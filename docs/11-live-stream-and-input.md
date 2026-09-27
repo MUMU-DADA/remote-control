@@ -395,6 +395,159 @@ server.Run([&](const HttpRequest& req) {
 
 ---
 
+---
+
+## 10 · 画面流也搬到 WebSocket
+
+同一个端点 `/api/v1/stream` 两条传输：
+
+| | MJPEG | **WebSocket** |
+|---|---|---|
+| 触发 | 不带 `Upgrade` 头 | 带 `Upgrade: websocket` |
+| 传输 | `multipart/x-mixed-replace` | 二进制帧 |
+| 客户端 | `<img src>`，零 JS | canvas + `createImageBitmap` |
+| 控制 | 无（改帧率要重连） | **能反过来控制流** |
+
+```js
+const ws = new WebSocket('ws://host:8088/api/v1/stream?fps=30&format=jpeg');
+ws.binaryType = 'blob';
+ws.onmessage = async (ev) => {
+  if (typeof ev.data === 'string') { /* 控制消息 */ return; }
+  const bmp = await createImageBitmap(ev.data);
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close();          // 不 close 会攒着不放，几分钟吃满内存
+};
+// 不用重连就能改：
+ws.send(JSON.stringify({t:'fps', v:10}));
+ws.send(JSON.stringify({t:'quality', v:50}));
+```
+
+客户端能发的：`fps` / `quality` / `format` / `refresh` / `ping`。
+
+**`createImageBitmap` 而不是 `<img>`**：解码在 worker 线程上，
+绘制是同步的，没有图片管道的排队；而且能 `close()` 主动释放 ——
+`<img>` 的旧帧什么时候被回收是浏览器说了算。
+
+MJPEG 那条保留：嵌到别的页面、或者用 curl 调试时它最省事。
+
+### 主循环用 poll 而不是 sleep 轮询
+
+第一版是"select 查消息 + sleep 1ms"，有两个毛病：空转（每秒 1000 次唤醒），
+以及控制消息要等下一轮才被看到 —— 而中间可能正卡在一次抓帧里
+（screencap 后端要 120ms），ping 的往返能到 100ms 以上。
+
+改成 `poll` 带超时之后，消息一到就处理，帧按时间点出。
+
+---
+
+## 11 · 服务配置与上位应用
+
+### 配置文件 `/sdcard/autod.conf`
+
+```ini
+enabled=1         # 服务是否应当运行
+bind=0.0.0.0      # 监听地址
+port=8088         # 对外监听端口
+auth=0            # 是否要求访问令牌
+token=            # auth=1 且为空时，启动时随机生成并写回
+```
+
+**为什么是纯文本 key=value**：Android 应用侧要用 Java 读写它。
+引 JSON 库只为存四个字段不划算，而且双方各用一套 JSON 实现时，
+格式分歧会变成很难查的兼容性问题。
+
+**为什么放 /sdcard**：上位应用是普通应用（没有 root），守护进程是 root。
+两边都能读写、都不需要特殊权限的位置，就是共享存储。
+
+优先级：**CLI 显式给的 > 配置文件 > 内置默认**。上位应用不传 CLI
+参数，所以它能生效；而调试时 `--http-port 9999` 这种一次性覆盖
+也不会被文件悄悄改掉。
+
+### 初始状态是**无鉴权**
+
+这是产品要求，也改了早先的一个设计：原来"绑非回环地址却不设 token"
+会**拒绝启动**。现在降级成一条显眼的告警，并把状态如实反映到
+`/api/v1/config` —— 硬拒绝会让"先绑 0.0.0.0 试试"这种正常操作
+直接起不来。
+
+### 令牌
+
+```
+首次把 auth 改成 1 → 守护进程启动时随机生成 → 写回配置文件
+```
+
+取自 `/dev/urandom`（不是 `rand()` —— 这是唯一的访问控制手段）。
+取不到就**不启用鉴权**，绝不降级成弱令牌。
+
+三种携带方式：
+
+| 方式 | 用途 |
+|---|---|
+| `Authorization: Bearer <t>` | 标准做法 |
+| `X-Autod-Token: <t>` | 不方便设 Authorization 的客户端 |
+| `?token=<t>` | `<img src>` / WebSocket 这类没法设头的场景 |
+
+**网页本身不校验** —— 它只是静态页面、不含秘密，而用户得先打开它
+才有地方输入令牌。
+
+### 上位应用只剩三件事
+
+原来的画面、触控、应用管理、文件管理全删了（1390 行 → 450 行，
+APK 33KB → 17KB）。理由：那些能力已经是网页控制台的一部分
+（而且那里不用装在设备上）。应用真正的独有价值是**它是设备本地的** ——
+服务没起来、端口改错了导致连不上，这些情况下网页自己也进不去，
+只有本机应用还能把服务拉回来。
+
+### supervisor：让无 root 的应用能管 root 服务
+
+应用改不了进程，但它能写文件。所以：
+
+```
+上位应用 → 写 /sdcard/autod.conf
+autod-supervisord（常驻 root 脚本）→ 监视文件 → 启停/重启 autod
+                                    → 写 /sdcard/autod.status 供应用显示
+```
+
+状态走文件而不是探端口：端口可能被转发规则挡住，"进程在不在"才是确定的；
+而且服务没起来时探端口只会得到"连不上"，分不清是挂了还是没启动。
+
+---
+
+## 实测
+
+```
+配置文件首启（不存在）→ 无鉴权模式，接口直接可用
+写入 port=9099 auth=1 token=  → 守护进程随机生成并写回
+  token=Df2peZ709waTECccprz5gJ7f2bUf0M8i
+鉴权：无令牌 401 · Bearer 200 · X-Autod-Token 200 · ?token= 200 · 网页 200
+
+supervisor：
+  enabled=0             → 服务停止，status 显示 running=0
+  enabled=1             → 启动 pid 2958
+  port 9099 → 7077      → 自动重启 pid 3035，监听 7077
+
+上位应用：读到真实 pid/端口，开关写入配置、生成令牌、显示令牌
+
+画面流 WebSocket：101 升级，52 帧/5 秒，改帧率不用重连
+触控流 WebSocket：101 升级，往返 1.1 ms
+网页端到端：真实 WebView 里画面渲染正常，状态栏 "… · 2fps · 1ms"
+```
+
+### 踩过的两个坑
+
+**1. 关闭时 `pthread_mutex_lock called on a destroyed mutex`**
+连接线程是 detached 的，主线程走到 `main()` 结尾就析构了 Dispatcher
+（含它的操作锁），而流式响应的回调还在那些线程里跑。
+`HttpServer::Stop()` 现在会主动 shutdown 活跃连接并等它们退出。
+
+**2. 网页里 `codec`/`quality` 从未声明**
+`streamUrl()` 里读它们抛 ReferenceError，而那个调用在 `try` 里 ——
+异常被吞掉、WebSocket 根本没创建，页面只显示"画面流断开"，
+没有任何线索。这种事**必须让它在界面上可见**：现在构造 URL 失败会
+写进状态栏和一个专门的诊断行。
+
+---
+
 ## 相关文件
 
 | 路径 | 内容 |

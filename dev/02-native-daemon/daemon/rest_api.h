@@ -12,10 +12,37 @@
 
 #pragma once
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
 #include "http_server.h"
 #include "protocol.h"
 
 namespace autod {
+
+// ── 画面流的参数与状态 ──
+//
+// 放头文件而不是 .cpp 的匿名命名空间：成员函数签名里要用到它们。
+// 只有流那条路径会碰这两个结构。
+struct StreamParams {
+    int         fps           = 5;
+    int         maxWidth      = 720;
+    int         level         = 0;      // 0 = 按格式选默认
+    bool        skipUnchanged = true;
+    int         codec         = 0;      // ImageFormat；用 int 免得头文件依赖
+    std::string boundary      = "autodframe";
+};
+
+// 每条流各自持有一份（跳过未变化帧的判断是有状态的）
+struct StreamState {
+    uint64_t lastHash = 0;
+    bool     haveLast = false;
+    uint64_t frameNo  = 0;
+    uint32_t outW     = 0;
+    uint32_t outH     = 0;
+    std::vector<uint8_t> scaled;
+};
 
 class Dispatcher;
 
@@ -40,9 +67,17 @@ class RestApi {
     // 安装：请求体就是 APK 字节，落成临时文件后用 fd 送过去
     HttpResponse HandleInstall(const HttpRequest& req);
 
-    // 实时画面流（MJPEG over multipart/x-mixed-replace）。
-    // 浏览器把它当"会不断更新的图"，原生支持，不需要 JS 解帧。
+    // 画面流。同一个端点两种传输：
+    //   有 Upgrade 头 → WebSocket（二进制帧，控制台用这条）
+    //   没有          → MJPEG（<img src> 就能看，零 JS）
     HttpResponse HandleStream(const HttpRequest& req);
+    HttpResponse HandleStreamWs(const HttpRequest& req, const StreamParams& p);
+
+    // 取一帧并编码。两条传输共用 —— 各写一遍的话，
+    // "跳过未变化的帧"这类优化很容易只做在一条上。
+    // 返回空表示这帧不用发，*unchanged 区分"画面没变"和"出错"。
+    std::string NextEncodedFrame(const StreamParams& p, StreamState* st,
+                                 bool* unchanged);
 
     // 手势类：x,y 走请求头的字段（和 tap/swipe 一致）
     HttpResponse HandleGesture(const HttpRequest& req, Cmd cmd, bool needsEnd);

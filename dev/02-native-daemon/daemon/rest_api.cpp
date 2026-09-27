@@ -9,6 +9,7 @@
 #include <time.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <poll.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -40,56 +41,6 @@ std::string ReadFd(int fd, uint64_t expected) {
     }
     close(fd);
     return out;
-}
-
-// 盒式降采样。把 w×h 的 RGBA 缩到 (w*num/den) × (h*num/den)。
-//
-// 为什么在编码前缩：PNG 的编码耗时大致随像素数走，缩一半面积就少四分之三
-// 的编码量。控制台用来看画面和点坐标，半分辨率完全够 —— 而且字节数小了，
-// 弱网下帧率反而更高。
-//
-// 用盒式平均而不是最近邻：最近邻会把细线（文字、边框）整条丢掉，
-// 看起来像画面在闪。
-void DownscaleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
-                   uint32_t dw, uint32_t dh, std::vector<uint8_t>* out) {
-    out->resize(static_cast<size_t>(dw) * dh * 4);
-    // 每个目标像素覆盖的源区域 [x0,x1) × [y0,y1)
-    for (uint32_t y = 0; y < dh; ++y) {
-        const uint32_t y0 = static_cast<uint32_t>(static_cast<uint64_t>(y) * sh / dh);
-        uint32_t y1 = static_cast<uint32_t>(static_cast<uint64_t>(y + 1) * sh / dh);
-        if (y1 <= y0) y1 = y0 + 1;
-        for (uint32_t x = 0; x < dw; ++x) {
-            const uint32_t x0 = static_cast<uint32_t>(static_cast<uint64_t>(x) * sw / dw);
-            uint32_t x1 = static_cast<uint32_t>(static_cast<uint64_t>(x + 1) * sw / dw);
-            if (x1 <= x0) x1 = x0 + 1;
-
-            uint32_t r = 0, g = 0, b = 0, a = 0, n = 0;
-            for (uint32_t sy = y0; sy < y1; ++sy) {
-                const uint8_t* row = src + static_cast<size_t>(sy) * sw * 4;
-                for (uint32_t sx = x0; sx < x1; ++sx) {
-                    const uint8_t* p = row + static_cast<size_t>(sx) * 4;
-                    r += p[0]; g += p[1]; b += p[2]; a += p[3];
-                    ++n;
-                }
-            }
-            uint8_t* d = out->data() + (static_cast<size_t>(y) * dw + x) * 4;
-            d[0] = static_cast<uint8_t>(r / n);
-            d[1] = static_cast<uint8_t>(g / n);
-            d[2] = static_cast<uint8_t>(b / n);
-            d[3] = static_cast<uint8_t>(a / n);
-        }
-    }
-}
-
-// FNV-1a。用来判断画面有没有变 —— 比编码便宜得多，
-// 静止画面（大多数时候）可以整帧跳过编码。
-uint64_t HashBytes(const uint8_t* p, size_t n) {
-    uint64_t h = 1469598103934665603ULL;
-    for (size_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= 1099511628211ULL;
-    }
-    return h;
 }
 
 int64_t NowMs() {
@@ -535,208 +486,245 @@ HttpResponse RestApi::HandleTouchStream(const HttpRequest& req) {
 }
 
 // ── 实时画面流 ──────────────────────────────────────────────────────────────
-HttpResponse RestApi::HandleStream(const HttpRequest& req) {
-    // 帧率：默认 5，限制在 1..30。
-    // 上限不是为了省事 —— 服务端每帧都要抓屏 + 编 PNG，30fps 在
-    // 低端设备上会把 CPU 吃满，而画面只会更卡。
-    int fps = 5;
-    {
-        const std::string s = req.queryParam("fps", "5");
-        char* end = nullptr;
-        const long v = strtol(s.c_str(), &end, 10);
-        if (end != nullptr && *end == '\0' && v > 0) fps = static_cast<int>(v);
-    }
-    if (fps > 30) fps = 30;
-    if (fps < 1)  fps = 1;
+// ── 画面流：参数、取帧、两条传输 ────────────────────────────────────────────
+//
+// MJPEG 和 WebSocket 用的是**同一套取帧与编码逻辑**，区别只在怎么发出去：
+//   MJPEG       multipart/x-mixed-replace，用 <img src> 就能看，零 JS
+//   WebSocket   二进制帧，用 canvas 画，延迟更低、可控性更好
+//
+// 抽出公共部分不只是省代码 —— 两条路各写一遍的话，"跳过未变化的帧"
+// 这类优化很容易只做在一条上。
 
-    const std::string boundary = "autodframe";
+namespace {
+
+int ClampInt(const std::string& s, int lo, int hi, int def) {
+    if (s.empty()) return def;
+    char* end = nullptr;
+    const long v = strtol(s.c_str(), &end, 10);
+    if (end == nullptr || *end != '\0') return def;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return static_cast<int>(v);
+}
+
+// 从 query 里取参数。失败时把原因写进 error。
+bool ParseStreamParams(const HttpRequest& req, StreamParams* out,
+                       std::string* error) {
+    out->fps = ClampInt(req.queryParam("fps", "5"), 1, 60, 5);
+    out->maxWidth = ClampInt(req.queryParam("maxWidth", "720"), 0, 8192, 720);
+    out->skipUnchanged = req.queryParam("skipUnchanged", "1") != "0";
+
+    const std::string fs = req.queryParam("format", "auto");
+    ImageFormat fmt;
+    if (!ImageEncoder::ParseFormat(fs, &fmt)) {
+        *error = "未知格式: " + fs + "（可用 auto|png|jpeg|webp）";
+        return false;
+    }
+    if (fmt == ImageFormat::kAuto) fmt = ImageEncoder::Instance().BestFormat();
+    if (fmt == ImageFormat::kRaw) {
+        *error = "流不支持 format=raw";
+        return false;
+    }
+    out->codec = static_cast<int>(fmt);
+
+    // quality 的含义随格式变：PNG 1-9（zlib 级别），JPEG/WebP 1-100（质量）。
+    // 之前只收 1..9，导致 format=jpeg&quality=75 被静默丢弃、退回 1。
+    out->level = 0;
+    const std::string qs = req.queryParam("quality", "");
+    if (!qs.empty()) {
+        out->level = ClampInt(qs, 1, 100, 0);
+    }
+    const bool lossy = (fmt == ImageFormat::kJpeg || fmt == ImageFormat::kWebp);
+    if (lossy) {
+        if (out->level < 1 || out->level > 100) {
+            out->level = (fmt == ImageFormat::kWebp) ? 80 : 75;
+        }
+    } else {
+        if (out->level < 1 || out->level > 9) out->level = 1;
+    }
+    return true;
+}
+
+// 盒式降采样。把 w×h 的 RGBA 缩到 dw×dh。
+//
+// 用盒式平均而不是最近邻：最近邻会把细线（文字、边框）整条丢掉，
+// 看起来像画面在闪。
+void DownscaleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
+                   uint32_t dw, uint32_t dh, std::vector<uint8_t>* out) {
+    out->resize(static_cast<size_t>(dw) * dh * 4);
+    for (uint32_t y = 0; y < dh; ++y) {
+        const uint32_t y0 = static_cast<uint32_t>(static_cast<uint64_t>(y) * sh / dh);
+        uint32_t y1 = static_cast<uint32_t>(static_cast<uint64_t>(y + 1) * sh / dh);
+        if (y1 <= y0) y1 = y0 + 1;
+        for (uint32_t x = 0; x < dw; ++x) {
+            const uint32_t x0 = static_cast<uint32_t>(static_cast<uint64_t>(x) * sw / dw);
+            uint32_t x1 = static_cast<uint32_t>(static_cast<uint64_t>(x + 1) * sw / dw);
+            if (x1 <= x0) x1 = x0 + 1;
+            uint32_t r = 0, g = 0, b = 0, a = 0, n = 0;
+            for (uint32_t sy = y0; sy < y1; ++sy) {
+                const uint8_t* row = src + static_cast<size_t>(sy) * sw * 4;
+                for (uint32_t sx = x0; sx < x1; ++sx) {
+                    const uint8_t* p = row + static_cast<size_t>(sx) * 4;
+                    r += p[0]; g += p[1]; b += p[2]; a += p[3];
+                    ++n;
+                }
+            }
+            uint8_t* d = out->data() + (static_cast<size_t>(y) * dw + x) * 4;
+            d[0] = static_cast<uint8_t>(r / n);
+            d[1] = static_cast<uint8_t>(g / n);
+            d[2] = static_cast<uint8_t>(b / n);
+            d[3] = static_cast<uint8_t>(a / n);
+        }
+    }
+}
+
+// FNV-1a。判断画面有没有变 —— 比编码便宜得多。
+uint64_t HashBytes(const uint8_t* p, size_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+}  // namespace
+
+// 取一帧、降采样、编码。
+//
+// 返回空字符串表示"这一帧不用发"，用 *unchanged 区分是"画面没变"还是"出错"。
+std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
+                                      bool* unchanged) {
+    *unchanged = false;
+
+    Request r{};
+    r.magic = kMagic;
+    r.cmd   = static_cast<uint32_t>(Cmd::Capture);
+    ReplyPacket rp = dispatcher_->Handle(r, "", -1, 0);
+    if (rp.reply.status != kOk || rp.fd < 0) {
+        if (rp.fd >= 0) close(rp.fd);
+        return {};
+    }
+
+    const uint32_t w = rp.reply.width, h = rp.reply.height;
+    const uint64_t size = rp.reply.dataSize;
+    const uint32_t fmt = rp.reply.format;
+    void* base = mmap(nullptr, size, PROT_READ, MAP_SHARED, rp.fd, 0);
+    if (base == MAP_FAILED) {
+        close(rp.fd);
+        return {};
+    }
+
+    if (fmt != 1 && fmt != 2 && fmt != 5) {
+        munmap(base, size);
+        close(rp.fd);
+        return {};
+    }
+
+    const uint8_t* src = static_cast<const uint8_t*>(base);
+    std::vector<uint8_t> rgba;
+    if (fmt == 5) {   // BGRA → RGBA
+        rgba.resize(size);
+        for (uint64_t i = 0; i + 3 < size; i += 4) {
+            rgba[i]     = src[i + 2];
+            rgba[i + 1] = src[i + 1];
+            rgba[i + 2] = src[i];
+            rgba[i + 3] = src[i + 3];
+        }
+        src = rgba.data();
+    }
+
+    uint32_t dw = w, dh = h;
+    const uint8_t* enc = src;
+    if (p.maxWidth > 0 && w > static_cast<uint32_t>(p.maxWidth)) {
+        dw = static_cast<uint32_t>(p.maxWidth);
+        dh = static_cast<uint32_t>(static_cast<uint64_t>(h) * dw / w);
+        if (dh == 0) dh = 1;
+        DownscaleRgba(src, w, h, dw, dh, &st->scaled);
+        enc = st->scaled.data();
+    }
+    st->outW = dw;
+    st->outH = dh;
+
+    // 变化检测放在降采样之后：降采样本来就是平均，顺带把传感器噪声
+    // 这类微小抖动滤掉了，跳过率更高。
+    const size_t encBytes = static_cast<size_t>(dw) * dh * 4;
+    const uint64_t hash = HashBytes(enc, encBytes);
+    if (p.skipUnchanged && st->haveLast && hash == st->lastHash) {
+        munmap(base, size);
+        close(rp.fd);
+        *unchanged = true;
+        return {};
+    }
+    st->lastHash = hash;
+    st->haveLast = true;
+
+    std::string perr;
+    std::string out = ImageEncoder::Instance().Encode(enc, dw, dh,
+                                                      static_cast<ImageFormat>(p.codec),
+                                                      p.level, &perr);
+    munmap(base, size);
+    close(rp.fd);
+
+    if (out.empty()) ALOGW("流编码失败: %s", perr.c_str());
+
+    if (!out.empty()) ++st->frameNo;
+    return out;
+}
+
+HttpResponse RestApi::HandleStream(const HttpRequest& req) {
+    if (!ImageEncoder::Instance().Init(nullptr)) {
+        return HttpResponse::Error(500, "没有可用的图像编码器");
+    }
+
+    StreamParams p;
+    std::string perr;
+    if (!ParseStreamParams(req, &p, &perr)) {
+        return HttpResponse::Error(400, perr);
+    }
+
+    // 有 Upgrade 头就是 WebSocket，否则给 MJPEG。
+    //
+    // 两种都留着是有意的：MJPEG 能直接塞进 <img src>，零 JS，
+    // 拿来调试或嵌到别的页面里最省事；WebSocket 延迟更低、可控性更好，
+    // 是控制台自己用的那条。
+    if (req.header("upgrade") == "websocket") {
+        return HandleStreamWs(req, p);
+    }
+
+    const int intervalMs = 1000 / p.fps;
+    const std::string boundary = p.boundary;
+
     HttpResponse resp = HttpResponse::Stream(
             "multipart/x-mixed-replace; boundary=" + boundary);
 
-    // 每帧之间至少隔这么久。抓帧本身就要几十毫秒，实际帧率会更低 ——
-    // 与其追求标称帧率，不如保证"不会把设备打满"。
-    const int intervalMs = 1000 / fps;
-
-    // 降采样上限：默认 720 宽。0 = 不缩。
-    int maxWidth = 720;
-    {
-        const std::string s = req.queryParam("maxWidth", "720");
-        char* end = nullptr;
-        const long v = strtol(s.c_str(), &end, 10);
-        if (end != nullptr && *end == '\0' && v >= 0) maxWidth = static_cast<int>(v);
-    }
-    // 画面没变时是否跳过。默认开 —— 静止画面下编码开销直接归零。
-    const bool skipUnchanged = req.queryParam("skipUnchanged", "1") != "0";
-
-    // 编码格式。默认 auto —— 设备上用 JPEG，主机上退回 PNG。
-    //
-    // PNG 是无损的，一帧 100+ KB，对"看画面、点坐标"完全不划算。
-    // JPEG/WebP 有损但小一个数量级，浏览器解码也快得多。
-    // 注意别和下面的像素格式 fmt 撞名 —— 那两个是不同层次的东西
-    // （像素格式讲"内存里怎么排"，编码格式讲"怎么压"）。
-    ImageFormat codecFmt = ImageFormat::kAuto;
-    {
-        const std::string s = req.queryParam("format", "auto");
-        if (!ImageEncoder::ParseFormat(s, &codecFmt)) {
-            return HttpResponse::Error(400, "未知格式: " + s +
-                                                "（可用 auto|png|jpeg|webp）");
-        }
-    }
-    if (codecFmt == ImageFormat::kAuto) {
-        codecFmt = ImageEncoder::Instance().BestFormat();
-    }
-    if (codecFmt == ImageFormat::kRaw) {
-        // 流里不做 raw —— 原始像素没有帧边界，浏览器也没法显示。
-        return HttpResponse::Error(400, "流不支持 format=raw");
-    }
-
-    // 质量。**含义随格式变**：
-    //   PNG        1..9   —— zlib 压缩级别（1 最快）
-    //   JPEG/WebP  1..100 —— 有损质量（75/80 是常用默认）
-    //
-    // ⚠️ 原来这里只收 1..9（那是给 PNG 定的），结果 format=jpeg&quality=75
-    //    被静默丢掉、退回 1 —— 实测 q50 和 q75 编出来的帧一样大，
-    //    就是这个问题。参数范围必须跟着格式走。
-    int level = 0;   // 0 = 交给编码器按格式选默认值
-    {
-        const std::string s = req.queryParam("quality", "");
-        if (!s.empty()) {
-            char* end = nullptr;
-            const long v = strtol(s.c_str(), &end, 10);
-            if (end != nullptr && *end == '\0' && v >= 1 && v <= 100) {
-                level = static_cast<int>(v);
-            }
-        }
-    }
-    // 按格式夹到合法区间，并给默认值
-    {
-        const bool lossy = (codecFmt == ImageFormat::kJpeg || codecFmt == ImageFormat::kWebp);
-        if (lossy) {
-            if (level < 1 || level > 100) level = (codecFmt == ImageFormat::kWebp) ? 80 : 75;
-        } else {
-            if (level < 1 || level > 9) level = 1;
-        }
-    }
-
-    resp.streamer = [this, boundary, intervalMs, maxWidth, level, skipUnchanged,
-                     codecFmt](int fd) {
-        if (!ImageEncoder::Instance().Init(nullptr)) {
-            const char* msg = "没有可用的图像编码器\n";
-            ssize_t ig = write(fd, msg, strlen(msg));
-            (void)ig;
-            return;
-        }
-
-        uint64_t frameNo = 0;      // 实际发出的帧数
-        uint64_t iterNo = 0;       // 循环次数（含跳过）
-        uint64_t lastHash = 0;
-        bool     haveLast = false;
-        std::vector<uint8_t> scaled;
-
+    resp.streamer = [this, boundary, intervalMs, p](int fd) {
+        StreamState st;
         while (true) {
             const int64_t t0 = NowMs();
 
-            Request r{};
-            r.magic = kMagic;
-            r.cmd   = static_cast<uint32_t>(Cmd::Capture);
-            ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
-            if (p.reply.status != kOk || p.fd < 0) {
-                if (p.fd >= 0) close(p.fd);
-                usleep(intervalMs * 1000);
-                continue;
-            }
-
-            const uint32_t w = p.reply.width, h = p.reply.height;
-            const uint64_t size = p.reply.dataSize;
-            const uint32_t fmt = p.reply.format;
-            void* base = mmap(nullptr, size, PROT_READ, MAP_SHARED, p.fd, 0);
-            if (base == MAP_FAILED) {
-                close(p.fd);
-                usleep(intervalMs * 1000);
-                continue;
-            }
-
-            std::string png;
-            bool wroteFrame = false;
-
-            if (fmt != 1 && fmt != 2 && fmt != 5) {
-                // 不支持的像素格式：跳过这一帧，但不终止整条流
-                munmap(base, size);
-                close(p.fd);
-                usleep(intervalMs * 1000);
-                continue;
-            }
-
-            // BGRA → RGBA
-            const uint8_t* src = static_cast<const uint8_t*>(base);
-            std::vector<uint8_t> rgba;
-            if (fmt == 5) {
-                rgba.resize(size);
-                for (uint64_t i = 0; i + 3 < size; i += 4) {
-                    rgba[i]     = src[i + 2];
-                    rgba[i + 1] = src[i + 1];
-                    rgba[i + 2] = src[i];
-                    rgba[i + 3] = src[i + 3];
-                }
-                src = rgba.data();
-            }
-
-            // 变化检测要在**降采样之后**做：降采样本来就是平均，
-            // 顺带把传感器噪声这类微小抖动滤掉了，跳过率更高。
-            uint32_t dw = w, dh = h;
-            const uint8_t* enc = src;
-            if (maxWidth > 0 && w > static_cast<uint32_t>(maxWidth)) {
-                dw = static_cast<uint32_t>(maxWidth);
-                dh = static_cast<uint32_t>(static_cast<uint64_t>(h) * dw / w);
-                if (dh == 0) dh = 1;
-                DownscaleRgba(src, w, h, dw, dh, &scaled);
-                enc = scaled.data();
-            }
-
-            const size_t encBytes = static_cast<size_t>(dw) * dh * 4;
-            const uint64_t hash = HashBytes(enc, encBytes);
-
-            if (skipUnchanged && haveLast && hash == lastHash) {
-                // 画面没变 —— 整帧跳过编码。
-                // 不写任何东西：MJPEG 客户端会继续显示上一帧，
-                // 这正是我们要的。连接靠 TCP 自己保活。
-                munmap(base, size);
-                close(p.fd);
-                ++iterNo;
-                const int64_t elapsed = NowMs() - t0;
-                const int64_t rest = intervalMs - elapsed;
+            bool unchanged = false;
+            std::string img = NextEncodedFrame(p, &st, &unchanged);
+            if (img.empty()) {
+                // 画面没变就整帧跳过：MJPEG 客户端会继续显示上一帧，
+                // 这正是我们要的。出错也走这里，下一轮重试。
+                const int64_t rest = intervalMs - (NowMs() - t0);
                 if (rest > 0) usleep(static_cast<useconds_t>(rest) * 1000);
-                continue;
-            }
-            lastHash = hash;
-            haveLast = true;
-
-            std::string perr;
-            png = ImageEncoder::Instance().Encode(enc, dw, dh, codecFmt, level, &perr);
-            if (png.empty()) {
-                ALOGW("流编码失败: %s", perr.c_str());
-            }
-
-            munmap(base, size);
-            close(p.fd);
-
-            if (png.empty()) {
-                usleep(intervalMs * 1000);
                 continue;
             }
 
             std::string part;
-            part.reserve(png.size() + 160);
+            part.reserve(img.size() + 200);
             part += "--" + boundary + "\r\n";
             part += "Content-Type: ";
-            part += ImageEncoder::MimeType(codecFmt);
+            part += ImageEncoder::MimeType(static_cast<ImageFormat>(p.codec));
             part += "\r\n";
-            part += "Content-Length: " + std::to_string(png.size()) + "\r\n";
-            part += "X-Autod-Frame: " + std::to_string(frameNo) + "\r\n";
-            part += "X-Autod-Width: " + std::to_string(dw) + "\r\n";
-            part += "X-Autod-Height: " + std::to_string(dh) + "\r\n";
+            part += "Content-Length: " + std::to_string(img.size()) + "\r\n";
+            part += "X-Autod-Frame: " + std::to_string(st.frameNo) + "\r\n";
+            part += "X-Autod-Width: " + std::to_string(st.outW) + "\r\n";
+            part += "X-Autod-Height: " + std::to_string(st.outH) + "\r\n";
             part += "\r\n";
-            part += png;
+            part += img;
             part += "\r\n";
 
             size_t sent = 0;
@@ -752,14 +740,157 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             }
             if (broken) break;
 
-            ++frameNo;
-            ++iterNo;
-            wroteFrame = true;
-            (void)wroteFrame;
-
-            const int64_t elapsed = NowMs() - t0;
-            const int64_t rest = intervalMs - elapsed;
+            const int64_t rest = intervalMs - (NowMs() - t0);
             if (rest > 0) usleep(static_cast<useconds_t>(rest) * 1000);
+        }
+    };
+    return resp;
+}
+
+// ── 画面流（WebSocket）──────────────────────────────────────────────────────
+//
+// 相对 MJPEG 的好处：
+//   - 二进制帧，不用 base64 也不用 multipart 边界解析
+//   - 客户端能**反过来控制**流（改帧率/画质不用重连）
+//   - canvas 绘制，没有 <img> 的布局与解码队列
+//   - 能测往返延迟（和触控流同一个套路）
+HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
+                                     const StreamParams& params) {
+    std::string accept;
+    if (!WsComputeAccept(req.header("sec-websocket-key"), &accept)) {
+        return HttpResponse::Error(400, "Sec-WebSocket-Key 缺失或不合法");
+    }
+
+    HttpResponse resp = HttpResponse::WebSocket(accept);
+    resp.streamer = [this, params](int fd) {
+        StreamParams p = params;
+        StreamState st;
+
+        // 先告诉客户端画面尺寸和格式 —— 客户端要据此建 canvas，
+        // 而第一帧到达之前它没法知道。
+        {
+            json::Writer w;
+            w.Obj()
+                .Field("t", "hello")
+                .Field("format", ImageEncoder::Name(static_cast<ImageFormat>(p.codec)))
+                .Field("fps", static_cast<int64_t>(p.fps))
+                .Field("chrome", false)
+             .EndObj();
+            if (!WsWriteText(fd, w.str())) return;
+        }
+
+        int64_t  nextFrameAt = NowMs();
+        uint64_t sent = 0;
+
+        // 主循环用 poll 同时等两件事：客户端发来的控制消息、下一帧的时间点。
+        //
+        // 早先的写法是"select 轮询 + sleep 1ms"，那样有两个毛病：
+        //   1. 空转（每秒 1000 次唤醒）
+        //   2. 控制消息要等到下一次循环才被看到 —— 而中间可能正卡在
+        //      一次抓帧里（screencap 后端要 120ms），于是 ping 的往返
+        //      延迟能到 100ms 以上
+        // 用 poll 带超时之后，消息一到就被处理，帧也按时间点出。
+        while (true) {
+            const int64_t now = NowMs();
+            int waitMs = 0;
+            if (nextFrameAt > now) {
+                waitMs = static_cast<int>(nextFrameAt - now);
+                if (waitMs > 1000) waitMs = 1000;   // 最多等 1 秒，便于察觉断连
+            }
+
+            pollfd pfd{};
+            pfd.fd = fd;
+            pfd.events = POLLIN;
+            const int pr = poll(&pfd, 1, waitMs);
+
+            if (pr < 0) {
+                if (errno == EINTR) continue;
+                return;
+            }
+
+            // ── 有消息就处理 ──
+            if (pr > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR))) {
+                WsFrame f;
+                std::string err;
+                if (!WsReadFrame(fd, &f, &err)) {
+                    if (!err.empty()) ALOGW("画面流异常结束: %s", err.c_str());
+                    return;   // 连接断了
+                }
+                if (f.opcode == kWsText || f.opcode == kWsBinary) {
+                    json::Value v;
+                    std::string jerr;
+                    if (json::Parse(f.payload, &v, &jerr)) {
+                        const std::string t = v.str("t");
+                        if (t == "ping") {
+                            WsWriteText(fd, "{\"t\":\"pong\",\"s\":" +
+                                                std::to_string(v.num("s", 0)) + "}");
+                        } else if (t == "fps") {
+                            const int nf = ClampInt(std::to_string(v.num("v", p.fps)),
+                                                    1, 60, p.fps);
+                            p.fps = nf;
+                            nextFrameAt = NowMs();    // 立刻反映新帧率
+                            WsWriteText(fd, "{\"t\":\"ack\",\"fps\":" +
+                                                std::to_string(nf) + "}");
+                        } else if (t == "quality") {
+                            const int nq = ClampInt(std::to_string(v.num("v", p.level)),
+                                                    1, 100, p.level);
+                            const bool lossy =
+                                (p.codec == static_cast<int>(ImageFormat::kJpeg) ||
+                                 p.codec == static_cast<int>(ImageFormat::kWebp));
+                            p.level = lossy ? nq : ((nq > 9) ? 9 : nq);
+                            st.haveLast = false;
+                            WsWriteText(fd, "{\"t\":\"ack\",\"quality\":" +
+                                                std::to_string(p.level) + "}");
+                        } else if (t == "format") {
+                            const std::string fs = v.str("v");
+                            ImageFormat nf;
+                            if (ImageEncoder::ParseFormat(fs, &nf) &&
+                                nf != ImageFormat::kRaw) {
+                                if (nf == ImageFormat::kAuto) {
+                                    nf = ImageEncoder::Instance().BestFormat();
+                                }
+                                p.codec = static_cast<int>(nf);
+                                p.level = (nf == ImageFormat::kJpeg) ? 75
+                                        : (nf == ImageFormat::kWebp) ? 80 : 1;
+                                st.haveLast = false;   // 换了格式，缓存作废
+                                WsWriteText(fd,
+                                    std::string("{\"t\":\"ack\",\"format\":\"") +
+                                        ImageEncoder::Name(nf) + "\"}");
+                            }
+                        } else if (t == "refresh") {
+                            // 客户端主动要求"下一帧无论变没变都发"，
+                            // 用于页面重新可见时立刻刷新一次。
+                            st.haveLast = false;
+                            nextFrameAt = NowMs();
+                        }
+                    }
+                }
+                continue;    // 处理完消息再看时间，避免刚好错过帧点
+            }
+
+            // ── 到点就出一帧 ──
+            if (NowMs() < nextFrameAt) continue;
+            const int intervalMs = 1000 / p.fps;
+            nextFrameAt = NowMs() + intervalMs;
+
+            bool unchanged = false;
+            std::string img = NextEncodedFrame(p, &st, &unchanged);
+            if (img.empty()) continue;      // 没变或出错，下一轮再看
+
+            // 二进制帧。第一帧附带尺寸信息（之后客户端就不用再解析了）——
+            // 单独发一条文本消息会让客户端在"有图没尺寸"的窗口里没法画。
+            if (sent == 0) {
+                json::Writer w;
+                w.Obj()
+                    .Field("t", "size")
+                    .Field("w", static_cast<int64_t>(st.outW))
+                    .Field("h", static_cast<int64_t>(st.outH))
+                 .EndObj();
+                if (!WsWriteText(fd, w.str())) return;
+            }
+
+            if (!WsWriteFrame(fd, kWsBinary, img)) return;
+            ++sent;
         }
     };
     return resp;

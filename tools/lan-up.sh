@@ -55,9 +55,20 @@ if [ "${1:-}" = "--status" ]; then
         && ok "lan-forward：运行中" || bad "lan-forward：未运行"
     echo
     echo "  局域网地址："
-    echo "    网页控制台  http://$LAN_IP:$LAN_PORT/"
-    echo "    HTTP API    http://$LAN_IP:$LAN_PORT/api/v1/describe"
+    PORT=$("$ADB" -s "$SERIAL" shell "grep '^port=' /sdcard/autod.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+    BIND=$("$ADB" -s "$SERIAL" shell "grep '^bind=' /sdcard/autod.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+    AUTH=$("$ADB" -s "$SERIAL" shell "grep '^auth=' /sdcard/autod.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+    RUN=$("$ADB" -s "$SERIAL" shell "grep '^running=' /sdcard/autod.status | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+    echo "    服务状态    running=$RUN  bind=$BIND  port=$PORT  auth=$AUTH"
+    HOST=$LAN_IP
+    [ "$BIND" = "127.0.0.1" ] && HOST=127.0.0.1
+    echo "    网页控制台  http://$HOST:$PORT/"
+    echo "    HTTP API    http://$HOST:$PORT/api/v1/describe"
     echo "    adb         $ADB connect $LAN_IP:$ADB_LAN_PORT"
+    if [ "$AUTH" = "1" ]; then
+        T=$("$ADB" -s "$SERIAL" shell "grep '^token=' /sdcard/autod.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+        echo "    访问令牌    $T"
+    fi
     exit 0
 fi
 
@@ -69,7 +80,7 @@ if [ "${1:-}" = "--stop" ]; then
 fi
 
 # -----------------------------------------------------------------------------
-step "1/4  模拟器"
+step "1/5  模拟器"
 if pgrep -f "qemu-system-x86_64.*$STOCK" >/dev/null 2>&1; then
     ok "已在运行"
 else
@@ -94,15 +105,16 @@ done
 ok "已开机"
 
 # -----------------------------------------------------------------------------
-step "2/4  adb forward"
+step "2/5  adb 连接"
 "$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
 sleep 1
-"$ADB" -s "$SERIAL" forward --remove "tcp:$LAN_PORT" >/dev/null 2>&1 || true
-"$ADB" -s "$SERIAL" forward "tcp:$ADB_FWD_PORT" tcp:8088 >/dev/null
-ok "127.0.0.1:$ADB_FWD_PORT → 模拟器:8088"
+# 不再给 8088 做 adb forward：autod 自己绑对外地址，这样
+# 上位机改端口能真正生效（转发器不会跟着改，两边会失联）。
+ok "HTTP 由 autod 直接监听，无需转发"
 
 # -----------------------------------------------------------------------------
-step "3/4  autod"
+step "3/5  部署文件"
+# -----------------------------------------------------------------------------
 # 优先用 AOSP 构建（SurfaceFlinger 直连后端），它比 NDK 版快 3 倍：
 #   实测 NDK/screencap 后端 120ms/帧 → 9.6 fps
 #        AOSP/SF 后端       23ms/帧 → 29.9 fps
@@ -118,15 +130,22 @@ if [ -f "$AOSP_BIN" ]; then
 else
     BIN="$NDK_BIN"; CTL="$NDK_CTL"
     warn "没有 AOSP 产物，退回 NDK 构建（screencap 后端，慢约 3 倍）"
-    warn "  编它： TARGET=sdk_phone64_x86_64-userdebug bash tools/build-autod.sh"
 fi
 [ -f "$BIN" ] || { bad "没编出 autod"; exit 1; }
 
-"$ADB" -s "$SERIAL" shell "pkill -f 'autod --socket' 2>/dev/null; rm -f $DEV/autod.sock" || true
+SUP="$PROJECT_DIR/tools/autod-supervisord.sh"
+
+# 停掉旧的（手工起的和 supervisor 起的都要停，否则会抢同一个端口）
+"$ADB" -s "$SERIAL" shell "pkill -f supervisord 2>/dev/null; \
+    pkill -f 'autod --socket' 2>/dev/null; rm -f $DEV/autod.sock" || true
+sleep 1
+
 "$ADB" -s "$SERIAL" push "$BIN" "$DEV/autod" >/dev/null
 "$ADB" -s "$SERIAL" push "$CTL" "$DEV/autodctl" >/dev/null
-"$ADB" -s "$SERIAL" shell "chmod 755 $DEV/autod $DEV/autodctl"
-# cliptool.jar：剪贴板功能要用（daemon 是 root，剪贴板必须以 shell 身份访问）
+"$ADB" -s "$SERIAL" push "$SUP" "$DEV/autod-supervisord.sh" >/dev/null
+"$ADB" -s "$SERIAL" shell "chmod 755 $DEV/autod $DEV/autodctl $DEV/autod-supervisord.sh"
+
+# 剪贴板辅助工具
 if [ ! -f "$PROJECT_DIR/dev/02-native-daemon/tools/cliptool/build/cliptool.jar" ]; then
     bash "$PROJECT_DIR/dev/02-native-daemon/tools/cliptool/build.sh" >/dev/null 2>&1 || true
 fi
@@ -134,17 +153,27 @@ fi
     "$ADB" -s "$SERIAL" push \
         "$PROJECT_DIR/dev/02-native-daemon/tools/cliptool/build/cliptool.jar" \
         "$DEV/" >/dev/null && "$ADB" -s "$SERIAL" shell "chmod 644 $DEV/cliptool.jar"
-
-"$ADB" -s "$SERIAL" shell \
-    "nohup $DEV/autod --socket $DEV/autod.sock --socket-mode 0666 \
-        --http-bind 127.0.0.1 --http-port 8088 --foreground \
-        > /dev/null 2>&1 &"
-sleep 3
-"$ADB" -s "$SERIAL" shell "test -S $DEV/autod.sock" \
-    && ok "autod 已就绪" || { bad "autod 没起来"; exit 1; }
+ok "文件已推送"
 
 # -----------------------------------------------------------------------------
-step "4/4  局域网转发"
+step "4/5  写入配置并启动 supervisor"
+# -----------------------------------------------------------------------------
+# 只在配置文件不存在时写默认值 —— 不覆盖用户（或上位应用）已经设好的。
+if ! "$ADB" -s "$SERIAL" shell "test -f /sdcard/autod.conf" 2>/dev/null; then
+    "$ADB" -s "$SERIAL" shell "printf 'enabled=1\nbind=0.0.0.0\nport=8088\nauth=0\ntoken=\n' > /sdcard/autod.conf"
+    ok "已写入默认配置（对外监听 8088，无鉴权）"
+else
+    ok "沿用已有 /sdcard/autod.conf"
+fi
+
+# supervisor 管理真正的启停。**必须 setsid** —— adb shell 一退出，
+# 普通后台进程会被一起带走（实测踩过：以为起来了，其实早没了）。
+"$ADB" -s "$SERIAL" shell \
+    "setsid nohup $DEV/autod-supervisord.sh > $DEV/sup.log 2>&1 < /dev/null &"
+sleep 4
+
+# -----------------------------------------------------------------------------
+step "5/5  局域网转发"
 systemctl is-active --quiet autod-lan-forward \
     && ok "lan-forward 已在运行" \
     || { systemctl start autod-lan-forward && ok "已启动"; }

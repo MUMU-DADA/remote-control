@@ -30,7 +30,7 @@ const std::string& WebUiHtml() {
      会让小屏截图糊成一团，坐标也难对准 */
   #screen { display:block; max-width:min(90vw,560px); height:auto;
             image-rendering:pixelated; cursor:crosshair;
-            touch-action:none; user-select:none; }
+            touch-action:none; user-select:none; background:#000; }
   .panel { flex:1 1 260px; min-width:260px; display:flex; flex-direction:column;
            gap:10px; }
   .card { background:#1b1b1b; border:1px solid #333; border-radius:6px;
@@ -68,9 +68,18 @@ const std::string& WebUiHtml() {
   <span class="dim" id="meta">连接中…</span>
 </header>
 
+<!-- 令牌条。开启鉴权后才需要填，平时隐藏（display:none）——
+     平时摆一个用不上的输入框只会让人以为哪里要授权。 -->
+<div id="authbar" style="display:none; padding:6px 12px; background:#3a2a12;
+     border-bottom:1px solid #553; align-items:center; gap:6px;">
+  <span style="font-size:12px; color:#dda">此服务需要访问令牌</span>
+  <input type="text" id="tokeninput" placeholder="粘贴令牌" style="flex:1; min-width:0">
+  <button onclick="saveToken()">保存</button>
+</div>
+
 <main>
   <div class="screen">
-    <img id="screen" alt="屏幕">
+    <canvas id="screen"></canvas>
     <div id="coord"></div>
   </div>
 
@@ -78,6 +87,7 @@ const std::string& WebUiHtml() {
     <div class="card">
       <h2>状态</h2>
       <div id="status" class="dim">就绪</div>
+      <div id="dbg" class="dim" style="font-size:11px;margin-top:4px"></div>
       <div class="row" style="margin-top:8px">
         <button onclick="refresh()">刷新状态</button>
         <button onclick="setFps(0)">暂停</button>
@@ -170,7 +180,6 @@ const std::string& WebUiHtml() {
 
 <script>
 const $ = (id) => document.getElementById(id);
-const img = $('screen');
 // 默认 30。
 //
 // ⚠️ 这里原来是 5，而按钮最高只到 10 —— 服务端明明能跑 30fps，
@@ -178,10 +187,29 @@ const img = $('screen');
 //    但页面上"卡到爆炸"，就是因为这个默认值。
 //    帧率不该由前端偷偷限死，服务端会按自己的能力截断。
 let fps = 30;
+// 编码格式与质量。
+//
+// ⚠️ 这两个必须在**所有使用者之前**声明。用 let 声明的变量在声明前
+//    处于 TDZ，读它会抛 ReferenceError；而 streamUrl() 里有
+//    `'&format=' + codec`，它在 try 里被调用 —— 于是异常被吞掉、
+//    WebSocket 根本没创建，页面上只显示"画面流断开"，
+//    看不出任何原因。实测就是这么坑了半天。
+let codec = 'jpeg';
+let quality = 75;
 // 降采样宽度。设备屏幕往往比展示区域大得多，全分辨率纯属浪费带宽。
 let maxW = 720;
 let sw = 0, sh = 0;          // 屏幕真实尺寸
 let streamKey = 0;
+
+// 画面流的诊断信息。写进 DOM 而不是 console.log ——
+// WebView shell 不转发 console.log，只有未捕获异常才进 logcat，
+// 所以"流为什么断了"在那边完全看不到。
+let streamDbg = '';
+function dbg(t) {
+  streamDbg = t;
+  const el = $('dbg');
+  if (el) el.textContent = streamDbg;
+}
 
 function setStatus(t, err) {
   const el = $('status');
@@ -189,75 +217,235 @@ function setStatus(t, err) {
   el.className = err ? 'err' : 'ok';
 }
 
-function api(path, opts) {
-  return fetch('/api/v1' + path, opts).then(r => r.json());
-}
-
-// ── 实时画面 ──
-// MJPEG：浏览器把 multipart/x-mixed-replace 当成会不断更新的图，
-// 原生支持，不需要 JS 解帧 —— 这是最省事也最省电的做法。
-function startStream() {
-  if (fps <= 0) { img.removeAttribute('src'); return; }
-  streamKey++;
-  img.src = '/api/v1/stream?fps=' + fps
-          + '&format=' + codec + '&quality=' + quality
-          + '&maxWidth=' + maxW + '&_=' + streamKey;
-}
-function setFps(v) { fps = v; startStream(); setStatus('流帧率：' + (v ? v + ' fps' : '已暂停')); }
-
-// 编码格式。
+// ── 状态行 ──
 //
-// PNG 是无损的，一帧要 100+ KB —— 对"看画面、点坐标"来说完全不划算。
-// JPEG/WebP 有损但小一个数量级，浏览器解码也快得多。默认用 JPEG。
-let codec = 'jpeg';
-let quality = 75;
-function setCodec(c, q) {
-  codec = c; quality = q;
-  startStream();
-  setStatus('编码：' + c.toUpperCase() + ' 质量 ' + q);
+// 把三样东西拼在一起：设备信息、实际收到的帧率、触控往返延迟。
+// 后两个才是用户"感觉卡不卡"的直接依据 —— 服务端说 30fps 不等于
+// 客户端真收到了 30 帧。
+let metaInfo = '';
+function updateMeta(r) {
+  if (r) {
+    const cap = r.runtime ? r.runtime.capture : r.capture;
+    metaInfo = (sw || cap.primaryWidth || '?') + '×' + (sh || cap.primaryHeight || '?')
+             + ' · ' + cap.backend
+             + ' · pid ' + r.runtime.pid
+             + ' · 协议 v' + r.runtime.protocolVersion;
+  }
+  const stream = streamReady ? (' · ' + shownFps + 'fps') : ' · 画面流断开';
+  const touch  = wsReady ? (' · ' + rtt + 'ms') : ' · 触控流断开';
+  $('meta').textContent = metaInfo + stream + touch;
 }
 
 function refresh() {
   api('/config').then(d => {
-    const r = d.runtime, c = d.config;
-    sw = (r.capture && r.capture.primaryWidth) || 0;
-    sh = (r.capture && r.capture.primaryHeight) || 0;
-    updateMeta(r);
+    const r = d.runtime;
+    const cap = r.capture;
+    sw = cap.primaryWidth || sw;
+    sh = cap.primaryHeight || sh;
+    updateMeta(d);
   }).catch(e => setStatus('取状态失败：' + e, true));
 }
 
-let metaInfo = '';
-function updateMeta(r) {
-  if (r) {
-    metaInfo = (r.capture.primaryWidth || sw) + '×'
-             + (r.capture.primaryHeight || sh) + ' · ' + r.capture.backend
-             + ' · pid ' + r.pid + ' · 协议 v' + r.protocolVersion;
-  }
-  // 把往返延迟显示出来 —— 触控手感好不好，用户感受到的是这个数
-  $('meta').textContent = metaInfo + (wsReady ? ' · ' + rtt + 'ms' : ' · 触控流断开');
+// ── 访问令牌 ──
+//
+// 存在 localStorage 里：开启鉴权后每次打开页面都要重新粘贴令牌的话
+// 没人受得了。服务端只对 /api/ 下的请求校验，网页本身不校验 ——
+// 所以页面能打开、再由脚本补上令牌。
+let token = localStorage.getItem('autod_token') || '';
+
+function authHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  if (token) h['Authorization'] = 'Bearer ' + token;
+  return h;
 }
 
-// 画面尺寸拿到之前先轮询 —— img 的 naturalWidth 要等第一帧到达
-img.addEventListener('load', () => {
-  if (!sw) {
-    sw = img.naturalWidth; sh = img.naturalHeight;
-    $('meta').textContent = sw + '×' + sh;
-  }
-});
+// 网页的 WebSocket 不能自定义请求头，所以令牌走查询参数。
+// 服务端两种都收（见 HttpServer::CheckAuth）。
+function withToken(url) {
+  if (!token) return url;
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
+}
 
-// ── 坐标换算 ──
-// 页面上的像素 → 屏幕像素。必须按**渲染后的显示尺寸**换算，
-// 而不是 naturalWidth：画面被 CSS 缩放过。
-function toScreen(ev) {
-  const rect = img.getBoundingClientRect();
-  const x = Math.round((ev.clientX - rect.left) / rect.width * (sw || img.naturalWidth));
-  const y = Math.round((ev.clientY - rect.top) / rect.height * (sh || img.naturalHeight));
-  return {
-    x: Math.max(0, Math.min((sw || img.naturalWidth) - 1, x)),
-    y: Math.max(0, Math.min((sh || img.naturalHeight) - 1, y))
+function api(path, opts) {
+  const o = Object.assign({}, opts || {});
+  o.headers = authHeaders(o.headers);
+  return fetch('/api/v1' + path, o).then(r => {
+    if (r.status === 401) {
+      // 令牌缺失或不对 —— 把输入条亮出来，别让用户对着一个
+      // 什么都点不动的页面猜
+      $('authbar').style.display = 'flex';
+      token = '';
+      localStorage.removeItem('autod_token');
+      throw new Error('需要访问令牌');
+    }
+    return r.json();
+  });
+}
+
+function saveToken() {
+  token = $('tokeninput').value.trim();
+  localStorage.setItem('autod_token', token);
+  $('authbar').style.display = token ? 'none' : 'flex';
+  setStatus(token ? '令牌已保存' : '令牌已清除');
+  // 两条长连接要重连才会带上新令牌
+  if (streamWs) { try { streamWs.close(); } catch (e) {} streamWs = null; }
+  if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+  refresh();
+  startStream();
+  connectTouch();
+}
+
+// ── 实时画面（WebSocket）──
+//
+// 画面走 WebSocket + canvas，不走 MJPEG 的 <img>：
+//
+//   MJPEG 让浏览器把一条 multipart 流当成"会不断更新的图"，
+//   省事但可控性差 —— 解码和绘制都排在浏览器的图片管道里，
+//   帧率只能靠重设 src 来改，而且没法测延迟。
+//
+//   WebSocket 收到的是二进制图片帧，用 createImageBitmap 解码到
+//   canvas。解码在 worker 线程上，绘制是同步的，链路更短。
+//   客户端还能反过来控制流（改帧率/画质不用重连）。
+//
+// MJPEG 那条留着（/api/v1/stream 不带 Upgrade 头就是它），
+// 用来嵌到别的页面或者调试最省事，也是下面断线时的兜底。
+
+const cvs = $('screen');
+const ctx = cvs.getContext('2d', { alpha: false, desynchronized: true });
+
+let streamWs = null;
+let streamReady = false;
+let streamFrames = 0;
+let lastFpsAt = performance.now();
+let shownFps = 0;
+
+function streamUrl() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return withToken(proto + '//' + location.host + '/api/v1/stream'
+       + '?fps=' + fps + '&format=' + codec + '&quality=' + quality
+       + '&maxWidth=' + maxW);
+}
+
+function startStream() {
+  if (fps <= 0) { stopStream(); return; }
+  if (streamReady) { pushStreamParams(); return; }
+  if (streamWs) return;                      // 正在连接
+
+  let url;
+  try {
+    url = streamUrl();
+  } catch (e) {
+    // 构造 URL 就失败 —— 多半是某个参数没定义（TDZ 或拼错）。
+    // 必须留下痕迹：只 setStatus 的话会被随后的触控流连接覆盖掉，
+    // 用户看到的只是"画面流断开"，无从下手。
+    dbg('url 构造失败: ' + e);
+    setStatus('画面流地址构造失败：' + e, true);
+    return;
+  }
+  try { streamWs = new WebSocket(url); }
+  catch (e) { dbg('new WebSocket 失败: ' + e); setStatus('画面流建立失败：' + e, true); return; }
+  streamWs.binaryType = 'blob';
+
+  streamWs.onopen = () => {
+    streamReady = true;
+    dbg('open');
+    setStatus('画面流已连接');
+    updateMeta();
+  };
+  streamWs.onclose = (e) => {
+    streamReady = false;
+    streamWs = null;
+    // 把关闭码打进控制台。WebSocket 断了但页面上只会显示一句
+    // "断开"，光看那个分不清是被服务端关的、握手失败、还是网络问题。
+    dbg('close code=' + e.code + ' clean=' + e.wasClean + ' r=' + (e.reason || ''));
+    updateMeta();
+    if (fps > 0) setTimeout(startStream, 1500);   // 自动重连
+  };
+  streamWs.onerror = (e) => {
+    streamReady = false;
+    dbg('error ' + (e && e.message ? e.message : '(无消息)'));
+  };
+
+  streamWs.onmessage = async (ev) => {
+    // 文本消息是控制信息，二进制才是图
+    if (typeof ev.data === 'string') {
+      dbg('text ' + ev.data.slice(0, 60));
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.t === 'size') {
+        // 服务端在第一帧之前告诉尺寸 —— 客户端据此建 canvas，
+        // 否则得等图到了才知道多大
+        if (cvs.width !== m.w || cvs.height !== m.h) {
+          cvs.width = m.w; cvs.height = m.h;
+          sw = m.w; sh = m.h;
+          updateMeta();
+        }
+      } else if (m.t === 'hello') {
+        setStatus('画面流 ' + m.format + ' @' + m.fps + 'fps');
+      }
+      return;
+    }
+
+    // 二进制帧：解码到 canvas
+    if (streamFrames === 0) {
+      dbg('binary ' + (ev.data.size || ev.data.byteLength) + 'B cIB='
+          + (typeof createImageBitmap));
+    }
+    try {
+      const bmp = await createImageBitmap(ev.data);
+      if (cvs.width !== bmp.width || cvs.height !== bmp.height) {
+        cvs.width = bmp.width; cvs.height = bmp.height;
+        sw = bmp.width; sh = bmp.height;
+      }
+      ctx.drawImage(bmp, 0, 0);
+      bmp.close();                 // 不 close 会攒着不放，几分钟就吃满内存
+      ++streamFrames;
+    } catch (e) {
+      // 解码失败只丢这一帧。但如果是 API 不可用，会每帧都失败 ——
+      // 那时候页面就是一片黑，而没有任何提示。所以记一次。
+      if (streamFrames === 0) dbg('decode failed: ' + e);
+    }
   };
 }
 
+function pushStreamParams() {
+  if (!streamReady) return;
+  streamWs.send(JSON.stringify({t: 'fps', v: fps}));
+  streamWs.send(JSON.stringify({t: 'quality', v: quality}));
+  streamWs.send(JSON.stringify({t: 'format', v: codec}));
+}
+
+function stopStream() {
+  if (streamWs) { try { streamWs.close(); } catch (e) {} streamWs = null; }
+  streamReady = false;
+  setStatus('画面流已暂停');
+  updateMeta();
+}
+
+// 实际收到的帧率。服务端说 30fps 不等于客户端真收到了 30 帧 ——
+// 网络丢包、解码跟不上都会让它更低，而这个数才是用户看到的。
+setInterval(() => {
+  const now = performance.now();
+  const dt = (now - lastFpsAt) / 1000;
+  if (dt > 0) shownFps = Math.round(streamFrames / dt);
+  streamFrames = 0;
+  lastFpsAt = now;
+  updateMeta();
+}, 1000);
+
+function setFps(v) {
+  fps = v;
+  if (v <= 0) { stopStream(); return; }
+  startStream();
+  pushStreamParams();
+  setStatus('流帧率：' + v + ' fps');
+}
+
+function setCodec(c, q) {
+  codec = c; quality = q;
+  startStream();
+  pushStreamParams();
+  setStatus('编码：' + c.toUpperCase() + ' 质量 ' + q);
+}
 
 // ── 流式触控 ──
 //
@@ -281,7 +469,7 @@ const pendingPings = new Map();
 
 function wsUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return proto + '//' + location.host + '/api/v1/touch';
+  return withToken(proto + '//' + location.host + '/api/v1/touch');
 }
 
 function connectTouch() {
@@ -342,9 +530,9 @@ setInterval(ping, 2000);
 // 画面会被 CSS 缩放过。换算后还要夹到屏幕范围内，
 // 否则边缘点击会越界（设备侧的注入会失败或落到屏幕外）。
 function toScreen(ev) {
-  const rect = img.getBoundingClientRect();
-  const w = sw || img.naturalWidth || 1;
-  const h = sh || img.naturalHeight || 1;
+  const rect = cvs.getBoundingClientRect();
+  const w = sw || cvs.width || 1;
+  const h = sh || cvs.height || 1;
   const x = Math.round((ev.clientX - rect.left) / rect.width * w);
   const y = Math.round((ev.clientY - rect.top) / rect.height * h);
   return {
@@ -384,9 +572,9 @@ function queueMove(slot, x, y) {
   });
 }
 
-img.addEventListener('pointerdown', (ev) => {
+cvs.addEventListener('pointerdown', (ev) => {
   ev.preventDefault();
-  img.setPointerCapture(ev.pointerId);
+  cvs.setPointerCapture(ev.pointerId);
   const p = toScreen(ev);
   const slot = slotFor(ev.pointerId);
   if (!send({t: 'down', x: p.x, y: p.y, id: slot})) {
@@ -395,7 +583,7 @@ img.addEventListener('pointerdown', (ev) => {
   }
 });
 
-img.addEventListener('pointermove', (ev) => {
+cvs.addEventListener('pointermove', (ev) => {
   const p = toScreen(ev);
   $('coord').textContent = p.x + ',' + p.y;
   if (!slotOf.has(ev.pointerId)) return;   // 没按下就不发
@@ -410,11 +598,11 @@ function endPointer(ev) {
   moveQueue.delete(slot);
   send({t: 'up', x: p.x, y: p.y, id: slot});
 }
-img.addEventListener('pointerup', endPointer);
-img.addEventListener('pointercancel', endPointer);
+cvs.addEventListener('pointerup', endPointer);
+cvs.addEventListener('pointercancel', endPointer);
 // 指针离开画面（比如拖到窗口外松手）也要收尾，
 // 否则那根"手指"会在设备上一直按着
-img.addEventListener('pointerleave', (ev) => {
+cvs.addEventListener('pointerleave', (ev) => {
   if (ev.buttons === 0) endPointer(ev);
 });
 

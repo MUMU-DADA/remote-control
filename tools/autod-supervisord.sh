@@ -1,0 +1,141 @@
+#!/system/bin/sh
+# =============================================================================
+# autod-supervisord —— 按 /sdcard/autod.conf 管理 autod 的启停
+#
+# 为什么需要它：
+#
+#   上位应用是普通 Android 应用，**没有 root**，起不了 root 守护进程。
+#   但它能读写共享存储。所以让它写配置文件，这个常驻脚本监视文件、
+#   负责真正的 proc 管理。应用侧因此只依赖"文件能写"这一件事，
+#   不需要任何特权。
+#
+# 它做的事：
+#   1. 每 INTERVAL 秒读一次配置
+#   2. enabled=0        → 停掉 autod
+#      enabled=1        → 没跑就起；bind/port 变了就重启
+#   3. 把实际状态写进 /sdcard/autod.status，供上位应用显示
+#
+# 用法（需要 root；真实设备上建议做成 init 服务，见 autod.rc）：
+#   nohup /data/local/tmp/autod-supervisord.sh >/dev/null 2>&1 &
+# =============================================================================
+
+CONF=${AUTOD_CONFIG:-/sdcard/autod.conf}
+STATUS=/sdcard/autod.status
+BIN=${AUTOD_BIN:-/data/local/tmp/autod}
+SOCK=${AUTOD_SOCK:-/data/local/tmp/autod.sock}
+LOG=/data/local/tmp/autod-run.log
+INTERVAL=2
+
+# 当前生效的值，用来判断"要不要重启"
+cur_bind=""
+cur_port=""
+cur_pid=""
+cur_fp=""      # 影响服务行为的配置指纹（bind/port/auth/token）
+
+log() { echo "[supervisord] $*"; }
+
+read_conf() {
+    # 输出 "enabled bind port auth token"
+    #
+    # ⚠️ auth/token 也要读出来参与"要不要重启"的判断。
+    #    早先只看 bind/port，结果在上位应用里打开鉴权开关之后
+    #    配置文件变了、服务却没重启，令牌也就没生成 ——
+    #    用户看到的是"开关拨过去了但什么都没发生"。
+    E=1; B=127.0.0.1; P=8088; A=0; T=""
+    [ -f "$CONF" ] || { echo "1 127.0.0.1 8088 0 "; return; }
+    while IFS='=' read -r k v; do
+        # 去掉注释与空白
+        k=$(echo "$k" | tr -d ' \t\r')
+        v=$(echo "$v" | sed 's/#.*//' | tr -d ' \t\r')
+        case "$k" in
+            enabled) [ "$v" = "0" ] && E=0 || E=1 ;;
+            bind)    [ -n "$v" ] && B="$v" ;;
+            port)    case "$v" in ''|*[!0-9]*) ;; *) P="$v" ;; esac ;;
+            auth)    [ "$v" = "1" ] && A=1 || A=0 ;;
+            token)   T="$v" ;;
+        esac
+    done < "$CONF"
+    echo "$E $B $P $A $T"
+}
+
+write_status() {
+    # 上位应用读这个文件显示状态。比去探端口可靠 ——
+    # 端口可能被防火墙/转发规则挡住，而"进程在不在"是确定的。
+    {
+        echo "running=$1"
+        echo "pid=${2:-0}"
+        echo "bind=$3"
+        echo "port=$4"
+        echo "since=$(date +%s 2>/dev/null || echo 0)"
+    } > "$STATUS.tmp" 2>/dev/null && mv "$STATUS.tmp" "$STATUS" 2>/dev/null
+}
+
+stop_autod() {
+    if [ -n "$cur_pid" ] && kill -0 "$cur_pid" 2>/dev/null; then
+        log "停止 autod (pid $cur_pid)"
+        kill "$cur_pid" 2>/dev/null
+        # 给它 3 秒优雅退出（它会关掉 uinput 设备、清理 socket 文件）
+        i=0
+        while [ $i -lt 15 ] && kill -0 "$cur_pid" 2>/dev/null; do
+            sleep 0.2; i=$((i+1))
+        done
+        kill -0 "$cur_pid" 2>/dev/null && kill -9 "$cur_pid" 2>/dev/null
+    fi
+    # 兜底：pid 文件丢了但进程还在（比如换了 supervisor）
+    pkill -f "$BIN --socket" 2>/dev/null
+    rm -f "$SOCK"
+    cur_pid=""
+}
+
+start_autod() {
+    stop_autod
+    log "启动 autod (bind=$1 port=$2)"
+    # **不传 --http-bind/--http-port** —— 让守护进程自己读配置文件。
+    # 传了的话 CLI 优先级更高，配置文件里改端口就不会生效了，
+    # 而那正是上位机要控制的东西。
+    nohup "$BIN" --socket "$SOCK" --socket-mode 0666 --foreground \
+        > "$LOG" 2>&1 &
+    cur_pid=$!
+    cur_bind=$1
+    cur_port=$2
+    sleep 1
+    if kill -0 "$cur_pid" 2>/dev/null; then
+        log "已启动 pid $cur_pid"
+    else
+        log "启动失败，见 $LOG"
+        cur_pid=""
+    fi
+}
+
+log "启动，监视 $CONF（每 ${INTERVAL}s）"
+
+while true; do
+    set -- $(read_conf)
+    E=$1; B=$2; P=$3; A=$4; T=$5
+
+    # 指纹只包含**影响服务行为**的字段。把注释和格式也算进去的话，
+    # 改一行注释就会重启服务，反而让人不敢编辑配置。
+    fp="$B|$P|$A|$T"
+
+    alive=0
+    [ -n "$cur_pid" ] && kill -0 "$cur_pid" 2>/dev/null && alive=1
+
+    if [ "$E" = "0" ]; then
+        [ "$alive" = "1" ] && stop_autod
+        cur_fp=""
+        write_status 0 0 "$B" "$P"
+    else
+        # 进程没了，或者影响行为的配置变了 → (重)启动
+        if [ "$alive" = "0" ] || [ "$fp" != "$cur_fp" ]; then
+            start_autod "$B" "$P"
+            cur_fp="$fp"
+        fi
+        if [ -n "$cur_pid" ]; then
+            write_status 1 "$cur_pid" "$cur_bind" "$cur_port"
+        else
+            write_status 0 0 "$B" "$P"
+        fi
+    fi
+
+    sleep "$INTERVAL"
+done

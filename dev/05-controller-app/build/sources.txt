@@ -1,5 +1,2 @@
-/root/AutoSnapshotAndroid/dev/05-controller-app/java/com/autod/controller/AppListAdapter.java
 /root/AutoSnapshotAndroid/dev/05-controller-app/java/com/autod/controller/MainActivity.java
-/root/AutoSnapshotAndroid/dev/05-controller-app/java/com/autod/controller/Protocol.java
-/root/AutoSnapshotAndroid/dev/05-controller-app/java/com/autod/controller/AutodClient.java
 /root/AutoSnapshotAndroid/dev/05-controller-app/build/gen/com/autod/controller/R.java

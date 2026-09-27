@@ -21,6 +21,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -89,7 +91,10 @@ class HttpServer {
     struct Options {
         std::string bindAddr = "127.0.0.1";
         uint16_t    port     = 8088;
-        // 空 = 不鉴权（只允许绑回环时这么用）
+        // 访问令牌。**空 = 无鉴权**，这是默认状态（首启即是）。
+        // 非空时 /api/ 下的所有请求都要带令牌；
+        // 网页本身（/ 和 /ui）不校验 —— 它只是个静态页面，
+        // 不含任何秘密，而用户得先打开它才能输入令牌。
         std::string token;
         size_t      maxBodyBytes = 64u << 20;   // 64MB，够传 APK
     };
@@ -112,7 +117,20 @@ class HttpServer {
     const std::string& bindAddr() const { return bindAddr_; }
 
   private:
+    // 活跃连接。
+    //
+    // ⚠️ 这是为了**关闭时不崩**：连接线程是 detached 的，主线程走到
+    //    main() 结尾就把 Dispatcher（含它的操作锁）析构了，而流式响应
+    //    的回调还在那些线程里跑着 —— 表现是
+    //      FORTIFY: pthread_mutex_lock called on a destroyed mutex
+    //    Stop() 因此要主动 shutdown 掉这些连接，并等它们真的退出。
+    std::mutex              connMutex_;
+    std::set<int>           connFds_;
+
     void ServeConnection(int connFd, const HttpHandler& handler);
+
+    // 校验请求的令牌。token_ 为空时一律放行（无鉴权模式）。
+    bool CheckAuth(const HttpRequest& req) const;
     bool ReadRequest(int connFd, HttpRequest* out, HttpResponse* errReply);
 
     int         listenFd_ = -1;

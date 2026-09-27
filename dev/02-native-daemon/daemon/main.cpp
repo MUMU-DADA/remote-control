@@ -17,6 +17,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "config_file.h"
 #include "autod_log.h"
 #include "autod_platform.h"
 
@@ -58,6 +59,7 @@ void PrintUsage(const char* argv0) {
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
   --gid <gid>          配套的 GID，省略则用与 uid 相同的值
   --selftest           检查运行环境后退出（首次部署时先跑这个）
+  --config <路径>       配置文件，默认 /sdcard/autod.conf（首启无鉴权）
   --http-bind <地址>    启用 HTTP/JSON API 并绑定该地址（如 127.0.0.1）
                         不指定则不启用。绑非回环地址时**必须**配 --http-token
   --http-port <端口>    HTTP 端口，默认 8088
@@ -125,6 +127,9 @@ int main(int argc, char** argv) {
     std::string httpBind;                 // 空 = 不启用 HTTP API
     uint16_t    httpPort       = 8088;
     std::string httpToken;
+    // 显式给了 CLI 标志就以 CLI 为准（见下面配置合并那段）
+    std::string configPath = ConfigFile::DefaultPath();
+    bool cliBind = false, cliPort = false, cliToken = false;
 
     enum LongOpt {
         kOptSocket = 1000,
@@ -135,6 +140,7 @@ int main(int argc, char** argv) {
         kOptGid,
         kOptSelfTest,
         kOptSocketMode,
+        kOptConfig,
         kOptHttpBind,
         kOptHttpPort,
         kOptHttpToken,
@@ -148,6 +154,7 @@ int main(int argc, char** argv) {
         {"touch-range", required_argument, nullptr, kOptTouchRange},
         {"selftest",    no_argument,       nullptr, kOptSelfTest},
         {"socket-mode", required_argument, nullptr, kOptSocketMode},
+        {"config",      required_argument, nullptr, kOptConfig},
         {"http-bind",   required_argument, nullptr, kOptHttpBind},
         {"http-port",   required_argument, nullptr, kOptHttpPort},
         {"http-token",  required_argument, nullptr, kOptHttpToken},
@@ -182,8 +189,12 @@ int main(int argc, char** argv) {
                 selfTest = true;
                 break;
 
+            case kOptConfig:
+                configPath = optarg;
+                break;
             case kOptHttpBind:
                 httpBind = optarg;
+                cliBind = true;
                 break;
             case kOptHttpPort: {
                 const long v = strtol(optarg, nullptr, 10);
@@ -192,10 +203,12 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 httpPort = static_cast<uint16_t>(v);
+                cliPort = true;
                 break;
             }
             case kOptHttpToken:
                 httpToken = optarg;
+                cliToken = true;
                 break;
 
             case kOptSocketMode: {
@@ -402,6 +415,55 @@ int main(int argc, char** argv) {
     // 这里要 join，所以不能走 SpawnDetached（那个是 detached）。
     pthread_t httpThread{};
     bool      httpThreadStarted = false;
+    // ── 合并持久化配置 ──
+    //
+    // 优先级：CLI 显式给的 > /sdcard/autod.conf > 内置默认。
+    //
+    // 这个顺序是有讲究的：上位应用写配置文件、不传 CLI 参数，
+    // 所以它能生效；而调试时 `--http-port 9999` 这种一次性覆盖
+    // 也不会被文件悄悄改掉。
+    //
+    // 首启（文件不存在）就是"无鉴权 + 127.0.0.1 + 8088"，
+    // 和产品要求一致。
+    {
+        PersistedConfig cfg;
+        std::string cfgErr;
+        if (!ConfigFile::Load(configPath, &cfg, &cfgErr)) {
+            ALOGW("读取配置 %s 失败，用默认值: %s", configPath.c_str(),
+                  cfgErr.c_str());
+        }
+        if (!cliBind)  httpBind  = cfg.bind;
+        if (!cliPort)  httpPort  = static_cast<uint16_t>(cfg.port);
+        if (!cliToken) httpToken = cfg.token;
+
+        // auth=1 但还没有令牌 → 生成一个并写回文件。
+        //
+        // 只在这里生成（而不是每次启动都生成）：令牌一旦变了，
+        // 已经配好它的客户端就全部失效，用户还得再去文件里看一眼。
+        if (cfg.auth && httpToken.empty()) {
+            const std::string fresh = ConfigFile::GenerateToken();
+            if (fresh.empty()) {
+                // 拿不到安全的随机数就**不要假装开了鉴权** ——
+                // 用弱令牌比明说"没开"更危险。
+                ALOGE("无法生成随机令牌，鉴权未启用（接口将无鉴权）");
+            } else {
+                httpToken = fresh;
+                cfg.token = fresh;
+                cfg.tokenWasGenerated = true;
+                std::string saveErr;
+                if (!ConfigFile::Save(configPath, cfg, &saveErr)) {
+                    ALOGW("令牌已生成但写回 %s 失败: %s", configPath.c_str(),
+                          saveErr.c_str());
+                }
+                ALOGI("已生成访问令牌并写入 %s —— 用 `grep token %s` 查看",
+                      configPath.c_str(), configPath.c_str());
+            }
+        }
+        ALOGI("配置: %s | bind=%s port=%u auth=%s", configPath.c_str(),
+              httpBind.empty() ? "(未启用)" : httpBind.c_str(), httpPort,
+              httpToken.empty() ? "关" : "开");
+    }
+
     if (!httpBind.empty()) {
         HttpServer::Options opts;
         opts.bindAddr = httpBind;

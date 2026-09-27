@@ -1,771 +1,450 @@
+// MainActivity.java — autod 服务管理器
+//
+// 这个应用**只做三件事**：
+//   1. 启动 / 停止 autod 服务
+//   2. 改它的对外监听端口
+//   3. 开关接口访问鉴权
+//
+// 为什么把原来的画面、触控、应用管理、文件管理全删了：
+//
+//   那些能力属于"控制设备"，而它们已经在网页控制台里了（那里有实时画面、
+//   流式触控、按键、应用列表……而且不用装在设备上）。应用再做一遍，
+//   等于两套 UI 各维护一遍，行为还容易不一致。
+//
+//   应用真正的独有价值是**它是设备本地的**：服务没起来、网络不通、
+//   端口改错了导致连不上 —— 这些情况下网页控制台自己也进不去，
+//   只有本机应用还能把服务拉回来。所以它就该只做这件事。
+//
+// 怎么做到"没有 root 也能启停 root 服务"：
+//
+//   应用改不了进程，但它能写共享存储。配置写在 /sdcard/autod.conf，
+//   由常驻的 autod-supervisord 监视并执行真正的启停。
+//   应用侧因此只依赖"文件能写"，不需要任何特权。
+//
+// ⚠️ 写 /sdcard 需要 MANAGE_EXTERNAL_STORAGE（Android 11+ 的
+//    "所有文件访问"）。没有它的话应用只能写自己的私有目录，
+//    守护进程就读不到了。
+
 package com.autod.controller;
 
+import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
-import android.graphics.Bitmap;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.InputType;
-import android.util.Log;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
-import android.widget.FrameLayout;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ListView;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
-/**
- * autod 上位应用：对服务做控制与状态查询。
- *
- * <p>界面是代码构建的而不是 XML 布局 —— 这是一个控制/调试工具，
- * 功能密度比视觉表现重要，代码构建也省掉一整层资源编译。
- *
- * <p>所有 socket 调用都走后台线程：Android 在主线程做阻塞 IO 会直接
- * 抛 NetworkOnMainThreadException，而且卡 UI 本身也是不可接受的。
- */
 public class MainActivity extends Activity {
 
-    private static final String TAG = "AutodUI";
-
-    private final AutodClient client = new AutodClient();
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private final Handler ui = new Handler(Looper.getMainLooper());
+    /** 与 autod-supervisord 约定的路径 */
+    private static final String CONF   = "/sdcard/autod.conf";
+    private static final String STATUS = "/sdcard/autod.status";
 
     private TextView statusView;
-    private EditText socketEdit;
-    private FrameLayout content;
-    private Button[] tabs;
+    private TextView tokenView;
+    private Switch   enableSwitch;
+    private Switch   authSwitch;
+    private EditText portEdit;
 
-    private int currentTab = 0;
-    private String currentDir = "";        // 文件页当前目录（相对下载目录）
-    private List<AppListAdapter.Item> apps = new ArrayList<>();
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private boolean suppressCallbacks = false;   // 程序化改开关时别触发保存
+
+    // ── 生命周期 ────────────────────────────────────────────────────────────
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
-        showTab(0);
+        ensureStorageAccess();
     }
 
     @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        client.close();
-        io.shutdownNow();
+    protected void onResume() {
+        super.onResume();
+        reload();
+        ui.postDelayed(poller, 1000);
     }
 
-    // ── 后台任务 ────────────────────────────────────────────────────────────
+    @Override
+    protected void onPause() {
+        super.onPause();
+        ui.removeCallbacks(poller);
+    }
 
-    private interface Job { Object run() throws Exception; }
+    private final Runnable poller = new Runnable() {
+        @Override public void run() {
+            refreshStatus();
+            ui.postDelayed(this, 1000);
+        }
+    };
 
-    private interface Done { void ok(Object result); }
+    // ── 存储权限 ────────────────────────────────────────────────────────────
+    //
+    // Android 11+ 里往 /sdcard 根目录写文件需要"所有文件访问"，
+    // 而这个权限只能在系统设置里由用户授予 —— 应用不能自己弹窗申请。
+    // 所以这里只负责把用户送过去，并说明为什么需要。
 
-    /** 在后台线程跑 socket 调用，结果回主线程 */
-    private void runAsync(String what, Job job, Done onDone) {
-        io.execute(() -> {
+    private void ensureStorageAccess() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
+        if (Environment.isExternalStorageManager()) return;
+
+        toast("需要「所有文件访问」权限才能改写服务配置");
+        try {
+            Intent i = new Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            startActivity(i);
+        } catch (Exception e) {
+            // 有些 ROM 没有这个页面，退回到总列表
             try {
-                final Object r = job.run();
-                ui.post(() -> {
-                    if (onDone != null) onDone.ok(r);
-                });
-            } catch (final Exception e) {
-                Log.w(TAG, what + " 失败", e);
-                ui.post(() -> {
-                    setStatus(what + " 失败: " + e.getMessage(), true);
-                    toast(what + " 失败: " + e.getMessage());
-                });
+                startActivity(new Intent(
+                        Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+            } catch (Exception e2) {
+                toast("请手动到系统设置里授予「所有文件访问」");
             }
-        });
-    }
-
-    private void setStatus(String text, boolean error) {
-        if (statusView != null) {
-            statusView.setText(text);
-            statusView.setTextColor(error ? 0xFFD32F2F : 0xFF2E7D32);
         }
     }
 
-    private void toast(String s) {
-        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
-    }
+    // ── 界面 ────────────────────────────────────────────────────────────────
 
-    // ── 界面构建 ────────────────────────────────────────────────────────────
-
-    private View buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-
-        // 连接栏
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setPadding(dp(8), dp(8), dp(8), dp(4));
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-
-        socketEdit = new EditText(this);
-        socketEdit.setText(AutodClient.DEFAULT_SOCKET);
-        socketEdit.setSingleLine(true);
-        socketEdit.setTextSize(12);
-        bar.addView(socketEdit, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        Button connect = new Button(this);
-        connect.setText("连接");
-        connect.setOnClickListener(v -> doConnect());
-        bar.addView(connect);
-        root.addView(bar);
-
-        statusView = new TextView(this);
-        statusView.setPadding(dp(10), dp(2), dp(10), dp(6));
-        statusView.setTextSize(12);
-        statusView.setText("未连接");
-        root.addView(statusView);
-
-        // 标签栏
-        LinearLayout tabBar = new LinearLayout(this);
-        tabBar.setOrientation(LinearLayout.HORIZONTAL);
-        String[] names = {"状态", "应用", "文件", "控制"};
-        tabs = new Button[names.length];
-        for (int i = 0; i < names.length; i++) {
-            final int idx = i;
-            Button b = new Button(this);
-            b.setText(names[i]);
-            b.setTextSize(13);
-            b.setOnClickListener(v -> showTab(idx));
-            tabs[i] = b;
-            tabBar.addView(b, new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        }
-        root.addView(tabBar);
-
-        content = new FrameLayout(this);
-        root.addView(content, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        return root;
-    }
-
-    private void showTab(int idx) {
-        currentTab = idx;
-        for (int i = 0; i < tabs.length; i++) {
-            tabs[i].setEnabled(i != idx);
-        }
-        switch (idx) {
-            case 0: content.removeAllViews(); content.addView(buildStatusTab()); break;
-            case 1: content.removeAllViews(); content.addView(buildAppsTab()); break;
-            case 2: content.removeAllViews(); content.addView(buildFilesTab()); break;
-            default: content.removeAllViews(); content.addView(buildControlTab()); break;
-        }
-    }
-
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density);
-    }
-
-    private Button button(String text, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setTextSize(13);
-        b.setOnClickListener(l);
-        return b;
+    private int dp(float v) {
+        return Math.round(TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics()));
     }
 
     private TextView label(String text) {
         TextView t = new TextView(this);
         t.setText(text);
-        t.setTextSize(13);
-        t.setPadding(dp(8), dp(6), dp(8), dp(2));
+        t.setTextSize(12);
+        t.setPadding(dp(12), dp(10), dp(12), dp(4));
+        t.setTextColor(0xFF888888);
         return t;
     }
 
-    private LinearLayout row() {
-        LinearLayout r = new LinearLayout(this);
-        r.setOrientation(LinearLayout.HORIZONTAL);
-        r.setPadding(dp(6), dp(2), dp(6), dp(2));
-        return r;
+    private Button button(String text, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextSize(13);
+        b.setOnClickListener(l);
+        return b;
     }
 
-    private EditText field(String hint, int weight) {
-        EditText e = new EditText(this);
-        e.setHint(hint);
-        e.setTextSize(13);
-        e.setSingleLine(true);
-        e.setInputType(InputType.TYPE_CLASS_TEXT);
-        if (weight > 0) {
-            e.setLayoutParams(new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, weight));
-        }
-        return e;
-    }
-
-    // ── 页 1：状态 ──────────────────────────────────────────────────────────
-
-    // ⚠️ 只声明，**不要**在这里 new。
-    //    字段初始化器在 onCreate 之前、Activity 还没挂到 Context 上时执行，
-    //    那时 this.getResources() 是 null，new TextView(this) 会直接
-    //    NPE 崩在 <init> 里 —— 实测就是这样崩的。
-    //    所有依赖 Context 的 View 一律在 onCreate/buildUi 里创建。
-    private TextView statusDetail;
-
-    private View buildStatusTab() {
-        ScrollView sv = new ScrollView(this);
+    private View buildUi() {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
+
+        // 标题
+        TextView title = new TextView(this);
+        title.setText("autod 服务管理");
+        title.setTextSize(19);
+        title.setTypeface(null, Typeface.BOLD);
+        title.setPadding(dp(16), dp(16), dp(16), dp(4));
+        title.setTextColor(0xFFFFFFFF);
+        col.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText("只管服务的启停、端口与鉴权\n（控制设备请用网页控制台）");
+        sub.setTextSize(12);
+        sub.setPadding(dp(16), 0, dp(16), dp(10));
+        sub.setTextColor(0xFF888888);
+        col.addView(sub);
+
+        // ── 状态 ──
+        col.addView(label("服务状态"));
+        statusView = new TextView(this);
+        statusView.setTextSize(13);
+        statusView.setPadding(dp(16), 0, dp(16), dp(8));
+        statusView.setTextColor(0xFFCCCCCC);
+        statusView.setTypeface(Typeface.MONOSPACE);
+        col.addView(statusView);
+
+        LinearLayout stRow = new LinearLayout(this);
+        stRow.setPadding(dp(12), 0, dp(12), dp(8));
+        stRow.addView(button("刷新", v -> { reload(); refreshStatus(); }));
+        stRow.addView(button("重新读取配置", v -> reload()));
+        col.addView(stRow);
+
+        // ── 启停 ──
+        col.addView(label("启动 / 停止"));
+        LinearLayout enRow = new LinearLayout(this);
+        enRow.setGravity(Gravity.CENTER_VERTICAL);
+        enRow.setPadding(dp(16), 0, dp(16), dp(8));
+        enableSwitch = new Switch(this);
+        enableSwitch.setText("服务运行中");
+        enableSwitch.setTextSize(14);
+        enableSwitch.setOnCheckedChangeListener((b, checked) -> {
+            if (suppressCallbacks) return;
+            save("enabled", checked ? "1" : "0",
+                 checked ? "正在启动服务…" : "正在停止服务…");
+        });
+        enRow.addView(enableSwitch);
+        col.addView(enRow);
+
+        // ── 端口 ──
+        col.addView(label("对外监听端口"));
+        LinearLayout pRow = new LinearLayout(this);
+        pRow.setGravity(Gravity.CENTER_VERTICAL);
+        pRow.setPadding(dp(16), 0, dp(16), dp(4));
+        portEdit = new EditText(this);
+        portEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
+        portEdit.setTextSize(14);
+        portEdit.setHint("1024-65535");
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        portEdit.setLayoutParams(lp);
+        pRow.addView(portEdit);
+        pRow.addView(button("保存", v -> savePort()));
+        col.addView(pRow);
+
+        TextView portHint = new TextView(this);
+        portHint.setText("改完 supervisor 会自动重启服务。\n"
+                + "连不上时先看这里 —— 端口写错是唯一能把你自己关在门外又\n"
+                + "只有本机应用能救回来的情况。");
+        portHint.setTextSize(11);
+        portHint.setPadding(dp(16), 0, dp(16), dp(8));
+        portHint.setTextColor(0xFF777777);
+        col.addView(portHint);
+
+        // ── 鉴权 ──
+        col.addView(label("接口访问鉴权"));
+        LinearLayout aRow = new LinearLayout(this);
+        aRow.setGravity(Gravity.CENTER_VERTICAL);
+        aRow.setPadding(dp(16), 0, dp(16), dp(4));
+        authSwitch = new Switch(this);
+        authSwitch.setText("要求访问令牌");
+        authSwitch.setTextSize(14);
+        authSwitch.setOnCheckedChangeListener((b, checked) -> {
+            if (suppressCallbacks) return;
+            save("auth", checked ? "1" : "0",
+                 checked ? "已开启鉴权（首次会自动生成令牌）" : "已关闭鉴权");
+        });
+        aRow.addView(authSwitch);
+        col.addView(aRow);
+
+        tokenView = new TextView(this);
+        tokenView.setTextSize(12);
+        tokenView.setPadding(dp(16), 0, dp(16), dp(6));
+        tokenView.setTextColor(0xFFAACCAA);
+        tokenView.setTypeface(Typeface.MONOSPACE);
+        tokenView.setTextIsSelectable(true);
+        col.addView(tokenView);
+
+        LinearLayout tRow = new LinearLayout(this);
+        tRow.setPadding(dp(12), 0, dp(12), dp(12));
+        tRow.addView(button("复制令牌", v -> copyToken()));
+        tRow.addView(button("重新生成", v -> {
+            if (!authSwitch.isChecked()) { toast("先开启鉴权"); return; }
+            save("token", "", "已清空令牌，重启后会生成新的");
+        }));
+        col.addView(tRow);
+
+        // 安全提示：这个开关很容易被随手打开又随手关掉
+        TextView warn = new TextView(this);
+        warn.setText("⚠️ 关闭鉴权后，同一网络里的任何人都能完全控制本设备：\n"
+                + "看屏幕、点屏幕、按键、读剪贴板、装应用、删文件。");
+        warn.setTextSize(11);
+        warn.setPadding(dp(16), 0, dp(16), dp(20));
+        warn.setTextColor(0xFFCC7744);
+        col.addView(warn);
+
+        ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(0xFF111111);
         sv.addView(col);
-
-        LinearLayout r = row();
-        r.addView(button("刷新状态", v -> refreshStatus()), new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        r.addView(button("查询前台应用", v -> refreshForeground()),
-                new LinearLayout.LayoutParams(
-                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        col.addView(r);
-
-        // ── 剪贴板 ──
-        //
-        // 为什么放在上位应用而不是 daemon：Android 的剪贴板访问控制里，
-        // OP_WRITE_CLIPBOARD 最终要过 AppOps.noteOp(uid, callingPackage)，
-        // 而且 CLI 在 Android 12 上根本没有（`cmd clipboard` 不存在）。
-        // **前台应用**写剪贴板是正常的、被支持的路径。
-        // daemon 侧只需要"读"，见 ClipTool。
-        col.addView(label("剪贴板（本应用读写）"));
-
-        final TextView clipView = new TextView(this);
-        clipView.setTextSize(12);
-        clipView.setPadding(dp(10), dp(2), dp(10), dp(2));
-        clipView.setTextIsSelectable(true);
-        clipView.setText("（点「读剪贴板」查看）");
-
-        LinearLayout clipRow = row();
-        final EditText clipEdit = field("要写入剪贴板的文本", 1);
-        clipRow.addView(clipEdit);
-        clipRow.addView(button("写入", v -> {
-            CharSequence t = clipEdit.getText();
-            if (t == null || t.length() == 0) { toast("请先填内容"); return; }
-            android.content.ClipboardManager cm =
-                    (android.content.ClipboardManager)
-                            getSystemService(CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(android.content.ClipData.newPlainText("autod", t));
-            toast("已写入剪贴板");
-        }));
-        clipRow.addView(button("读剪贴板", v -> {
-            android.content.ClipboardManager cm =
-                    (android.content.ClipboardManager)
-                            getSystemService(CLIPBOARD_SERVICE);
-            if (!cm.hasPrimaryClip()) { clipView.setText("（剪贴板为空）"); return; }
-            android.content.ClipData d = cm.getPrimaryClip();
-            if (d == null || d.getItemCount() == 0) {
-                clipView.setText("（剪贴板为空）"); return;
-            }
-            CharSequence t = d.getItemAt(0).coerceToText(this);
-            clipView.setText("剪贴板内容：\n" + (t == null ? "(null)" : t.toString()));
-        }));
-        col.addView(clipRow);
-        col.addView(clipView);
-
-        statusDetail = new TextView(this);
-        statusDetail.setTextSize(13);
-        statusDetail.setPadding(dp(10), dp(8), dp(10), dp(8));
-        statusDetail.setTextIsSelectable(true);
-        statusDetail.setText("点「刷新状态」查询");
-        col.addView(statusDetail);
         return sv;
     }
 
-    private void doConnect() {
-        final String path = socketEdit.getText().toString().trim();
-        setStatus("连接中…", false);
-        runAsync("连接", () -> {
-            client.connect(path);
-            return path;
-        }, o -> {
-            setStatus("已连接 " + o, false);
-            refreshStatus();
-        });
+    // ── 配置读写 ────────────────────────────────────────────────────────────
+    //
+    // 格式与 ConfigFile::Serialize()（守护进程侧）必须一致：
+    // 纯 key=value、# 开头是注释。这样两边都不需要 JSON 库，
+    // 而且用户能直接用编辑器看懂和改。
+
+    private Map<String, String> readConf() {
+        Map<String, String> m = new LinkedHashMap<>();
+        File f = new File(CONF);
+        if (!f.exists()) return m;
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(
+                new FileInputStream(f), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                int eq = line.indexOf('=');
+                if (eq <= 0) continue;
+                m.put(line.substring(0, eq).trim(), line.substring(eq + 1).trim());
+            }
+        } catch (Exception e) {
+            toast("读配置失败：" + e.getMessage());
+        }
+        return m;
+    }
+
+    /** 只改一个字段，保留文件里其它内容和注释。 */
+    private void save(String key, String value, String toastText) {
+        Map<String, String> m = readConf();
+        m.put(key, value);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("# autod 配置 —— 由上位应用或手工编辑，守护进程启动时读取。\n");
+        sb.append("# 改完之后需要重启服务才生效。\n\n");
+        sb.append("# 服务是否应当运行\n");
+        sb.append("enabled=").append(m.containsKey("enabled") ? m.get("enabled") : "1").append('\n');
+        sb.append("\n# 监听地址。127.0.0.1 = 仅本机；0.0.0.0 = 对外（注意鉴权设置）\n");
+        sb.append("bind=").append(m.containsKey("bind") ? m.get("bind") : "127.0.0.1").append('\n');
+        sb.append("\n# HTTP 监听端口\n");
+        sb.append("port=").append(m.containsKey("port") ? m.get("port") : "8088").append('\n');
+        sb.append("\n# 是否要求访问令牌。0 = 无鉴权（任何人都能访问接口）\n");
+        sb.append("auth=").append(m.containsKey("auth") ? m.get("auth") : "0").append('\n');
+        sb.append("\n# 访问令牌。auth=1 时若为空，守护进程启动时会随机生成并写回这里。\n");
+        sb.append("token=").append(m.containsKey("token") ? m.get("token") : "").append('\n');
+
+        try (OutputStreamWriter w = new OutputStreamWriter(
+                new FileOutputStream(CONF + ".tmp"), StandardCharsets.UTF_8)) {
+            w.write(sb.toString());
+        } catch (Exception e) {
+            toast("写配置失败：" + e.getMessage()
+                    + "\n（多半是没有「所有文件访问」权限）");
+            reload();
+            return;
+        }
+        // 原子替换：守护进程可能正在读，不能让它看到半个文件
+        File tmp = new File(CONF + ".tmp");
+        File dst = new File(CONF);
+        if (!tmp.renameTo(dst)) {
+            toast("替换配置失败");
+            reload();
+            return;
+        }
+        if (toastText != null) toast(toastText);
+        ui.postDelayed(this::reload, 700);
+    }
+
+    private void savePort() {
+        String s = portEdit.getText().toString().trim();
+        int p;
+        try {
+            p = Integer.parseInt(s);
+        } catch (Exception e) {
+            toast("端口必须是数字");
+            return;
+        }
+        if (p < 1 || p > 65535) {
+            toast("端口范围 1-65535");
+            return;
+        }
+        if (p < 1024) {
+            // 1024 以下是特权端口，root 进程能绑，但很容易和系统服务撞上
+            toast("提示：" + p + " 是特权端口，可能和系统服务冲突");
+        }
+        save("port", String.valueOf(p), "端口已改为 " + p + "，正在重启服务…");
+    }
+
+    private void copyToken() {
+        Map<String, String> m = readConf();
+        String t = m.get("token");
+        if (t == null || t.isEmpty()) { toast("当前没有令牌"); return; }
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(ClipData.newPlainText("autod token", t));
+        toast("令牌已复制");
+    }
+
+    // ── 状态显示 ────────────────────────────────────────────────────────────
+    //
+    // 状态来自 supervisor 写的 /sdcard/autod.status。
+    // 不去探端口：端口可能被转发规则挡住，"进程在不在"才是确定的；
+    // 而且服务没起来时探端口只会得到"连不上"，分不清是挂了还是没启动。
+
+    private void reload() {
+        Map<String, String> c = readConf();
+        suppressCallbacks = true;
+        enableSwitch.setChecked(!"0".equals(c.get("enabled")));
+        authSwitch.setChecked("1".equals(c.get("auth")));
+        portEdit.setText(c.containsKey("port") ? c.get("port") : "8088");
+        suppressCallbacks = false;
+
+        String t = c.get("token");
+        boolean auth = "1".equals(c.get("auth"));
+        if (!auth) {
+            tokenView.setText("令牌：—（无鉴权模式）");
+            tokenView.setTextColor(0xFFCC7744);
+        } else if (t == null || t.isEmpty()) {
+            tokenView.setText("令牌：（重启服务后自动生成）");
+            tokenView.setTextColor(0xFFCCCC88);
+        } else {
+            tokenView.setText("令牌：" + t);
+            tokenView.setTextColor(0xFFAACCAA);
+        }
+        refreshStatus();
     }
 
     private void refreshStatus() {
-        runAsync("查询状态", () -> {
-            JSONObject info = client.info();
-            JSONObject fg = null;
-            try {
-                fg = client.foregroundApp();
-            } catch (Exception e) {
-                // 息屏或开机中没有前台 Activity，不是错误
-                fg = new JSONObject().put("error", e.getMessage());
-            }
-            JSONObject both = new JSONObject();
-            both.put("display", info);
-            both.put("foreground", fg);
-            both.put("socket", client.socketPath());
-            return both;
-        }, o -> {
-            try {
-                JSONObject both = (JSONObject) o;
-                JSONObject d = both.getJSONObject("display");
-                JSONObject f = both.getJSONObject("foreground");
-
-                StringBuilder sb = new StringBuilder();
-                sb.append("socket: ").append(both.optString("socket")).append('\n');
-                sb.append("显示: ")
-                  .append(d.optInt("width")).append(" x ")
-                  .append(d.optInt("height")).append('\n');
-                sb.append('\n').append("当前前台应用:\n");
-                if (f.has("package")) {
-                    sb.append("  包名  : ").append(f.optString("package")).append('\n');
-                    sb.append("  Activity: ").append(f.optString("activity")).append('\n');
-                    sb.append("  pid   : ").append(f.optInt("pid")).append('\n');
-                    sb.append("  userId: ").append(f.optInt("userId")).append('\n');
-                } else {
-                    sb.append("  ").append(f.optString("error", "无")).append('\n');
+        Map<String, String> s = new LinkedHashMap<>();
+        File f = new File(STATUS);
+        if (f.exists()) {
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(
+                    new FileInputStream(f), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    int eq = line.indexOf('=');
+                    if (eq > 0) s.put(line.substring(0, eq).trim(),
+                                     line.substring(eq + 1).trim());
                 }
-
-                if (statusDetail != null) statusDetail.setText(sb.toString());
-                setStatus("状态已更新", false);
-            } catch (Exception e) {
-                setStatus("解析失败: " + e.getMessage(), true);
+            } catch (Exception ignored) {
             }
-        });
-    }
-
-    private void refreshForeground() {
-        runAsync("查询前台应用", () -> client.foregroundApp(), o -> {
-            JSONObject f = (JSONObject) o;
-            new AlertDialog.Builder(this)
-                    .setTitle("当前前台应用")
-                    .setMessage("包名: " + f.optString("package")
-                            + "\nActivity: " + f.optString("activity")
-                            + "\npid: " + f.optInt("pid"))
-                    .setPositiveButton("知道了", null)
-                    .show();
-        });
-    }
-
-    // ── 页 2：应用 ──────────────────────────────────────────────────────────
-
-    private AppListAdapter appAdapter;
-    private CheckBox systemCheck;
-    private ListView appList;
-
-    private View buildAppsTab() {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-
-        LinearLayout r = row();
-        systemCheck = new CheckBox(this);
-        systemCheck.setText("含系统应用");
-        systemCheck.setTextSize(13);
-        r.addView(systemCheck);
-        r.addView(button("刷新", v -> refreshApps()));
-        r.addView(button("当前前台", v -> refreshForeground()));
-        col.addView(r);
-
-        appList = new ListView(this);
-        appAdapter = new AppListAdapter(this);
-        appList.setAdapter(appAdapter);
-        appList.setOnItemClickListener(this::onAppClicked);
-        appList.setOnItemLongClickListener((p, v, pos, id) -> {
-            showAppMenu(appAdapter.getItemAt(pos));
-            return true;
-        });
-        col.addView(appList, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        return col;
-    }
-
-    private void refreshApps() {
-        final boolean withSystem = systemCheck.isChecked();
-        setStatus("拉取应用列表…", false);
-        runAsync("拉取应用列表", () -> client.listApps(withSystem, true), o -> {
-            try {
-                JSONObject doc = (JSONObject) o;
-                JSONArray arr = doc.optJSONArray("apps");
-                List<AppListAdapter.Item> list = new ArrayList<>();
-                if (arr != null) {
-                    for (int i = 0; i < arr.length(); i++) {
-                        JSONObject a = arr.getJSONObject(i);
-                        AppListAdapter.Item it = new AppListAdapter.Item();
-                        it.pkg = a.optString("package");
-                        it.versionCode = a.optLong("versionCode");
-                        it.system = a.optBoolean("system");
-                        it.apkPath = a.optString("apkPath", null);
-                        list.add(it);
-                    }
-                }
-                apps = list;
-                appAdapter.setItems(list);
-                setStatus("共 " + list.size() + " 个应用（点=启动，长按=更多）", false);
-            } catch (Exception e) {
-                setStatus("解析失败: " + e.getMessage(), true);
-            }
-        });
-    }
-
-    private void onAppClicked(AdapterView<?> parent, View view, int pos, long id) {
-        AppListAdapter.Item it = appAdapter.getItemAt(pos);
-        setStatus("启动 " + it.pkg + " …", false);
-        runAsync("启动应用", () -> client.launchApp(it.pkg, null),
-                o -> setStatus("已启动 " + it.pkg, false));
-    }
-
-    private void showAppMenu(AppListAdapter.Item it) {
-        String[] actions = {"查看详情 / 清单", "强制停止", "启动"};
-        new AlertDialog.Builder(this)
-                .setTitle(it.pkg)
-                .setItems(actions, (d, which) -> {
-                    switch (which) {
-                        case 0: showAppInfo(it.pkg); break;
-                        case 1: killApp(it.pkg); break;
-                        default: runAsync("启动应用",
-                                () -> client.launchApp(it.pkg, null),
-                                o -> setStatus("已启动 " + it.pkg, false));
-                    }
-                })
-                .show();
-    }
-
-    private void killApp(String pkg) {
-        setStatus("停止 " + pkg + " …", false);
-        runAsync("停止应用", () -> client.killApp(pkg), o -> {
-            JSONObject r = (JSONObject) o;
-            boolean still = r.optBoolean("stillRunning", false);
-            setStatus("已停止 " + pkg + (still ? "（但进程仍在）" : ""), still);
-        });
-    }
-
-    private void showAppInfo(String pkg) {
-        setStatus("读取 " + pkg + " 清单…", false);
-        runAsync("读取应用清单", () -> client.appInfo(pkg), o -> {
-            JSONObject d = (JSONObject) o;
-            StringBuilder sb = new StringBuilder();
-            sb.append("版本: ").append(d.optString("versionName"))
-              .append(" (").append(d.optLong("versionCode")).append(")\n");
-            sb.append("uid: ").append(d.optInt("uid"))
-              .append("  SDK: ").append(d.optInt("minSdk"))
-              .append("/").append(d.optInt("targetSdk")).append('\n');
-            sb.append("系统应用: ").append(d.optBoolean("system") ? "是" : "否").append('\n');
-            sb.append("签名: ").append(d.optString("signatureDigest")).append('\n');
-            sb.append("安装: ").append(d.optString("firstInstallTime")).append('\n');
-            sb.append("路径: ").append(d.optString("apkPath")).append('\n');
-            sb.append('\n');
-            appendArray(sb, "权限", d.optJSONArray("permissions"));
-            appendArray(sb, "Activity", d.optJSONArray("activities"));
-            appendArray(sb, "Service", d.optJSONArray("services"));
-            appendArray(sb, "Receiver", d.optJSONArray("receivers"));
-            appendArray(sb, "Provider", d.optJSONArray("providers"));
-
-            ScrollView sv = new ScrollView(this);
-            TextView tv = new TextView(this);
-            tv.setText(sb.toString());
-            tv.setTextSize(12);
-            tv.setTextIsSelectable(true);
-            tv.setPadding(dp(16), dp(8), dp(16), dp(8));
-            sv.addView(tv);
-
-            new AlertDialog.Builder(this)
-                    .setTitle(pkg)
-                    .setView(sv)
-                    .setPositiveButton("关闭", null)
-                    .show();
-            setStatus("已读取 " + pkg + " 清单", false);
-        });
-    }
-
-    private void appendArray(StringBuilder sb, String title, JSONArray arr) {
-        int n = arr == null ? 0 : arr.length();
-        sb.append(title).append("（").append(n).append("）\n");
-        if (arr == null) return;
-        int show = Math.min(n, 20);
-        for (int i = 0; i < show; i++) {
-            sb.append("  ").append(arr.optString(i)).append('\n');
         }
-        if (n > show) sb.append("  … 还有 ").append(n - show).append(" 项\n");
-        sb.append('\n');
-    }
 
-    // ── 页 3：文件 ──────────────────────────────────────────────────────────
-
-    private ArrayAdapter<String> fileAdapter;
-    private final List<String> fileLines = new ArrayList<>();
-    private final List<JSONObject> fileEntries = new ArrayList<>();
-    private TextView pathView;
-
-    private View buildFilesTab() {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-
-        pathView = label("下载目录: /");
-        col.addView(pathView);
-
-        LinearLayout r1 = row();
-        r1.addView(button("刷新", v -> refreshFiles()));
-        r1.addView(button("上级", v -> goUp()));
-        r1.addView(button("新建目录", v -> promptMkdir()));
-        r1.addView(button("删除选中", v -> promptDelete()));
-        col.addView(r1);
-
-        LinearLayout r2 = row();
-        final EditText urlEdit = field("下载 URL（https://…）", 1);
-        r2.addView(urlEdit);
-        r2.addView(button("下载", v -> {
-            final String url = urlEdit.getText().toString().trim();
-            if (url.isEmpty()) { toast("请填 URL"); return; }
-            setStatus("下载中…", false);
-            runAsync("下载", () -> client.download(url, null, currentDir),
-                    o -> {
-                        JSONObject d = (JSONObject) o;
-                        setStatus("已下载 " + d.optString("path")
-                                + "（" + d.optLong("bytes") + " 字节）", false);
-                        refreshFiles();
-                    });
-        }));
-        col.addView(r2);
-
-        ListView lv = new ListView(this);
-        fileAdapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_list_item_1, fileLines);
-        lv.setAdapter(fileAdapter);
-        lv.setOnItemClickListener((p, v, pos, id) -> {
-            JSONObject e = fileEntries.get(pos);
-            if (e.optBoolean("dir")) {
-                String name = e.optString("name");
-                currentDir = currentDir.isEmpty() ? name : currentDir + "/" + name;
-                refreshFiles();
+        boolean running = "1".equals(s.get("running"));
+        StringBuilder sb = new StringBuilder();
+        sb.append(running ? "● 运行中" : "○ 已停止").append('\n');
+        if (running) {
+            sb.append("  pid   ").append(s.getOrDefault("pid", "?")).append('\n');
+            sb.append("  监听  ").append(s.getOrDefault("bind", "?"))
+              .append(':').append(s.getOrDefault("port", "?")).append('\n');
+            String b = s.get("bind");
+            if ("0.0.0.0".equals(b)) {
+                sb.append("  ⚠️ 对外监听");
             } else {
-                toast(e.optString("name") + "  " + e.optLong("size") + " 字节");
+                sb.append("  仅本机");
             }
-        });
-        lv.setOnItemLongClickListener((p, v, pos, id) -> {
-            showFileMenu(fileEntries.get(pos));
-            return true;
-        });
-        col.addView(lv, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        return col;
-    }
-
-    private void refreshFiles() {
-        final String dir = currentDir;
-        runAsync("列出目录", () -> client.listDir(dir), o -> {
-            try {
-                JSONObject doc = (JSONObject) o;
-                JSONArray arr = doc.optJSONArray("entries");
-                fileLines.clear();
-                fileEntries.clear();
-                pathView.setText("下载目录: /" + (dir.isEmpty() ? "" : dir)
-                        + "   (" + doc.optInt("count") + " 项)");
-                if (arr != null) {
-                    for (int i = 0; i < arr.length(); i++) {
-                        JSONObject e = arr.getJSONObject(i);
-                        fileEntries.add(e);
-                        boolean isDir = e.optBoolean("dir");
-                        fileLines.add((isDir ? "📁 " : "📄 ") + e.optString("name")
-                                + (isDir ? "" : "   " + humanSize(e.optLong("size"))));
-                    }
-                }
-                fileAdapter.notifyDataSetChanged();
-                setStatus("已列出 " + fileEntries.size() + " 项", false);
-            } catch (Exception e) {
-                setStatus("解析失败: " + e.getMessage(), true);
-            }
-        });
-    }
-
-    private static String humanSize(long bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        if (bytes < 1024L * 1024 * 1024) return String.format("%.1f MB", bytes / 1048576.0);
-        return String.format("%.2f GB", bytes / 1073741824.0);
-    }
-
-    private void goUp() {
-        int s = currentDir.lastIndexOf('/');
-        currentDir = s < 0 ? "" : currentDir.substring(0, s);
-        refreshFiles();
-    }
-
-    private void promptMkdir() {
-        final EditText e = field("目录名", 0);
-        new AlertDialog.Builder(this)
-                .setTitle("在 /" + currentDir + " 下新建目录")
-                .setView(e)
-                .setPositiveButton("创建", (d, w) -> {
-                    String name = e.getText().toString().trim();
-                    if (name.isEmpty()) return;
-                    String full = currentDir.isEmpty() ? name : currentDir + "/" + name;
-                    runAsync("新建目录", () -> client.mkdir(full, true), o -> {
-                        setStatus("已创建 " + full, false);
-                        refreshFiles();
-                    });
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    private void promptDelete() {
-        final EditText e = field("要删除的路径（相对下载目录）", 0);
-        e.setText(currentDir);
-        new AlertDialog.Builder(this)
-                .setTitle("删除")
-                .setMessage("路径会被服务端约束在下载目录内，越界会被拒绝。")
-                .setView(e)
-                .setPositiveButton("删除", (d, w) -> {
-                    String p = e.getText().toString().trim();
-                    if (p.isEmpty()) return;
-                    runAsync("删除", () -> client.delete(p, true), o -> {
-                        setStatus("已删除 " + p, false);
-                        refreshFiles();
-                    });
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    private void showFileMenu(JSONObject e) {
-        final String path = e.optString("path");
-        new AlertDialog.Builder(this)
-                .setTitle(e.optString("name"))
-                .setItems(new String[]{"删除", "重命名"}, (d, which) -> {
-                    if (which == 0) {
-                        runAsync("删除", () -> client.delete(path, true), o -> {
-                            setStatus("已删除 " + path, false);
-                            refreshFiles();
-                        });
-                    } else {
-                        final EditText ni = field("新名字", 0);
-                        new AlertDialog.Builder(this)
-                                .setTitle("重命名")
-                                .setView(ni)
-                                .setPositiveButton("确定", (dd, ww) -> {
-                                    String name = ni.getText().toString().trim();
-                                    if (name.isEmpty()) return;
-                                    int slash = path.lastIndexOf('/');
-                                    String to = slash < 0 ? name
-                                            : path.substring(0, slash + 1) + name;
-                                    runAsync("重命名",
-                                            () -> client.fileOp("rename", path, to, 0),
-                                            o -> {
-                                                setStatus("已重命名为 " + name, false);
-                                                refreshFiles();
-                                            });
-                                })
-                                .setNegativeButton("取消", null)
-                                .show();
-                    }
-                })
-                .show();
-    }
-
-    // ── 页 4：控制 ──────────────────────────────────────────────────────────
-
-    private ImageView shotView;
-
-    private View buildControlTab() {
-        ScrollView sv = new ScrollView(this);
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        sv.addView(col);
-
-        col.addView(label("点击"));
-        LinearLayout r1 = row();
-        final EditText tx = field("x", 1);
-        final EditText ty = field("y", 1);
-        r1.addView(tx);
-        r1.addView(ty);
-        r1.addView(button("点击", v -> runAsync("点击",
-                () -> { client.tap(intOf(tx, 0), intOf(ty, 0), 50); return "ok"; },
-                o -> setStatus("已点击", false))));
-        col.addView(r1);
-
-        col.addView(label("滑动"));
-        LinearLayout r2 = row();
-        final EditText sx1 = field("x1", 1), sy1 = field("y1", 1);
-        final EditText sx2 = field("x2", 1), sy2 = field("y2", 1);
-        r2.addView(sx1); r2.addView(sy1); r2.addView(sx2); r2.addView(sy2);
-        col.addView(r2);
-        LinearLayout r3 = row();
-        r3.addView(button("滑动", v -> runAsync("滑动", () -> {
-            client.swipe(intOf(sx1, 0), intOf(sy1, 0),
-                         intOf(sx2, 0), intOf(sy2, 0), 300);
-            return "ok";
-        }, o -> setStatus("已滑动", false))));
-        r3.addView(button("截图并显示", v -> doScreenshot()));
-        col.addView(r3);
-
-        shotView = new ImageView(this);
-        shotView.setAdjustViewBounds(true);
-        col.addView(shotView);
-        return sv;
-    }
-
-    private static int intOf(EditText e, int def) {
-        try {
-            String s = e.getText().toString().trim();
-            return s.isEmpty() ? def : Integer.parseInt(s);
-        } catch (NumberFormatException ex) {
-            return def;
+        } else if (!f.exists()) {
+            sb.append("  （supervisor 未运行，状态文件不存在）");
         }
+        statusView.setText(sb.toString());
     }
 
-    private void doScreenshot() {
-        setStatus("截图中…", false);
-        runAsync("截图", () -> {
-            int[] w = new int[1], h = new int[1], f = new int[1];
-            byte[] px = client.capture(w, h, f, 0);
-            return new Object[]{px, w[0], h[0], f[0]};
-        }, o -> {
-            Object[] a = (Object[]) o;
-            byte[] px = (byte[]) a[0];
-            int w = (Integer) a[1], h = (Integer) a[2], fmt = (Integer) a[3];
-            Bitmap bmp = toBitmap(px, w, h, fmt);
-            if (bmp == null) {
-                setStatus("像素格式 0x" + Integer.toHexString(fmt) + " 暂不支持显示", true);
-                return;
-            }
-            shotView.setImageBitmap(bmp);
-            setStatus("截图 " + w + "x" + h + "（" + px.length + " 字节）", false);
-        });
-    }
-
-    /** 把服务端返回的原始像素转成 Bitmap。只处理最常见的两种格式。 */
-    private static Bitmap toBitmap(byte[] px, int w, int h, int fmt) {
-        if (w <= 0 || h <= 0 || px == null || px.length < w * h * 4) return null;
-        int[] argb = new int[w * h];
-        final int PIXEL_RGBA_8888 = 1, PIXEL_RGBX_8888 = 2, PIXEL_BGRA_8888 = 5;
-        for (int i = 0; i < w * h; i++) {
-            int r = px[i * 4] & 0xFF;
-            int g = px[i * 4 + 1] & 0xFF;
-            int b = px[i * 4 + 2] & 0xFF;
-            int a = px[i * 4 + 3] & 0xFF;
-            if (fmt == PIXEL_BGRA_8888) {
-                int t = r; r = b; b = t;
-            }
-            if (fmt == PIXEL_RGBX_8888) a = 0xFF;
-            if (fmt != PIXEL_RGBA_8888 && fmt != PIXEL_RGBX_8888
-                    && fmt != PIXEL_BGRA_8888) {
-                return null;
-            }
-            argb[i] = (a << 24) | (r << 16) | (g << 8) | b;
-        }
-        return Bitmap.createBitmap(argb, w, h, Bitmap.Config.ARGB_8888);
+    private void toast(String s) {
+        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
     }
 }

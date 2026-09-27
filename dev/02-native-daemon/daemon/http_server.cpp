@@ -149,15 +149,18 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     const bool loopbackOnly = (opts.bindAddr == "127.0.0.1" ||
                                opts.bindAddr == "::1" ||
                                opts.bindAddr == "localhost");
+    // 绑定到非回环地址却不开鉴权时**只告警，不拒绝启动**。
+    //
+    // 早先这里是硬拒绝，理由是"这是个能截图、注入触控、装应用、
+    // 删文件的接口"。但产品要求首启就是无鉴权模式，用户自己决定
+    // 什么时候开 —— 硬拒绝会让"先绑 0.0.0.0 试试"这种正常操作
+    // 直接起不来。所以降级成一条**显眼的告警**，并把状态如实反映到
+    // /api/v1/config 里，让上位机能看到。
     if (!loopbackOnly && opts.token.empty()) {
-        // 与其在文档里写"请不要这样"，不如让它在启动时就失败。
-        // 这是个能截图、注入触控、装应用、删文件的接口。
-        if (error) {
-            *error = "拒绝启动：绑定到 " + opts.bindAddr +
-                     " 却不设 token —— 这会把设备控制权交给整个网络。"
-                     "请用 --http-token 设置令牌，或改回 --http-bind 127.0.0.1";
-        }
-        return false;
+        ALOGW("⚠️  HTTP API 绑定到 %s 且**未开启鉴权** —— 同网络的任何人都能"
+              "完全控制本设备（截图、触控、装应用、删文件）。"
+              "要收紧请在 /sdcard/autod.conf 里设 auth=1",
+              opts.bindAddr.c_str());
     }
 
     const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -201,12 +204,68 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     listenFd_ = fd;
     stop_ = false;
     ALOGI("HTTP API 就绪: http://%s:%u/（%s）", bindAddr_.c_str(), port_,
-          token_.empty() ? "无鉴权，仅限本机" : "需要 Bearer token");
+          token_.empty() ? "无鉴权" : "需要访问令牌");
     return true;
+}
+
+bool HttpServer::CheckAuth(const HttpRequest& req) const {
+    if (token_.empty()) return true;      // 无鉴权模式
+
+    // 网页本身不校验：它只是个静态页面，不含秘密，
+    // 而用户得先打开它才有地方输入令牌。
+    // 其余（/api/ 下的一切）都要校验。
+    const std::string& path = req.path;
+    const bool isPage = (path == "/" || path == "/index.html" || path == "/ui");
+    if (isPage) return true;
+
+    // 1) Authorization: Bearer <token>  —— 标准做法
+    const std::string auth = req.header("authorization");
+    if (auth.size() > 7 && auth.compare(0, 7, "Bearer ") == 0 &&
+        auth.substr(7) == token_) {
+        return true;
+    }
+    // 2) X-Autod-Token: <token>  —— 给不方便设 Authorization 的客户端
+    if (req.header("x-autod-token") == token_) return true;
+    // 3) ?token=<token>  —— 给 <img src="/api/v1/stream?..."> 这种
+    //    没法自定义请求头的场景。
+    //    ⚠️ 令牌会出现在 URL 里，可能被日志和浏览器历史记录留下。
+    //    只在确实没法带头的场合用它。
+    if (req.queryParam("token") == token_) return true;
+
+    return false;
 }
 
 void HttpServer::Stop() {
     stop_ = true;
+
+    // 先把活跃连接踢掉，再关监听 fd。
+    //
+    // 顺序很重要：流式响应（MJPEG / WebSocket）的回调会一直循环到
+    // write 失败为止。不主动 shutdown 的话，客户端不松手它们就永远
+    // 不退出，而 main() 随后就会析构 Dispatcher —— 那些线程再去碰
+    // 它的操作锁就是一个已销毁的互斥量。
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        for (int fd : connFds_) {
+            shutdown(fd, SHUT_RDWR);
+        }
+    }
+    // 等它们真的退出（最多 2 秒）。超时也继续往下走 ——
+    // 进程都要退了，卡在这里比带着一个残留线程更糟。
+    for (int i = 0; i < 200; ++i) {
+        {
+            std::lock_guard<std::mutex> lk(connMutex_);
+            if (connFds_.empty()) break;
+        }
+        usleep(10 * 1000);
+    }
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        if (!connFds_.empty()) {
+            ALOGW("关闭时仍有 %zu 条连接没退出", connFds_.size());
+        }
+    }
+
     if (listenFd_ >= 0) {
         shutdown(listenFd_, SHUT_RDWR);
         close(listenFd_);
@@ -375,21 +434,12 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out, HttpResponse* errRepl
     body.resize(contentLength);
     out->body = std::move(body);
 
-    // 鉴权
-    if (!token_.empty()) {
-        std::string got = out->header("x-autod-token");
-        if (got.empty()) {
-            const std::string auth = out->header("authorization");
-            const std::string prefix = "Bearer ";
-            if (auth.compare(0, prefix.size(), prefix) == 0) {
-                got = auth.substr(prefix.size());
-            }
-        }
-        if (got != token_) {
-            *errReply = HttpResponse::Error(401, "缺少或错误的 token");
-            return false;
-        }
-    }
+    // 鉴权**不在这里**做。
+    //
+    // 这里原本有一份检查，但它和 ServeConnection 里的 CheckAuth 是
+    // 两套逻辑，而且这版更弱：不支持 ?token=、也不放行网页本身。
+    // 两份检查并存的结果是"改了一处以为生效了，实际被另一处先拦下"。
+    // 统一到 CheckAuth 一处 —— 鉴权这种事，入口越少越好。
 
     return true;
 }
@@ -410,12 +460,47 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
         return;
     }
 
+    // 鉴权。放在这里而不是各处理器里 —— 漏掉一个处理器就是一个
+    // 未授权的入口，而这种漏洞不会自己暴露出来。
+    if (!CheckAuth(req)) {
+        ALOGW("HTTP 拒绝（缺少或错误的令牌）: %s %s", req.method.c_str(),
+              req.rawPath.c_str());
+        const HttpResponse deny = HttpResponse::Error(
+                401, "需要访问令牌。请在页面顶部填入，或用 "
+                     "Authorization: Bearer <token> / X-Autod-Token: <token>");
+        std::string head =
+                "HTTP/1.1 401 Unauthorized\r\n"
+                "Content-Type: application/json; charset=utf-8\r\n"
+                "WWW-Authenticate: Bearer realm=\"autod\"\r\n"
+                "Content-Length: " + std::to_string(deny.body.size()) + "\r\n"
+                "Connection: close\r\n\r\n";
+        if (write(connFd, head.data(), head.size()) > 0) {
+            ssize_t ig = write(connFd, deny.body.data(), deny.body.size());
+            (void)ig;
+        }
+        return;
+    }
+
     // 直接调用，不包 try/catch。
     //
     // AOSP 是 -fno-exceptions，写了也编不过；而且我们全程不用异常，
     // 处理器本来就不抛。真出了 bad_alloc 这类，-fno-exceptions 下
     // 本来就是 abort，catch 也救不回来。
     const HttpResponse resp = handler(req);
+
+    // 登记本连接，让 Stop() 能把它踢掉
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        connFds_.insert(connFd);
+    }
+    struct ConnGuard {
+        HttpServer* self;
+        int fd;
+        ~ConnGuard() {
+            std::lock_guard<std::mutex> lk(self->connMutex_);
+            self->connFds_.erase(fd);
+        }
+    } connGuard{this, connFd};
 
     // ── WebSocket 升级 ──
     //

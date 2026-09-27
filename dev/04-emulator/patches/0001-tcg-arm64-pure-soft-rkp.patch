@@ -1,0 +1,59 @@
+diff --git a/contexts/pure_soft_remote_provisioning_context.cpp b/contexts/pure_soft_remote_provisioning_context.cpp
+index a943f42..b7f8498 100644
+--- a/contexts/pure_soft_remote_provisioning_context.cpp
++++ b/contexts/pure_soft_remote_provisioning_context.cpp
+@@ -84,19 +84,26 @@ std::unique_ptr<cppbor::Map> PureSoftRemoteProvisioningContext::CreateDeviceInfo
+     return result;
+ }
+ 
++// [AUTO-SNAPSHOT / TCG-ARM64 兼容补丁]
++//
++// 原实现会做 HKDF(SHA-256) + Ed25519 密钥派生（BoringSSL），随后构造 cppbor 结构。
++// 在 x86_64 宿主上用 2021 版 AOSP 模拟器（emulator 30.8.3 / 31.x）跑 arm64 guest 时，
++// keystore2 会在该函数里第二次堆分配后拿到无效指针而 SIGSEGV
++// （tombstone: fault addr 0xfdffff...，pc 落在 GenerateBcc，且地址与寄存器不自洽），
++// 每次重启都崩在同一处，导致 wait_for_keymaster 卡死、系统永远无法启动。
++// 已排除：CPU 型号/核数/内存/GPU/GIC 版本/TBI 标签指针/SELinux/IO/memmap/pKVM/
++// 惰性绑定；换过 emulator 版本与镜像（成品 A11、A12、自制 A12）都一样。
++//
++// 模拟器上的远程密钥供应本来就是"假"的 —— 见上面 CreateDeviceInfo() 里成片的
++// "Fake"/"Imaginary" 占位。因此这里改为确定性的占位实现：不调用 OpenSSL、
++// 不做签名、堆分配降到最低。对模拟器验证用途没有任何影响。
+ std::pair<std::vector<uint8_t> /* privKey */, cppbor::Array /* BCC */>
+-PureSoftRemoteProvisioningContext::GenerateBcc(bool testMode) const {
+-    std::vector<uint8_t> privKey(ED25519_PRIVATE_KEY_LEN);
+-    std::vector<uint8_t> pubKey(ED25519_PUBLIC_KEY_LEN);
+-
+-    uint8_t seed[32];  // Length is hard-coded in the BoringCrypto API
+-    if (testMode) {
+-        RAND_bytes(seed, sizeof(seed));
+-    } else {
+-        auto seed_vector = DeriveBytesFromHbk("Device Key Seed", sizeof(seed));
+-        std::copy(seed_vector.begin(), seed_vector.end(), seed);
+-    }
+-    ED25519_keypair_from_seed(pubKey.data(), privKey.data(), seed);
++PureSoftRemoteProvisioningContext::GenerateBcc(bool /* testMode */) const {
++    static const uint8_t kPriv[ED25519_PRIVATE_KEY_LEN] = {0};
++    static const uint8_t kPub[ED25519_PUBLIC_KEY_LEN] = {0};
++
++    std::vector<uint8_t> privKey(kPriv, kPriv + sizeof(kPriv));
++    std::vector<uint8_t> pubKey(kPub, kPub + sizeof(kPub));
+ 
+     auto coseKey = cppbor::Map()
+                        .add(CoseKey::KEY_TYPE, OCTET_KEY_PAIR)
+@@ -113,12 +120,10 @@ PureSoftRemoteProvisioningContext::GenerateBcc(bool testMode) const {
+                                  std::vector<uint8_t>{0x20} /* keyCertSign = 1<<5 */)
+                             .canonicalize()
+                             .encode();
+-    auto coseSign1 = constructCoseSign1(privKey,       /* signing key */
+-                                        cppbor::Map(), /* extra protected */
+-                                        sign1Payload, {} /* AAD */);
+-    assert(coseSign1);
+ 
+-    return {privKey, cppbor::Array().add(std::move(coseKey)).add(coseSign1.moveValue())};
++    // 不再做 COSE 签名（constructCoseSign1 会走 Ed25519），改用 bstr 占位。
++    return {std::move(privKey),
++            cppbor::Array().add(std::move(coseKey)).add(cppbor::Bstr(sign1Payload))};
+ }
+ 
+ std::optional<cppcose::HmacSha256>
