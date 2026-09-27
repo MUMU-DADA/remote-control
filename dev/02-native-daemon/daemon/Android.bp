@@ -25,6 +25,10 @@ cc_defaults {
         "dispatch.cpp",        // 请求分发（可测试，从 main.cpp 抽出）
         "selftest.cpp",        // --selftest 部署自检
         "inject.cpp",          // 平台无关的手势逻辑
+        "appops.cpp",          // 应用管理（pm/am/cmd/dumpsys）
+        "subprocess.cpp",      // 无 shell 的子进程执行
+        "fileops.cpp",         // 下载目录与文件操作
+        "http_client.cpp",     // libcurl 运行时加载
     ],
 
     shared_libs: [

@@ -18,6 +18,7 @@
 """
 
 import argparse
+import json
 import array
 import mmap
 import os
@@ -31,7 +32,16 @@ MAGIC = 0x44545541  # 'AUTD'
 CMD = {
     "info": 1, "capture": 2, "tap": 3, "swipe": 4,
     "touch_down": 5, "touch_move": 6, "touch_up": 7,
+    # v2：应用与文件管理
+    "list_apps": 10, "app_info": 11, "launch_app": 12, "kill_app": 13,
+    "foreground_app": 14, "install_app": 15, "download": 16, "file_op": 17,
 }
+
+# v2 命令的 flags 位（与 protocol.h 的 Flags 对应）
+FLAG_INCLUDE_SYSTEM = 1 << 3
+FLAG_WITH_METADATA  = 1 << 4
+FLAG_REPLACE        = 1 << 5
+FLAG_RECURSIVE      = 1 << 6
 CMD_NAME = {v: k for k, v in CMD.items()}
 
 STATUS = {
@@ -44,6 +54,11 @@ STATUS = {
     0x1006: "injection failed",
     0x1007: "internal error",
     0x1008: "unsupported",
+    0x1009: "not found",
+    0x100a: "permission denied",
+    0x100b: "timeout",
+    0x100c: "bad payload",
+    0x100d: "io error",
 }
 
 # <IIII iiii Iff  —— 与 daemon/protocol.h 的 Request 严格对应
@@ -91,6 +106,74 @@ def make_request(cmd, **kw):
         kw.get("pressure", 0.0),
         kw.get("size", 0.0),
     )
+
+
+def pack_payload(*parts):
+    """把参数拼成 NUL 分隔的 payload。
+
+    协议约定：v2 命令的请求 payload 是一串 NUL 分隔的 UTF-8 字符串。
+    字符串本身不含 NUL，所以不需要转义，也不会有歧义。
+    """
+    return b"\0".join(p.encode("utf-8") if isinstance(p, str) else p
+                       for p in parts if p is not None)
+
+
+def transact_v2(sock, cmd, *parts, flags=0, fd=None):
+    """发一条 v2 命令，收 JSON 应答。
+
+    应答的 JSON 通过 memfd + SCM_RIGHTS 回来（和截图同一个通道），
+    这里读出来解析。fd 参数用于 InstallApp：把 APK 用 memfd 送过去。
+    """
+    req = make_request(cmd, flags=flags)
+    payload = pack_payload(*parts)
+
+    msg_bytes = req + payload
+    if fd is not None:
+        sent = sock.sendmsg([msg_bytes],
+                            [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                              array.array("i", [fd]))])
+    else:
+        sent = sock.send(msg_bytes)
+
+    # ⚠️ SOCK_SEQPACKET 上不能用 sendall：
+    #    sendall 在短写时会循环调用 send，那就变成**多条消息**了，
+    #    而服务端按"一条消息 = 一个请求"解析，会直接错位。
+    #    SEQPACKET 的 send 要么整条发出去，要么报 EMSGSIZE，校验长度即可。
+    if sent != len(msg_bytes):
+        raise RuntimeError(f"请求未完整发送: {sent} != {len(msg_bytes)}")
+
+    fds = array.array("i")
+    msg, ancdata, _flags, _addr = sock.recvmsg(
+        REPLY_SIZE, socket.CMSG_LEN(fds.itemsize)
+    )
+    if len(msg) != REPLY_SIZE:
+        raise RuntimeError(f"应答长度不符: {len(msg)} != {REPLY_SIZE}")
+
+    for level, ctype, cdata in ancdata:
+        if level == socket.SOL_SOCKET and ctype == socket.SCM_RIGHTS:
+            fds.frombytes(cdata[: len(cdata) - (len(cdata) % fds.itemsize)])
+
+    reply = parse_reply(msg)
+    if reply["magic"] != MAGIC:
+        raise RuntimeError(f"magic 不匹配: 0x{reply['magic']:x}")
+
+    # v2 的应答体是 JSON，即使失败也带在 fd 里（里面有可读的原因），
+    # 所以先读内容再判断状态 —— 这样报错信息是服务端给的原文，
+    # 而不是"internal error"这种没用的东西。
+    doc = None
+    if fds:
+        try:
+            data = os.pread(fds[0], reply["data_size"], 0)
+            doc = json.loads(data.decode("utf-8"))
+        finally:
+            os.close(fds[0])
+
+    if reply["status"] != 0:
+        reason = (doc or {}).get("error") if isinstance(doc, dict) else None
+        name = STATUS.get(reply["status"], f"0x{reply['status']:x}")
+        raise RuntimeError(reason or name)
+
+    return doc if doc is not None else {}
 
 
 def pack_reply(cmd, status=0, width=0, height=0, stride=0, fmt=0, size=0):
@@ -259,6 +342,110 @@ def do_swipe(sock, x1, y1, x2, y2, ms):
 # Mock 服务端 —— 主机侧验证协议用，不需要设备
 # ---------------------------------------------------------------------------
 
+
+
+# ---------------------------------------------------------------------------
+# v2：应用与文件管理
+# ---------------------------------------------------------------------------
+
+def _print_json(doc, compact=False):
+    if compact:
+        print(json.dumps(doc, ensure_ascii=False))
+    else:
+        print(json.dumps(doc, ensure_ascii=False, indent=2))
+
+
+def do_list_apps(sock, include_system=False, with_metadata=False,
+                 names_only=False):
+    flags = 0
+    if include_system: flags |= FLAG_INCLUDE_SYSTEM
+    if with_metadata:  flags |= FLAG_WITH_METADATA
+    doc = transact_v2(sock, "list_apps", flags=flags)
+    if names_only:
+        for a in doc.get("apps", []):
+            print(a["package"])
+        return 0
+    _print_json(doc)
+    print(f"\n共 {doc.get('count', 0)} 个应用"
+          f"（{'含系统' if include_system else '仅第三方'}）", file=sys.stderr)
+    return 0
+
+
+def do_app_info(sock, package):
+    _print_json(transact_v2(sock, "app_info", package))
+    return 0
+
+
+def do_launch_app(sock, package, activity=None):
+    _print_json(transact_v2(sock, "launch_app", package, activity))
+    return 0
+
+
+def do_kill_app(sock, package):
+    _print_json(transact_v2(sock, "kill_app", package))
+    return 0
+
+
+def do_foreground(sock):
+    _print_json(transact_v2(sock, "foreground_app"))
+    return 0
+
+
+def do_install(sock, apk_path, replace=True):
+    """把 APK 通过 memfd 送过去。
+
+    为什么用 fd 而不是把字节塞进 payload：SEQPACKET 单条消息约 208KB 上限，
+    APK 动辄几十 MB。fd 通道没有大小限制。
+    """
+    size = os.path.getsize(apk_path)
+    if size == 0:
+        print("错误: APK 是空文件", file=sys.stderr)
+        return 1
+
+    fd = os.memfd_create("apk") if hasattr(os, "memfd_create") else None
+    if fd is None:
+        # 老 Python 没有 os.memfd_create，退化到临时文件
+        import tempfile
+        tf = tempfile.TemporaryFile()
+        fd = tf.fileno()
+    with open(apk_path, "rb") as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            os.write(fd, chunk)
+    os.lseek(fd, 0, os.SEEK_SET)
+
+    flags = FLAG_REPLACE if replace else 0
+    try:
+        doc = transact_v2(sock, "install_app", flags=flags, fd=fd)
+    finally:
+        os.close(fd)
+    _print_json(doc)
+    return 0
+
+
+def do_download(sock, url, filename=None, subdir=None):
+    _print_json(transact_v2(sock, "download", url, filename, subdir))
+    return 0
+
+
+def do_file_op(sock, op, path=None, arg2=None, recursive=False):
+    flags = FLAG_RECURSIVE if recursive else 0
+    doc = transact_v2(sock, "file_op", op, path, arg2, flags=flags)
+
+    # list 的表格化输出比 JSON 好读
+    if op == "list" and "entries" in doc:
+        print(f"{doc.get('dir', '.')}  ({doc.get('count', 0)} 项)")
+        for e in doc["entries"]:
+            kind = "d" if e.get("dir") else "-"
+            size = "" if e.get("dir") else f"{e.get('size', 0):>12,}"
+            print(f"  {kind} {size}  {e['name']}")
+        return 0
+    _print_json(doc)
+    return 0
+
+
 def run_mock(path, width, height):
     if os.path.exists(path):
         os.unlink(path)
@@ -377,6 +564,48 @@ def main():
     p_sw.add_argument("y2", type=int)
     p_sw.add_argument("--ms", type=int, default=300)
 
+    # ── v2：应用与文件管理 ──
+    p_la = sub.add_parser("list-apps", help="列出应用")
+    p_la.add_argument("--system", action="store_true", help="含系统应用")
+    p_la.add_argument("--meta", action="store_true", help="附带版本/路径等元数据")
+    p_la.add_argument("--names", action="store_true", help="只输出包名，便于管道")
+
+    p_ai = sub.add_parser("app-info", help="应用详情（含权限与组件清单）")
+    p_ai.add_argument("package")
+
+    p_ln = sub.add_parser("launch", help="启动应用")
+    p_ln.add_argument("package")
+    p_ln.add_argument("activity", nargs="?", default=None)
+
+    p_kl = sub.add_parser("kill", help="强制停止应用")
+    p_kl.add_argument("package")
+
+    sub.add_parser("foreground", help="查询当前前台应用")
+
+    p_in = sub.add_parser("install", help="安装 APK（内容经 memfd 传输）")
+    p_in.add_argument("apk")
+    p_in.add_argument("--no-replace", action="store_true",
+                      help="不覆盖已安装的同名应用")
+
+    p_dl = sub.add_parser("download", help="下载文件到下载目录")
+    p_dl.add_argument("url")
+    p_dl.add_argument("filename", nargs="?", default=None)
+    p_dl.add_argument("--subdir", default=None, help="下载目录下的子目录")
+
+    p_fl = sub.add_parser("ls", help="列出下载目录")
+    p_fl.add_argument("path", nargs="?", default="")
+    p_fs = sub.add_parser("stat", help="查看文件信息")
+    p_fs.add_argument("path")
+    p_fm = sub.add_parser("mkdir", help="创建目录")
+    p_fm.add_argument("path")
+    p_fm.add_argument("-p", "--parents", action="store_true")
+    p_fr = sub.add_parser("rm", help="删除文件或目录")
+    p_fr.add_argument("path")
+    p_fr.add_argument("-r", "--recursive", action="store_true")
+    p_fv = sub.add_parser("mv", help="重命名/移动")
+    p_fv.add_argument("src")
+    p_fv.add_argument("dst")
+
     args = parser.parse_args()
 
     if args.mock:
@@ -398,6 +627,32 @@ def main():
             return do_tap(sock, args.x, args.y, args.ms)
         if args.command == "swipe":
             return do_swipe(sock, args.x1, args.y1, args.x2, args.y2, args.ms)
+
+        if args.command == "list-apps":
+            return do_list_apps(sock, args.system, args.meta, args.names)
+        if args.command == "app-info":
+            return do_app_info(sock, args.package)
+        if args.command == "launch":
+            return do_launch_app(sock, args.package, args.activity)
+        if args.command == "kill":
+            return do_kill_app(sock, args.package)
+        if args.command == "foreground":
+            return do_foreground(sock)
+        if args.command == "install":
+            return do_install(sock, args.apk, not args.no_replace)
+        if args.command == "download":
+            return do_download(sock, args.url, args.filename, args.subdir)
+        if args.command == "ls":
+            return do_file_op(sock, "list", args.path)
+        if args.command == "stat":
+            return do_file_op(sock, "stat", args.path)
+        if args.command == "mkdir":
+            return do_file_op(sock, "mkdir", args.path, recursive=args.parents)
+        if args.command == "rm":
+            return do_file_op(sock, "delete", args.path, recursive=args.recursive)
+        if args.command == "mv":
+            return do_file_op(sock, "rename", args.src, args.dst)
+
         parser.error(f"未知子命令 {args.command}")
     except RuntimeError as e:
         print(f"错误: {e}", file=sys.stderr)

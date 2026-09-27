@@ -33,8 +33,9 @@ INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
 
 # [3] screencap 截图后端：配 fake_screencap 冒充设备命令
 SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp
+APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops
 
 all: $(BINS) fake_screencap
 
@@ -44,6 +45,9 @@ test_inject_uinput: $(UNIT_SRCS) $(COMMON_HDRS)
 test_integration: $(INTEG_SRCS) $(COMMON_HDRS) \
                   $(DAEMON)/socket_server.h $(DAEMON)/dispatch.h $(DAEMON)/capture.h
 	$(CXX) $(CXXFLAGS) -pthread -o $@ $(INTEG_SRCS)
+
+test_appops: $(APPOPS_SRCS) test_util.h $(DAEMON)/appops.h $(DAEMON)/subprocess.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^
 
 test_capture_screencap: $(SCREENCAP_SRCS) test_util.h $(DAEMON)/capture.h
 	$(CXX) $(CXXFLAGS) -o $@ $(SCREENCAP_SRCS)
@@ -63,11 +67,13 @@ _run: all
 	@./test_inject_uinput;                       u=$$?; echo; \
 	 ./test_integration;                         i=$$?; echo; \
 	 ./test_capture_screencap ./fake_screencap;  c=$$?; echo; \
+	 ./test_appops;                              a=$$?; echo; \
 	 echo "───────────────────────────────"; \
 	 printf "  %-34s %s\n" "注入后端单元测试"   "$$([ $$u -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "端到端集成测试"     "$$([ $$i -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "screencap 截图后端" "$$([ $$c -eq 0 ] && echo 通过 || echo 失败)"; \
-	 exit $$(( u + i + c ))
+	 printf "  %-34s %s\n" "应用管理后端"       "$$([ $$a -eq 0 ] && echo 通过 || echo 失败)"; \
+	 exit $$(( u + i + c + a ))
 
 clean:
 	rm -f $(BINS) fake_screencap

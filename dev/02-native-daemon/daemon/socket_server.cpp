@@ -2,6 +2,10 @@
 
 #include "socket_server.h"
 
+#include <string.h>
+
+#include <vector>
+
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -236,14 +240,17 @@ void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
 
     while (!stop_) {
         Request req{};
-        const int rc = RecvRequest(connFd, &req);
+        std::string payload;
+        int reqFd = -1;
+        const int rc = RecvRequest(connFd, &req, &payload, &reqFd);
         if (rc < 0) break;          // 对端正常关闭
         if (rc > 0) {
             ALOGW("autod: 读请求失败: %s", strerror(rc));
             break;
         }
 
-        ReplyPacket packet = handler(req, cred.uid);
+        ReplyPacket packet = handler(req, payload, reqFd, cred.uid);
+        if (reqFd >= 0) close(reqFd);   // handler 若需要保留会自己 dup
 
         if (!SendReply(connFd, packet)) {
             ALOGW("autod: 发应答失败: %s", strerror(errno));
@@ -256,16 +263,24 @@ void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
     }
 }
 
-int SocketServer::RecvRequest(int connFd, Request* out) {
+int SocketServer::RecvRequest(int connFd, Request* out, std::string* payload,
+                              int* outFd) {
+    payload->clear();
+    *outFd = -1;
+
+    // 一次读「头 + payload」。SEQPACKET 有消息边界，多读的部分就是 payload，
+    // 不需要长度前缀。缓冲区按上限一次备好，超长消息会被内核截断（MSG_TRUNC
+    // 不设时剩余部分直接丢弃），下面用 n > 上限 来识别并报错。
+    std::vector<char> buf(sizeof(Request) + kMaxRequestPayload);
     iovec iov{};
-    iov.iov_base = out;
-    iov.iov_len  = sizeof(Request);
+    iov.iov_base = buf.data();
+    iov.iov_len  = buf.size();
 
     msghdr msg{};
     msg.msg_iov    = &iov;
     msg.msg_iovlen = 1;
-    // 请求里不该带 fd。留 no-op 的 cmsg 缓冲以便丢弃对端误传的 fd，
-    // 否则内核会因为 cmsg 缓冲不足而在 recvmsg 期间关闭连接。
+    // 客户端可能传 fd（InstallApp 用 memfd 送 APK），所以这里要能收。
+    // 其余命令收到 fd 一律关闭，防止泄漏。
     alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int) * kMaxFdsPerMessage)]{};
     msg.msg_control    = control;
     msg.msg_controllen = sizeof(control);
@@ -285,19 +300,27 @@ int SocketServer::RecvRequest(int connFd, Request* out) {
     }
 
     if (n < 0) return errno;
-    if (static_cast<size_t>(n) != sizeof(Request)) return EMSGSIZE;
+    if (static_cast<size_t>(n) < sizeof(Request)) return EMSGSIZE;
 
-    // 丢弃并关闭对端误传的 fd，防止 fd 泄漏
-    for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-            const size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-            const int* fds = reinterpret_cast<const int*>(CMSG_DATA(cmsg));
-            for (size_t i = 0; i < count; ++i) {
-                ALOGW("autod: 客户端不应发送 fd，已丢弃 fd=%d", fds[i]);
+    // 收 fd：最多留一个（第一条消息里的第一个），其余关掉
+    for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
+        const size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        const int* fds = reinterpret_cast<const int*>(CMSG_DATA(cmsg));
+        for (size_t i = 0; i < count; ++i) {
+            if (*outFd < 0) {
+                *outFd = fds[i];
+            } else {
+                ALOGW("autod: 一次只接受一个 fd，丢弃 fd=%d", fds[i]);
                 close(fds[i]);
             }
         }
     }
+
+    memcpy(out, buf.data(), sizeof(Request));
+    const size_t payloadLen = static_cast<size_t>(n) - sizeof(Request);
+    if (payloadLen > 0) payload->assign(buf.data() + sizeof(Request), payloadLen);
     return 0;
 }
 

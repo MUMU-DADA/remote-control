@@ -18,7 +18,10 @@ namespace autod {
 // ReplyPacket 定义在 protocol.h（dispatch 层也要构造它）
 
 // 请求处理回调。返回处理结果。
-using RequestHandler = std::function<ReplyPacket(const Request&, int peerUid)>;
+// 参数：请求头、NUL 分隔的 payload、客户端传来的 fd（无则 -1）、对端 uid。
+// reqFd 的所有权属于调用方（ServeConnection），handler 不该关闭它。
+using RequestHandler = std::function<ReplyPacket(
+        const Request&, const std::string& payload, int reqFd, int peerUid)>;
 
 class SocketServer {
   public:
@@ -55,7 +58,17 @@ class SocketServer {
     void ServeConnection(int connFd, const RequestHandler& handler);
 
     // 读一个 Request。返回 0 成功，>0 为 errno，<0 表示对端正常关闭。
-    int RecvRequest(int connFd, Request* out);
+    // 收一条请求。
+    //
+    // SEQPACKET 保留消息边界，所以「44 字节头 + 变长 payload」是一条消息，
+    // 按 kMaxRequestPayload 一次读进来即可，不需要自己拼长度前缀。
+    //
+    // payload  ：NUL 分隔的 UTF-8 字符串（见 protocol.h 的 v2 命令说明）
+    // outFd    ：客户端传来的 fd（InstallApp 用它传 APK），没有则 -1。
+    //            调用方负责关闭。
+    //
+    // 返回 0 成功；-1 对端关闭；>0 是 errno。
+    int RecvRequest(int connFd, Request* out, std::string* payload, int* outFd);
 
     // 发应答，可选带一个 fd。
     bool SendReply(int connFd, const ReplyPacket& packet);

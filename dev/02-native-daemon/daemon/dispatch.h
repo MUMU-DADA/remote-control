@@ -1,14 +1,20 @@
 // dispatch.h —— 请求分发
 //
-// 把协议请求翻译成 Capture / Injector 的调用。
+// 把协议请求翻译成 Capture / Injector / AppOps / FileOps 的调用。
 //
 // 为什么单独成文件：这样集成测试可以直接用**真实的**分发逻辑，
-// 而不是在测试里复制一份。main.cpp 里的原来那份是匿名命名空间的
-// 静态函数，测试无法复用。
+// 而不是在测试里复制一份。
+//
+// 应答的两种形态：
+//   1. 二进制（截图的帧）—— memfd 里是原始像素
+//   2. 结构化（v2 命令）—— memfd 里是 UTF-8 JSON
+// 两者都走同一个 SCM_RIGHTS 通道，靠 reply.cmd 区分（见 protocol.h）。
 
 #pragma once
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "protocol.h"
 
@@ -16,21 +22,45 @@ namespace autod {
 
 class Capture;
 class Injector;
+class AppOps;
+class FileOps;
 
 class Dispatcher {
   public:
     Dispatcher(Capture* capture, Injector* injector);
+    ~Dispatcher();
 
     // 处理一个请求。不会抛异常；失败通过 reply.status 表达。
-    ReplyPacket Handle(const Request& req, int peerUid);
+    //
+    // payload : NUL 分隔的字符串参数（可为空）
+    // reqFd   : 客户端传来的 fd（InstallApp 的 APK），没有则 -1。
+    //           所有权仍属调用方，本函数不关闭它。
+    ReplyPacket Handle(const Request& req, const std::string& payload, int reqFd,
+                       int peerUid);
+
+    // 把 NUL 分隔的 payload 拆成参数列表。
+    // 空 payload 返回空 vector（不是含一个空串的 vector）。
+    static std::vector<std::string> SplitPayload(const std::string& payload);
 
   private:
     ReplyPacket HandleInfo(const Request& req);
     ReplyPacket HandleCapture(const Request& req);
     ReplyPacket HandleTouch(const Request& req);
 
+    // ── v2：应用与文件管理 ──
+    ReplyPacket HandleListApps(const Request& req);
+    ReplyPacket HandleAppInfo(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleLaunchApp(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleKillApp(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleForegroundApp(const Request& req);
+    ReplyPacket HandleInstallApp(const Request& req, int reqFd);
+    ReplyPacket HandleDownload(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleFileOp(const Request& req, const std::vector<std::string>& args);
+
     Capture*  capture_;
     Injector* injector_;
+    std::unique_ptr<AppOps>  appOps_;
+    std::unique_ptr<FileOps> fileOps_;
 };
 
 }  // namespace autod

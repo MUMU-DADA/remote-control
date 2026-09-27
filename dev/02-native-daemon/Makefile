@@ -24,7 +24,11 @@ HOST_SRCS = $(DAEMON)/main.cpp \
             $(DAEMON)/selftest.cpp \
             $(DAEMON)/capture_stub.cpp \
             $(DAEMON)/inject.cpp \
-            $(DAEMON)/inject_uinput.cpp
+            $(DAEMON)/inject_uinput.cpp \
+            $(DAEMON)/appops.cpp \
+            $(DAEMON)/subprocess.cpp \
+            $(DAEMON)/fileops.cpp \
+            $(DAEMON)/http_client.cpp
 
 HOST_HDRS = $(wildcard $(DAEMON)/*.h)
 

@@ -295,12 +295,254 @@ void Usage(const char* argv0) {
   tap <x> <y> [--ms N]              单击
   swipe <x1> <y1> <x2> <y2> [--ms N] 滑动
 
+应用管理:
+  list-apps [--system] [--meta] [--names]   列出应用
+  app-info <包名>                           详情（含权限与组件清单）
+  launch <包名> [Activity]                  启动
+  kill <包名>                               强制停止
+  foreground                                当前前台应用
+  install <apk> [--no-replace]              安装（APK 内容经 memfd 传输）
+
+文件与下载（路径均相对下载目录，越界会被拒绝）:
+  download <url> [文件名] [子目录]          下载到下载目录
+  ls [路径]                                 列出目录
+  stat <路径>                               文件信息
+  mkdir [-p] <路径>                         创建目录
+  rm [-r] <路径>                            删除
+  mv <源> <目标>                            重命名/移动
+
 选项:
   --socket <路径>   autod 的 Unix socket 路径（必填）
 )", argv0);
 }
 
 }  // namespace
+
+
+// ---------------------------------------------------------------------------
+// v2：应用与文件管理
+// ---------------------------------------------------------------------------
+
+// 把参数拼成 NUL 分隔的 payload（协议约定，见 protocol.h）
+// 取第一个不以 '-' 开头的参数。
+//
+// 子命令的参数是"选项 + 位置参数"混排的（`mkdir -p <路径>`），
+// 不能直接拿 args[0] —— 那样 `-p` 会被当成路径，
+// 实测真的建出了一个名叫 "-p" 的目录。
+const char* FirstPositional(char** args, int count) {
+    for (int i = 0; i < count; ++i) {
+        if (args[i] != nullptr && args[i][0] != '-') return args[i];
+    }
+    return nullptr;
+}
+
+std::string BuildPayload(std::initializer_list<const char*> parts) {
+    std::string out;
+    bool first = true;
+    for (const char* p : parts) {
+        if (p == nullptr) continue;          // 跳过可选的尾参数
+        if (!first) out.push_back('\0');
+        out += p;
+        first = false;
+    }
+    return out;
+}
+
+// 发一条 v2 命令，收 JSON 应答。
+//
+// 应答的 JSON 走 memfd + SCM_RIGHTS（和截图同一个通道）—— 这样没有大小限制，
+// 应用列表几十 KB 也能回。
+bool TransactV2(int sockFd, Cmd cmd, const std::string& payload, uint32_t flags,
+                int passFd, std::string* jsonOut, Reply* replyOut) {
+    std::vector<char> msg(sizeof(Request) + payload.size());
+    Request req = MakeRequest(cmd);
+    req.flags = flags;
+    memcpy(msg.data(), &req, sizeof(Request));
+    if (!payload.empty()) {
+        memcpy(msg.data() + sizeof(Request), payload.data(), payload.size());
+    }
+
+    ssize_t sent;
+    if (passFd >= 0) {
+        iovec iov{msg.data(), msg.size()};
+        alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))]{};
+        msghdr m{};
+        m.msg_iov        = &iov;
+        m.msg_iovlen     = 1;
+        m.msg_control    = control;
+        m.msg_controllen = sizeof(control);
+        cmsghdr* cmsg = CMSG_FIRSTHDR(&m);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type  = SCM_RIGHTS;
+        cmsg->cmsg_len   = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(cmsg), &passFd, sizeof(int));
+        m.msg_controllen = cmsg->cmsg_len;
+        sent = sendmsg(sockFd, &m, MSG_NOSIGNAL);
+    } else {
+        sent = send(sockFd, msg.data(), msg.size(), MSG_NOSIGNAL);
+    }
+    if (sent != static_cast<ssize_t>(msg.size())) {
+        fprintf(stderr, "发送失败: %s\n", strerror(errno));
+        return false;
+    }
+
+    iovec iov{};
+    iov.iov_base = replyOut;
+    iov.iov_len  = sizeof(Reply);
+    msghdr m{};
+    m.msg_iov    = &iov;
+    m.msg_iovlen = 1;
+    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))]{};
+    m.msg_control    = control;
+    m.msg_controllen = sizeof(control);
+
+    ssize_t n;
+    do {
+        n = recvmsg(sockFd, &m, 0);
+    } while (n < 0 && errno == EINTR);
+    if (n != static_cast<ssize_t>(sizeof(Reply))) {
+        fprintf(stderr, "接收应答失败: %s\n", n < 0 ? strerror(errno) : "长度不符");
+        return false;
+    }
+
+    jsonOut->clear();
+    for (cmsghdr* cmsg = CMSG_FIRSTHDR(&m); cmsg; cmsg = CMSG_NXTHDR(&m, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
+        int fd = -1;
+        memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+        if (fd < 0) continue;
+
+        // 顺序读，不依赖 st_size —— 服务端可能用管道
+        char buf[16384];
+        ssize_t r;
+        while ((r = read(fd, buf, sizeof(buf))) > 0) jsonOut->append(buf, r);
+        close(fd);
+    }
+    return true;
+}
+
+// 简易 JSON 缩进。没有引库，就自己按字符走一遍：
+// 只在字符串之外对 { } [ ] , 做换行缩进。
+std::string PrettyJson(const std::string& in, int indentStep = 2) {
+    std::string out;
+    int depth = 0;
+    bool inStr = false;
+    bool esc = false;
+    auto newline = [&](int d) {
+        out.push_back('\n');
+        out.append(static_cast<size_t>(d * indentStep), ' ');
+    };
+    for (size_t i = 0; i < in.size(); ++i) {
+        const char c = in[i];
+        if (inStr) {
+            out.push_back(c);
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') inStr = false;
+            continue;
+        }
+        switch (c) {
+            case '"': inStr = true; out.push_back(c); break;
+            case '{': case '[':
+                out.push_back(c);
+                ++depth;
+                if (i + 1 < in.size() && in[i + 1] != '}' && in[i + 1] != ']') newline(depth);
+                break;
+            case '}': case ']':
+                --depth;
+                if (i > 0 && in[i - 1] != '{' && in[i - 1] != '[') newline(depth);
+                out.push_back(c);
+                break;
+            case ',':
+                out.push_back(c);
+                newline(depth);
+                break;
+            case ':':
+                out += ": ";
+                break;
+            default:
+                out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// 通用：发一条 v2 命令并把 JSON 打出来
+int CmdV2(int sockFd, Cmd cmd, const std::string& payload, uint32_t flags,
+          bool compact = false) {
+    Reply reply{};
+    std::string json;
+    if (!TransactV2(sockFd, cmd, payload, flags, -1, &json, &reply)) return 1;
+
+    bool ok = reply.status == kOk;
+    if (!json.empty()) {
+        printf("%s\n", compact ? json.c_str() : PrettyJson(json).c_str());
+    }
+    if (!ok) {
+        // v2 应答即使失败也带 JSON（里面有服务端给的原因），已经打出来了
+        fprintf(stderr, "服务端返回: %s (0x%x)\n",
+                StatusName(reply.status), reply.status);
+        return 1;
+    }
+    return 0;
+}
+
+// install：把 APK 读进 memfd 送过去
+int CmdInstall(int sockFd, const char* apkPath, bool replace) {
+    const int fileFd = open(apkPath, O_RDONLY | O_CLOEXEC);
+    if (fileFd < 0) {
+        fprintf(stderr, "打不开 %s: %s\n", apkPath, strerror(errno));
+        return 1;
+    }
+
+    const int memFd = memfd_create("apk", MFD_CLOEXEC);
+    if (memFd < 0) {
+        fprintf(stderr, "memfd_create 失败: %s\n", strerror(errno));
+        close(fileFd);
+        return 1;
+    }
+
+    char buf[256 * 1024];
+    for (;;) {
+        const ssize_t n = read(fileFd, buf, sizeof(buf));
+        if (n == 0) break;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "读取失败: %s\n", strerror(errno));
+            close(fileFd); close(memFd);
+            return 1;
+        }
+        ssize_t off = 0;
+        while (off < n) {
+            const ssize_t w = write(memFd, buf + off, static_cast<size_t>(n - off));
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                fprintf(stderr, "写入 memfd 失败: %s\n", strerror(errno));
+                close(fileFd); close(memFd);
+                return 1;
+            }
+            off += w;
+        }
+    }
+    close(fileFd);
+    lseek(memFd, 0, SEEK_SET);
+
+    Reply reply{};
+    std::string json;
+    const uint32_t flags = replace ? static_cast<uint32_t>(kFlagReplace) : 0u;
+    const bool sent = TransactV2(sockFd, Cmd::InstallApp, {}, flags, memFd,
+                                 &json, &reply);
+    close(memFd);
+    if (!sent) return 1;
+
+    if (!json.empty()) printf("%s\n", PrettyJson(json).c_str());
+    if (reply.status != kOk) {
+        fprintf(stderr, "服务端返回: %s (0x%x)\n",
+                StatusName(reply.status), reply.status);
+        return 1;
+    }
+    return 0;
+}
 
 int main(int argc, char** argv) {
     std::string socketPath;
@@ -320,7 +562,12 @@ int main(int argc, char** argv) {
     // 先手工扫一遍找 --socket，再解析其余
     int c;
     optind = 1;
-    while ((c = getopt_long(argc, argv, "o:h", kLong, nullptr)) != -1) {
+    // ⚠️ optstring 开头的 "+" 不能省。
+    //    GNU getopt 默认会**重排参数**，把子命令后面的选项也当顶层选项解析，
+    //    于是 `list-apps --system` 里的 --system 会被当成未知的顶层选项报错。
+    //    "+" 让它遇到第一个非选项（也就是子命令）就停下，
+    //    后面的参数原样留给子命令自己处理。
+    while ((c = getopt_long(argc, argv, "+o:h", kLong, nullptr)) != -1) {
         switch (c) {
             case kOptSocket: socketPath = optarg; break;
             case kOptOut:    outPath = optarg;    break;
@@ -366,6 +613,79 @@ int main(int argc, char** argv) {
         if (remaining < 5) { Usage(argv[0]); close(sockFd); return 1; }
         rc = CmdSwipe(sockFd, atoi(args[0]), atoi(args[1]),
                       atoi(args[2]), atoi(args[3]), ms);
+    }
+    // ── v2：应用与文件管理 ──
+    // 约定：payload 为 NUL 分隔字符串，应答为 JSON
+    else if (cmd == "list-apps") {
+        uint32_t flags = 0;
+        bool namesOnly = false;
+        for (int i = 0; i < remaining - 1; ++i) {
+            if (strcmp(args[i], "--system") == 0) flags |= kFlagIncludeSystem;
+            if (strcmp(args[i], "--meta") == 0)   flags |= kFlagWithMetadata;
+            if (strcmp(args[i], "--names") == 0)  namesOnly = true;
+        }
+        rc = CmdV2(sockFd, Cmd::ListApps, {}, flags, /*compact=*/namesOnly);
+    } else if (cmd == "app-info") {
+        if (remaining < 2) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdV2(sockFd, Cmd::AppInfo, BuildPayload({args[0]}), 0);
+    } else if (cmd == "launch") {
+        if (remaining < 2) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdV2(sockFd, Cmd::LaunchApp,
+                   BuildPayload({args[0], remaining >= 3 ? args[1] : nullptr}), 0);
+    } else if (cmd == "kill") {
+        if (remaining < 2) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdV2(sockFd, Cmd::KillApp, BuildPayload({args[0]}), 0);
+    } else if (cmd == "foreground") {
+        rc = CmdV2(sockFd, Cmd::ForegroundApp, {}, 0);
+    } else if (cmd == "install") {
+        if (remaining < 2) { Usage(argv[0]); close(sockFd); return 1; }
+        bool replace = true;
+        for (int i = 1; i < remaining - 1; ++i) {
+            if (strcmp(args[i], "--no-replace") == 0) replace = false;
+        }
+        rc = CmdInstall(sockFd, args[0], replace);
+    } else if (cmd == "download") {
+        if (remaining < 2) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdV2(sockFd, Cmd::Download,
+                   BuildPayload({args[0],
+                                 remaining >= 3 ? args[1] : nullptr,
+                                 remaining >= 4 ? args[2] : nullptr}), 0);
+    } else if (cmd == "ls" || cmd == "stat") {
+        const char* path = FirstPositional(args, remaining - 1);
+        rc = CmdV2(sockFd, Cmd::FileOp,
+                   BuildPayload({cmd == "ls" ? "list" : "stat",
+                                 path != nullptr ? path : ""}), 0);
+    } else if (cmd == "mkdir") {
+        uint32_t flags = 0;
+        for (int i = 0; i < remaining - 1; ++i) {
+            if (strcmp(args[i], "-p") == 0 || strcmp(args[i], "--parents") == 0) {
+                flags |= kFlagRecursive;
+            }
+        }
+        const char* path = FirstPositional(args, remaining - 1);
+        if (path == nullptr) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdV2(sockFd, Cmd::FileOp, BuildPayload({"mkdir", path}), flags);
+    } else if (cmd == "rm") {
+        uint32_t flags = 0;
+        for (int i = 0; i < remaining - 1; ++i) {
+            if (strcmp(args[i], "-r") == 0 || strcmp(args[i], "-rf") == 0 ||
+                strcmp(args[i], "--recursive") == 0) {
+                flags |= kFlagRecursive;
+            }
+        }
+        const char* path = FirstPositional(args, remaining - 1);
+        if (path == nullptr) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdV2(sockFd, Cmd::FileOp, BuildPayload({"delete", path}), flags);
+    } else if (cmd == "mv") {
+        const char* a = FirstPositional(args, remaining - 1);
+        const char* b = nullptr;
+        if (a != nullptr) {
+            for (char** q = args; *q != nullptr; ++q) {
+                if (*q == a) { b = FirstPositional(q + 1, remaining - 1 - (int)(q - args)); break; }
+            }
+        }
+        if (a == nullptr || b == nullptr) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdV2(sockFd, Cmd::FileOp, BuildPayload({"rename", a, b}), 0);
     } else {
         fprintf(stderr, "未知子命令: %s\n", cmd.c_str());
         Usage(argv[0]);

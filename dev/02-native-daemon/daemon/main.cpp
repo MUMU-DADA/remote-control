@@ -281,8 +281,9 @@ int main(int argc, char** argv) {
     fprintf(stderr, "autod: 就绪, 监听 %s\n", server.path().c_str());
 
     Dispatcher dispatcher(&capture, &injector);
-    server.Run([&dispatcher](const Request& req, int peerUid) {
-        return dispatcher.Handle(req, peerUid);
+    server.Run([&dispatcher](const Request& req, const std::string& payload,
+                             int reqFd, int peerUid) {
+        return dispatcher.Handle(req, payload, reqFd, peerUid);
     });
 
     gServer = nullptr;
