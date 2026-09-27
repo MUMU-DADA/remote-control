@@ -39,6 +39,7 @@ using autodtest::ExtractBitmapWords;
 using autodtest::FindEventNode;
 using autodtest::LastValueOf;
 using autodtest::ReadDeviceBlock;
+using autodtest::WaitEvents;
 
 // ---------------------------------------------------------------------------
 // 测试用例
@@ -64,8 +65,8 @@ void TestTap(autod::Injector& inj, int readFd) {
     const bool ok = inj.Tap(p, 30, false, &err);
     Check(ok, "Tap() 返回成功%s%s", ok ? "" : " —— ", ok ? "" : err.c_str());
 
-    usleep(100000);   // 等内核把事件推给 evdev
-    const auto evs = DrainEvents(readFd);
+    // 轮询等待，不用固定睡眠 —— 构建占满 CPU 时事件到达会推迟
+    const auto evs = WaitEvents(readFd, 11, 3000);
 
     if (evs.empty()) {
         Check(false, "读回事件 —— 一个都没有（设备没被识别？）");
@@ -111,10 +112,14 @@ void TestSwipe(autod::Injector& inj, int readFd) {
     const bool ok = inj.Swipe(from, to, 200, 0, false, &err);
     Check(ok, "Swipe() 返回成功%s%s", ok ? "" : " —— ", ok ? "" : err.c_str());
 
-    usleep(150000);
-    const auto evs = DrainEvents(readFd);
+    auto evs = WaitEvents(readFd, 1, 3000);
+    for (int i = 0; i < 20 && CountSyn(evs) < 4; ++i) {
+        usleep(50000);
+        auto more = DrainEvents(readFd);
+        evs.insert(evs.end(), more.begin(), more.end());
+    }
 
-    const int moves = CountOf(evs, EV_SYN, SYN_REPORT, 0) - 2;   // 减去 DOWN/UP
+    const int moves = CountSyn(evs) - 2;   // 减去 DOWN/UP
     Check(moves >= 8, "产生了 %d 个 MOVE 事件（200ms 按 60Hz 应约 12 个）", moves);
     Check(CountOf(evs, EV_KEY, BTN_TOUCH, 1) == 1, "BTN_TOUCH 按下一次");
     Check(CountOf(evs, EV_KEY, BTN_TOUCH, 0) == 1, "BTN_TOUCH 抬起一次");
@@ -151,8 +156,12 @@ void TestMultiTouch(autod::Injector& inj, int readFd) {
     ok &= inj.TouchUp(f1, false, &err);
     Check(ok, "多点触控序列执行成功%s%s", ok ? "" : " —— ", ok ? "" : err.c_str());
 
-    usleep(150000);
-    const auto evs = DrainEvents(readFd);
+    auto evs = WaitEvents(readFd, 1, 3000);
+    for (int i = 0; i < 20 && CountSyn(evs) < 6; ++i) {
+        usleep(50000);
+        auto more = DrainEvents(readFd);
+        evs.insert(evs.end(), more.begin(), more.end());
+    }
 
     // 两个不同槽位应各自被使用过
     std::vector<int32_t> slots;
@@ -181,8 +190,61 @@ void TestMultiTouch(autod::Injector& inj, int readFd) {
           "BTN_TOUCH=0 只出现一次（最后一根手指抬起后才清零）");
 }
 
+// 槽位耗尽：设备声明了 10 个槽位，第 11 个指针必须干净失败而不是静默丢弃
+void TestSlotExhaustion(autod::Injector& inj, int readFd) {
+    printf("\n\033[1;34m[4] 槽位耗尽\033[0m  超过 10 个指针时的行为\n");
+
+    DrainEvents(readFd);
+
+    std::string err;
+    int succeeded = 0;
+    bool failedCleanly = false;
+
+    // 故意按下 12 个指针
+    for (int i = 0; i < 12; ++i) {
+        autod::TouchPoint p;
+        p.id = i;
+        p.x  = 100 + i * 10;
+        p.y  = 200;
+
+        err.clear();
+        if (inj.TouchDown(p, false, &err)) {
+            ++succeeded;
+        } else {
+            failedCleanly = true;
+            Check(err.find("槽位耗尽") != std::string::npos,
+                  "第 %d 个指针被拒绝，错误信息明确: %s", i + 1, err.c_str());
+            break;
+        }
+    }
+
+    Check(succeeded == 10, "成功按下 %d 个指针（设备声明了 10 个槽位）", succeeded);
+    Check(failedCleanly, "第 11 个指针干净失败，没有静默丢弃");
+
+    // 收尾：全部抬起，避免影响后续用例
+    for (int i = 0; i < succeeded; ++i) {
+        autod::TouchPoint p;
+        p.id = i;
+        p.x  = 100 + i * 10;
+        p.y  = 200;
+        inj.TouchUp(p, false, nullptr);
+    }
+    // 等事件落定再清空
+    WaitEvents(readFd, 1, 2000);
+    DrainEvents(readFd);
+
+    // 槽位应已全部释放 —— 再按一个应该成功
+    autod::TouchPoint after;
+    after.id = 99; after.x = 500; after.y = 500;
+    err.clear();
+    const bool ok = inj.TouchDown(after, false, &err);
+    Check(ok, "全部抬起后槽位已释放，能再按下新指针%s%s",
+          ok ? "" : " —— ", ok ? "" : err.c_str());
+    inj.TouchUp(after, false, nullptr);
+}
+
 void TestUnpairedUp(autod::Injector& inj) {
-    printf("\n\033[1;34m[4] 异常路径\033[0m  没有配对的 UP 不应崩溃\n");
+    printf("\n\033[1;34m[5] 异常路径\033[0m  没有配对的 UP 不应崩溃\n");
 
     autod::TouchPoint p;
     p.id = 42; p.x = 100; p.y = 100;
@@ -194,7 +256,7 @@ void TestUnpairedUp(autod::Injector& inj) {
 
 // 验证内核记录的设备能力位 —— 这决定了 Android 会不会把它当触摸屏
 void TestDeviceProperties(const std::string& deviceName) {
-    printf("\n\033[1;34m[5] 设备能力位\033[0m  (/proc/bus/input/devices)\n");
+    printf("\n\033[1;34m[6] 设备能力位\033[0m  (/proc/bus/input/devices)\n");
 
     const std::string block = ReadDeviceBlock(deviceName);
     if (block.empty()) {
@@ -287,6 +349,7 @@ int main() {
     TestTap(injector, readFd);
     TestSwipe(injector, readFd);
     TestMultiTouch(injector, readFd);
+    TestSlotExhaustion(injector, readFd);
     TestUnpairedUp(injector);
     TestDeviceProperties(kDeviceName);
 

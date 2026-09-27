@@ -35,6 +35,16 @@ inline void Check(bool cond, const char* fmt, ...) {
     va_end(ap);
 }
 
+// 非断言的信息输出（缩进与 Check 对齐）
+inline void Info(const char* fmt, ...) {
+    printf("    \033[2m");
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\033[0m\n");
+}
+
 inline int Summary(const char* title) {
     printf("\n\033[1m=== %s ===\033[0m\n", title);
     if (gFailed == 0) {

@@ -62,6 +62,14 @@ class Capture {
     uint64_t requestedDisplayId_ = 0;
     uint64_t activeDisplayId_    = 0;
     bool     resolved_           = false;
+
+    // 最近一次成功抓帧的分辨率。
+    //
+    // screencap 这类"exec 外部命令"的后端拿不到显示枚举，
+    // 只能靠抓一帧来知道真实分辨率。mutable 是因为 ListDisplays()
+    // 声明成了 const，但需要读缓存。
+    mutable uint32_t lastWidth_  = 0;
+    mutable uint32_t lastHeight_ = 0;
 };
 
 }  // namespace autod

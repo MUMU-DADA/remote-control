@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace autod {
@@ -24,6 +25,34 @@ enum class Cmd : uint32_t {
     TouchMove  = 6,   // 手动多点触控：移动
     TouchUp    = 7,   // 手动多点触控：抬起
     KeyEvent   = 8,   // 按键注入（保留）
+
+    // ── 应用与文件管理（v2）───────────────────────────────────────────────
+    //
+    // 这批命令的**请求** payload 是一串 NUL 分隔的 UTF-8 字符串
+    // （字符串本身不含 NUL，所以零依赖、无歧义），
+    // **应答** payload 是 JSON，通过 memfd 传回（见 Reply.dataSize）。
+    //
+    // 为什么应答用 JSON 而不是同样用 NUL 分隔：应答是结构化的、字段会增长，
+    // 而且我们只需要"写"JSON 不需要"读"——不必引入解析器。
+    // 请求则相反，参数少而固定，NUL 分隔比 JSON 更省事也更难写错。
+    ListApps      = 10,  // payload: 无。flags & kFlagIncludeSystem 控制范围
+                         // → {"count":N,"apps":[{"package":..,"label":..,...}]}
+    AppInfo       = 11,  // payload: "<package>"
+                         // → 包名/版本/UID/权限/Activity/Service/Receiver/签名摘要
+    LaunchApp     = 12,  // payload: "<package>[\0<activity>]"
+                         // → {"started":true,"component":..}
+    KillApp       = 13,  // payload: "<package>"
+                         // → {"stopped":true}
+    ForegroundApp = 14,  // payload: 无
+                         // → {"package":..,"activity":..,"pid":..}
+    InstallApp    = 15,  // fd = APK 内容（memfd），payload: 无
+                         // flags & kFlagReplace 控制 -r
+                         // → {"installed":true,"package":..}
+    Download      = 16,  // payload: "<url>[\0<filename>]"
+                         // → {"path":"/sdcard/Download/..","bytes":N}
+    FileOp        = 17,  // payload: "<op>[\0<path>[\0<arg>]]"
+                         // op: list|stat|mkdir|delete|rename|exists
+                         // → 随 op 不同，见 docs/09-file-and-app-api.md
 };
 
 enum Flags : uint32_t {
@@ -34,6 +63,12 @@ enum Flags : uint32_t {
     kFlagGrayscale  = 1u << 2,  // 只要灰度，数据量 1/4
     // 手势专用
     kFlagAsync      = 1u << 8,  // 不等待分发完成
+
+    // ── v2 命令专用 ──
+    kFlagIncludeSystem = 1u << 3,  // ListApps：含系统应用（默认只列第三方）
+    kFlagWithMetadata  = 1u << 4,  // ListApps：附带标签/版本/安装时间（更慢）
+    kFlagReplace       = 1u << 5,  // InstallApp：-r 覆盖安装
+    kFlagRecursive     = 1u << 6,  // FileOp delete：递归删除目录
 };
 
 struct Request {
@@ -86,6 +121,11 @@ enum Status : uint32_t {
     kErrInjected    = 0x1006,
     kErrInternal    = 0x1007,
     kErrUnsupported = 0x1008,
+    kErrNotFound    = 0x1009,   // 包不存在 / 路径不存在
+    kErrPermission  = 0x100a,   // 权限不足
+    kErrTimeout     = 0x100b,   // 子进程或下载超时
+    kErrPayload     = 0x100c,   // payload 缺失或格式不对
+    kErrIo          = 0x100d,   // 文件/网络 IO 失败
 };
 
 inline const char* StatusName(uint32_t s) {
@@ -99,6 +139,11 @@ inline const char* StatusName(uint32_t s) {
         case kErrInjected:    return "injection failed";
         case kErrInternal:    return "internal error";
         case kErrUnsupported: return "unsupported";
+        case kErrNotFound:    return "not found";
+        case kErrPermission:  return "permission denied";
+        case kErrTimeout:     return "timeout";
+        case kErrPayload:     return "bad payload";
+        case kErrIo:          return "io error";
         default:              return "unknown";
     }
 }
@@ -111,6 +156,15 @@ struct ReplyPacket {
     Reply reply{};
     int   fd = -1;   // >=0 时通过 SCM_RIGHTS 发送；发送后由调用方关闭
 };
+
+// 请求 payload 上限。
+//
+// SOCK_SEQPACKET 单条消息有上限（net.core.wmem_default 附近，通常 ~208KB），
+// 超过会 EMSGSIZE。需要传大块数据（APK、文件内容）时走 fd，不要塞进 payload。
+constexpr size_t kMaxRequestPayload = 4096;
+
+// 应答 payload（JSON）上限，超过就报 kErrPayload 而不是悄悄截断
+constexpr size_t kMaxReplyPayload = 4u << 20;   // 4 MB
 
 // 默认手势参数
 constexpr uint32_t kDefaultTapMs   = 50;

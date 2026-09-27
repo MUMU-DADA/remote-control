@@ -1,10 +1,16 @@
-// capture.cpp — 基于 SurfaceFlinger 的屏幕捕获
+// capture_surfaceflinger.cpp —— 基于 SurfaceFlinger 的屏幕捕获
 //
-// 【版本基准】本实现对齐 AOSP main（Android 15/16）的 API 形态，参考：
-//   frameworks/base/cmds/screencap/screencap.cpp
+// 【版本基准】本实现**对齐 Android 12**（android-12.0.0_r34），API 形态已逐项
+// 对照以下 AOSP 源码核实过：
 //
-// 【换版本时】Android 12/13 的 API 差异较大，见 docs/03-version-matrix.md。
-// API 不匹配时编译器报错就是这个文件需要改，其它文件不受影响。
+//   frameworks/native/libs/gui/include/gui/LayerState.h            DisplayCaptureArgs
+//   frameworks/native/libs/gui/include/gui/SurfaceComposerClient.h ScreenshotClient
+//   frameworks/native/libs/gui/include/gui/SyncScreenCaptureListener.h
+//   frameworks/native/libs/gui/include/gui/ScreenCaptureResults.h
+//   frameworks/native/libs/ui/include/ui/DisplayId.h               PhysicalDisplayId
+//   frameworks/native/libs/ui/include/ui/DisplayMode.h             ui::DisplayMode
+//
+// Android 12 与 15/16 的差异很大，换版本时见 docs/03-version-matrix.md。
 
 #include "capture.h"
 
@@ -15,8 +21,11 @@
 #include <unistd.h>
 
 #include <gui/ISurfaceComposer.h>
-#include <gui/SurfaceComposerClient.h>
+#include <gui/LayerState.h>              // DisplayCaptureArgs / CaptureArgs
+#include <gui/ScreenCaptureResults.h>    // gui::ScreenCaptureResults
+#include <gui/SurfaceComposerClient.h>   // SurfaceComposerClient / ScreenshotClient
 #include <gui/SyncScreenCaptureListener.h>
+#include <ui/DisplayId.h>                // PhysicalDisplayId
 #include <ui/GraphicBuffer.h>
 #include <ui/PixelFormat.h>
 
@@ -33,15 +42,14 @@ std::string ErrnoString(const char* what) {
 }
 
 // 创建匿名内存文件。memfd 没有文件系统实体，可以安全地通过 SCM_RIGHTS 传递。
-// 需要内核 3.17+ / Android 8+；更老的平台需要退回 ashmem。
 int CreateMemFd(const char* name, uint64_t size) {
     int fd = memfd_create(name, MFD_CLOEXEC);
     if (fd < 0) {
-        ALOGE("autod: memfd_create 失败: %s", strerror(errno));
+        ALOGE("memfd_create 失败: %s", strerror(errno));
         return -1;
     }
     if (ftruncate(fd, static_cast<off_t>(size)) != 0) {
-        ALOGE("autod: ftruncate(%llu) 失败: %s",
+        ALOGE("ftruncate(%llu) 失败: %s",
               static_cast<unsigned long long>(size), strerror(errno));
         close(fd);
         return -1;
@@ -88,7 +96,7 @@ void Frame::Reset() {
 
 bool Capture::Init(std::string* error) {
     if (!ResolveDisplay(error)) return false;
-    ALOGI("autod: 使用显示 id=0x%llx",
+    ALOGI("使用显示 id=0x%llx",
           static_cast<unsigned long long>(activeDisplayId_));
     return true;
 }
@@ -126,7 +134,7 @@ bool Capture::ResolveDisplay(std::string* error) {
     }
 
     if (ids.size() > 1) {
-        ALOGW("autod: 检测到 %zu 个显示，未指定时默认用第一个。"
+        ALOGW("检测到 %zu 个显示，未指定时默认用第一个。"
               "顺序不保证稳定，生产环境请用 --display 显式指定。", ids.size());
     }
     activeDisplayId_ = ids.front().value;
@@ -137,6 +145,7 @@ bool Capture::ResolveDisplay(std::string* error) {
 bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
                            std::string* error) const {
     out->clear();
+
     const std::vector<PhysicalDisplayId> ids =
             SurfaceComposerClient::getPhysicalDisplayIds();
     if (ids.empty()) {
@@ -148,13 +157,17 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
         DisplayInfo info;
         info.id = id.value;
 
-        const sp<IBinder> token = SurfaceComposerClient::getPhysicalDisplayToken(id);
+        // Android 12：getPhysicalDisplayToken 按值收 PhysicalDisplayId
+        const sp<IBinder> token =
+                SurfaceComposerClient::getPhysicalDisplayToken(id);
         if (token != nullptr) {
             ui::DisplayMode mode;
-            if (SurfaceComposerClient::getActiveDisplayMode(token, &mode) == NO_ERROR) {
-                info.width     = static_cast<uint32_t>(mode.resolution.getWidth());
-                info.height    = static_cast<uint32_t>(mode.resolution.getHeight());
-                info.refreshHz = static_cast<uint32_t>(mode.refreshRate);
+            if (SurfaceComposerClient::getActiveDisplayMode(token, &mode) ==
+                NO_ERROR) {
+                info.width  = static_cast<uint32_t>(mode.resolution.getWidth());
+                info.height = static_cast<uint32_t>(mode.resolution.getHeight());
+                info.refreshHz =
+                        static_cast<uint32_t>(mode.refreshRate);
             }
         }
         out->push_back(info);
@@ -165,23 +178,46 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
 bool Capture::Grab(Frame* out, std::string* error) {
     if (!resolved_ && !ResolveDisplay(error)) return false;
 
-    const DisplayId displayId = DisplayId::fromValue(activeDisplayId_);
+    const PhysicalDisplayId displayId{activeDisplayId_};
+    const sp<IBinder> token =
+            SurfaceComposerClient::getPhysicalDisplayToken(displayId);
+    if (token == nullptr) {
+        if (error) *error = "拿不到显示 token";
+        return false;
+    }
 
-    // gui::CaptureArgs 在 android/gui/DisplayCaptureArgs.h
-    gui::CaptureArgs args;
-    args.hintForSeamlessTransition = false;
-    args.attachGainmap             = false;
+    // Android 12：DisplayCaptureArgs 继承 CaptureArgs，定义在 gui/LayerState.h
+    DisplayCaptureArgs args;
+    args.displayToken = token;
+    args.width        = 0;    // 0 = 用显示原始分辨率
+    args.height       = 0;
+    args.pixelFormat      = ui::PixelFormat::RGBA_8888;
+    args.captureSecureLayers = false;
+    args.allowProtected   = false;
+    args.grayscale        = false;
+    // UNKNOWN = 用显示自身的色彩空间（默认行为，也是 screencap 的做法）
+    args.dataspace        = ui::Dataspace::UNKNOWN;
 
-    // 同步等待结果。注意：必须先 ProcessState::startThreadPool()，
-    // 否则这里的 Binder 回调永远收不到，waitForResults() 会死等。
+    // 同步等待。注意 waitForResults() 内部已经调了 fence->waitForever()，
+    // 返回时数据一定可读。但前提是 Binder 线程池已启动 —— 见 main.cpp。
     sp<SyncScreenCaptureListener> listener = new SyncScreenCaptureListener();
-    ScreenshotClient::captureDisplay(displayId, args, listener);
 
-    ScreenCaptureResults result = listener->waitForResults();
-    if (!result.fenceResult.ok()) {
+    const status_t captureStatus =
+            ScreenshotClient::captureDisplay(args, listener);
+    if (captureStatus != NO_ERROR) {
         if (error) {
-            *error = "截图失败, fence status=" +
-                     std::to_string(fenceStatus(result.fenceResult));
+            *error = "ScreenshotClient::captureDisplay 失败, status=" +
+                     std::to_string(captureStatus);
+        }
+        return false;
+    }
+
+    const gui::ScreenCaptureResults result = listener->waitForResults();
+
+    // Android 12 用 status_t result；Android 15+ 改成了 ftl::Expected fenceResult
+    if (result.result != OK) {
+        if (error) {
+            *error = "截图失败, result=" + std::to_string(result.result);
         }
         return false;
     }
@@ -193,7 +229,7 @@ bool Capture::Grab(Frame* out, std::string* error) {
     }
 
     void* base = nullptr;
-    status_t lockStatus =
+    const status_t lockStatus =
             buffer->lock(GraphicBuffer::USAGE_SW_READ_OFTEN, &base);
     if (lockStatus != NO_ERROR || base == nullptr) {
         if (error) {
@@ -229,8 +265,8 @@ bool Capture::Grab(Frame* out, std::string* error) {
     }
 
     // 逐行拷贝：必须用 stride 而不是 width 做步长，否则图像会斜切
-    const uint8_t* src = static_cast<const uint8_t*>(base);
-    uint8_t* dstBytes  = static_cast<uint8_t*>(dst);
+    const auto* src      = static_cast<const uint8_t*>(base);
+    auto*       dstBytes = static_cast<uint8_t*>(dst);
     const uint64_t srcStride = static_cast<uint64_t>(stride) * bpp;
     for (uint32_t y = 0; y < height; ++y) {
         memcpy(dstBytes + y * rowBytes, src + y * srcStride, rowBytes);
@@ -256,4 +292,3 @@ bool Capture::Grab(Frame* out, std::string* error) {
 const char* Capture::BackendName() { return "surfaceflinger"; }
 
 }  // namespace autod
-

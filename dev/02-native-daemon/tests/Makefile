@@ -1,48 +1,57 @@
 # autod 的验证测试
 #
-# 所有测试都在开发机上**真实运行**：创建虚拟触摸屏 → 注入事件 →
-# 从 /dev/input/eventN 读回校验。走完整的内核 input 子系统路径，不是 mock。
+# 所有测试都在开发机上**真实运行**，走完整的系统路径，不是 mock：
+#   - 触控：真的创建虚拟触摸屏、注入事件、从 /dev/input/eventN 读回
+#   - 截图：真的 fork/exec 一个进程、通过管道读像素
 #
 #   make              编译全部
-#   sudo make run     跑全部
-#   make test_util    只编某个
-#   sudo ./test_integration   单独跑
+#   sudo make run     跑全部（需要 root：/dev/uinput 默认 0600）
+#   sudo ./test_integration      单独跑
 #   make clean
 #
-# 需要 root（/dev/uinput 默认 0600）和已加载的 uinput 内核模块
-# （modprobe uinput）。
+# 需要已加载的 uinput 内核模块（modprobe uinput）。
 
+CC       ?= gcc
 CXX      ?= g++
+CFLAGS   ?= -O1 -g -Wall -Wextra
 CXXFLAGS ?= -std=c++20 -O1 -g -Wall -Wextra -Wno-unused-parameter
 DAEMON    = ../daemon
 
 COMMON_SRCS = $(DAEMON)/inject.cpp $(DAEMON)/inject_uinput.cpp
 COMMON_HDRS = $(DAEMON)/inject.h $(DAEMON)/inject_backend.h \
-              $(DAEMON)/autod_log.h $(DAEMON)/protocol.h test_util.h
+              $(DAEMON)/autod_log.h $(DAEMON)/autod_platform.h \
+              $(DAEMON)/protocol.h test_util.h
 
-# 单元测试：只测注入后端
+# [1] 单元测试：只测注入后端
 UNIT_SRCS = test_inject_uinput.cpp $(COMMON_SRCS)
 
-# 集成测试：socket 服务端 + 真实 Dispatcher + 协议 + 注入 + 桩截图
-# 截图后端用 capture_stub.cpp —— 生成合成图像，不需要 AOSP 环境
+# [2] 集成测试：真实 socket 服务端 + Dispatcher + 协议 + 注入 + 桩截图
 INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
              $(DAEMON)/socket_server.cpp \
              $(DAEMON)/dispatch.cpp \
              $(DAEMON)/capture_stub.cpp
 
-BINS = test_inject_uinput test_integration
+# [3] screencap 截图后端：配 fake_screencap 冒充设备命令
+SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp
 
-INTEG_HDRS = $(DAEMON)/socket_server.h $(DAEMON)/dispatch.h $(DAEMON)/capture.h
+BINS = test_inject_uinput test_integration test_capture_screencap
 
-all: $(BINS)
+all: $(BINS) fake_screencap
 
 test_inject_uinput: $(UNIT_SRCS) $(COMMON_HDRS)
 	$(CXX) $(CXXFLAGS) -o $@ $(UNIT_SRCS)
 
-test_integration: $(INTEG_SRCS) $(COMMON_HDRS) $(INTEG_HDRS)
+test_integration: $(INTEG_SRCS) $(COMMON_HDRS) \
+                  $(DAEMON)/socket_server.h $(DAEMON)/dispatch.h $(DAEMON)/capture.h
 	$(CXX) $(CXXFLAGS) -pthread -o $@ $(INTEG_SRCS)
 
-run: $(BINS)
+test_capture_screencap: $(SCREENCAP_SRCS) test_util.h $(DAEMON)/capture.h
+	$(CXX) $(CXXFLAGS) -o $@ $(SCREENCAP_SRCS)
+
+fake_screencap: fake_screencap.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+run: all
 	@if [ "$$(id -u)" -ne 0 ]; then \
 		echo "需要 root，改用 sudo"; \
 		sudo $(MAKE) --no-print-directory _run; \
@@ -50,17 +59,17 @@ run: $(BINS)
 		$(MAKE) --no-print-directory _run; \
 	fi
 
-_run: $(BINS)
-	@./test_inject_uinput; u=$$?; \
-	 echo; \
-	 ./test_integration; i=$$?; \
-	 echo; \
-	 echo "───────────────"; \
-	 echo "单元测试: $$([ $$u -eq 0 ] && echo 通过 || echo 失败)"; \
-	 echo "集成测试: $$([ $$i -eq 0 ] && echo 通过 || echo 失败)"; \
-	 exit $$(( u + i ))
+_run: all
+	@./test_inject_uinput;                       u=$$?; echo; \
+	 ./test_integration;                         i=$$?; echo; \
+	 ./test_capture_screencap ./fake_screencap;  c=$$?; echo; \
+	 echo "───────────────────────────────"; \
+	 printf "  %-34s %s\n" "注入后端单元测试"   "$$([ $$u -eq 0 ] && echo 通过 || echo 失败)"; \
+	 printf "  %-34s %s\n" "端到端集成测试"     "$$([ $$i -eq 0 ] && echo 通过 || echo 失败)"; \
+	 printf "  %-34s %s\n" "screencap 截图后端" "$$([ $$c -eq 0 ] && echo 通过 || echo 失败)"; \
+	 exit $$(( u + i + c ))
 
 clean:
-	rm -f $(BINS)
+	rm -f $(BINS) fake_screencap
 
 .PHONY: all run _run clean

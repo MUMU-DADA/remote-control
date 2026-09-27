@@ -13,6 +13,7 @@
 // 编译运行:
 //   make test_integration && sudo ./test_integration
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -178,8 +179,9 @@ void TestTapRoundTrip(int cfd, int readFd) {
     Check(Transact(cfd, req, &reply), "socket 往返成功");
     Check(reply.status == kOk, "服务端返回 ok");
 
-    usleep(120000);
-    const auto evs = DrainEvents(readFd);
+    // 轮询等到事件齐，而不是死等固定时长 ——
+    // 构建占满 CPU 时事件到达会被推迟，固定睡眠会造成偶发失败。
+    const auto evs = WaitEvents(readFd, 11, 3000);
 
     Check(!evs.empty(), "内核收到了 %zu 个事件", evs.size());
     if (evs.empty()) return;
@@ -210,8 +212,13 @@ void TestSwipeRoundTrip(int cfd, int readFd) {
     Check(Transact(cfd, req, &reply), "socket 往返成功");
     Check(reply.status == kOk, "服务端返回 ok");
 
-    usleep(200000);
-    const auto evs = DrainEvents(readFd);
+    // 先等到第一个事件批出现，再补齐剩下的
+    auto evs = WaitEvents(readFd, 1, 3000);
+    for (int i = 0; i < 20 && CountSyn(evs) < 4; ++i) {
+        usleep(50000);
+        auto more = DrainEvents(readFd);
+        evs.insert(evs.end(), more.begin(), more.end());
+    }
 
     Check(CountSyn(evs) > 3, "产生了 %d 个事件批（DOWN + MOVE* + UP）",
           CountSyn(evs));
@@ -252,11 +259,110 @@ void TestProtocolRobustness(int cfd) {
     }
 }
 
+// 数当前进程打开的 fd 数量
+//
+// 集成测试里服务端与客户端在同一个进程，所以这个数字能反映
+// 服务端有没有漏关 fd —— 对常驻服务来说这是最要紧的一类问题：
+// 一次抓帧会经过 pipe/memfd/GraphicBuffer 好几个 fd，
+// 漏一个就意味着跑几小时后必然 EMFILE。
+int CountOpenFds() {
+    DIR* d = opendir("/proc/self/fd");
+    if (!d) return -1;
+    int n = 0;
+    while (readdir(d) != nullptr) ++n;
+    closedir(d);
+    return n - 2;   // 减掉 "." 和 ".."
+}
+
+// 验证空闲连接不会永久占用服务
+void TestIdleTimeout() {
+    printf("\n\033[1;34m[6] 连接空闲超时\033[0m  "
+           "连上但不发数据，服务不应被卡死\n");
+
+    // 连上但不发任何数据
+    const int idleFd = ConnectClient();
+    Check(idleFd >= 0, "建立了一个不发数据的连接");
+    if (idleFd < 0) return;
+
+    // 服务端超时设的是 1 秒（main 里通过环境变量设的），等 1.6 秒
+    usleep(1600 * 1000);
+
+    // 服务端应该已经主动断开 —— 读会返回 0（EOF）
+    char buf[1];
+    ssize_t n;
+    do {
+        n = recv(idleFd, buf, 1, 0);
+    } while (n < 0 && errno == EINTR);
+
+    Check(n == 0, "空闲连接已被服务端断开（recv 返回 %zd，期望 0）", n);
+    close(idleFd);
+
+    // 关键：服务本身必须还活着
+    const int cfd = ConnectClient();
+    Check(cfd >= 0, "超时之后仍能建立新连接（服务未被卡死）");
+    if (cfd < 0) return;
+
+    Reply reply{};
+    const bool ok = Transact(cfd, MakeRequest(Cmd::Info), &reply);
+    Check(ok && reply.status == kOk, "新连接能正常处理请求");
+    close(cfd);
+}
+
+// 长驻服务的稳定性：反复抓帧不能累积 fd
+void TestNoFdLeak() {
+    printf("\n\033[1;34m[7] fd 泄漏\033[0m  反复抓帧不应累积文件描述符\n");
+
+    constexpr int kIterations = 200;
+
+    // 先跑几轮热身，让各种惰性分配都发生
+    for (int i = 0; i < 5; ++i) {
+        const int fd = ConnectClient();
+        if (fd < 0) { Check(false, "热身心跳连接失败"); return; }
+        Reply reply{};
+        int frameFd = -1;
+        Transact(fd, MakeRequest(Cmd::Capture), &reply, &frameFd);
+        if (frameFd >= 0) close(frameFd);
+        close(fd);
+    }
+
+    const int before = CountOpenFds();
+    Check(before > 0, "初始 fd 数量: %d", before);
+
+    int failures = 0;
+    for (int i = 0; i < kIterations; ++i) {
+        const int fd = ConnectClient();
+        if (fd < 0) { ++failures; continue; }
+
+        Reply reply{};
+        int frameFd = -1;
+        if (!Transact(fd, MakeRequest(Cmd::Capture), &reply, &frameFd)) {
+            ++failures;
+        }
+        // 客户端这一侧的 fd 必须自己关 —— 否则测的是客户端的泄漏
+        if (frameFd >= 0) close(frameFd);
+        close(fd);
+    }
+
+    const int after = CountOpenFds();
+
+    Check(failures == 0, "%d 次抓帧全部成功（失败 %d 次）", kIterations, failures);
+    Check(after <= before, "fd 数量没有增长：%d → %d（%+d）",
+          before, after, after - before);
+
+    if (after > before) {
+        Info("泄漏量 %d 个 —— 一次抓帧经过 pipe/memfd/连接三条路径，"
+             "漏一个就意味着跑几小时后 EMFILE", after - before);
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
 
 int main() {
+    // 把空闲超时压到 1 秒，否则 [6] 用例要等 30 秒
+    setenv("AUTOD_IDLE_TIMEOUT_SEC", "1", 1);
+
     printf("\033[1m=== autod 端到端集成测试 ===\033[0m\n");
     printf("使用真实 Dispatcher / SocketServer / Injector，截图后端为桩。\n");
 
@@ -333,6 +439,8 @@ int main() {
     TestTapRoundTrip(cfd, readFd);
     TestSwipeRoundTrip(cfd, readFd);
     TestProtocolRobustness(cfd);
+    TestIdleTimeout();
+    TestNoFdLeak();
 
     close(cfd);
     close(readFd);

@@ -4,14 +4,18 @@
 
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include "autod_log.h"
+#include "autod_platform.h"
 
-#ifdef __ANDROID__
+#if AUTOD_HAS_INIT_SOCKET
 #include <cutils/sockets.h>
 #endif
 
@@ -20,6 +24,27 @@ namespace {
 
 constexpr size_t kMaxFdsPerMessage = 1;
 constexpr int    kBacklog          = 8;
+
+// 连接空闲超时。
+//
+// 为什么必须有：ServeConnection 是在 accept 循环里**串行**调用的。
+// 没有超时的话，一个连上来就不发数据的客户端会让 recvmsg 永久阻塞，
+// 整个服务随之卡死（症状："服务还在，但谁来都没反应"）。
+//
+// 为什么不做并发：Injector 是有状态的（downTime、触控槽位映射），
+// 多线程并发注入会互相破坏手势状态。串行是这里的正确设计。
+constexpr int kDefaultIdleTimeoutSec = 30;
+
+// 允许用环境变量覆盖，方便测试（不然一个用例要等 30 秒）
+// 和运维调优。非法值忽略，回退到默认。
+int IdleTimeoutSec() {
+    const char* env = getenv("AUTOD_IDLE_TIMEOUT_SEC");
+    if (env && *env) {
+        const int v = atoi(env);
+        if (v > 0 && v <= 3600) return v;
+    }
+    return kDefaultIdleTimeoutSec;
+}
 
 std::string ErrnoString(int e) {
     return std::string(strerror(e)) + " (errno=" + std::to_string(e) + ")";
@@ -82,7 +107,7 @@ SocketServer::~SocketServer() {
 bool SocketServer::Start(std::string* error) {
     // --- 模式 1：init 已创建好 socket，通过环境变量传 fd ---
     if (!initSocketName_.empty()) {
-#ifdef __ANDROID__
+#if AUTOD_HAS_INIT_SOCKET
         // android_get_control_socket 读 ANDROID_SOCKET_<name>
         listenFd_ = android_get_control_socket(initSocketName_.c_str());
         if (listenFd_ < 0) {
@@ -178,6 +203,18 @@ void SocketServer::Run(const RequestHandler& handler) {
             ALOGE("autod: accept 失败: %s", strerror(errno));
             continue;
         }
+
+        // 给连接设个空闲超时。
+        //
+        // 没有它的话，一个连上来就不说话的客户端会让 RecvRequest 里的
+        // recvmsg 永久阻塞 —— 而 ServeConnection 是串行调用的，
+        // 整个服务就被这一个连接卡死了。这是很容易踩的坑：
+        // 症状是"服务还在，但谁来都没反应"。
+        timeval tv{};
+        tv.tv_sec  = IdleTimeoutSec();
+        tv.tv_usec = 0;
+        setsockopt(connFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
         ServeConnection(connFd, handler);
         close(connFd);
     }
@@ -238,8 +275,16 @@ int SocketServer::RecvRequest(int connFd, Request* out) {
         n = recvmsg(connFd, &msg, 0);
     } while (n < 0 && errno == EINTR);
 
-    if (n == 0) return -1;                       // 正常关闭
-    if (n < 0)  return errno;
+    if (n == 0) return -1;                       // 对端正常关闭
+
+    // SO_RCVTIMEO 到期会返回 EAGAIN/EWOULDBLOCK —— 对端连上但不发数据。
+    // 单独报出来，否则日志里只会看到一句含糊的"读请求失败"。
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        ALOGW("autod: 连接空闲超过 %d 秒，主动断开", IdleTimeoutSec());
+        return -1;
+    }
+
+    if (n < 0) return errno;
     if (static_cast<size_t>(n) != sizeof(Request)) return EMSGSIZE;
 
     // 丢弃并关闭对端误传的 fd，防止 fd 泄漏

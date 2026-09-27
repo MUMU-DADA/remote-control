@@ -23,6 +23,7 @@ cc_defaults {
         "main.cpp",
         "socket_server.cpp",
         "dispatch.cpp",        // 请求分发（可测试，从 main.cpp 抽出）
+        "selftest.cpp",        // --selftest 部署自检
         "inject.cpp",          // 平台无关的手势逻辑
     ],
 
@@ -44,6 +45,10 @@ cc_defaults {
         "-Wall",
         "-Werror",
         "-Wno-unused-parameter",
+
+        // 平台构建：能调系统服务、能接管 init socket。
+        // 不要用 __ANDROID__ 判断 —— NDK 构建时它同样是定义的。
+        "-DAUTOD_FULL_PLATFORM=1",
     ],
 
     cppflags: ["-std=c++20"],
@@ -71,7 +76,11 @@ cc_binary {
     ],
 
     // 自动安装到 /system/etc/init/autod.rc
-    init_rc: ["../init/autod.rc"],
+    //
+    // ⚠️ 路径里不能用 ".." —— Soong 会报
+    //    "Path is outside directory: ../init/autod.rc"
+    //    所以 autod.rc 必须与 Android.bp 同目录。
+    init_rc: ["autod.rc"],
 
     vendor: false,
     proprietary: false,
@@ -98,6 +107,36 @@ cc_binary {
 }
 
 // ---------------------------------------------------------------------------
+// 推荐目标：走 AOSP 官方的 virtual_touchpad 服务
+// ---------------------------------------------------------------------------
+//
+// 触控不再自己写 uinput，而是调 AOSP 官方的 virtual_touchpad Binder 服务。
+// 好处：autod **不需要 /dev/uinput 权限**（SELinux 大幅简化），
+//       少维护 ~350 行 uinput 代码。
+//
+// 前置条件（两个都要做，否则跑不起来）：
+//   1. 产品配置里加：PRODUCT_PACKAGES += virtual_touchpad
+//      它默认不在 aosp_arm64 的产品包里（是 VR 专用）
+//   2. sepolicy 按 sepolicy/autod.te 里「启用 vtp 后端」一节改
+//
+// 限制：官方实现只有 2 个触控槽位，做不了 3 指以上手势。
+cc_binary {
+    name: "autod_vtp",
+    defaults: ["autod_defaults"],
+    srcs: [
+        "capture_surfaceflinger.cpp",
+        "inject_vtp.cpp",
+    ],
+
+    shared_libs: [
+        "libvirtualtouchpadclient",
+    ],
+
+    vendor: false,
+    proprietary: false,
+}
+
+// ---------------------------------------------------------------------------
 // 测试目标：桩截图后端
 // ---------------------------------------------------------------------------
 //
@@ -110,6 +149,26 @@ cc_binary {
     defaults: ["autod_defaults"],
     srcs: [
         "capture_stub.cpp",
+        "inject_uinput.cpp",
+    ],
+    vendor: false,
+    proprietary: false,
+}
+
+// ---------------------------------------------------------------------------
+// 可选目标：screencap 截图后端
+// ---------------------------------------------------------------------------
+//
+// 走 exec /system/bin/screencap，不依赖 libgui。
+// 主要用途是 NDK 构建（见 tools/build-ndk.sh），那里完全不需要 AOSP 树。
+//
+// 在这里也提供一份是为了：想在 AOSP 树内编一个「不依赖 SurfaceFlinger 私有 API」
+// 的版本时可以用。注意它会多链一个 libgui（来自 autod_defaults），无害但多余。
+cc_binary {
+    name: "autod_screencap",
+    defaults: ["autod_defaults"],
+    srcs: [
+        "capture_screencap.cpp",
         "inject_uinput.cpp",
     ],
     vendor: false,

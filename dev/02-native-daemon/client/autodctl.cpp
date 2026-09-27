@@ -20,8 +20,15 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+// AndroidBitmap_compress 是 Android 专有 API。
+// 主机上（编译期自检、联调）退回到写 PPM。
+#ifdef __ANDROID__
 #include <android/bitmap.h>
 #include <android/data_space.h>
+#endif
+
+#include <string>
+#include <vector>
 
 #include "../daemon/protocol.h"
 
@@ -156,7 +163,9 @@ int CmdCapture(int sockFd, const char* outPath, bool raw) {
 
     int rc = 0;
     if (raw) {
-        const int fd = open(outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        // 不能是 const —— AndroidBitmap_compress 的第 6 个参数是 void*，
+        // 传 &fd 时 const int* 无法隐式转换（NDK 构建实测踩到）。
+        int fd = open(outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) {
             fprintf(stderr, "打开 %s 失败: %s\n", outPath, strerror(errno));
             rc = 1;
@@ -177,6 +186,7 @@ int CmdCapture(int sockFd, const char* outPath, bool raw) {
             fprintf(stderr, "已写入 %s (PPM)\n", outPath);
         }
     } else {
+#ifdef __ANDROID__
         // 用 AndroidBitmap_compress 编码成 PNG，和 AOSP 的 screencap 同一条路
         AndroidBitmapInfo info;
         memset(&info, 0, sizeof(info));
@@ -186,7 +196,10 @@ int CmdCapture(int sockFd, const char* outPath, bool raw) {
         info.format = ANDROID_BITMAP_FORMAT_RGBA_8888;
         info.flags  = ANDROID_BITMAP_FLAGS_ALPHA_PREMUL;
 
-        const int fd = open(outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        // ⚠️ 不能是 const —— AndroidBitmap_compress 的第 6 个参数是 void*，
+        //    传 &fd（const int*）无法隐式转换。NDK 构建实测踩到，
+        //    AOSP 构建同样会失败。
+        int fd = open(outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) {
             fprintf(stderr, "打开 %s 失败: %s\n", outPath, strerror(errno));
             rc = 1;
@@ -206,6 +219,32 @@ int CmdCapture(int sockFd, const char* outPath, bool raw) {
                 fprintf(stderr, "已写入 %s (PNG)\n", outPath);
             }
         }
+#else
+        // 主机上没有 AndroidBitmap_compress，退回到 PPM。
+        // 这条分支只为让本文件在开发机上能编译自检 —— 设备上永远走上面的 PNG 路径。
+        fprintf(stderr,
+                "提示: 主机构建无 PNG 编码，改为输出 PPM\n");
+        const int fd = open(outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            fprintf(stderr, "打开 %s 失败: %s\n", outPath, strerror(errno));
+            rc = 1;
+        } else {
+            char header[64];
+            const int headerLen = snprintf(header, sizeof(header), "P6\n%u %u\n255\n",
+                                           reply.width, reply.height);
+            if (write(fd, header, static_cast<size_t>(headerLen)) < 0) rc = 1;
+            const auto* src = static_cast<const uint8_t*>(base);
+            std::vector<uint8_t> row(static_cast<size_t>(reply.width) * 3);
+            for (uint32_t yy = 0; yy < reply.height && rc == 0; ++yy) {
+                for (uint32_t xx = 0; xx < reply.width; ++xx) {
+                    memcpy(&row[xx * 3], src + (static_cast<size_t>(yy) * reply.width + xx) * 4, 3);
+                }
+                if (write(fd, row.data(), row.size()) < 0) rc = 1;
+            }
+            close(fd);
+            if (rc == 0) fprintf(stderr, "已写入 %s (PPM)\n", outPath);
+        }
+#endif
     }
 
     munmap(base, reply.dataSize);
@@ -286,8 +325,20 @@ int main(int argc, char** argv) {
             case kOptSocket: socketPath = optarg; break;
             case kOptOut:    outPath = optarg;    break;
             case kOptRaw:    raw = true;          break;
-            case kOptMs:     ms = strtoul(optarg, nullptr, 10); break;
-            default:         break;
+            case kOptMs:     ms = static_cast<uint32_t>(strtoul(optarg, nullptr, 10)); break;
+
+            // ⚠️ 短选项 -o 走的是 'o'，不是 kOptOut。
+            //    少了这一行，`-o 路径` 会被 default 静默吞掉，
+            //    输出永远落到默认的 /data/local/tmp/shot.png。
+            case 'o':        outPath = optarg;    break;
+
+            case 'h':
+                Usage(argv[0]);
+                return 0;
+
+            default:
+                Usage(argv[0]);
+                return 1;
         }
     }
 

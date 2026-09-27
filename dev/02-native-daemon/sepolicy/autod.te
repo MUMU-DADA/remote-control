@@ -1,95 +1,243 @@
-# autod 的 SELinux domain 定义
+# autod 的 SELinux domain
 #
 # 安装位置：system/sepolicy/private/autod.te
+#          （type 声明也可以放这里，因为只有 autod 自己用）
 #
-# ⚠️ 这是一个【起始模板】，不是能直接编过的成品。
-#    里面的类型名和属性名随 AOSP 版本变化，且 AOSP 的 neverallow 规则会
-#    强制你补全缺失的 allow。正确的工作方式是：
-#      1. 先按下面写，编译
-#      2. 编译器报 neverallow 违反 → 按报错信息逐条加 allow
-#      3. 运行时看 dmesg / logcat 里的 avc: denied → 用 audit2allow 生成规则
+# =============================================================================
+# 本文件的所有类型名和宏都已对照 android-12.0.0_r34 实际源码核实，不是猜的：
 #
-#    audit2allow 用法（在 AOSP 树里）：
-#      adb shell dmesg | grep avc > avc.log
-#      ./prebuilts/build-tools/linux-x86/bin/audit2allow -i avc.log
+#   system/sepolicy/public/te_macros:162          init_daemon_domain 定义
+#   system/sepolicy/public/device.te:25           gpu_device
+#   system/sepolicy/public/device.te:54           uhid_device  ← 注意不是 uinput_device
+#   system/sepolicy/private/file_contexts:189     /dev/uinput → uhid_device
+#   system/core/rootdir/ueventd.rc:55             /dev/uinput 0660 uhid:uhid
+#   system/sepolicy/public/virtual_touchpad.te    uinput 访问权限的现成模板 ★
+#   system/sepolicy/private/surfaceflinger.te     GPU 访问 + binder 模式
+#   system/sepolicy/public/file.te:510            自建 socket 的类型声明方式
+#
+# ★ 特别值得一提的是 virtual_touchpad —— AOSP 自带一个用 /dev/uinput
+#   造虚拟触摸设备的域，注释写着 "Requires access to /dev/uinput to create
+#   and feed the virtual device"。我们这个域做的事和它几乎一样，
+#   所以 uinput 那几条规则直接照抄，不用自己摸索。
+# =============================================================================
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # 类型声明
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
-# 主 domain
 type autod, domain;
+type autod_exec, system_file_type, exec_type, file_type;
 
-# 二进制文件类型
-type autod_exec, exec_type, file_type, system_file_type;
+# 自建的 socket。coredomain_socket 属性让它能被 init 正确处理。
+# 参考 public/file.te 里 statsdw_socket 的声明方式。
+type autod_socket, file_type, coredomain_socket;
 
-# init 创建的 socket 类型（对应 autod.rc 里的 `socket autod ...`）
-type autod_socket, file_type;
+typeattribute autod coredomain;
 
-# 让 init 能启动这个 domain（自动处理 exec / 转换 / 属性）
+# 由 init 启动并做域转换。
+# 宏展开就是 domain_auto_trans(init, autod_exec, autod)
 init_daemon_domain(autod)
 
-# init 需要创建并设置 socket 的属主和标签
-allow init autod_socket:sock_file create_file_perms;
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Binder 基础设施
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
-# 允许 autod 使用 binder（找 servicemanager、收发 Binder 调用）
 binder_use(autod)
 
-# ---------------------------------------------------------------------------
-# 调用 SurfaceFlinger（截图）
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 截图：调 SurfaceFlinger
+# -----------------------------------------------------------------------------
+#
+# 对照 private/surfaceflinger.te：它自己 rw_file_perms 访问 gpu_device；
+# 我们作为客户端只需要能映射它给的 GraphicBuffer。
 
-# 建立到 surfaceflinger 的 Binder 连接
 binder_call(autod, surfaceflinger)
-
-# 在 servicemanager 里查找 surfaceflinger 服务
 allow autod surfaceflinger_service:service_manager find;
 
-# 截图需要访问 GPU / DMA-BUF 设备来映射 GraphicBuffer。
-# 具体类型名按平台不同（gpu_device / dmabuf_*_device / ion_device）。
+# GraphicBuffer 底层是 gralloc 分配的 dma-buf，需要访问 GPU 设备节点
 allow autod gpu_device:chr_file rw_file_perms;
-allow autod dmabuf_system_heap_device:chr_file r_file_perms;
-allow autod dmabuf_heap_device:chr_file r_file_perms;
 
-# ---------------------------------------------------------------------------
-# 调用 system_server（触控注入走 InputManagerService）
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 触控：写 /dev/uinput
+# -----------------------------------------------------------------------------
+#
+# 直接照抄 public/virtual_touchpad.te 的同名规则。
+#
+# ⚠️ 类型是 uhid_device，不是 uinput_device ——
+#    /dev/uinput 和 /dev/uhid 共用同一个标签。
+#    POSIX 权限是 0660 uhid:uhid，所以进程的 UID/GID 也要对
+#    （init.rc 里用 `user system` + `group system uhid`）。
 
-# 建立到 system_server 的 Binder 连接
-binder_call(autod, system_server)
+allow autod uhid_device:chr_file { w_file_perms ioctl };
 
-# 在 servicemanager 里查找 input 服务。
-# 服务标签名随版本变化，可能是 input_service / inputflinger_service。
-allow autod input_service:service_manager find;
+# -----------------------------------------------------------------------------
+# 对外 socket：AF_UNIX SOCK_SEQPACKET
+# -----------------------------------------------------------------------------
+#
+# ⚠️ SELinux 里**没有** unix_seqpacket_socket 这个类 ——
+#    内核把 SOCK_SEQPACKET 映射到 unix_stream_socket，别去找 seqpacket 类。
+#
+# socket 由 init 创建（autod.rc 里的 `socket autod seqpacket 0660 system system`），
+# 所以 init 负责 create/bind/listen，autod 只负责 accept/读写。
 
-# ---------------------------------------------------------------------------
-# 自己的 socket
-# ---------------------------------------------------------------------------
+allow init autod_socket:{ sock_file create setattr unlink };
 
 allow autod autod_socket:sock_file rw_file_perms;
-allow autod autod_socket:{ unix_stream_socket unix_seqpacket_socket } { create bind listen accept read write getattr };
-allow autod self:{ unix_stream_socket unix_seqpacket_socket } { create bind listen accept read write getattr };
+allow autod self:unix_stream_socket { create bind listen accept read write getattr shutdown };
 
-# 允许客户端连接（把 untrusted_app 换成你实际的客户端 domain）
+# 客户端要连这个 socket。
+# 如果调用方是 app，把下面两行的注释去掉并把 untrusted_app 换成实际 domain；
+# 如果调用方是 adb shell，用 shell；如果是自己的 native 进程，用它的 domain。
+#
 # allow untrusted_app autod_socket:sock_file write;
-# allow untrusted_app autod:unix_seqpacket_socket connectto;
+# allow untrusted_app autod:unix_stream_socket connectto;
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # 日志
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 allow autod self:capability { sys_admin };
-allow autod self:{ tcp_socket udp_socket } { read write };
 allow autod autod_exec:file { read open execute execute_no_trans map };
 
-# ---------------------------------------------------------------------------
-# 调试期临时规则（进生产前删掉）
-# ---------------------------------------------------------------------------
-# 实在卡住时，用 permissive domain 定位问题：
-#   permissive autod;
-# 这条会打印所有会被拒绝的操作而不真的拦，方便一次性收集全部 avc 报错。
-# 定位完必须删除 —— permissive domain 会过 CTS 失败。
+# -----------------------------------------------------------------------------
+# 第一阶段：先用 permissive 定位
+# -----------------------------------------------------------------------------
+#
+# 把下面这行放开，init 会打印所有「本来会被拒绝」的操作而不真的拦，
+# 可以一次性收集全部 avc 报错，然后逐条收 allow。
+#
+# 正确工作流：
+#   1. 放开 permissive
+#   2. adb shell dmesg | grep 'avc:.*autod' > avc.log
+#   3. ./prebuilts/build-tools/linux-x86/bin/audit2allow -i avc.log
+#   4. 把生成的 allow 逐条加进来
+#   5. 注释掉 permissive，重编
+#
+# ⚠️ 进生产前必须删掉 —— permissive domain 会导致 CTS 失败。
+#
+# permissive autod;
+
+# -----------------------------------------------------------------------------
+# 配套改动清单（别漏）
+# -----------------------------------------------------------------------------
+#
+# 1. system/sepolicy/private/file_contexts 追加：
+#       /system/bin/autod              u:object_r:autod_exec:s0
+#       /dev/socket/autod              u:object_r:autod_socket:s0
+#
+# 2. autod.rc（已随 Android.bp 的 init_rc 自动装到 /system/etc/init/）：
+#       service autod /system/bin/autod --init-socket autod
+#           class core
+#           user system
+#           group system uhid          ← uhid 组是 /dev/uinput 的属组，别漏
+#           seclabel u:r:autod:s0
+#           socket autod seqpacket 0660 system system
+#
+# 3. 确认 init 能访问 autod_exec：
+#       init 通过 init_daemon_domain 宏拿到执行权，通常无需额外规则。
+
+# =============================================================================
+# 变体：启用 autod_vtp（走 AOSP 官方 virtual_touchpad 服务）
+# =============================================================================
+#
+# 如果 autod 用 inject_vtp.cpp（而不是 inject_uinput.cpp），
+# 触控那部分权限可以整段替换掉 —— autod 不再碰 /dev/uinput。
+#
+# ── 删掉这两条 ──
+#   allow autod uhid_device:chr_file { w_file_perms ioctl };
+#   （autod.rc 里的 `group system uhid` 也不再需要，但留着无害）
+#
+# ── 换成这两条 ──
+#   binder_call(autod, virtual_touchpad)
+#   allow autod virtual_touchpad_service:service_manager find;
+#
+# 对比：
+#   自己写 uinput  → 需要 uhid 组 + uhid_device 访问权
+#   走官方服务     → 只需要能 find 到服务，权限面小得多
+#
+# ── 另外要做的事 ──
+#   PRODUCT_PACKAGES += virtual_touchpad
+#
+#   virtual_touchpad 默认**不**编进 aosp_arm64 产品包（它是 VR 专用）。
+#   不加这一行的话，autod_vtp 启动后会 attach 失败：
+#     "attach() 失败 (status=-2) —— 确认 virtual_touchpad 服务在跑"
+#
+# ── 已知限制 ──
+#   官方实现只有 2 个触控槽位（VirtualTouchpadEvdev::kTouchpads = 2），
+#   做不了 3 指以上手势。单指/双指（点击、滑动、缩放）都够用。
+
+# =============================================================================
+# UID 选择：system(1000) 还是 shell(2000)
+# =============================================================================
+#
+# autod 需要同时满足三件事，而它们的来源不同：
+#
+#   1. 能调 SurfaceFlinger::captureDisplay（截图）
+#   2. 能写 /dev/uinput（触控）
+#   3. 有 INJECT_EVENTS（如果将来启用 binder 触控后端）
+#
+# ── 1. 截图的权限判定（已对照源码核实）──
+#
+# frameworks/native/services/surfaceflinger/SurfaceFlinger.cpp:
+#
+#   static status_t validateScreenshotPermissions(const CaptureArgs& captureArgs) {
+#       const int uid = ipc->getCallingUid();
+#       if (uid == AID_GRAPHICS || PermissionCache::checkPermission(sReadFramebuffer, pid, uid)) {
+#           return OK;
+#       }
+#       if (captureArgs.uid == uid) {   // 只截自己
+#           return OK;
+#       }
+#       ALOGE("Permission Denial: can't take screenshot pid=%d, uid=%d", pid, uid);
+#       return PERMISSION_DENIED;
+#   }
+#
+# 而 SurfaceFlinger::captureDisplay() 第一件事就是调它，失败直接返回。
+#
+# ⚠️ 关键坑：`uid == AID_GRAPHICS` 比的是 **UID**，不是 GID。
+#    AID_GRAPHICS = 1003（见 system/core/libcutils/include/private/
+#    android_filesystem_config.h）。所以"把进程加进 graphics 组"
+#    **并不能**满足这个条件 —— 它要的是调用方的 UID 就是 1003。
+#
+#    第二条路是 READ_FRAME_BUFFER 这个权限。它的保护级别是
+#    `signature|recents`（frameworks/base/core/res/AndroidManifest.xml:4345）。
+#
+#    已知持有它的：
+#      AID_SHELL(2000) —— com.android.shell 在 AndroidManifest.xml:178 里声明了它。
+#                         `adb exec-out screencap` 能工作就是这个原因，**已确证**。
+#      AID_SYSTEM(1000) —— 待实测。system_server 自己截屏走的是内部路径，
+#                         不能直接推断外部进程以 1000 调用也能通过。
+#
+# ── 2. /dev/uinput ──
+#
+#   SELinux：allow <domain> uhid_device:chr_file { w_file_perms ioctl }
+#   POSIX  ：/dev/uinput 是 0660 uhid:uhid（system/core/rootdir/ueventd.rc:55）
+#            → 进程必须在 uhid 组里
+#   shell.te 里也有 `allow shell uhid_device:chr_file rw_file_perms`
+#
+# ── 3. INJECT_EVENTS ──
+#
+#   shell 和 system 都持有（`adb shell input` 就是 shell 身份）。
+#
+# ── 结论与实测方法 ──
+#
+# 两个 UID 都能满足 2 和 3；分歧只在 1。
+#
+#   先按 `user system` + `group system uhid graphics` 试。
+#   推上去第一步就跑：
+#
+#       autod --selftest
+#
+#   它会做一次真实抓帧。[2] 截图一节若报
+#
+#       Capture::Init 失败 / 抓帧失败: ... PERMISSION_DENIED
+#
+#   就把 autod.rc 改成：
+#
+#       user shell
+#       group shell uhid graphics
+#
+#   并让客户端也以 shell 身份运行（或把 socket 权限放宽到对应组）。
+#
+# 不要把这条留成"以后再说" —— 它决定了整个服务能不能用，
+# 而且是 30 秒就能测出来的事。

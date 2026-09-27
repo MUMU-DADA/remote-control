@@ -1,12 +1,22 @@
-# autod 二进制的 SELinux 文件标签
+# autod 的 SELinux 文件标签
 #
-# 安装位置：system/sepolicy/private/file_contexts
-#          （追加到文件末尾，或者在 system/sepolicy/private/ 下新建
-#            file_contexts 片段并加到 Android.bp 的 sepolicy 输入里）
-
-/system/bin/autod    u:object_r:autod_exec:s0
-
-# 如果 socket 由 autod 自己 bind（而不是 init 创建），还需要给它打标签：
-# /data/local/tmp/autod\.sock    u:object_r:autod_socket:s0
+# 安装位置：追加到 system/sepolicy/private/file_contexts
+#          （或作为片段加到 sepolicy 的 build 输入里）
 #
-# 但生产环境推荐用 init 的 `socket` 指令创建，标签会自动打对。
+# 已对照 android-12.0.0_r34 的 private/file_contexts 核实格式：
+#   /system/bin/virtual_touchpad     u:object_r:virtual_touchpad_exec:s0
+#   /dev/socket/statsdw              u:object_r:statsdw_socket:s0
+
+# 二进制
+/system/bin/autod           u:object_r:autod_exec:s0
+
+# 对外 socket
+#
+# init 在解析 autod.rc 的 `socket autod seqpacket ...` 时会创建 /dev/socket/autod。
+# init 按这里的规则给它打标签，所以这条必须存在，否则 socket 会是
+# socket_device 标签，autod 反而访问不了自己的 socket。
+/dev/socket/autod           u:object_r:autod_socket:s0
+
+# 开发期用的 socket（阶段 1 免 sepolicy 原型时会 bind 到这里）
+# 生产环境不需要，可以删掉。
+/data/local/tmp/autod\.sock u:object_r:autod_socket:s0

@@ -10,12 +10,30 @@ cc_binary {
     shared_libs: [
         "libbase",
         "liblog",
-        "libandroid",      // AndroidBitmap_compress（和 screencap 同一条编码路径）
+
+        // AndroidBitmap_compress 的**实现**在这里（链接期），不是 libandroid。
+        "libjnigraphics",
+    ],
+
+    // 编译期还需要 jni.h 与 ADataSpace：
+    //   <android/bitmap.h>   里 #include <jni.h>       → jni_headers
+    //   <android/data_space.h>（ADATASPACE_SRGB）      → libnativewindow_headers
+    //
+    // ⚠️ libjnigraphics 帮不上忙：它自己用的是 header_libs（只作用于自己），
+    //    **没有** export_header_lib_headers，所以这两个头都不会传给链接它的模块。
+    //    漏掉的报错是 "fatal error: 'jni.h' / 'android/data_space.h' file not found"，
+    //    跟库名八竿子打不着，很难猜（实测两个都踩过）。
+    //
+    //    官方写法对照：frameworks/base/cmds/bootanimation/Android.bp
+    //      header_libs: ["jni_headers"],
+    header_libs: [
+        "jni_headers",
+        "libnativewindow_headers",
     ],
 
     // autodctl.cpp 里 #include "../daemon/protocol.h"，
     // 所以 client/ 和 daemon/ 必须保持同级目录。
-    // 如果移动了目录，改成在 AOSP.bp 里加 local_include_dirs: ["../daemon"]。
+    // 注意这只影响 #include 解析，Soong 的 srcs/init_rc 不允许 ".."。
 
     cflags: [
         "-Wall",
@@ -24,4 +42,7 @@ cc_binary {
 
     cppflags: ["-std=c++20"],
     stl: "libc++_static",
+
+    vendor: false,
+    proprietary: false,
 }
