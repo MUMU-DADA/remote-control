@@ -87,6 +87,22 @@ log "推送二进制到 $TMP（阶段 1：不碰 /system）"
 "$ADB_BIN" -s "$SERIAL" shell "chmod 755 $TMP/autod $TMP/autodctl"
 
 # ---------------------------------------------------------------------------
+# 先跑自检。
+#
+# `autod --selftest` 逐项检查运行环境（/dev/uinput 权限、截图后端、
+# 触控后端、显示尺寸），每项失败都给排查方向。
+#
+# 放在起服务之前：环境不对的话，后面的截图/点击会一串失败，
+# 真正的原因会被淹没在后面的报错里。
+printf '\n--- autod --selftest ---\n'
+if "$ADB_BIN" -s "$SERIAL" shell "$TMP/autod --selftest" 2>&1; then
+    log "自检通过 ✓"
+else
+    warn "自检有失败项（见上）—— 后面的功能测试大概率也会失败"
+    warn "先按上面的 → 提示逐项排查，不要往下看"
+fi
+
+# ---------------------------------------------------------------------------
 log "启动 autod（前台模式、root 身份、跳过 sepolicy）"
 "$ADB_BIN" -s "$SERIAL" shell "pkill -f 'autod --socket' 2>/dev/null; rm -f $SOCK; sleep 1" >/dev/null 2>&1 || true
 "$ADB_BIN" -s "$SERIAL" shell \

@@ -92,38 +92,57 @@ AOSP 树自带的 30.8.3 正好是"旧版 + 与镜像同源" ✓。这也意味�
 要求模拟器 ≥ 该版本。用 30.8.3 跑 API 31 的**成品镜像**会因不匹配而启动失败；
 **自己编的镜像没有这个问题**（同一棵树、同一版本）。
 
-### 顺带：成品镜像与**当前已知阻塞**（重要）
+### ⭐ arm64 的关键修复：把 QEMU 机器换成带 PCIe 的 `virt`
 
-`get-stock-image.sh` 会下载 Google 官方的 Android 12 arm64 成品镜像
-（`system-images;android-31;default;arm64-v8a`，606MB，SHA1 与清单一致 ✓）。
-
-⚠️ **但它目前在本机跑不起来** —— 原因已定位，**别把它当成"先验证环境"的手段**：
+**症状**（曾让 arm64 完全跑不起来，且日志毫无线索）：
 
 ```
 qemu-system-aarch64-headless: PCI bus not available for hda
-emulator: Done with QEMU main loop          ← QEMU 致命退出，模拟器跟着关
+emulator: Done with QEMU main loop          ← QEMU 创建设备失败，直接退出
 ```
 
-模拟器给 arm 的 `ranchu` 机器挂了 **PCI 设备**（`intel-hda` 音频、`virtio-serial-pci`），
-而 arm 的 ranchu **没有 PCI 总线** → QEMU 直接退出。
+没有 guest 内核输出，`adb` 永远看不到设备，看起来像"arm64 在 x86_64 上跑不了"。
 
-已经排除的尝试（都无效）：
+**根因**：模拟器给 arm64 guest 挂了 **16 个 PCI 设备** ——
+`virtio-serial-pci`、`virtio_input_multi_touch_pci_1..11`、`virtio-wifi-pci`、
+`virtio-vsock-pci`，外加 `-soundhw hda`（开了 `VirtioSndCard` 特性则变成
+`virtio-snd-pci`）。而 arm 的 **`ranchu` 机器没有 PCI 总线** → QEMU 建不出设备、直接退出。
+
+**解决**：用 `-qemu` 透传，把机器换成带 PCIe 的 `virt`：
+
+```bash
+./run-emulator.sh            # 脚本已内置，arm64 自动加 -qemu -machine type=virt
+# 想退回原机器： EMU_MACHINE_OVERRIDE=none ./run-emulator.sh
+```
+
+实测对比（同一份成品镜像、同一台机器）：
+
+| | 改之前 | 改之后 |
+|---|---|---|
+| QEMU 存活 | < 1 秒即退出 | 持续运行 |
+| `PCI bus not available` | 出现 | **0 次** |
+| `adb devices` | 空 | `emulator-5554` 出现并上线 |
+
+**排除过的无效尝试**（记下来免得再走一遍）：
 
 | 尝试 | 结果 |
 |---|---|
-| `-no-audio` / `-audio none` / `QEMU_AUDIO_DRV=none` | 音频设备照样被挂上 |
-| 改 `hardware-qemu.ini` 里 `hw.audio* = false` | 构建模式下被模拟器重写，忽略 |
-| 换 31.x 模拟器（镜像自带 `Pkg.Dependencies=emulator#31.2.7`） | 同样的 hda 报错 |
-| AVD 模式（`-avd`，配置里音频已关） | 模拟器**直接段错误**（exit 139，日志为空） |
+| `-no-audio` / `-audio none` / `QEMU_AUDIO_DRV=none` | 音频设备照样被拼进命令行 |
+| 改 `hardware-qemu.ini` 的 `hw.audio*` | 构建模式下由模拟器重写，无效 |
+| 镜像 `advancedFeatures.ini` 加 `VirtioSndCard = on` | 只是把 `hda` 换成 `virtio-snd-pci`，仍是 PCI |
+| AVD 模式（`-avd`，配置里音频已关） | 模拟器段错误 / 报 Broken AVD system path |
+| 换 31.x 模拟器 | 同样的 PCI 报错 |
 
-而且这份成品镜像还会让模拟器警告 `unexpected system image feature string`，
-说明它和手头的模拟器并不是配套版本。
+### 成品镜像（`get-stock-image.sh`）
 
-**结论**：arm64 的验证要用**自己编的镜像**（与模拟器同源、feature 匹配），
-也就是 `./build-images.sh` 的产物。成品镜像留作对照样本（镜像内容本身是好的）。
+`get-stock-image.sh` 下载 Google 官方的 Android 12 arm64 成品镜像
+（`system-images;android-31;default;arm64-v8a`，606MB，SHA1 与清单一致 ✓），
+`run-stock-image.sh` 直接以构建模式启动它 —— 不需要 AVD、不需要 SDK 布局。
+用途：还没编出自己的镜像时先确认环境，或在自制镜像出问题时做对照
+（与自制镜像**共用同一套启动参数**，所以能直接判断问题出在环境还是镜像）。
 
-`run-stock-image.sh` 保留着（一旦版本匹配就能直接用），
-`screenshot.sh` 用于起来之后抓图留证。
+镜像里的 `build.prop` 在顶层，构建模式需要 `system/build.prop`；
+`initrd` 也缺 —— 这两个由 `get-stock-image.sh` / `run-stock-image.sh` 自动补齐（见坑 2、3）。
 
 ---
 

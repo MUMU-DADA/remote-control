@@ -104,6 +104,31 @@ else
     [ "$WIPE" = 1 ] && args+=(-wipe-data)
     [ "$WRITABLE" = 1 ] && args+=(-writable-system)
 
+    # ---------------------------------------------------------------------
+    # arm64 guest 的关键修复：把 QEMU 机器换成带 PCIe 的 virt
+    #
+    # 症状：模拟器启动后立刻退出，日志只有一行、且没有任何 guest 输出：
+    #     qemu-system-aarch64-headless: PCI bus not available for hda
+    #     emulator: Done with QEMU main loop
+    #
+    # 原因：模拟器给 arm64 guest 挂了 16 个 PCI 设备 —— virtio-serial-pci、
+    #   virtio_input_multi_touch_pci_1..11、virtio-wifi-pci、virtio-vsock-pci，
+    #   再加上 `-soundhw hda`（开了 VirtioSndCard 特性则变成 virtio-snd-pci）。
+    #   而 arm 的 `ranchu` 机器**没有 PCI 总线** → QEMU 创建设备失败、直接退出。
+    #   `-no-audio` / `-audio none` / `QEMU_AUDIO_DRV=none` / 改 hardware-qemu.ini
+    #   都拦不住（设备是模拟器自己拼进命令行的）。
+    #
+    # 解决：用 `-qemu` 透传，把机器改成带 PCIe 的 virt，这些设备就挂得上了。
+    #   实测：改之前 QEMU 活不过 1 秒；改之后 arm64 正常开机、adb 可见设备。
+    #
+    # 想换回原机器： EMU_MACHINE_OVERRIDE=none ./run-emulator.sh
+    # ---------------------------------------------------------------------
+    if [ "$EMU_ABI" = arm64 ]; then
+        if [ "${EMU_MACHINE_OVERRIDE:-virt}" != "none" ]; then
+            args+=(-qemu -machine "type=${EMU_MACHINE_OVERRIDE:-virt}")
+        fi
+    fi
+
     log "启动模拟器（ABI：$EMU_ABI，accel=$EMULATOR_ACCEL）"
     log "  $ABI_NOTE"
     log "  sysdir : ${PRODUCT_OUT#"$PROJECT_ROOT"/}"
