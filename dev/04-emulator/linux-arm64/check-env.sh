@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 # 前置检查：跑模拟器之前，先确认缺什么。
 #
-#   ./check-env.sh
+#   ./check-env.sh              # 检查默认目标（arm64）
+#   ./check-env.sh --fast       # 检查 x86_64 快速通道（KVM）
 #
 # 只读检查，不改任何东西；每项 FAIL 都会给出能直接执行的修复命令。
+
+# 先扫 ABI 开关，再 source common.sh
+for _a in "$@"; do
+    case "$_a" in
+        --fast|--x86_64) EMU_ABI=x86_64 ;;
+        --arm64)         EMU_ABI=arm64 ;;
+    esac
+done
+export EMU_ABI
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
@@ -49,9 +59,18 @@ else
 fi
 
 if [ -x "$EMULATOR_CHECK" ]; then
-    accel="$("$EMULATOR_CHECK" accel 2>&1 | head -3 | tr '\n' ' ')"
-    note "emulator-check accel: $accel"
-    note "  ↑ 只对 x86_64 guest 有意义；arm64 guest 走 TCG，用不到 KVM"
+    accel_code="$("$EMULATOR_CHECK" accel 2>&1 | sed -n '2p')"
+    accel_desc="$("$EMULATOR_CHECK" accel 2>&1 | sed -n '3p')"
+    if [ "$EMU_ABI" = x86_64 ]; then
+        if [ "$accel_code" = "0" ]; then
+            ok "KVM 可用 —— $accel_desc"
+        else
+            bad "KVM 不可用（状态码 ${accel_code:-?}：$accel_desc）—— x86_64 guest 会退回 TCG，快不起来"
+            note "修复： 确认 /dev/kvm 存在且当前用户可访问"
+        fi
+    else
+        note "emulator-check accel: ${accel_code:-?} / ${accel_desc:-?}   ← arm64 guest 用不到 KVM，只能 TCG"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -68,7 +87,9 @@ else
     bad "没有容器 $BUILDER_CONTAINER（见 docs/07-environment.md 第 4 节）"
 fi
 
-note "lunch 目标：$LUNCH_TARGET  →  产物目录：out/target/product/$PRODUCT_DEVICE"
+note "目标 ABI：$EMU_ABI"
+note "lunch   ：$LUNCH_TARGET"
+note "产物目录：out/target/product/$PRODUCT_DEVICE"
 
 if [ -d "$PRODUCT_OUT" ]; then
     ok "产物目录存在"
@@ -85,9 +106,20 @@ if [ -d "$PRODUCT_OUT" ]; then
     done < <(optional_images)
     [ "$missing" = 1 ] && note "修复： ./build-images.sh"
 else
-    bad "还没有 $PRODUCT_OUT —— 没编过模拟器目标"
-    note "修复： ./build-images.sh        （首次全量约 100GB、数小时）"
-    note "说明： aosp_arm64-userdebug 是 GSI，产物在 generic_arm64/，起不了模拟器"
+    bad "还没有 $PRODUCT_OUT —— 这个目标没编过"
+    note "修复： ./build-images.sh            （arm64：首次全量约 100GB、数小时）"
+    note "      ./build-images.sh --fast     （x86_64：同架构，KVM 加速，日常内循环用它）"
+    note "说明： aosp_arm64-userdebug 是 GSI，产物在 generic_arm64/ 里只有 system 侧镜像，"
+    note "       没有 kernel-ranchu / ramdisk.img / vendor.img —— 起不了模拟器。"
+fi
+
+if [ -d "$OTHER_PRODUCT_OUT" ]; then
+    note "另一个 ABI 的产物已存在：$(basename "$OTHER_PRODUCT_OUT")"
+    if [ "$EMU_ABI" = arm64 ]; then
+        note "  → 想跑得快： ./run-emulator.sh --fast"
+    else
+        note "  → 想验证 arm64： ./run-emulator.sh --arm64"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -120,9 +152,10 @@ else
     warn "内存只有 ${mem:-未知}GiB，TCG 模拟器 + 编译会紧张"
 fi
 
-if [ -e /dev/kvm ]; then
-    note "/dev/kvm 存在，但对 arm64 guest 无效（只能同架构加速）"
-fi
+case "$EMU_ABI" in
+    arm64)  [ -e /dev/kvm ] && note "/dev/kvm 存在，但对 arm64 guest 无效（只能同架构加速）" ;;
+    x86_64) kvm_usable && ok "KVM 就绪（x86_64 guest 靠它加速）" || warn "KVM 不可用，x86_64 guest 会退回慢速 TCG" ;;
+esac
 
 # ---------------------------------------------------------------------------
 printf '\n'

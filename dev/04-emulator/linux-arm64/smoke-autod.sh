@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 阶段 1 冒烟测试：把 autod / autodctl 推进模拟器，验证截图与触控链路。
 #
-#   ./smoke-autod.sh                        # 用产物目录里的 autod / autodctl
+#   ./smoke-autod.sh                        # 用产物目录里的 autod / autodctl（默认 arm64）
+#   ./smoke-autod.sh --fast                 # 用 x86_64 通道的产物
 #   ./smoke-autod.sh /path/autod /path/autodctl
 #   ./smoke-autod.sh --no-frame-check       # 跳过“截图是不是全黑”的分析
 #   ./smoke-autod.sh --stop                 # 停掉设备上的 autod
@@ -12,6 +13,15 @@
 # 想走 dev/02-native-daemon/tools/deploy_cuttlefish.sh 那种推 /system/bin 的路径，
 # 先用 ./run-emulator.sh --writable-system 启动模拟器（否则 adb remount 必然失败）。
 
+# 先扫 ABI 开关，再 source common.sh
+for _a in "$@"; do
+    case "$_a" in
+        --fast|--x86_64) EMU_ABI=x86_64 ;;
+        --arm64)         EMU_ABI=arm64 ;;
+    esac
+done
+export EMU_ABI
+
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 FRAME_CHECK=1
@@ -20,6 +30,7 @@ AUTODCTL_BIN=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --fast|--x86_64|--arm64) ;;                    # 已在 source 之前处理
         --no-frame-check) FRAME_CHECK=0 ;;
         --stop)
             ADB_BIN="$(resolve_adb)"

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# 启动 arm64 模拟器（无显示宿主：-no-window + swiftshader），等到系统真正起来。
+# 启动模拟器（无显示宿主：-no-window + swiftshader），等到系统真正起来。
 #
-#   ./run-emulator.sh                  # 前台等 boot_completed（首次 10~40 分钟，TCG）
+#   ./run-emulator.sh                  # 默认 arm64：TCG，首次开机 10~40 分钟
+#   ./run-emulator.sh --fast           # x86_64 + KVM：开机几十秒，开发机日常内循环用它
 #   ./run-emulator.sh --no-wait        # 起了就返回，不等开机
-#   ./run-emulator.sh --writable-system    # 开 system 可写（想跑 deploy_cuttlefish.sh 时用）
+#   ./run-emulator.sh --writable-system    # 开 system 可写（想推 /system/bin 时用）
 #   ./run-emulator.sh --wipe-data      # 清掉 userdata 重来
 #   ./run-emulator.sh --stop           # 停掉本端口的模拟器
 #   ./run-emulator.sh --tail           # 跟模拟器控制台日志
@@ -11,9 +12,19 @@
 # 为什么必须用这个脚本而不是直接敲 emulator：
 #   1. 用绝对路径调 AOSP 自带的 emulator，它自己会把包内 lib64/qt 加进
 #      LD_LIBRARY_PATH；直接调 qemu/linux-x86_64/qemu-system-* 会缺库。
-#   2. 传 -sysdir 指向模拟器产物目录（不是 GSI 的 generic_arm64）。
+#   2. 传 -sysdir 指向**模拟器产物目录**（不是 GSI 的 generic_arm64）。
 #   3. 默认 -no-window -gpu swiftshader_indirect —— 本机没有 DISPLAY，
 #      但 guest 侧仍然会真实合成画面，所以 captureDisplay() 拿得到帧。
+#   4. 加速方式按 ABI 自动选：arm64 只能 TCG，x86_64 走 KVM。
+
+# 先扫 ABI 开关，再 source common.sh
+for _a in "$@"; do
+    case "$_a" in
+        --fast|--x86_64) EMU_ABI=x86_64 ;;
+        --arm64)         EMU_ABI=arm64 ;;
+    esac
+done
+export EMU_ABI
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
@@ -25,6 +36,7 @@ DATADIR="$RUN_DIR/data"
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --fast|--x86_64|--arm64) ;;                    # 已在 source 之前处理
         --no-wait)         WAIT=0 ;;
         --wipe-data)       WIPE=1 ;;
         --writable-system) WRITABLE=1 ;;
@@ -37,10 +49,10 @@ while [ $# -gt 0 ]; do
             if "$adb_bin" -s "$serial" emu kill >/dev/null 2>&1; then
                 log "已通过 adb 停掉 $serial"
             else
-                pkill -f "qemu-system-aarch64.*-port $EMULATOR_PORT" && log "已 pkill 停掉" || warn "没找到在跑的模拟器"
+                pkill -f "qemu-system-.*-port $EMULATOR_PORT" && log "已 pkill 停掉" || warn "没找到在跑的模拟器"
             fi
             exit 0 ;;
-        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) die "未知参数：$1（-h 看用法）" ;;
     esac
     shift
@@ -58,9 +70,16 @@ while read -r img; do
     image_ok "$PRODUCT_OUT/$img" || missing="$missing $img"
 done < <(required_images)
 if [ -n "$missing" ]; then
-    die "产物不全，缺：$missing
+    die "产物不全（ABI：$EMU_ABI），缺：$missing
     目录： $PRODUCT_OUT
-    先编： ./build-images.sh          （注意：aosp_arm64 是 GSI，产物在 generic_arm64/，起不了模拟器）"
+    先编： ./build-images.sh$([ "$EMU_ABI" = x86_64 ] && printf ' --fast')
+    注意： aosp_arm64-userdebug 是 GSI，产物在 generic_arm64/，**起不了模拟器**；
+           模拟器目标只有 sdk_phone64_arm64（默认）与 sdk_phone64_x86_64（--fast）"
+fi
+
+# x86_64 靠 KVM 才有意义；不可用就别装作能快
+if [ "$EMU_ABI" = x86_64 ] && ! kvm_usable; then
+    warn "KVM 不可用（$EMULATOR_CHECK accel）—— x86_64 guest 会退回 TCG，开机同样很慢"
 fi
 
 if "$ADB_BIN" -s "$SERIAL" get-state >/dev/null 2>&1; then
@@ -78,14 +97,15 @@ else
         -no-snapshot
         -no-boot-anim
         -no-audio
-        -accel   off                   # 跨架构本来就没有加速，显式写出来避免误解
+        -accel   "$EMULATOR_ACCEL"     # arm64=off（只能 TCG）/ x86_64=on（走 KVM）
         -memory  "$EMULATOR_MEMORY_MB"
         -cores   "$EMULATOR_CORES"
     )
     [ "$WIPE" = 1 ] && args+=(-wipe-data)
     [ "$WRITABLE" = 1 ] && args+=(-writable-system)
 
-    log "启动模拟器（arm64 guest / x86_64 宿主 → TCG 软件模拟，慢是正常的）"
+    log "启动模拟器（ABI：$EMU_ABI，accel=$EMULATOR_ACCEL）"
+    log "  $ABI_NOTE"
     log "  sysdir : ${PRODUCT_OUT#"$PROJECT_ROOT"/}"
     log "  datadir: ${DATADIR#"$PROJECT_ROOT"/}"
     log "  gpu    : $EMULATOR_GPU    内存: ${EMULATOR_MEMORY_MB}MB    核: $EMULATOR_CORES"
@@ -102,15 +122,16 @@ if [ "$WAIT" != 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 等 adb + 等开机完成。TCG 下这一步很慢，进度按 30s 打点。
-log "等待系统启动（TCG 全软件模拟，首次可能 10~40 分钟；Ctrl-C 不会杀掉模拟器）"
+# 等 adb + 等开机完成。进度按 30s 打点。
+log "等待系统启动（超时 ${BOOT_TIMEOUT_S}s；Ctrl-C 不会杀掉模拟器）"
 START=$(date +%s)
 "$ADB_BIN" -s "$SERIAL" wait-for-device
 log "adb 已连上，等 sys.boot_completed…"
 
 while :; do
     el=$(( $(date +%s) - START ))
-    if ! kill -0 "${EMU_PID:-0}" 2>/dev/null && ! "$ADB_BIN" -s "$SERIAL" get-state >/dev/null 2>&1; then
+    if [ -n "$EMU_PID" ] && ! kill -0 "$EMU_PID" 2>/dev/null && \
+       ! "$ADB_BIN" -s "$SERIAL" get-state >/dev/null 2>&1; then
         echo
         warn "模拟器进程退出了。日志尾部："
         tail -30 "$LOG" >&2
@@ -124,7 +145,7 @@ while :; do
     fi
     if [ "$el" -ge "$BOOT_TIMEOUT_S" ]; then
         printf '\n'
-        warn "超过 ${BOOT_TIMEOUT_S}s 还没起来（TCG 下偶尔会更久）"
+        warn "超过 ${BOOT_TIMEOUT_S}s 还没起来"
         warn "看日志： tail -50 ${LOG#"$PROJECT_ROOT"/}"
         die "超时"
     fi
@@ -139,9 +160,10 @@ done
 log "设备信息"
 printf '  %-22s %s\n' \
     "serial"      "$SERIAL" \
+    "ABI(镜像)"   "$EMU_ABI" \
     "型号"        "$("$ADB_BIN" -s "$SERIAL" shell getprop ro.product.model | tr -d '\r')" \
     "Android"     "$("$ADB_BIN" -s "$SERIAL" shell getprop ro.build.version.release | tr -d '\r')" \
-    "ABI"         "$("$ADB_BIN" -s "$SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" \
+    "ABI(设备)"   "$("$ADB_BIN" -s "$SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" \
     "build type"  "$("$ADB_BIN" -s "$SERIAL" shell getprop ro.build.type | tr -d '\r')" \
     "屏幕"        "$("$ADB_BIN" -s "$SERIAL" shell wm size | tr -d '\r' | awk -F': ' '{print $2}')" \
     "uid"         "$("$ADB_BIN" -s "$SERIAL" shell id -u | tr -d '\r')"
@@ -159,4 +181,4 @@ else
     fi
 fi
 
-printf '\n下一步： ./smoke-autod.sh\n'
+printf '\n下一步： ./smoke-autod.sh%s\n' "$([ "$EMU_ABI" = x86_64 ] && printf ' --fast')"

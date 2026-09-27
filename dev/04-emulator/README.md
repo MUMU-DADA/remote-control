@@ -10,6 +10,31 @@
 
 ---
 
+## 开发测试怎么分层（选对层，别每改一行都等 40 分钟）
+
+| 层 | 命令 | 耗时 | 能发现什么 | 要模拟器 |
+|---|---|---|---|---|
+| **0 · 主机单测** | `cd dev/02-native-daemon/tests && sudo make run` | 秒 | 注入后端、socket、协议、分发、`SCM_RIGHTS` 帧通道 | 不要 |
+| **1 · 主机整链路** | `tools/build-autod.sh` → `autod-host` / `autodctl-host` | 秒 | 客户端 ↔ 服务端完整回环（截图后端用 `fake_screencap` 替身） | 不要 |
+| **2 · 编译验证** | 容器内 `m autod autodctl` | 分钟 | AOSP 头/API/bionic 用法对不对（`jni.h` 那类坑就是这样抓到的） | 不要 |
+| **3 · x86_64 模拟器** ⭐ | `./build-images.sh --fast` + `./run-emulator.sh --fast` | 首次编译 1~2 小时，之后**开机几十秒** | 真实 SurfaceFlinger 截图、真实 `/dev/uinput` 触控、init.rc、SELinux | 要，KVM 加速 |
+| **4 · arm64 模拟器 / 真机** | `./build-images.sh` + `./run-emulator.sh` | 编译 1~2 小时，开机 10~40 分钟 | ABI 相关差异、与产品一致的行为；**也是 Windows ROM 的来源** | 要，只能 TCG |
+
+**日常内循环走第 3 层。** x86_64 guest 与 arm64 guest 的源码路径完全一样
+（截图走 libgui/SurfaceFlinger、触控走 uinput、协议与分发跟架构无关），
+但同架构 + KVM 让开机从 40 分钟变成几十秒，改完 `m autod` + `adb push` + 重启服务是秒级。
+只有 ABI 相关的疑虑（指针宽度、对齐、bionic 差异）才必须回到第 4 层。
+
+> **最容易踩的坑**：`lunch aosp_arm64-userdebug` 编出来的是 **GSI**，产物在
+> `out/target/product/generic_arm64/`，**永远起不了模拟器**（没有 `kernel-ranchu` /
+> `ramdisk.img` / `vendor.img`）。它只适合 `m autod` 这类单模块编译验证，
+> 不要拿它当模拟器镜像 —— 这也是"看起来模拟器跑不起来"的真正原因。
+
+编译成本：arm64 与 x86_64 是两套 target 产物（host 工具与大部分中间产物复用），
+`out/` 会各占几十 GB。磁盘不够时可以 `rm -rf out/target/product/<不要的那个>`。
+
+---
+
 ## 先读这一节：三个硬约束
 
 后面所有脚本都是围绕这三条写的，绕不过去。

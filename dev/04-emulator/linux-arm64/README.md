@@ -9,6 +9,30 @@
 
 ---
 
+## 两条通道：arm64（默认）/ x86_64（`--fast`）
+
+| | arm64（默认） | x86_64（`--fast`） |
+|---|---|---|
+| lunch 目标 | `sdk_phone64_arm64-userdebug` | `sdk_phone64_x86_64-userdebug` |
+| 产物目录 | `out/target/product/emulator64_arm64/` | `out/target/product/emulator64_x86_64/` |
+| 硬件加速 | 无（跨架构，只能 TCG） | **KVM** |
+| 开机耗时 | 10~40 分钟 | **几十秒** |
+| 定位 | 最终验证；**Windows 侧 ROM 的来源** | 开发机日常内循环 |
+
+```bash
+./build-images.sh --fast     # 编 x86_64 镜像（与 arm64 是两套 target 产物，host 工具复用）
+./run-emulator.sh --fast     # 起 x86_64 模拟器（脚本会自动用 -accel on 走 KVM）
+./smoke-autod.sh --fast      # 用 x86_64 的产物冒烟
+```
+
+源码级验证（截图链路 / 触控注入 / 协议 / 分发）两者完全等价，
+只有 ABI 相关的疑虑（指针宽度、对齐、bionic 差异）才必须回到 arm64。
+
+切换方式三选一：`--fast` 只影响本次；`export EMU_ABI=x86_64` 影响整个 shell；
+`LUNCH_TARGET=... PRODUCT_DEVICE=...` 可完全自定义目标。
+
+---
+
 ## 前置条件
 
 ```bash
