@@ -94,6 +94,20 @@ public:
         out_ += "null";
         return *this;
     }
+
+    // 直接嵌入一段**已经渲染好**的 JSON。
+    //
+    // 用途：把一个子对象交给别的模块去渲染（比如 ServiceState 自己知道
+    // config/runtime 长什么样），避免为了嵌套而写一堆手工拼字符串。
+    //
+    // ⚠️ 不做任何校验 —— 传进来的必须是合法 JSON。传了坏数据，
+    //    产出的就是坏 JSON。调用方自己保证（本项目的调用点都是
+    //    同一个 Writer 渲染出来的）。
+    Writer& RawJson(const std::string& rendered) {
+        Sep();
+        out_ += rendered;
+        return *this;
+    }
     // 浮点：固定 3 位小数，够表达尺寸/耗时/比例，且不会出现科学计数法
     Writer& Val(double v) {
         Sep();

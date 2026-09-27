@@ -100,6 +100,10 @@ public:
 
     // 某个包当前是否在运行（pid 查询，用于 Kill 后确认）
     bool IsRunning(const std::string& package, int32_t* pid);
+
+  private:
+    // Init 会被反复调用（Describe 逐命令判可用性），日志只打一次
+    bool loggedOnce_ = false;
 };
 
 }  // namespace autod

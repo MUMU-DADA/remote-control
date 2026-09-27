@@ -311,6 +311,16 @@ void Usage(const char* argv0) {
   rm [-r] <路径>                            删除
   mv <源> <目标>                            重命名/移动
 
+服务自身（v3）:
+  describe                                  能力清单：有哪些命令、哪些可用
+  config                                    当前配置与运行时状态
+  set-config <key> <value> [...]            热改配置
+  selftest                                  环境自检（有副作用：会抓帧、建设备）
+  stats                                     运行统计
+  log [sinceSeq]                            取最近日志（增量拉取）
+  shutdown                                  优雅退出
+  restart                                   退出并由 init 重启（退出码 1）
+
 选项:
   --socket <路径>   autod 的 Unix socket 路径（必填）
 )", argv0);
@@ -699,6 +709,40 @@ int main(int argc, char** argv) {
         }
         if (a == nullptr || b == nullptr) { Usage(argv[0]); close(sockFd); return 1; }
         rc = CmdV2(sockFd, Cmd::FileOp, BuildPayload({"rename", a, b}), 0);
+    // ── v3：服务自身 ──
+    } else if (cmd == "describe") {
+        rc = CmdV2(sockFd, Cmd::Describe, {}, 0);
+    } else if (cmd == "config") {
+        rc = CmdV2(sockFd, Cmd::GetConfig, {}, 0);
+    } else if (cmd == "set-config") {
+        // 参数成对：key value key value…
+        std::string payload;
+        int pairs = 0;
+        for (int i = 0; i + 1 < remaining - 1; i += 2) {
+            if (pairs++ > 0) payload.push_back('\0');
+            payload += args[i];
+            payload.push_back('\0');
+            payload += args[i + 1];
+        }
+        if (pairs == 0) {
+            fprintf(stderr, "用法: set-config <key> <value> [<key> <value> ...]\n");
+            fprintf(stderr, "可改: verbose, log-level, display, socket-mode, touch-range\n");
+            fprintf(stderr, "需重启: socket, init-socket, uid, gid\n");
+            close(sockFd);
+            return 1;
+        }
+        rc = CmdV2(sockFd, Cmd::SetConfig, payload, 0);
+    } else if (cmd == "selftest") {
+        rc = CmdV2(sockFd, Cmd::SelfTest, {}, 0);
+    } else if (cmd == "stats") {
+        rc = CmdV2(sockFd, Cmd::Stats, {}, 0);
+    } else if (cmd == "log") {
+        rc = CmdV2(sockFd, Cmd::Log,
+                   BuildPayload({remaining >= 2 ? args[0] : ""}), 0);
+    } else if (cmd == "shutdown") {
+        rc = CmdV2(sockFd, Cmd::Shutdown, {}, 0);
+    } else if (cmd == "restart") {
+        rc = CmdV2(sockFd, Cmd::Restart, {}, 0);
     } else {
         fprintf(stderr, "未知子命令: %s\n", cmd.c_str());
         Usage(argv[0]);

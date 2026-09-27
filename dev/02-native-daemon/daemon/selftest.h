@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace autod {
 
@@ -17,5 +18,15 @@ namespace autod {
 //
 // 返回 0 表示全部通过，非 0 是失败项数。
 int RunSelfTest(bool verbose, uint32_t touchWidth, uint32_t touchHeight);
+
+// 同一套检查的 JSON 版本（API 的 SelfTest 命令用）。
+//
+// 与上面共用检查逻辑，只是呈现方式不同 —— 两份实现迟早会不一致，
+// 而不一致的那个一定是没人跑的那个。
+//
+// 注意：跑自检会**真的**抓一帧、真的建一个 uinput 设备。它是有副作用的，
+// 不是纯查询。频繁调用会在 logcat 里留下痕迹，也会短暂占用输入设备。
+std::string RunSelfTestJson(bool verbose, uint32_t touchWidth,
+                            uint32_t touchHeight);
 
 }  // namespace autod

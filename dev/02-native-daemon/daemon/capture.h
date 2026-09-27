@@ -50,6 +50,12 @@ class Capture {
     // 显式指定显示 ID（0 表示自动选主显示）。
     void SetDisplayId(uint64_t id);
 
+    // 立刻解析当前 displayId 并缓存。
+    //
+    // 公开出来是给 API 用的：客户端热改 display 之后要能**当场**知道
+    // 这个 id 能不能用，而不是等下一次抓帧才失败。
+    bool ResolveDisplay(std::string* error);
+
     // 释放缓存的 Binder 资源。析构时自动调用。
     void Shutdown();
 
@@ -57,8 +63,6 @@ class Capture {
     static const char* BackendName();
 
   private:
-    bool ResolveDisplay(std::string* error);
-
     uint64_t requestedDisplayId_ = 0;
     uint64_t activeDisplayId_    = 0;
     bool     resolved_           = false;

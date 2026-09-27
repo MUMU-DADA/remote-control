@@ -69,10 +69,11 @@ DAEMON="$SRC/daemon"
 #   inject_binder.cpp           依赖 libbinder + AIDL 生成的 C++ 头（且故意 #error）
 for f in main.cpp socket_server.cpp dispatch.cpp selftest.cpp \
          capture_screencap.cpp inject.cpp inject_uinput.cpp \
-         appops.cpp subprocess.cpp fileops.cpp http_client.cpp; do
+         appops.cpp subprocess.cpp fileops.cpp http_client.cpp \
+         service_state.cpp log_buffer.cpp; do
     [ -f "$DAEMON/$f" ] || { bad "缺源文件: daemon/$f"; exit 1; }
 done
-ok "11 个源文件齐备"
+ok "13 个源文件齐备"
 
 # -----------------------------------------------------------------------------
 step "编译 autod"
@@ -106,6 +107,8 @@ COMMON_FLAGS=(
     "$DAEMON/subprocess.cpp" \
     "$DAEMON/fileops.cpp" \
     "$DAEMON/http_client.cpp" \
+    "$DAEMON/service_state.cpp" \
+    "$DAEMON/log_buffer.cpp" \
     -llog -static-libstdc++
 
 ok "autod → $OUT/$ABI/autod"

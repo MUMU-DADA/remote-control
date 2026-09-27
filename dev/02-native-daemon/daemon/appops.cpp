@@ -145,7 +145,13 @@ bool AppOps::Init(std::string* error) {
         ALOGW("appops: %s", error ? error->c_str() : "");
         return false;
     }
-    ALOGI("应用管理后端就绪 (pm/am/cmd/dumpsys)");
+    if (!loggedOnce_) {
+        // 只打一次。Init 会被反复调用（Describe 对每个应用类命令都要
+        // 判定一次可用性），每次都打日志会把它刷成噪音 ——
+        // 实测一次 Describe 就打出 9 条一模一样的"后端就绪"。
+        ALOGI("应用管理后端就绪 (pm/am/cmd/dumpsys)");
+        loggedOnce_ = true;
+    }
     return true;
 }
 

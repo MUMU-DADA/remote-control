@@ -24,6 +24,9 @@
 #include <string>
 #include <vector>
 
+#include "json_writer.h"
+#include <vector>
+
 #include "autod_log.h"
 #include "autod_platform.h"
 #include "capture.h"
@@ -32,44 +35,79 @@
 namespace autod {
 namespace {
 
+// 检查结果同时满足两种消费方式：
+//   - 人看：RunSelfTest 打印成带颜色的一行行
+//   - 机器看：RunSelfTestJson 输出 JSON，供 API 客户端解析
+// 为此把"产生结果"与"呈现结果"分开 —— 检查逻辑只往里塞条目。
+enum class ItemKind { kPass, kFail, kNote };
+
+struct CheckItem {
+    std::string section;
+    ItemKind    kind;
+    std::string text;
+};
+
+std::vector<CheckItem> gItems;
+std::string gSection;
+bool gPrint = true;          // false = JSON 模式，只收集不打印
+
 int gPassed = 0;
 int gFailed = 0;
 
+std::string Format(const char* fmt, va_list ap) {
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    return buf;
+}
+
+void Add(ItemKind kind, const std::string& text) {
+    gItems.push_back({gSection, kind, text});
+}
+
 void Pass(const char* fmt, ...) {
     ++gPassed;
-    printf("  \033[1;32m✓\033[0m ");
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    const std::string t = Format(fmt, ap);
     va_end(ap);
-    printf("\n");
-    fflush(stdout);   // 卡住/被杀时也要能看到已经检查到哪一步
+    Add(ItemKind::kPass, t);
+    if (gPrint) {
+        printf("  \033[1;32m✓\033[0m %s\n", t.c_str());
+        fflush(stdout);   // 卡住/被杀时也要能看到已经检查到哪一步
+    }
 }
 
 void Fail(const char* fmt, ...) {
     ++gFailed;
-    printf("  \033[1;31m✗\033[0m ");
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    const std::string t = Format(fmt, ap);
     va_end(ap);
-    printf("\n");
-    fflush(stdout);
+    Add(ItemKind::kFail, t);
+    if (gPrint) {
+        printf("  \033[1;31m✗\033[0m %s\n", t.c_str());
+        fflush(stdout);
+    }
 }
 
 void Info(const char* fmt, ...) {
-    printf("    \033[2m");
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    const std::string t = Format(fmt, ap);
     va_end(ap);
-    printf("\033[0m\n");
-    fflush(stdout);
+    Add(ItemKind::kNote, t);
+    if (gPrint) {
+        printf("    \033[2m%s\033[0m\n", t.c_str());
+        fflush(stdout);
+    }
 }
 
 void Section(const char* title) {
-    printf("\n\033[1;34m%s\033[0m\n", title);
-    fflush(stdout);
+    gSection = title;
+    if (gPrint) {
+        printf("\n\033[1;34m%s\033[0m\n", title);
+        fflush(stdout);
+    }
 }
 
 int64_t NowMs() {
@@ -269,13 +307,33 @@ void CheckInject(bool verbose, uint32_t cliW, uint32_t cliH) {
 
 // ---------------------------------------------------------------------------
 
-int RunSelfTest(bool verbose, uint32_t touchWidth, uint32_t touchHeight) {
-    printf("\033[1mautod 部署自检\033[0m\n");
-    printf("逐项检查运行所需的环境。\n");
+namespace {
 
+// 每次跑之前清一次 —— 这个函数既被 --selftest 用，也被 API 反复调用，
+// 累计上一次的结果会给出错误的通过/失败数。
+void ResetResults(bool print) {
+    gItems.clear();
+    gSection.clear();
+    gPassed = 0;
+    gFailed = 0;
+    gPrint  = print;
+}
+
+void RunChecks(bool verbose, uint32_t touchWidth, uint32_t touchHeight) {
     CheckRunEnvironment(verbose);
     CheckCapture(verbose);
     CheckInject(verbose, touchWidth, touchHeight);
+}
+
+}  // namespace
+
+int RunSelfTest(bool verbose, uint32_t touchWidth, uint32_t touchHeight) {
+    ResetResults(/*print=*/true);
+
+    printf("\033[1mautod 部署自检\033[0m\n");
+    printf("逐项检查运行所需的环境。\n");
+
+    RunChecks(verbose, touchWidth, touchHeight);
 
     printf("\n\033[1m=== 结果 ===\033[0m\n");
     if (gFailed == 0) {
@@ -288,6 +346,42 @@ int RunSelfTest(bool verbose, uint32_t touchWidth, uint32_t touchHeight) {
     printf("\033[1;31m%d 项失败\033[0m（%d 项通过）\n", gFailed, gPassed);
     printf("\n按上面的 → 提示逐项排查。\n");
     return gFailed;
+}
+
+// 同一套检查的 JSON 版本，供 API 的 SelfTest 命令使用。
+//
+// 复用 RunChecks 而不是重写一遍：自检的检查项会随版本增长，
+// 两份实现迟早会不一致（而且不一致的那个一定是没人跑的那个）。
+std::string RunSelfTestJson(bool verbose, uint32_t touchWidth,
+                            uint32_t touchHeight) {
+    ResetResults(/*print=*/false);
+    RunChecks(verbose, touchWidth, touchHeight);
+
+    json::Writer w;
+    w.Obj()
+        .Field("ok", gFailed == 0)
+        .Field("passed", static_cast<uint64_t>(gPassed))
+        .Field("failed", static_cast<uint64_t>(gFailed))
+        .Key("checks").Arr();
+
+    // 按段分组，客户端可以直接按段渲染
+    std::string lastSection;
+    bool openGroup = false;
+    for (const auto& it : gItems) {
+        if (it.section != lastSection) {
+            if (openGroup) { w.EndArr().EndObj(); openGroup = false; }
+            w.Obj().Field("section", it.section).Key("items").Arr();
+            lastSection = it.section;
+            openGroup = true;
+        }
+        const char* kind = it.kind == ItemKind::kPass ? "pass"
+                         : it.kind == ItemKind::kFail ? "fail"
+                                                      : "note";
+        w.Obj().Field("kind", kind).Field("text", it.text).EndObj();
+    }
+    if (openGroup) w.EndArr().EndObj();
+    w.EndArr().EndObj();
+    return w.str();
 }
 
 }  // namespace autod

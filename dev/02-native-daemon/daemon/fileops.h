@@ -75,6 +75,7 @@ class FileOps {
 
     std::string root_;        // 下载目录绝对路径，无尾斜杠
     HttpClient  http_;
+    bool        loggedOnce_ = false;   // Init 会被反复调用，日志只打一次
 };
 
 }  // namespace autod

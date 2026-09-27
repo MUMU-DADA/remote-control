@@ -57,6 +57,15 @@ class Dispatcher {
     ReplyPacket HandleDownload(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandleFileOp(const Request& req, const std::vector<std::string>& args);
 
+    // ── v3：服务自身 ──
+    ReplyPacket HandleDescribe(const Request& req);
+    ReplyPacket HandleGetConfig(const Request& req);
+    ReplyPacket HandleSetConfig(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleSelfTest(const Request& req);
+    ReplyPacket HandleStats(const Request& req);
+    ReplyPacket HandleLog(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleShutdown(const Request& req, bool restart);
+
     Capture*  capture_;
     Injector* injector_;
     std::unique_ptr<AppOps>  appOps_;

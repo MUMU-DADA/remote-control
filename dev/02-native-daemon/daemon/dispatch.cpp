@@ -13,9 +13,13 @@
 
 #include <algorithm>
 #include <ctime>
+#include <unistd.h>
 #include <memory>
 
 #include "appops.h"
+#include "log_buffer.h"
+#include "selftest.h"
+#include "service_state.h"
 #include "fileops.h"
 #include "json_writer.h"
 
@@ -327,6 +331,23 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleDownload(req, args);
         case Cmd::FileOp:
             return HandleFileOp(req, args);
+
+        case Cmd::Describe:
+            return HandleDescribe(req);
+        case Cmd::GetConfig:
+            return HandleGetConfig(req);
+        case Cmd::SetConfig:
+            return HandleSetConfig(req, args);
+        case Cmd::SelfTest:
+            return HandleSelfTest(req);
+        case Cmd::Stats:
+            return HandleStats(req);
+        case Cmd::Log:
+            return HandleLog(req, args);
+        case Cmd::Shutdown:
+            return HandleShutdown(req, /*restart=*/false);
+        case Cmd::Restart:
+            return HandleShutdown(req, /*restart=*/true);
 
         default:
             return MakeJsonError(req.cmd, kErrBadCmd,
@@ -645,6 +666,238 @@ ReplyPacket Dispatcher::HandleFileOp(const Request& req,
     }
 
     return MakeJsonError(req.cmd, kErrBadArg, "未知 op: " + op);
+}
+
+// ── v3：服务自身 ────────────────────────────────────────────────────────────
+
+namespace {
+
+struct CommandSpec {
+    const char* name;
+    uint32_t    cmd;
+    uint32_t    since;        // 哪个协议版本引入
+    const char* params;       // 人类可读的参数说明
+    const char* desc;
+};
+
+// 命令清单。
+//
+// 这是 API 的"自描述"—— 客户端不必靠文档猜服务端支持什么，
+// 也不必用"发一个试试看报不报错"来探测。
+const CommandSpec kCommands[] = {
+    {"Info",          1,  1, "无",                      "查询显示参数"},
+    {"Capture",       2,  1, "flags",                   "截图，应答附带 memfd"},
+    {"Tap",           3,  1, "x,y,durationMs",          "单击"},
+    {"Swipe",         4,  1, "x1,y1,x2,y2,durationMs",  "滑动"},
+    {"TouchDown",     5,  1, "pointerId,x,y",           "多点触控：按下"},
+    {"TouchMove",     6,  1, "pointerId,x,y",           "多点触控：移动"},
+    {"TouchUp",       7,  1, "pointerId,x,y",           "多点触控：抬起"},
+    {"KeyEvent",      8,  1, "—",                       "按键注入（未实现）"},
+    {"ListApps",     10,  2, "flags",                   "列出应用"},
+    {"AppInfo",      11,  2, "<package>",               "应用详情与清单"},
+    {"LaunchApp",    12,  2, "<package>[,activity]",    "启动应用"},
+    {"KillApp",      13,  2, "<package>",               "强制停止应用"},
+    {"ForegroundApp",14,  2, "无",                      "当前前台应用"},
+    {"InstallApp",   15,  2, "fd=APK, flags",           "安装 APK"},
+    {"Download",     16,  2, "<url>[,filename[,subdir]]","下载到下载目录"},
+    {"FileOp",       17,  2, "<op>[,path[,arg]]",       "下载目录文件操作"},
+    {"Describe",     20,  3, "无",                      "本清单：有哪些命令、哪些可用"},
+    {"GetConfig",    21,  3, "无",                      "当前配置与运行时状态"},
+    {"SetConfig",    22,  3, "<key>\0<value>...",       "热改配置"},
+    {"SelfTest",     23,  3, "无",                      "环境自检（有副作用）"},
+    {"Stats",        24,  3, "无",                      "运行统计"},
+    {"Log",          25,  3, "[sinceSeq]",              "取最近日志"},
+    {"Shutdown",     26,  3, "无",                      "优雅退出"},
+    {"Restart",      27,  3, "无",                      "退出并由 init 重启"},
+};
+
+}  // namespace
+
+ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
+    // ⚠️ 先把懒初始化的后端初始化掉，再汇总能力。
+    //
+    //    AppOps/FileOps 都是懒初始化的，没 Init 过时它们的可用性查询恒为 false
+    //    —— 那会让 Describe 谎报"某项不可用"，而实际完全能用，是最误导人的
+    //    一种错误。（实测踩过：capabilities.download 报了 false。）
+    //    注意这段必须在拼 capabilities **之前**，下面循环里的按命令判定
+    //    不能替代它。
+    if (appOps_  != nullptr) appOps_->Init(nullptr);
+    if (fileOps_ != nullptr) fileOps_->Init(nullptr);
+
+    json::Writer w;
+    w.Obj()
+        .Field("service", "autod")
+        .Field("protocolVersion", ServiceState::ProtocolVersion())
+        .Field("pid", static_cast<int64_t>(getpid()))
+        .Key("capabilities").Obj()
+            .Field("screenshot", true)
+            .Field("touch", true)
+            .Field("multiTouch", true)
+            .Field("appManagement", appOps_ != nullptr && appOps_->Init(nullptr))
+            .Field("download", fileOps_ != nullptr && fileOps_->httpAvailable())
+            .Field("fileManagement", fileOps_ != nullptr && fileOps_->Init(nullptr))
+            .Field("selfControl", true)
+        .EndObj()
+        .Key("commands").Arr();
+
+    for (const auto& c : kCommands) {
+        w.Obj().Field("name", c.name)
+               .Field("cmd", c.cmd)
+               .Field("since", c.since)
+               .Field("params", c.params)
+               .Field("desc", c.desc);
+
+        // 每个命令单独判定可用性
+        bool available = true;
+        std::string reason;
+        switch (static_cast<Cmd>(c.cmd)) {
+            case Cmd::KeyEvent:
+                available = false;
+                reason = "未实现（Android 12 无 native 按键注入接口）";
+                break;
+            case Cmd::ListApps:
+            case Cmd::AppInfo:
+            case Cmd::LaunchApp:
+            case Cmd::KillApp:
+            case Cmd::ForegroundApp:
+            case Cmd::InstallApp: {
+                std::string err;
+                available = appOps_ != nullptr && appOps_->Init(&err);
+                if (!available) reason = err;
+                break;
+            }
+            case Cmd::Download: {
+                // ⚠️ 必须先 Init 再问 httpAvailable()。
+                //    FileOps 是懒初始化的，没 Init 过时 httpAvailable() 恒为 false
+                //    —— 于是 Describe 会谎报"下载不可用"，而实际完全能用。
+                //    （实测就是这么暴露的：capabilities.download 报了 false。）
+                std::string err;
+                if (fileOps_ != nullptr) fileOps_->Init(&err);
+                available = fileOps_ != nullptr && fileOps_->httpAvailable();
+                if (!available) {
+                    reason = err.empty()
+                                 ? "设备上没有可用的 libcurl，服务端无法下载"
+                                 : err;
+                }
+                break;
+            }
+            case Cmd::FileOp: {
+                std::string err;
+                available = fileOps_ != nullptr && fileOps_->Init(&err);
+                if (!available) reason = err;
+                break;
+            }
+            default:
+                break;
+        }
+        w.Field("available", available);
+        if (!available) w.Field("reason", reason);
+        w.EndObj();
+    }
+    w.EndArr().EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleGetConfig(const Request& req) {
+    ServiceState& st = ServiceState::Instance();
+    json::Writer w;
+    w.Obj()
+        .Field("ok", true)
+        .Field("protocolVersion", ServiceState::ProtocolVersion())
+        .Key("config").RawJson(st.ConfigJson())
+        .Key("runtime").RawJson(st.RuntimeJson())
+     .EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleSetConfig(const Request& req,
+                                        const std::vector<std::string>& args) {
+    if (args.empty()) {
+        return MakeJsonError(req.cmd, kErrPayload,
+                             "缺少参数（payload 应为 <key>\\0<value> 序列）");
+    }
+    // 参数成对出现：key, value, key, value…
+    if (args.size() % 2 != 0) {
+        return MakeJsonError(req.cmd, kErrPayload,
+                             "参数必须成对：<key>\\0<value>，当前收到 " +
+                             std::to_string(args.size()) + " 个");
+    }
+    std::vector<std::pair<std::string, std::string>> kv;
+    for (size_t i = 0; i + 1 < args.size(); i += 2) {
+        kv.emplace_back(args[i], args[i + 1]);
+    }
+
+    ServiceState& st = ServiceState::Instance();
+    const auto result = st.Apply(kv);
+    return MakeJsonReply(req.cmd, st.ApplyResultJson(result));
+}
+
+ReplyPacket Dispatcher::HandleSelfTest(const Request& req) {
+    ServiceState& st = ServiceState::Instance();
+    const auto cfg = st.GetConfig();
+    // 触控范围：优先用运行时实际生效的值（可能已被 SetConfig 改过）
+    uint32_t w = cfg.touchWidth;
+    uint32_t h = cfg.touchHeight;
+    const InjectorConfig& ic = st.GetInjectorConfig();
+    if (ic.touchWidth > 0)  w = ic.touchWidth;
+    if (ic.touchHeight > 0) h = ic.touchHeight;
+
+    return MakeJsonReply(req.cmd, RunSelfTestJson(cfg.verbose, w, h));
+}
+
+ReplyPacket Dispatcher::HandleStats(const Request& req) {
+    return MakeJsonReply(req.cmd, ServiceState::Instance().StatsJson());
+}
+
+ReplyPacket Dispatcher::HandleLog(const Request& req,
+                                  const std::vector<std::string>& args) {
+    uint64_t since = 0;
+    if (!args.empty() && !args[0].empty()) {
+        char* end = nullptr;
+        since = strtoull(args[0].c_str(), &end, 10);
+        if (end == nullptr || *end != '\0') {
+            return MakeJsonError(req.cmd, kErrBadArg, "sinceSeq 需要是数字");
+        }
+    }
+
+    constexpr size_t kMaxLines = 500;
+    uint64_t latest = 0;
+    const auto lines = LogBuffer::Instance().Since(since, kMaxLines, &latest);
+
+    json::Writer w;
+    w.Obj()
+        .Field("ok", true)
+        .Field("sinceSeq", since)
+        .Field("latestSeq", latest)
+        .Field("dropped", LogBuffer::Instance().DroppedCount())
+        .Field("minLevel", LogLevelName(LogBuffer::Instance().MinLevel()))
+        .Field("count", static_cast<uint64_t>(lines.size()))
+        .Key("lines").Arr();
+    for (const auto& ln : lines) {
+        w.Obj()
+            .Field("seq", ln.seq)
+            .Field("timeMs", ln.timeMs)
+            .Field("level", LogLevelName(ln.level))
+            .Field("tag", ln.tag)
+            .Field("text", ln.text)
+         .EndObj();
+    }
+    w.EndArr().EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleShutdown(const Request& req, bool restart) {
+    ServiceState::Instance().RequestShutdown(restart);
+
+    json::Writer w;
+    w.Obj().Field("ok", true)
+           .Field("action", restart ? "restart" : "shutdown")
+           .Field("note", restart
+                    ? "进程即将退出；需要 init（autod.rc）负责拉起，否则不会自动回来"
+                    : "进程即将优雅退出：关闭 uinput 设备、清理 socket 文件")
+     .EndObj();
+    ALOGI("收到 %s 请求，准备退出", restart ? "重启" : "关闭");
+    return MakeJsonReply(req.cmd, w.str());
 }
 
 }  // namespace autod

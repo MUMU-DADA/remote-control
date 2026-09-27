@@ -16,6 +16,15 @@ namespace autod {
 // 'AUTD' — 用于快速识别串流错位
 constexpr uint32_t kMagic = 0x44545541;
 
+// 协议版本。
+//
+// 单调递增，客户端用它判断服务端是否支持某个命令 ——
+// 比"试一下看报不报错"可靠，也让 Describe 的输出有明确的版本含义。
+//   1 = 截图 / 触控
+//   2 = 应用管理与文件下载
+//   3 = 服务自身控制（配置 / 自检 / 统计 / 日志 / 生命周期）
+constexpr uint32_t kProtocolVersion = 3;
+
 enum class Cmd : uint32_t {
     Info       = 1,   // 查询显示参数，不产生副作用
     Capture    = 2,   // 截图，应答附带 memfd
@@ -53,6 +62,32 @@ enum class Cmd : uint32_t {
     FileOp        = 17,  // payload: "<op>[\0<path>[\0<arg>]]"
                          // op: list|stat|mkdir|delete|rename|exists
                          // → 随 op 不同，见 docs/09-file-and-app-api.md
+
+    // ── 服务自身（v3）────────────────────────────────────────────────────
+    //
+    // 这一组让客户端能"控制服务本身"，而不只是用它对外提供的功能。
+    // 目标里那句「api 拥有控制自身的所有能力」指的就是这组 ——
+    // 启动参数里的每一项（显示、触控范围、日志级别、socket 权限……）
+    // 都必须能通过 API 查到、并且在能改的时候改得动。
+    //
+    // 改不动的项（socket 路径、init 模式、降权目标）**必须如实报告**
+    // 需要重启，而不是假装改成功了。
+    Describe      = 20,  // 能力清单：有哪些命令、哪些当前可用、为什么不可用
+                         // → {"version":..,"commands":[{name,cmd,available,params}]}
+    GetConfig     = 21,  // 当前配置 + 运行时状态（后端、设备、pid、启动时间）
+                         // → {"config":{...},"runtime":{...}}
+    SetConfig     = 22,  // payload: 重复的 "<key>\0<value>" 对
+                         // → {"applied":{...},"requiresRestart":[...],"rejected":{...}}
+    SelfTest      = 23,  // 跑环境自检（等同 --selftest，但在运行中的进程里跑）
+                         // → {"passed":N,"failed":N,"checks":[{name,ok,detail}]}
+    Stats         = 24,  // 运行统计：请求数、各命令计数、运行时长
+                         // → {"uptimeMs":..,"requests":..,"byCommand":{...}}
+    Log           = 25,  // payload: "[<sinceSeq>]" —— 取环形缓冲里的日志
+                         // → {"lines":[{"seq","level","text"}]}
+    Shutdown      = 26,  // 优雅退出（清理 socket 文件、关闭 uinput 设备）
+                         // → {"ok":true}
+    Restart       = 27,  // 退出并由 init 重新拉起（需要 autod.rc 的 oneshot/restart）
+                         // → {"ok":true}
 };
 
 enum Flags : uint32_t {

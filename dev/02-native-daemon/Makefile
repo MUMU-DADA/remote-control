@@ -28,7 +28,9 @@ HOST_SRCS = $(DAEMON)/main.cpp \
             $(DAEMON)/appops.cpp \
             $(DAEMON)/subprocess.cpp \
             $(DAEMON)/fileops.cpp \
-            $(DAEMON)/http_client.cpp
+            $(DAEMON)/http_client.cpp \
+            $(DAEMON)/service_state.cpp \
+            $(DAEMON)/log_buffer.cpp
 
 HOST_HDRS = $(wildcard $(DAEMON)/*.h)
 

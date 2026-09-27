@@ -283,8 +283,12 @@ bool FileOps::Init(std::string* error) {
         ALOGW("fileops: %s", httpErr.c_str());
     }
 
-    ALOGI("文件后端就绪：下载目录 %s，libcurl %s", root_.c_str(),
-          http_.Available() ? http_.version().c_str() : "不可用");
+    if (!loggedOnce_) {
+        // 同 AppOps：Init 会被反复调用，日志只打一次
+        ALOGI("文件后端就绪：下载目录 %s，libcurl %s", root_.c_str(),
+              http_.Available() ? http_.version().c_str() : "不可用");
+        loggedOnce_ = true;
+    }
     return true;
 }
 

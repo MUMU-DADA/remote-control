@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -25,7 +26,9 @@
 #include "dispatch.h"
 #include "inject.h"
 #include "protocol.h"
+#include "log_buffer.h"
 #include "selftest.h"
+#include "service_state.h"
 #include "socket_server.h"
 
 using namespace autod;
@@ -199,6 +202,25 @@ int main(int argc, char** argv) {
         }
     }
 
+    // 把启动配置登记进 ServiceState —— API 的 GetConfig 要能查到它，
+    // SetConfig 也要以它为基准判断"哪些改了能生效"。
+    {
+        ServiceState::Config sc;
+        sc.socketPath      = socketPath;
+        sc.usingInitSocket = !initSocketName.empty();
+        sc.initSocketName  = initSocketName;
+        sc.socketMode      = static_cast<uint32_t>(socketMode);
+        sc.displayId       = displayId;
+        sc.touchWidth      = touchW;
+        sc.touchHeight     = touchH;
+        sc.verbose         = verbose;
+        sc.dropUid         = dropPrivileges ? static_cast<int32_t>(targetUid) : -1;
+        sc.dropGid         = dropPrivileges ? static_cast<int32_t>(targetGid) : -1;
+        ServiceState::Instance().SetInitialConfig(sc);
+    }
+    // 日志级别也走同一套：--verbose 就是 debug 级
+    LogBuffer::Instance().SetMinLevel(verbose ? LogLevel::kDebug : LogLevel::kInfo);
+
     // 自检不需要 socket，放在必填检查之前
 #if AUTOD_HAS_BINDER_PLATFORM
     // 必须在任何截图动作之前启动 Binder 线程池，自检也不例外。
@@ -270,6 +292,29 @@ int main(int argc, char** argv) {
     // 此时 --socket-mode 无效（我们不会去改 init 建的文件）。
     if (initSocketName.empty()) {
         server.SetSocketMode(socketMode);
+
+        // 让 SetConfig("socket-mode", ...) 能真正作用到已监听的 socket 上。
+        // 不做这一步的话，"改成功了"只是改了个数字，用户下次连接还是老权限 ——
+        // 这种"报告成功但实际没变"是最难排查的一类问题。
+        ServiceState::Instance().SetSocketChmodHook(
+            [](uint32_t mode) {
+                const std::string& p = ServiceState::Instance()
+                                            .GetConfig().socketPath;
+                if (!p.empty() && chmod(p.c_str(), mode) != 0) {
+                    ALOGW("socket-mode 热改失败: chmod(%s, %04o): %s", p.c_str(),
+                          mode, strerror(errno));
+                }
+            });
+    }
+
+    ServiceState::Instance().SetBackends(&capture, &injector);
+    {
+        InjectorConfig ic;
+        ic.touchWidth  = injectConfig.touchWidth;
+        ic.touchHeight = injectConfig.touchHeight;
+        ic.deviceName  = injectConfig.deviceName;
+        ic.displayId   = injectConfig.displayId;
+        ServiceState::Instance().SetInjectorConfig(ic);
     }
 
     if (!server.Start(&error)) {
@@ -312,15 +357,38 @@ int main(int argc, char** argv) {
     // 长连接客户端把整个服务占住（实测踩过：上位应用连上后，
     // 其它客户端全被挡住，直到空闲超时把应用那条连接掐掉）。
     std::mutex opMutex;
-    server.Run([&dispatcher, &opMutex](const Request& req,
-                                       const std::string& payload,
-                                       int reqFd, int peerUid) {
-        std::lock_guard<std::mutex> lock(opMutex);
-        return dispatcher.Handle(req, payload, reqFd, peerUid);
+    server.Run([&dispatcher, &opMutex, &server](const Request& req,
+                                                const std::string& payload,
+                                                int reqFd, int peerUid) {
+        ReplyPacket packet;
+        {
+            std::lock_guard<std::mutex> lock(opMutex);
+            packet = dispatcher.Handle(req, payload, reqFd, peerUid);
+        }
+        ServiceState::Instance().CountRequest(req.cmd, packet.reply.status);
+
+        // Shutdown / Restart 命令只是设了个标志（应答要先发出去），
+        // 真正退出在这里做。Stop() 会 shutdown 监听 fd，让 Run() 的
+        // accept 立刻返回。
+        if (ServiceState::Instance().ShutdownRequested()) {
+            server.Stop();
+        }
+        return packet;
     });
 
     gServer = nullptr;
     capture.Shutdown();
+
+    // Restart 用退出码 1：init 的 `oneshot` + 外部监督脚本据此区分
+    // "正常关闭"和"要求重启"。自己不明说，监督方就只能一律重启，
+    // 那 Shutdown 就没意义了。
+    if (ServiceState::Instance().RestartRequested()) {
+        ALOGI("autod: 按请求重启（退出码 1）");
+        fprintf(stderr, "autod: 按请求重启（退出码 1）\n");
+        return 1;
+    }
+
+    ALOGI("autod: 已退出");
     fprintf(stderr, "autod: 已退出\n");
     return 0;
 }

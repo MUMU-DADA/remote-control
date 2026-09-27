@@ -14,8 +14,15 @@
 //
 // 注意：用 <android/log.h> 而不是 <log/log.h>，因为后者不在 NDK 里。
 //       AOSP 的 liblog 同时提供这两个头，所以用前者两边都能编。
+//
+// 每一条日志同时进两处：
+//   - 原生通道（logcat / stderr）—— 给人看的、给开发工具抓的
+//   - 进程内环形缓冲（log_buffer）—— 给客户端通过 API 拉取的
+// 之所以要后者：客户端问"服务在说什么"时，不该要求用户去 adb logcat 里翻。
 
 #pragma once
+
+#include "log_buffer.h"
 
 #if defined(__ANDROID__)
 
@@ -35,12 +42,24 @@
 
 #define AUTOD_LOG_TAG "autod"
 
-#define ALOGI(...) \
-    __android_log_print(ANDROID_LOG_INFO,  AUTOD_LOG_TAG, __VA_ARGS__)
-#define ALOGW(...) \
-    __android_log_print(ANDROID_LOG_WARN,  AUTOD_LOG_TAG, __VA_ARGS__)
-#define ALOGE(...) \
-    __android_log_print(ANDROID_LOG_ERROR, AUTOD_LOG_TAG, __VA_ARGS__)
+#define ALOGI(...)                                                          \
+    do {                                                                    \
+        __android_log_print(ANDROID_LOG_INFO, AUTOD_LOG_TAG, __VA_ARGS__);  \
+        ::autod::LogBufferAppend(::autod::LogLevel::kInfo,                  \
+                                 AUTOD_LOG_TAG, __VA_ARGS__);               \
+    } while (0)
+#define ALOGW(...)                                                          \
+    do {                                                                    \
+        __android_log_print(ANDROID_LOG_WARN, AUTOD_LOG_TAG, __VA_ARGS__);  \
+        ::autod::LogBufferAppend(::autod::LogLevel::kWarn,                  \
+                                 AUTOD_LOG_TAG, __VA_ARGS__);               \
+    } while (0)
+#define ALOGE(...)                                                          \
+    do {                                                                    \
+        __android_log_print(ANDROID_LOG_ERROR, AUTOD_LOG_TAG, __VA_ARGS__); \
+        ::autod::LogBufferAppend(::autod::LogLevel::kError,                 \
+                                 AUTOD_LOG_TAG, __VA_ARGS__);               \
+    } while (0)
 
 #define LOG_ALWAYS_FATAL_IF(cond, ...)                     \
     do {                                                   \
@@ -55,25 +74,33 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define ALOGI(...)                        \
-    do {                                  \
-        fprintf(stderr, "I autod: ");     \
-        fprintf(stderr, __VA_ARGS__);     \
-        fprintf(stderr, "\n");            \
+#define AUTOD_LOG_TAG "autod"
+
+#define ALOGI(...)                                                  \
+    do {                                                            \
+        fprintf(stderr, "I autod: ");                               \
+        fprintf(stderr, __VA_ARGS__);                               \
+        fprintf(stderr, "\n");                                      \
+        ::autod::LogBufferAppend(::autod::LogLevel::kInfo,          \
+                                 AUTOD_LOG_TAG, __VA_ARGS__);       \
     } while (0)
 
-#define ALOGW(...)                        \
-    do {                                  \
-        fprintf(stderr, "W autod: ");     \
-        fprintf(stderr, __VA_ARGS__);     \
-        fprintf(stderr, "\n");            \
+#define ALOGW(...)                                                  \
+    do {                                                            \
+        fprintf(stderr, "W autod: ");                               \
+        fprintf(stderr, __VA_ARGS__);                               \
+        fprintf(stderr, "\n");                                      \
+        ::autod::LogBufferAppend(::autod::LogLevel::kWarn,          \
+                                 AUTOD_LOG_TAG, __VA_ARGS__);       \
     } while (0)
 
-#define ALOGE(...)                        \
-    do {                                  \
-        fprintf(stderr, "E autod: ");     \
-        fprintf(stderr, __VA_ARGS__);     \
-        fprintf(stderr, "\n");            \
+#define ALOGE(...)                                                  \
+    do {                                                            \
+        fprintf(stderr, "E autod: ");                               \
+        fprintf(stderr, __VA_ARGS__);                               \
+        fprintf(stderr, "\n");                                      \
+        ::autod::LogBufferAppend(::autod::LogLevel::kError,         \
+                                 AUTOD_LOG_TAG, __VA_ARGS__);       \
     } while (0)
 
 #define LOG_ALWAYS_FATAL_IF(cond, ...)    \

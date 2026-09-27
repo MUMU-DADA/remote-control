@@ -29,6 +29,8 @@ cc_defaults {
         "subprocess.cpp",      // 无 shell 的子进程执行
         "fileops.cpp",         // 下载目录与文件操作
         "http_client.cpp",     // libcurl 运行时加载
+        "service_state.cpp",   // 服务自身状态（API 的"控制自身"）
+        "log_buffer.cpp",      // 进程内日志环形缓冲
     ],
 
     shared_libs: [
