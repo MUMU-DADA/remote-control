@@ -55,7 +55,7 @@ SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
 APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
                  $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard
 
 all: $(BINS) fake_screencap
 
@@ -67,6 +67,11 @@ test_integration: $(INTEG_SRCS) $(COMMON_HDRS) \
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(INTEG_SRCS)
 
 JSON_SRCS = test_json.cpp $(DAEMON)/json_parser.cpp $(DAEMON)/json_writer.h
+
+KB_SRCS = test_keyboard.cpp $(DAEMON)/keyboard.cpp $(DAEMON)/log_buffer.cpp
+
+test_keyboard: $(KB_SRCS) test_util.h $(DAEMON)/keyboard.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(KB_SRCS)
 
 test_json: $(JSON_SRCS) test_util.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(JSON_SRCS)
@@ -94,13 +99,15 @@ _run: all
 	 ./test_capture_screencap ./fake_screencap;  c=$$?; echo; \
 	 ./test_appops;                              a=$$?; echo; \
 	 ./test_json;                                j=$$?; echo; \
+	 ./test_keyboard;                            k=$$?; echo; \
 	 echo "───────────────────────────────"; \
 	 printf "  %-34s %s\n" "注入后端单元测试"   "$$([ $$u -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "端到端集成测试"     "$$([ $$i -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "screencap 截图后端" "$$([ $$c -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "应用管理后端"       "$$([ $$a -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "JSON 解析/输出"      "$$([ $$j -eq 0 ] && echo 通过 || echo 失败)"; \
-	 exit $$(( u + i + c + a + j ))
+	 printf "  %-34s %s\n" "按键注入"            "$$([ $$k -eq 0 ] && echo 通过 || echo 失败)"; \
+	 exit $$(( u + i + c + a + j + k ))
 
 clean:
 	rm -f $(BINS) fake_screencap
