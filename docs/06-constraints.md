@@ -8,7 +8,17 @@
 
 ### 事实
 
-核对 [`IInputManager.aidl` @ android12-release](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android12-release/core/java/android/hardware/input/IInputManager.aidl)：
+**已在本地 synced 的 Android 12 源码树中实地核实**（不再是网上的推断）：
+
+```bash
+# 全树只有这一个 IInputManager 定义
+find aosp/frameworks -name "IInputManager*"
+# → aosp/frameworks/base/core/java/android/hardware/input/IInputManager.aidl
+
+# 没有任何 backend / vintfstability / ndk 标注
+grep -inE "backend|vintfstability|ndk" IInputManager.aidl
+# → （无输出）
+```
 
 ```java
 package android.hardware.input;
@@ -16,7 +26,6 @@ package android.hardware.input;
 import android.view.InputEvent;        // ← 纯 Java 类
 import android.graphics.Rect;
 import android.os.IBinder;
-import android.view.InputMonitor;
 ...
 interface IInputManager {
     // Injects an input event into the system. To inject into windows owned by other
@@ -32,6 +41,42 @@ interface IInputManager {
 1. 位于 `frameworks/base/core/java/`，是**纯 Java AIDL**
 2. **没有 `@VintfStability`，没有 cpp / ndk backend 标注**
 3. `import` 的全是 Java 类型（`android.view.InputEvent`、`android.graphics.Rect`）
+
+### 原生侧也没有替代路径（已核实）
+
+有人会想"那走 `IInputFlinger` 呢？它是原生 AIDL"。**不行**：
+
+```bash
+$ cat frameworks/native/libs/input/android/os/IInputFlinger.aidl
+interface IInputFlinger {
+    oneway void setInputWindows(in InputWindowInfo[] inputHandles,
+            in @nullable ISetInputWindowsListener setInputWindowsListener);
+    InputChannel createInputChannel(in @utf8InCpp String name);
+    void removeInputChannel(in IBinder connectionToken);
+    oneway void setFocusedWindow(in FocusRequest request);
+}
+```
+
+只有四个方法，**没有任何注入能力**。
+
+而且 Android 12 的 InputFlinger 还跑在 system_server 进程内：
+
+```
+frameworks/native/services/inputflinger/Android.bp
+// TODO(b/23084678): Move inputflinger to its own process and mark it hidden
+```
+
+（拆成独立进程是后来的版本才做的。）
+
+### 结论
+
+> **Android 12 上不存在任何 native 的输入注入路径。**
+>
+> - `IInputManager` 是 Java-only AIDL
+> - `IInputFlinger` 是原生 AIDL，但没有注入方法
+> - 全树搜索只有一份 `IInputManager` 定义
+
+因此 `inject_uinput.cpp`（写 `/dev/uinput`）是 Android 12 上**唯一可行**的方案。
 
 ### 对比：截图没问题
 

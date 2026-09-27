@@ -124,8 +124,8 @@ boolean injectInputEvent(in InputEvent ev, int mode);
 
 ### 已交付
 
-- `dev/02-native-daemon/` —— native daemon 主体（含两个可切换的注入后端）
-- `docs/` —— 7 份专题文档
+- `dev/02-native-daemon/` —— native daemon 主体（截图 3 后端 / 触控 3 后端，均编译期可选）
+- `docs/` —— 8 份专题文档
 - `dev/01-ndk-prototype/` `dev/03-java-service/` —— 另外两条轨道的方案
 - `tools/setup-host.sh` `tools/repo-sync.sh` —— 环境与源码同步脚本
 
@@ -218,6 +218,8 @@ cd dev/02-native-daemon/tests && sudo make run
 | `docs/04-hardware.md` | 硬件配置、磁盘预算、构建环境 |
 | `docs/05-latency-and-touch.md` | 延迟拆解、吞吐、触控能力矩阵 |
 | `docs/06-constraints.md` | 关键约束与风险清单 |
+| `docs/07-environment.md` | 本机实际环境：磁盘、镜像源、构建容器 |
+| `docs/08-official-implementations.md` | 官方/开源实现对照：用了哪个、为什么 |
 | `dev/01-ndk-prototype/` | 阶段 0：纯 NDK 快速验证 |
 | `dev/02-native-daemon/` | 阶段 1–2：AOSP native daemon（主体代码） |
 | `dev/03-java-service/` | 阶段 3：Java 系统服务（长期形态） |

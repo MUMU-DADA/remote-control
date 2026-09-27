@@ -43,7 +43,8 @@ AutoSnapshotAndroid/
 │   ├── 04-hardware.md            硬件与构建环境
 │   ├── 05-latency-and-touch.md   延迟与触控能力
 │   ├── 06-constraints.md         约束与风险
-│   └── 07-environment.md         ⭐ 本机实际环境（磁盘/镜像源/容器）
+│   ├── 07-environment.md         ⭐ 本机实际环境（磁盘/镜像源/容器）
+│   └── 08-official-implementations.md  官方/开源实现对照 ★
 │
 ├── tools/                     ← 环境与构建脚本
 │   ├── setup-host.sh             环境初始化

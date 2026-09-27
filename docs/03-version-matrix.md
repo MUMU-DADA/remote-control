@@ -40,32 +40,109 @@ sp<GraphicBuffer> buf = res.buffer;
 - 结果里的 `buffer` 是 `sp<GraphicBuffer>`，要 `lock(USAGE_SW_READ_OFTEN, &base)` 才能读
 - `res.fenceResult` 是 `ftl::Expected`，用 `.ok()` 判成功
 
-### Android 12 / 13（推荐目标版本）
+### Android 12（本项目目标，已对照源码逐项核实）
+
+**核实来源**（`android-12.0.0_r34` 实际源码）：
+
+| 文件 | 内容 |
+|---|---|
+| `frameworks/native/libs/gui/include/gui/LayerState.h` | `CaptureArgs` / `DisplayCaptureArgs` |
+| `frameworks/native/libs/gui/include/gui/SurfaceComposerClient.h` | `ScreenshotClient` / `SurfaceComposerClient` |
+| `frameworks/native/libs/gui/include/gui/SyncScreenCaptureListener.h` | 同步 listener |
+| `frameworks/native/libs/gui/include/gui/ScreenCaptureResults.h` | 结果结构体 |
+| `frameworks/native/libs/ui/include/ui/DisplayId.h` | `PhysicalDisplayId` |
+| `frameworks/native/libs/ui/include/ui/DisplayMode.h` | `ui::DisplayMode` |
+
+**注意：Android 12 没有 `gui/ScreenCapture.h`。** 那是后来的版本才有的。
 
 ```cpp
-#include <gui/ScreenCapture.h>
-#include <gui/SurfaceComposerClient.h>
+#include <gui/LayerState.h>              // DisplayCaptureArgs
+#include <gui/ScreenCaptureResults.h>    // gui::ScreenCaptureResults
+#include <gui/SurfaceComposerClient.h>   // SurfaceComposerClient / ScreenshotClient
+#include <gui/SyncScreenCaptureListener.h>
+#include <ui/DisplayId.h>                // PhysicalDisplayId
 
-sp<IBinder> token = SurfaceComposerClient::getPhysicalDisplayToken(displayId);
+// --- 枚举显示 ---
+std::vector<PhysicalDisplayId> ids = SurfaceComposerClient::getPhysicalDisplayIds();
+// 按值收，不是引用
+sp<IBinder> token = SurfaceComposerClient::getPhysicalDisplayToken(
+        PhysicalDisplayId{ids.front().value});
+// 从 uint64 构造：explicit PhysicalDisplayId(uint64_t id)
 
-ScreenCapture::CaptureArgs args;
-args.displayToken = token;                // ← 注意是 token，不是 DisplayId
-args.width  = 0;                          // 0 = 原始分辨率
-args.height = 0;
-args.dataspace  = ui::Dataspace::V0_SRGB;
-args.pixelFormat = ui::PixelFormat::RGBA_8888;
+// --- 查询显示模式（参数是 token，不是 DisplayId）---
+ui::DisplayMode mode;
+SurfaceComposerClient::getActiveDisplayMode(token, &mode);
+// mode.resolution.getWidth() / getHeight(), mode.refreshRate
 
-ScreenCapture::CaptureResults res;
-status_t err = ScreenCapture::captureDisplay(args, &res);
+// --- 截图 ---
+DisplayCaptureArgs args;                 // 继承 CaptureArgs
+args.displayToken = token;
+args.width        = 0;                   // 0 = 原始分辨率
+args.height       = 0;
+args.pixelFormat  = ui::PixelFormat::RGBA_8888;
+args.dataspace    = ui::Dataspace::UNKNOWN;   // 用显示自身色彩空间
+
+sp<SyncScreenCaptureListener> listener = new SyncScreenCaptureListener();
+status_t st = ScreenshotClient::captureDisplay(args, listener);
+if (st != NO_ERROR) { /* 提交失败 */ }
+
+gui::ScreenCaptureResults result = listener->waitForResults();
+// waitForResults() 内部已调 fence->waitForever()，返回时数据一定可读
+
+if (result.result != OK) { /* Android 12 用 status_t result */ }
+sp<GraphicBuffer> buffer = result.buffer;
 ```
 
-**主要差异**：
-| 项 | 12/13 | 15/16 |
+**Android 12 的结果结构体：**
+
+```cpp
+namespace android::gui {
+struct ScreenCaptureResults : public Parcelable {
+    sp<GraphicBuffer> buffer;
+    sp<Fence> fence = Fence::NO_FENCE;
+    bool capturedSecureLayers{false};
+    ui::Dataspace capturedDataspace{ui::Dataspace::V0_SRGB};
+    status_t result = OK;          // ← 注意是 status_t
+};
+}
+```
+
+**`DisplayCaptureArgs` 的定义：**
+
+```cpp
+struct CaptureArgs {
+    ui::PixelFormat pixelFormat{ui::PixelFormat::RGBA_8888};
+    Rect sourceCrop;
+    float frameScaleX{1}, frameScaleY{1};
+    bool captureSecureLayers{false};
+    int32_t uid{UNSET_UID};
+    ui::Dataspace dataspace = ui::Dataspace::UNKNOWN;
+    bool allowProtected = false;
+    bool grayscale = false;
+};
+
+struct DisplayCaptureArgs : CaptureArgs {
+    sp<IBinder> displayToken;
+    uint32_t width{0};
+    uint32_t height{0};
+    bool useIdentityTransform{false};
+};
+```
+
+**省流提示**：`sourceCrop` 和 `frameScaleX/Y` 可以直接做**区域截图**和**降采样**——
+这是延迟优化里收益最大的两项（见 `05-latency-and-touch.md`），不需要改协议就能先验证。
+
+### Android 12 vs 15/16 关键差异
+
+| 项 | Android 12 | Android 15 / 16 |
 |---|---|---|
+| 截图头文件 | `gui/LayerState.h` | `android/gui/DisplayCaptureArgs.h` |
+| 参数类型 | `DisplayCaptureArgs` | `gui::CaptureArgs` |
 | 显示标识 | `sp<IBinder>` token | `DisplayId` 值类型 |
-| 参数类型 | `ScreenCapture::CaptureArgs` | `gui::CaptureArgs` |
-| 调用方式 | 同步返回 `status_t` | 通过 `SyncScreenCaptureListener` |
-| 结果类型 | `ScreenCapture::CaptureResults` | `ScreenCaptureResults` |
+| 调用 | `ScreenshotClient::captureDisplay(args, listener)` | `ScreenshotClient::captureDisplay(displayId, args, listener)` |
+| 结果字段 | `status_t result` | `ftl::Expected fenceResult` |
+| `SyncScreenCaptureListener` | ✅ 有 | ✅ 有 |
+| `gui/ScreenCapture.h` | ❌ **不存在** | ✅ 有 |
 
 ### Android 9 / 10（不推荐）
 
@@ -98,6 +175,10 @@ sf->captureDisplay(args, res.get());
 
 ### 原生 Binder 路径（性能好，依赖 AOSP 树）
 
+> ⚠️ **Android 12 上此路径不存在**。已全树核实：只有一份 Java 版
+> `IInputManager`，`IInputFlinger` 也没有注入方法。
+> 详见 `06-constraints.md` 约束 1。以下内容供 Android 13+ 参考。
+
 接口：`android.hardware.input.IInputManager::injectInputEvent(const InputEvent&, int32_t mode)`
 
 ```cpp
@@ -109,29 +190,60 @@ sp<IBinder> binder = sm->getService(String16("input"));
 
 // AIDL 生成的 C++ 接口，命名空间随 AIDL 包名变化，务必对源码确认
 auto im = android::hardware::input::IInputManager::fromBinder(binder);
-
-android::MotionEvent event;
-// event.initialize(...) 的参数很长：downTime, eventTime, action, pointerCount,
-// pointerProperties[], pointerCoords[], metaState, buttonState,
-// xPrecision, yPrecision, deviceId, edgeFlags, source, displayId, flags
-//
-// MotionEvent 定义在 frameworks/native/libs/input/input/Input.h
-// Java 侧参考逻辑见 cmds/input/src/com/android/commands/input/Input.java
-
-im->injectInputEvent(event, INJECT_INPUT_EVENT_MODE_ASYNC);
 ```
 
+**注入模式常量**（Android 12 已核实，来自
+`frameworks/native/libs/input/android/os/InputEventInjectionSync.aidl`）：
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `NONE` | 0 | 异步，假定总是成功 |
+| `WAIT_FOR_RESULT` | 1 | 等前面的分发完成，以便判定是否允许注入 |
+| `WAIT_FOR_FINISHED` | 2 | 等事件被完全处理 |
+
 **权限**：`android.permission.INJECT_EVENTS`，保护级别 `signature`。
-`system` UID 和 `shell` UID 都已持有，所以 `autod` 以 `system` 运行即可
-（`adb shell input` 能工作就是这个原因）。
+`system` UID 和 `shell` UID 都已持有。
+
+#### Android 12 的 `MotionEvent::initialize` 签名（已核实）
+
+**注意头文件路径**：Android 12 的 `Input.h` 在
+`frameworks/native/include/input/Input.h`（**不是** `libs/input/input/`）。
+
+```cpp
+void initialize(int32_t id, int32_t deviceId, uint32_t source, int32_t displayId,
+                std::array<uint8_t, 32> hmac, int32_t action, int32_t actionButton,
+                int32_t flags, int32_t edgeFlags, int32_t metaState,
+                int32_t buttonState, MotionClassification classification,
+                const ui::Transform& transform,
+                float xPrecision, float yPrecision,
+                float rawXCursorPosition, float rawYCursorPosition,
+                int32_t displayWidth, int32_t displayHeight,
+                nsecs_t downTime, nsecs_t eventTime, size_t pointerCount,
+                const PointerProperties* pointerProperties,
+                const PointerCoords* pointerCoords);
+```
+
+Android 12 **只有这一个**面向多指事件的 `initialize`，且要求填
+`hmac`、`classification`、`ui::Transform`、`displayWidth/Height`——
+它是为 InputReader 填充事件设计的，不是为注入设计的。
+
+后来的版本（15/16）简化成了不需要 hmac/transform 的形态。
+
+#### 其他构造函数
+
+```cpp
+InputEvent::initialize(int32_t id, int32_t deviceId, uint32_t source,
+                       int32_t displayId, int32_t action, ...);   // 基类
+KeyEvent::initialize  /  FocusEvent::initialize  /  ...
+```
+
+`MotionEvent` 定义在 `frameworks/native/include/input/Input.h`，
+实现在 `frameworks/native/libs/input/Input.cpp`。
+Java 侧参考逻辑见 `frameworks/base/cmds/input/src/com/android/commands/input/Input.java`。
 
 关键注意：
-- `MotionEvent::initialize()` 的参数在各版本**变过多次**，`displayId` 和 `flags`
-  是较晚才加的。务必对照你目标版本的 `Input.h`。
-- 多点触控要正确填 `PointerProperties`（含 `id` 和 `toolType`）与 `PointerCoords`
-  （含 `x, y, pressure, size, touchMajor, touchMinor`）。
-- `INJECT_INPUT_EVENT_MODE_ASYNC` 不等待分发结果，延迟低；
-  `WAIT_FOR_FINISH` 会阻塞到事件分发完成。
+- 多点触控要正确填 `PointerProperties`（`id` + `toolType`）与 `PointerCoords`
+- `client` 侧一般用 `0`（NONE）拿到最低延迟
 
 ### `/dev/uinput` 路径（不依赖 AOSP 树，可用 NDK 编译）
 
