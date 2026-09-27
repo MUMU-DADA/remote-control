@@ -127,7 +127,7 @@ RUN mkdir -p /etc && printf '[global]\nindex-url = $TUNA/pypi/web/simple\ntruste
 #         arm64 目标构建基本用不到，装不上就跳过。
 # 注：AOSP 官方文档列的 unicode-terminfo 在 Ubuntu 22.04 已不存在。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+        git-core gnupg flex bison build-essential zip unzip curl zlib1g-dev \
         libxml2-utils xsltproc fontconfig \
         python3 python-is-python3 python3-pip \
         openjdk-11-jdk-headless \
@@ -169,9 +169,21 @@ if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
     docker rm -f "$CONTAINER" >/dev/null
 fi
 
+# --privileged 是 Cuttlefish 的硬前提，不是图省事。
+#
+# Cuttlefish 要的东西（已对照 device/google/cuttlefish 源码确认）：
+#   /dev/kvm           KVM 加速；crosvm_manager 用它起虚拟机
+#   /dev/net/tun       OpenTapInterface() 创建 TAP 网卡
+#   /dev/vhost-net     crosvm 传 --vhost-net
+#   /dev/vhost-vsock   guest 与 host 的 vsock 通信
+#   CAP_NET_ADMIN      配置 TAP 和 DHCP
+#
+# 只加 --device /dev/kvm 是不够的 —— 那样编译没问题（编译根本不需要这些），
+# 但 launch_cvd 会在创建网卡时失败。
 docker run -d \
     --name "$CONTAINER" \
     --hostname builder \
+    --privileged \
     -e REPO_URL="$REPO_MIRROR" \
     -v "$PROJECT_DIR/aosp":/aosp \
     -w /aosp \
