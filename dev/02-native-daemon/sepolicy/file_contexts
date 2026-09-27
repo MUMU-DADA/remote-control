@@ -1,0 +1,12 @@
+# autod 二进制的 SELinux 文件标签
+#
+# 安装位置：system/sepolicy/private/file_contexts
+#          （追加到文件末尾，或者在 system/sepolicy/private/ 下新建
+#            file_contexts 片段并加到 Android.bp 的 sepolicy 输入里）
+
+/system/bin/autod    u:object_r:autod_exec:s0
+
+# 如果 socket 由 autod 自己 bind（而不是 init 创建），还需要给它打标签：
+# /data/local/tmp/autod\.sock    u:object_r:autod_socket:s0
+#
+# 但生产环境推荐用 init 的 `socket` 指令创建，标签会自动打对。

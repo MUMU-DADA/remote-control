@@ -1,0 +1,95 @@
+# autod 的 SELinux domain 定义
+#
+# 安装位置：system/sepolicy/private/autod.te
+#
+# ⚠️ 这是一个【起始模板】，不是能直接编过的成品。
+#    里面的类型名和属性名随 AOSP 版本变化，且 AOSP 的 neverallow 规则会
+#    强制你补全缺失的 allow。正确的工作方式是：
+#      1. 先按下面写，编译
+#      2. 编译器报 neverallow 违反 → 按报错信息逐条加 allow
+#      3. 运行时看 dmesg / logcat 里的 avc: denied → 用 audit2allow 生成规则
+#
+#    audit2allow 用法（在 AOSP 树里）：
+#      adb shell dmesg | grep avc > avc.log
+#      ./prebuilts/build-tools/linux-x86/bin/audit2allow -i avc.log
+
+# ---------------------------------------------------------------------------
+# 类型声明
+# ---------------------------------------------------------------------------
+
+# 主 domain
+type autod, domain;
+
+# 二进制文件类型
+type autod_exec, exec_type, file_type, system_file_type;
+
+# init 创建的 socket 类型（对应 autod.rc 里的 `socket autod ...`）
+type autod_socket, file_type;
+
+# 让 init 能启动这个 domain（自动处理 exec / 转换 / 属性）
+init_daemon_domain(autod)
+
+# init 需要创建并设置 socket 的属主和标签
+allow init autod_socket:sock_file create_file_perms;
+
+# ---------------------------------------------------------------------------
+# Binder 基础设施
+# ---------------------------------------------------------------------------
+
+# 允许 autod 使用 binder（找 servicemanager、收发 Binder 调用）
+binder_use(autod)
+
+# ---------------------------------------------------------------------------
+# 调用 SurfaceFlinger（截图）
+# ---------------------------------------------------------------------------
+
+# 建立到 surfaceflinger 的 Binder 连接
+binder_call(autod, surfaceflinger)
+
+# 在 servicemanager 里查找 surfaceflinger 服务
+allow autod surfaceflinger_service:service_manager find;
+
+# 截图需要访问 GPU / DMA-BUF 设备来映射 GraphicBuffer。
+# 具体类型名按平台不同（gpu_device / dmabuf_*_device / ion_device）。
+allow autod gpu_device:chr_file rw_file_perms;
+allow autod dmabuf_system_heap_device:chr_file r_file_perms;
+allow autod dmabuf_heap_device:chr_file r_file_perms;
+
+# ---------------------------------------------------------------------------
+# 调用 system_server（触控注入走 InputManagerService）
+# ---------------------------------------------------------------------------
+
+# 建立到 system_server 的 Binder 连接
+binder_call(autod, system_server)
+
+# 在 servicemanager 里查找 input 服务。
+# 服务标签名随版本变化，可能是 input_service / inputflinger_service。
+allow autod input_service:service_manager find;
+
+# ---------------------------------------------------------------------------
+# 自己的 socket
+# ---------------------------------------------------------------------------
+
+allow autod autod_socket:sock_file rw_file_perms;
+allow autod autod_socket:{ unix_stream_socket unix_seqpacket_socket } { create bind listen accept read write getattr };
+allow autod self:{ unix_stream_socket unix_seqpacket_socket } { create bind listen accept read write getattr };
+
+# 允许客户端连接（把 untrusted_app 换成你实际的客户端 domain）
+# allow untrusted_app autod_socket:sock_file write;
+# allow untrusted_app autod:unix_seqpacket_socket connectto;
+
+# ---------------------------------------------------------------------------
+# 日志
+# ---------------------------------------------------------------------------
+
+allow autod self:capability { sys_admin };
+allow autod self:{ tcp_socket udp_socket } { read write };
+allow autod autod_exec:file { read open execute execute_no_trans map };
+
+# ---------------------------------------------------------------------------
+# 调试期临时规则（进生产前删掉）
+# ---------------------------------------------------------------------------
+# 实在卡住时，用 permissive domain 定位问题：
+#   permissive autod;
+# 这条会打印所有会被拒绝的操作而不真的拦，方便一次性收集全部 avc 报错。
+# 定位完必须删除 —— permissive domain 会过 CTS 失败。

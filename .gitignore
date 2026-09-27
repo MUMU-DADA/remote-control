@@ -1,0 +1,28 @@
+# ============================================================================
+# AutoSnapshotAndroid
+# ============================================================================
+
+# --- AOSP 源码树 ---
+# ~45GB（+ .repo ~30GB），由 `repo` 独立管理着 314 个 git 项目，
+# 不属于本仓库；本仓库只跟踪 dev/ docs/ tools/ 等项目本体内容。
+/aosp/
+
+# --- 数据盘根目录的文件系统元数据 ---
+/lost+found/
+
+# --- 编译产物 ---
+# dev/02-native-daemon/tests 下 make 出来的测试程序（make clean 会删掉）
+/dev/**/tests/test_inject_uinput
+/dev/**/tests/test_integration
+*.o
+*.a
+*.d
+*.so
+*.so.*
+
+# --- AOSP 构建输出 ---
+# 正常情况下会落在 aosp/out/（已被上面的 /aosp/ 覆盖），这里只是留个记号
+out/
+
+# 说明：.vscode/settings.json 是**要**入库的，它记录了"只监听本项目、
+#       不扫 aosp/"的 VSCode 配置，不要忽略。

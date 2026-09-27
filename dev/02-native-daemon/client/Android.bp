@@ -1,0 +1,27 @@
+// autodctl（参考客户端）的构建描述
+//
+// 放置位置：frameworks/native/cmds/autod/client/Android.bp
+// 编译：m autodctl
+
+cc_binary {
+    name: "autodctl",
+    srcs: ["autodctl.cpp"],
+
+    shared_libs: [
+        "libbase",
+        "liblog",
+        "libandroid",      // AndroidBitmap_compress（和 screencap 同一条编码路径）
+    ],
+
+    // autodctl.cpp 里 #include "../daemon/protocol.h"，
+    // 所以 client/ 和 daemon/ 必须保持同级目录。
+    // 如果移动了目录，改成在 AOSP.bp 里加 local_include_dirs: ["../daemon"]。
+
+    cflags: [
+        "-Wall",
+        "-Wno-unused-parameter",
+    ],
+
+    cppflags: ["-std=c++20"],
+    stl: "libc++_static",
+}

@@ -1,0 +1,77 @@
+{
+  // ============================================================================
+  // AutoSnapshotAndroid —— 让 VSCode 只盯着本项目，不再被 aosp/ 拖垮
+  //
+  // 背景：aosp/ 是 repo 管理的 AOSP 12 源码树（源码 ~45GB + .repo ~30GB，
+  //       314 个 git 项目）。默认设置下 VSCode 会自动打开其中 300+ 个仓库，
+  //       并递归监听整棵树，导致 SCM 面板爆掉、扩展宿主卡顿。
+  // ============================================================================
+
+  // ---------------------------------------------------------------------------
+  // Git：只在项目自己的开发目录里找仓库，aosp/ 下的一律不管
+  // ---------------------------------------------------------------------------
+
+  // 关闭"打开哪个文件就自动打开它所属的 git 仓库"。
+  // 设成 "subFolders" 后，打开 aosp/frameworks/base/... 不会再把 AOSP 仓库拉进来。
+  // （可选值：true=全扫 / "subFolders"=只扫子目录 / "openEditors"=只跟打开的文件 / false=全关）
+  "git.autoRepositoryDetection": "subFolders",
+
+  // 不做递归目录扫描（0 = 除下面 scanRepositories 列出的目录外，一个都不扫）
+  "git.repositoryScanMaxDepth": 0,
+
+  // 双保险：万一以后把 maxDepth 调大，也跳过这些目录
+  "git.repositoryScanIgnoredFolders": ["node_modules", "aosp", ".repo", "out", "prebuilts"],
+
+  // 只在这些目录（相对工作区根）里检测 git 仓库。
+  // 目前 dev/ 下还没有仓库；以后在任一目录 git init，SCM 里就能看到。
+  "git.scanRepositories": [
+    "dev",
+    "dev/01-ndk-prototype",
+    "dev/02-native-daemon",
+    "dev/03-java-service",
+    "docs",
+    "tools"
+  ],
+
+  // AOSP 项目没有 submodule，关掉可少一轮探测
+  "git.detectSubmodules": false,
+
+  // ---------------------------------------------------------------------------
+  // 文件监听：只监听本项目本体，AOSP 源码树与仓库元数据排除在 watcher 之外
+  // ---------------------------------------------------------------------------
+  // 说明：Git 扩展会用一个 "**" 递归 watcher 监视 .git 的出现/变化；
+  //       这里的排除同样作用于它 —— 所以 repo sync 期间也不会再自动弹出一堆仓库。
+  // 同时写 "**/aosp" 与 "**/aosp/**"：前者匹配目录本身（让 watcher 直接剪枝、不注册
+  // 子目录），后者匹配目录内的所有文件（过滤事件）。
+  "files.watcherExclude": {
+    "**/aosp": true,
+    "**/aosp/**": true,
+    "**/.repo": true,
+    "**/.repo/**": true,
+    "**/out": true,
+    "**/out/**": true,
+    "**/.gradle": true,
+    "**/.gradle/**": true
+  },
+
+  // ---------------------------------------------------------------------------
+  // 全局搜索：默认不扫 AOSP（45GB 会很慢）。
+  // 需要临时搜 AOSP 时，在搜索框右上角 "..." → 取消勾选
+  // "Use Exclude Settings and Ignore Files"，或直接在终端用 rg。
+  // ---------------------------------------------------------------------------
+  "search.exclude": {
+    "**/aosp": true,
+    "**/aosp/**": true,
+    "**/.repo": true,
+    "**/.repo/**": true,
+    "**/out": true,
+    "**/out/**": true
+  },
+  "search.followSymlinks": false,
+
+  // 资源管理器里藏掉 repo 的内部元数据目录（aosp/ 本身保持可见，方便查平台源码）。
+  // 不想藏就删掉这一段。
+  "files.exclude": {
+    "**/.repo": true
+  }
+}

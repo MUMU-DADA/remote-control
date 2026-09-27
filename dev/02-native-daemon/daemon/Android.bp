@@ -1,0 +1,137 @@
+// autod 的 AOSP 构建描述
+//
+// 放置位置：把 dev/02-native-daemon/ 整个目录拷进 AOSP 树的
+//           frameworks/native/cmds/autod/（保持 daemon/ client/ 同级）
+//
+// 编译：
+//   source build/envsetup.sh
+//   lunch aosp_arm64-userdebug
+//   m autod            # 默认：SurfaceFlinger 截图 + uinput 触控
+//   m autod_binder     # 可选：IInputManager 触控（Android 12 上不可用）
+//   m autod_stub       # 测试用：桩截图（不要装进产品镜像）
+//
+// 每个二进制只链一个截图后端 + 一个注入后端 —— 它们都定义同名工厂函数，
+// 链在一起会重复符号。
+
+// ---------------------------------------------------------------------------
+// 共享配置
+// ---------------------------------------------------------------------------
+cc_defaults {
+    name: "autod_defaults",
+
+    srcs: [
+        "main.cpp",
+        "socket_server.cpp",
+        "dispatch.cpp",        // 请求分发（可测试，从 main.cpp 抽出）
+        "inject.cpp",          // 平台无关的手势逻辑
+    ],
+
+    shared_libs: [
+        "libbase",
+        "libbinder",
+        "libcutils",
+        "libgui",              // SurfaceComposerClient / SyncScreenCaptureListener
+        "liblog",
+        "libui",               // GraphicBuffer / PixelFormat
+        "libutils",
+    ],
+
+    header_libs: [
+        "libgui_headers",
+    ],
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wno-unused-parameter",
+    ],
+
+    cppflags: ["-std=c++20"],
+    stl: "libc++_static",
+
+    // 用平台私有 API，必须标记为非 NDK
+    sdk_version: "",
+}
+
+// ---------------------------------------------------------------------------
+// 默认目标
+// ---------------------------------------------------------------------------
+//
+// 截图走 SurfaceFlinger::captureDisplay（和 AOSP 的 screencap 同源）。
+// 触控走 /dev/uinput —— Android 12 上唯一可用的方式，因为 IInputManager
+// 是 Java-only AIDL（见 docs/06-constraints.md 约束 1）。
+//
+// 代价：uinput 会创建一个可枚举的输入设备。
+cc_binary {
+    name: "autod",
+    defaults: ["autod_defaults"],
+    srcs: [
+        "capture_surfaceflinger.cpp",
+        "inject_uinput.cpp",
+    ],
+
+    // 自动安装到 /system/etc/init/autod.rc
+    init_rc: ["../init/autod.rc"],
+
+    vendor: false,
+    proprietary: false,
+}
+
+// ---------------------------------------------------------------------------
+// 可选目标：IInputManager 触控后端
+// ---------------------------------------------------------------------------
+//
+// ⚠️ 在 Android 12 上加载会失败：IInputManager 没有 cpp backend。
+//    保留是为了 Android 13+ 或自行给 AIDL 加 cpp backend 的场景。
+//
+// 优越之处：不创建额外的输入设备，不可被枚举。
+cc_binary {
+    name: "autod_binder",
+    defaults: ["autod_defaults"],
+    srcs: [
+        "capture_surfaceflinger.cpp",
+        "inject_binder.cpp",
+    ],
+
+    vendor: false,
+    proprietary: false,
+}
+
+// ---------------------------------------------------------------------------
+// 测试目标：桩截图后端
+// ---------------------------------------------------------------------------
+//
+// 生成合成图像而不是真的抓屏。用于在没有显示设备的 CI 上冒烟测试，
+// 或者验证帧通道（memfd + SCM_RIGHTS）。
+//
+// **不要编进产品镜像。** 名字带 _stub 就是为了避免误装。
+cc_binary {
+    name: "autod_stub",
+    defaults: ["autod_defaults"],
+    srcs: [
+        "capture_stub.cpp",
+        "inject_uinput.cpp",
+    ],
+    vendor: false,
+    proprietary: false,
+}
+
+// ---------------------------------------------------------------------------
+// 备注
+// ---------------------------------------------------------------------------
+//
+// 1. 三个后端各定义一个同名工厂（CreateInjectorBackend / Capture 的实现），
+//    所以必须编成独立二进制。
+//
+// 2. shared_libs 里的 libgui 是平台私有库，需要完整 AOSP 树才能解析。
+//    只想编一个模块的话，先 `m libgui` 把依赖备好。
+//
+// 3. 报 "unknown module libgui_headers" 时去掉 header_libs —— 较老版本
+//    把 libgui 的头文件直接放在 libgui 的 export_include_dirs 里。
+//
+// 4. 需要编进 system 分区才能以 system/shell UID 运行并拿到所需权限。
+//    userdebug/eng 版本可以 adb remount 后 push，eng 阶段不必每次刷机。
+//
+// 5. 主机侧的单元测试和集成测试见 ../tests/Makefile，
+//    用 g++ 直接编译，不需要 AOSP：
+//      cd ../tests && sudo make run
