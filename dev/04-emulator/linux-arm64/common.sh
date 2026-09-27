@@ -46,7 +46,9 @@ case "$EMU_ABI" in
         exit 1 ;;
 esac
 
-PRODUCT_OUT="$AOSP_DIR/out/target/product/$PRODUCT_DEVICE"
+PRODUCT_OUT="${PRODUCT_OUT:-$AOSP_DIR/out/target/product/$PRODUCT_DEVICE}"
+# 想跑"别处来的镜像"（例如 SDK 的成品 system-image）时直接覆盖：
+#   PRODUCT_OUT=/path/to/arm64-v8a ./run-emulator.sh
 
 # 另一个 ABI 的产物目录（check-env 用来提示"你其实已经编过另一个"）
 if [ "$EMU_ABI" = arm64 ]; then
@@ -78,7 +80,11 @@ mkdir -p "$RUN_DIR"
 EMULATOR_PORT="${EMULATOR_PORT:-5554}"
 EMULATOR_MEMORY_MB="${EMULATOR_MEMORY_MB:-4096}"     # TCG 吃内存，别低于 3072
 EMULATOR_CORES="${EMULATOR_CORES:-4}"
-EMULATOR_GPU="${EMULATOR_GPU:-swiftshader_indirect}" # 无显示宿主下唯一稳妥的选择
+# 默认 guest（guest 侧软件渲染）而不是 swiftshader_indirect：
+# 实测在 Debian 13 上 swiftshader_indirect 会让 emulator 段错误
+# （dmesg: emulator[...]: segfault，崩在初始化阶段，日志停在"下发 adb 公钥"后），
+# 而 -gpu guest 不会。guest 模式仍然真实合成画面，screencap/captureDisplay 正常。
+EMULATOR_GPU="${EMULATOR_GPU:-guest}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }

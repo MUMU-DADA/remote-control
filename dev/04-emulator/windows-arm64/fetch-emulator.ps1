@@ -43,6 +43,13 @@ param(
     # 直接指定 zip：本地文件路径或 URL（镜像/内网/已下好的包）
     [string]$EmulatorZipUrl,
 
+    # 直接指定模拟器 build id（例如 8807927）。
+    # ⚠️ 跑 arm64 镜像**必须**用旧版模拟器：新版（34+）在 x86_64 宿主上直接拒绝：
+    #      FATAL | QEMU2 emulator does not support arm64 CPU architecture
+    #    Google 已删除旧包（404），但国内镜像仍保留 —— 用 -RepoBase 指向镜像 + 本参数。
+    #    清单里没有旧版，所以这个路径不做 SHA1 校验。
+    [string]$BuildId,
+
     [string]$PlatformToolsZipUrl,
 
     # 例如 http://127.0.0.1:10809（本机有代理工具时用）
@@ -91,6 +98,11 @@ $emuUrl = $null; $emuSize = 0; $emuSha1 = $null
 if ($EmulatorZipUrl) {
     $emuUrl = $EmulatorZipUrl
     Write-Note "使用指定的模拟器包：$emuUrl"
+} elseif ($BuildId) {
+    $emuUrl = "$RepoBase/emulator-windows_x64-$BuildId.zip"
+    Write-Note "使用指定 build id：$BuildId"
+    Write-Note "（旧版不在仓库清单里，跳过 SHA1 校验）"
+    $emuSize = 0; $emuSha1 = $null
 } else {
     $xmlUrl = "$RepoBase/repository2-3.xml"
     $xmlPath = Join-Path $env:TEMP 'dsh-repository2-3.xml'
@@ -146,6 +158,9 @@ if ($EmulatorZipUrl) {
         Write-Ok "模拟器版本 $($revNode.major).$($revNode.minor).$($revNode.micro)（$Channel 渠道）"
     }
     Write-Ok "$(Split-Path -Leaf $emuUrl)  $(Format-Size $emuSize)  sha1=$($emuSha1.Substring(0,12))…"
+    Write-Note "⚠️ 新版模拟器（34+）在 x86_64 宿主上**不支持 arm64 guest**（实测 37.1.11 直接 FATAL）。"
+    Write-Note "   要跑 arm64 镜像请改用旧版： -RepoBase <国内镜像> -BuildId <旧版 build id>"
+    Write-Note "   详见 README「模拟器版本」一节。"
 }
 
 if (-not $PlatformToolsZipUrl) {

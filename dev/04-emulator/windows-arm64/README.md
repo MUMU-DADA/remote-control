@@ -47,24 +47,57 @@ cd dev\04-emulator\windows-arm64
 | Google 只保留当前版本，老包已删（实测 `emulator-windows_x64-7595944.zip` → **HTTP 404**） | 无法让 Windows 用上与镜像同源的 30.8.3 |
 | 当前 stable 渠道是 **37.1.11**（脚本自动解析，421 MB） | Windows 只能用新版 |
 
-新版模拟器跑 Android 12 镜像**通常**没问题（向后兼容），且 `-sysdir`、`-wipe-data`、
-`-writable-system` 这些老参数仍在。万一启动失败，按顺序试：
+### 实测结论：**新版模拟器不支持在 x86_64 宿主上跑 arm64**，必须钉旧版
 
-> **好消息：这个风险可以在 Linux 上提前验证，不必等装好 Windows 才知道。**
-> 把 37.1.11 的 **linux** 包下下来，用同一份镜像跑一次（guest 侧行为与 Windows 一致）：
->
-> ```bash
-> # 在开发机上
-> curl -sSL -o /tmp/emu37.zip \
->   https://mirrors.cloud.tencent.com/AndroidSDK/emulator-linux_x64-15917651.zip
-> unzip -q /tmp/emu37.zip -d /tmp/emu37
-> cd dev/04-emulator/linux-arm64
-> EMULATOR_BIN=/tmp/emu37/emulator/emulator ./run-emulator.sh --arm64
-> ```
->
-> 能开机 → Windows 侧用 37.x 基本没悬念；起不来 → 提前切下面的降级方案。
-> （已核对：37.1.11 的 `-sysdir`/`-datadir`/`-accel`/`-gpu`/`-wipe-data`/`-writable-system`
-> 全部保留，`run-emulator.ps1` 传的参数合法。）
+在开发机上用同一份 arm64 镜像实测（Linux 版与 Windows 版同源代码）：
+
+```
+INFO  | Found build target architecture: arm64
+FATAL | QEMU2 emulator does not support arm64 CPU architecture        ← emulator 37.1.11
+```
+
+| 模拟器版本 | x86_64 宿主跑 arm64 guest |
+|---|---|
+| ≤ 33.x | ✅ 带 `qemu-system-aarch64`，接受 arm64 镜像 |
+| 34+（含当前 stable 37.1.11） | ❌ 直接 `FATAL` |
+
+而 Google **只保留当前版本**：老包在官方源全部 404
+（实测 `emulator-windows_x64-7595944.zip` → 404）。**国内镜像还留着旧包**（实测腾讯镜像）：
+
+| 包 | `dl.google.com` | 腾讯镜像 |
+|---|---|---|
+| `emulator-windows_x64-7595944.zip`（30.8.3） | 404 | 404 |
+| `emulator-windows_x64-8807927.zip` | 未测 | **HTTP 200，380MB** |
+| `emulator-windows_x64-15917651.zip`（37.1.11） | 200 | 200 |
+
+所以 Windows 侧要这样装：
+
+```powershell
+.\fetch-emulator.ps1 -RepoBase https://mirrors.cloud.tencent.com/AndroidSDK -BuildId 8807927
+```
+
+（`-BuildId` 直接拼 zip 名；清单里没有旧版本，因此**不做 SHA1 校验**。）
+
+### ⚠️ 还有一道尚未解决的关卡：arm64 的 PCI 音频设备
+
+不管 30.8.3 还是 31.x，arm64 镜像都会卡在这里：
+
+```
+qemu-system-aarch64-headless: PCI bus not available for hda
+emulator: Done with QEMU main loop
+```
+
+模拟器给 arm 的 `ranchu` 机器挂 PCI 设备（`intel-hda`、`virtio-serial-pci`），
+而 arm ranchu **没有 PCI 总线** → QEMU 致命退出。已排除：`-no-audio` / `-audio none` /
+`QEMU_AUDIO_DRV=none` / 改 `hardware-qemu.ini` / AVD 模式（AVD 直接段错误）。
+完整记录见 [`../linux-arm64/README.md`](../linux-arm64/README.md) 的「成品镜像与当前已知阻塞」。
+
+判断：大概率是**镜像 feature 与模拟器不配套**（用 Google 成品镜像时还会警告
+`unexpected system image feature string`）。**自己编的镜像**（与本机模拟器同源）是下一个要试的，
+开发机上已经开编。若自制镜像同样卡住，Windows 侧的 arm64 只剩：
+真机 / arm64 宿主 / WSL2（见下面降级 C）。
+
+万一启动失败，按顺序试：
 
 ### 降级 A：换渠道
 

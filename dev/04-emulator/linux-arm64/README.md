@@ -33,6 +33,100 @@
 
 ---
 
+## 实测踩到的坑（2026-09-28 在本机逐条验证）
+
+跑通这条路的成本几乎全在这几个坑上，记下来免得重踩。
+
+### 1. 必须让模拟器进"构建模式"，光有 `-sysdir` 不够
+
+单独用 `emulator -sysdir <dir>`，30.8.3 会直接报：
+
+```
+emulator: ERROR: No AVD specified. Use '@foo' or '-avd foo' to launch a virtual device named 'foo'
+```
+
+它需要 **`ANDROID_PRODUCT_OUT` 环境变量**才进入"从构建产物直接启动"的模式。
+`source build/envsetup.sh`（`lunch`）会设这个变量，所以官方流程里看不出来。
+`run-emulator.sh` 已经替你设好。
+
+### 2. 它靠 `<sysdir>/system/build.prop` 判断 guest 架构
+
+只给 `-sysdir` 而缺这个文件时，模拟器**退回宿主架构 x86_64** —— 日志里会出现
+x86 专属的 `pc_memory_init` 与 CPUID 警告，arm64 内核根本不会启动。
+
+- AOSP 产物天然有 `system/build.prop` ✓
+- SDK 成品镜像的 `build.prop` 在**顶层** ✗ → 要手工补一份到 `system/build.prop`
+
+### 3. `-initrd` 指向的是 `<sysdir>/initrd`，不是 `ramdisk.img`
+
+AOSP 产物里有这个文件；SDK 成品镜像没有 → QEMU 拿到不存在的 initrd，
+**主循环立刻结束且不报任何错**（日志停在 `emulator: Done with QEMU main loop`）。
+补 `cp ramdisk.img initrd` 即可。
+
+### 4. `-gpu swiftshader_indirect` 在 Debian 13 上让模拟器段错误
+
+```
+dmesg: emulator[261357]: segfault at 94 ip 00000000004434b0 ... in emulator[...]
+```
+
+崩在初始化阶段，日志停在"下发 adb 公钥"之后，**没有任何错误输出**，极难定位。
+改用 **`-gpu guest`**（guest 侧软件渲染）即正常 —— 画面仍然真实合成，
+`screencap` / `captureDisplay()` 不受影响。`run-emulator.sh` 已把默认值改成 `guest`。
+
+### 5. 新版模拟器不再支持在 x86_64 宿主上跑 arm64
+
+拿 SDK 最新的 37.1.11 跑同一份 arm64 镜像：
+
+```
+INFO | Found build target architecture: arm64
+FATAL | QEMU2 emulator does not support arm64 CPU architecture
+```
+
+Google 在新版里去掉了 ARM 的软件模拟后端。**arm64 guest 只能用旧版模拟器** ——
+AOSP 树自带的 30.8.3 正好是"旧版 + 与镜像同源" ✓。这也意味着 Windows 侧
+不能直接用最新版（见 [`../windows-arm64/README.md`](../windows-arm64/README.md)）。
+
+### 6. SDK 成品镜像带版本依赖
+
+成品镜像的 `source.properties` 会写 `Pkg.Dependencies=emulator#31.2.7`，
+要求模拟器 ≥ 该版本。用 30.8.3 跑 API 31 的**成品镜像**会因不匹配而启动失败；
+**自己编的镜像没有这个问题**（同一棵树、同一版本）。
+
+### 顺带：成品镜像与**当前已知阻塞**（重要）
+
+`get-stock-image.sh` 会下载 Google 官方的 Android 12 arm64 成品镜像
+（`system-images;android-31;default;arm64-v8a`，606MB，SHA1 与清单一致 ✓）。
+
+⚠️ **但它目前在本机跑不起来** —— 原因已定位，**别把它当成"先验证环境"的手段**：
+
+```
+qemu-system-aarch64-headless: PCI bus not available for hda
+emulator: Done with QEMU main loop          ← QEMU 致命退出，模拟器跟着关
+```
+
+模拟器给 arm 的 `ranchu` 机器挂了 **PCI 设备**（`intel-hda` 音频、`virtio-serial-pci`），
+而 arm 的 ranchu **没有 PCI 总线** → QEMU 直接退出。
+
+已经排除的尝试（都无效）：
+
+| 尝试 | 结果 |
+|---|---|
+| `-no-audio` / `-audio none` / `QEMU_AUDIO_DRV=none` | 音频设备照样被挂上 |
+| 改 `hardware-qemu.ini` 里 `hw.audio* = false` | 构建模式下被模拟器重写，忽略 |
+| 换 31.x 模拟器（镜像自带 `Pkg.Dependencies=emulator#31.2.7`） | 同样的 hda 报错 |
+| AVD 模式（`-avd`，配置里音频已关） | 模拟器**直接段错误**（exit 139，日志为空） |
+
+而且这份成品镜像还会让模拟器警告 `unexpected system image feature string`，
+说明它和手头的模拟器并不是配套版本。
+
+**结论**：arm64 的验证要用**自己编的镜像**（与模拟器同源、feature 匹配），
+也就是 `./build-images.sh` 的产物。成品镜像留作对照样本（镜像内容本身是好的）。
+
+`run-stock-image.sh` 保留着（一旦版本匹配就能直接用），
+`screenshot.sh` 用于起来之后抓图留证。
+
+---
+
 ## 前置条件
 
 ```bash

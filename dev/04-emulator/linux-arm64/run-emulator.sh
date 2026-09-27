@@ -111,6 +111,14 @@ else
     log "  gpu    : $EMULATOR_GPU    内存: ${EMULATOR_MEMORY_MB}MB    核: $EMULATOR_CORES"
     log "  日志   : ${LOG#"$PROJECT_ROOT"/}"
 
+    # ⚠️ 关键：模拟器只有在 ANDROID_PRODUCT_OUT 存在时才进"不用 AVD、
+    #    直接从构建产物启动"的模式。少了它 30.8.3 会直接报
+    #      ERROR: No AVD specified. Use '@foo' or '-avd foo' ...
+    #    虽然传了 -sysdir 也没用。（AOSP 官方流程里 lunch 会设这个变量，
+    #    所以文档上看不出来。）
+    export ANDROID_PRODUCT_OUT="$PRODUCT_OUT"
+    export ANDROID_BUILD_TOP="$AOSP_DIR"
+
     setsid nohup "$EMULATOR_BIN" "${args[@]}" > "$LOG" 2>&1 &
     EMU_PID=$!
     log "PID $EMU_PID，等待 adb 出现…"
