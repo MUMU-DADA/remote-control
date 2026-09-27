@@ -300,6 +300,11 @@ ReplyPacket Dispatcher::HandleTouch(const Request& req) {
 
 ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
                                int reqFd, int peerUid) {
+    // 所有操作串行化。理由见 dispatch.h 里的 opMutex_ ——
+    // 关键是流式响应（WebSocket / MJPEG）的回调是在处理器**返回之后**
+    // 才跑的，锁放调用方保护不到它们。
+    std::lock_guard<std::mutex> opLock(opMutex_);
+
     const std::vector<std::string> args = SplitPayload(payload);
 
     if (req.magic != kMagic) {

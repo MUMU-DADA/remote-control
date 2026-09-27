@@ -13,6 +13,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,20 @@ class Dispatcher {
     Injector* injector_;
     std::unique_ptr<AppOps>  appOps_;
     std::unique_ptr<FileOps> fileOps_;
+    // 操作串行化锁。
+    //
+    // ⚠️ 锁必须在**这一层**，不能放在调用方。
+    //
+    //   Injector 是有状态的（按下/抬起、触控槽位映射、手势的 downTime），
+    //   两条传输同时注入会互相破坏对方的手势。
+    //
+    //   原来锁在 main.cpp 的 HTTP/socket 处理器里 —— 那对流式响应是**无效**的：
+    //   streamer 回调是在处理器**返回之后**才由 ServeConnection 调用的，
+    //   那时锁早就释放了。所以 WebSocket 里流的每个触控点都是无锁注入的。
+    //
+    //   放进 Dispatcher::Handle 之后，无论谁调、从哪条传输调，都自动串行。
+    std::mutex opMutex_;
+
     // 键盘是延迟创建的：建了就会在系统里多一个输入设备，
     // 没用到按键功能的部署不该平白多出它。
     std::unique_ptr<Keyboard> keyboard_;

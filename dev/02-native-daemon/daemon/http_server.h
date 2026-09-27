@@ -58,7 +58,18 @@ struct HttpResponse {
     // （客户端断开时 write 会失败，那就是停止信号）。
     std::function<void(int connFd)> streamer;
 
+    // WebSocket 升级。
+    //
+    // 非空时 ServeConnection 不再发普通的 HTTP 响应，而是发
+    //   101 Switching Protocols + Upgrade + Connection + Sec-WebSocket-Accept
+    // 然后把连接交给 streamer —— 之后这条连接上跑的就是 WebSocket 帧了。
+    //
+    // 复用 streamer 而不是另开一套：升级之后"连接归回调管"这件事
+    // 和 MJPEG 是一样的，区别只在握手阶段。
+    std::string wsAccept;
+
     bool isStreaming() const { return static_cast<bool>(streamer); }
+    bool isWebSocket() const { return !wsAccept.empty(); }
 
     static HttpResponse Json(int status, const std::string& json);
     static HttpResponse Text(int status, const std::string& text);
@@ -66,6 +77,9 @@ struct HttpResponse {
 
     // 构造一个流式响应。contentType 里的 boundary 由调用方给全。
     static HttpResponse Stream(const std::string& contentType);
+
+    // 构造一个 WebSocket 升级响应。accept 由 WsComputeAccept 算出。
+    static HttpResponse WebSocket(const std::string& accept);
 };
 
 using HttpHandler = std::function<HttpResponse(const HttpRequest&)>;

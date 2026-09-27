@@ -22,6 +22,7 @@
 #include "png_encoder.h"
 #include "protocol.h"
 #include "service_state.h"
+#include "websocket.h"
 #include "webui.h"
 
 namespace autod {
@@ -414,6 +415,125 @@ HttpResponse RestApi::HandleClipboard(const HttpRequest& req) {
     return Call(Cmd::Clipboard, PackArgs({op}), 0, -1);
 }
 
+// ── 流式触控（WebSocket）────────────────────────────────────────────────────
+
+bool RestApi::HandleTouchEvent(const std::string& text, std::string* reply) {
+    reply->clear();
+
+    json::Value v;
+    std::string perr;
+    if (!json::Parse(text, &v, &perr)) {
+        *reply = "{\"ok\":false,\"error\":\"JSON 解析失败\"}";
+        return false;
+    }
+
+    const std::string t = v.str("t");
+
+    // 心跳。客户端用它测往返延迟 —— 触控手感好不好，
+    // 用户感受到的是这个数，不是帧率。
+    if (t == "ping") {
+        *reply = "{\"t\":\"pong\",\"s\":" +
+                 std::to_string(v.num("s", 0)) + "}";
+        return true;
+    }
+
+    Request r{};
+    r.magic     = kMagic;
+    r.pointerId = static_cast<uint32_t>(v.num("id", 0));
+    r.x         = static_cast<int32_t>(v.num("x", 0));
+    r.y         = static_cast<int32_t>(v.num("y", 0));
+    r.x2        = static_cast<int32_t>(v.num("x2", 0));
+    r.y2        = static_cast<int32_t>(v.num("y2", 0));
+    r.durationMs = static_cast<uint32_t>(v.num("ms", 0));
+    if (v.num("pressure", 0) > 0) {
+        r.pressure = static_cast<float>(v.num("pressure", 0));
+    }
+
+    // 事件名 → 命令。
+    //
+    // down/move/up 是流式的三个原语：客户端按下就发 down，
+    // 之后每次指针移动发一个 move，抬起发 up。
+    // 服务端收到就立刻注入，不再等"整个手势"。
+    uint32_t cmd = 0;
+    bool wantReply = true;
+    if (t == "down")           { cmd = static_cast<uint32_t>(Cmd::TouchDown); }
+    else if (t == "move")      { cmd = static_cast<uint32_t>(Cmd::TouchMove);
+                                 // move 是最高频的事件，默认不回 —— 回一个
+                                 // 就等于把上行流量翻倍，而它对客户端没用。
+                                 // 出错时仍然会回。
+                                 wantReply = false; }
+    else if (t == "up")        { cmd = static_cast<uint32_t>(Cmd::TouchUp); }
+    else if (t == "cancel")    { cmd = static_cast<uint32_t>(Cmd::TouchUp); }
+    else if (t == "tap")       { cmd = static_cast<uint32_t>(Cmd::Tap); }
+    else if (t == "longpress") { cmd = static_cast<uint32_t>(Cmd::LongPress); }
+    else if (t == "doubletap") { cmd = static_cast<uint32_t>(Cmd::DoubleTap); }
+    else if (t == "drag")      { cmd = static_cast<uint32_t>(Cmd::Drag); }
+    else {
+        *reply = "{\"ok\":false,\"error\":\"未知事件: " + t + "\"}";
+        return false;
+    }
+    if (v.num("ms", 0) > 0 && (t == "tap")) wantReply = true;
+    r.cmd = cmd;
+
+    ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
+    ServiceState::Instance().CountRequest(r.cmd, p.reply.status);
+    if (p.fd >= 0) close(p.fd);
+
+    if (p.reply.status != kOk) {
+        *reply = "{\"ok\":false,\"t\":\"" + t + "\",\"error\":\"" +
+                 StatusName(p.reply.status) + "\"}";
+        return false;
+    }
+    if (wantReply) {
+        *reply = "{\"ok\":true,\"t\":\"" + t + "\"}";
+    }
+    return true;
+}
+
+HttpResponse RestApi::HandleTouchStream(const HttpRequest& req) {
+    // 必须是一次 WebSocket 升级。普通 GET 落到这里说明调用方用错了方式 ——
+    // 明确告诉他该怎么做，比返回一个看不懂的 400 好。
+    if (req.header("upgrade") != "websocket") {
+        return HttpResponse::Error(
+                400, "这个端点需要 WebSocket 升级（用 new WebSocket(...) 连，"
+                     "不要用 fetch）。一次性手势仍可用 POST /api/v1/tap 等");
+    }
+
+    std::string accept;
+    if (!WsComputeAccept(req.header("sec-websocket-key"), &accept)) {
+        return HttpResponse::Error(400, "Sec-WebSocket-Key 缺失或不合法");
+    }
+
+    HttpResponse resp = HttpResponse::WebSocket(accept);
+    resp.streamer = [this](int fd) {
+        uint64_t events = 0, failed = 0;
+        while (true) {
+            WsFrame f;
+            std::string err;
+            if (!WsReadFrame(fd, &f, &err)) {
+                if (!err.empty()) {
+                    ALOGW("触控流异常结束: %s", err.c_str());
+                }
+                break;
+            }
+            if (f.opcode != kWsText && f.opcode != kWsBinary) continue;
+
+            ++events;
+            std::string reply;
+            if (!HandleTouchEvent(f.payload, &reply)) {
+                ++failed;
+            }
+            if (!reply.empty()) {
+                if (!WsWriteText(fd, reply)) break;
+            }
+        }
+        ALOGI("触控流结束: %llu 个事件，%llu 个失败", 
+              static_cast<unsigned long long>(events),
+              static_cast<unsigned long long>(failed));
+    };
+    return resp;
+}
+
 // ── 实时画面流 ──────────────────────────────────────────────────────────────
 HttpResponse RestApi::HandleStream(const HttpRequest& req) {
     // 帧率：默认 5，限制在 1..30。
@@ -736,6 +856,9 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
     }
     if (res == "stream" && method == "GET") {
         return HandleStream(req);
+    }
+    if (res == "touch" && method == "GET") {
+        return HandleTouchStream(req);
     }
     if (res == "longpress" && method == "POST") {
         return HandleGesture(req, Cmd::LongPress, /*needsEnd=*/false);

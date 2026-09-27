@@ -123,6 +123,13 @@ HttpResponse HttpResponse::Stream(const std::string& contentType) {
     return r;
 }
 
+HttpResponse HttpResponse::WebSocket(const std::string& accept) {
+    HttpResponse r;
+    r.status = 101;
+    r.wsAccept = accept;
+    return r;
+}
+
 HttpResponse HttpResponse::Error(int status, const std::string& message) {
     json::Writer w;
     w.Obj().Field("ok", false).Field("status", status)
@@ -409,6 +416,33 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
     // 处理器本来就不抛。真出了 bad_alloc 这类，-fno-exceptions 下
     // 本来就是 abort，catch 也救不回来。
     const HttpResponse resp = handler(req);
+
+    // ── WebSocket 升级 ──
+    //
+    // 必须在普通响应分支之前处理：101 响应没有 Content-Length，
+    // 头也不一样（Upgrade / Connection: Upgrade）。
+    if (resp.isWebSocket()) {
+        std::string head =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + resp.wsAccept + "\r\n\r\n";
+        if (write(connFd, head.data(), head.size()) < 0) return;
+
+        // 升级之后这条连接是长连接，不能再让它带着读超时 ——
+        // ReadRequest 设了 SO_RCVTIMEO 防"连上不发数据"，但 WebSocket
+        // 空闲是正常的（用户没碰屏幕时就没有事件）。
+        // 不清掉的话，空闲几秒就会被自己的超时掐断，
+        // 表现为"停一会儿不动，再拖就失灵了"。
+        timeval tv{};
+        tv.tv_sec  = 0;
+        tv.tv_usec = 0;
+        setsockopt(connFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(connFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        resp.streamer(connFd);
+        return;
+    }
 
     // 流式响应没有 Content-Length（长度事先不知道），
     // 也不能带 Content-Length —— 带了客户端会等满那么多字节才渲染。

@@ -413,34 +413,24 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 连接可以并发，但**操作**必须串行：Injector 是有状态的
-    // （按下/抬起、触控槽位映射、手势的 downTime），两个客户端同时
-    // 注入会互相破坏对方的手势状态。
-    //
-    // 锁加在这里而不是退回"连接也串行" —— 后者会让一个空闲的长连接
-    // 客户端把整个服务占住（实测踩过：上位应用连上后其它客户端全被
-    // 挡住，直到空闲超时把应用那条连接掐掉）。
-    //
-    // 注意这把锁同时保护 socket 与 HTTP 两条传输 —— 它们调的是同一个
-    // Dispatcher，锁必须在**共同的那一层**。
-    std::mutex opMutex;
 
     // HTTP 线程的上下文。用栈上的结构体而不是 lambda 捕获 ——
     // pthread_create 的入口必须是普通函数指针，捕获得靠传参。
     struct HttpThreadCtx {
         HttpServer* server;
         RestApi*    api;
-        std::mutex* mutex;
     };
-    HttpThreadCtx httpCtx{&httpServer, &restApi, &opMutex};
+    HttpThreadCtx httpCtx{&httpServer, &restApi};
 
     if (httpServer.running()) {
         const int rc = pthread_create(
             &httpThread, nullptr,
             [](void* arg) -> void* {
                 auto* c = static_cast<HttpThreadCtx*>(arg);
+                // 不再在这里加锁 —— 操作串行化在 Dispatcher::Handle 里。
+                // 放这里对流式响应是无效的：streamer 回调是在处理器返回
+                // **之后**才跑的，那时锁已经释放了。
                 c->server->Run([c](const HttpRequest& req) {
-                    std::lock_guard<std::mutex> lock(*c->mutex);
                     return c->api->Handle(req);
                 });
                 return nullptr;
@@ -454,14 +444,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    server.Run([&dispatcher, &opMutex, &server, &httpServer](
+    server.Run([&dispatcher, &server, &httpServer](
                        const Request& req, const std::string& payload,
                        int reqFd, int peerUid) {
-        ReplyPacket packet;
-        {
-            std::lock_guard<std::mutex> lock(opMutex);
-            packet = dispatcher.Handle(req, payload, reqFd, peerUid);
-        }
+        // 不加锁 —— 串行化在 Dispatcher::Handle 里做。
+        // 放这里对流式响应无效（回调在处理器返回之后才跑），
+        // 而且两处都加会直接死锁。
+        ReplyPacket packet = dispatcher.Handle(req, payload, reqFd, peerUid);
         ServiceState::Instance().CountRequest(req.cmd, packet.reply.status);
 
         // Shutdown / Restart 命令只是设了个标志（应答要先发出去），

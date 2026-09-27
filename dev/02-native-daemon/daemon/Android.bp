@@ -39,6 +39,7 @@ cc_defaults {
         "clipops.cpp",
         "webui.cpp",
         "image_encoder.cpp",
+        "websocket.cpp",
     ],
 
     // ⚠️ 必须排除静态库的符号导出，否则会与系统的 libc++.so 打架。

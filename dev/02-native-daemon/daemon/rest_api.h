@@ -51,6 +51,17 @@ class RestApi {
     HttpResponse HandleKey(const HttpRequest& req);
     HttpResponse HandleClipboard(const HttpRequest& req);
 
+    // 流式触控（WebSocket）。
+    //
+    // 一个手势一个 HTTP 请求是行不通的：每次都要 TCP 往返 + HTTP 解析，
+    // 拖拽时"一顿一顿"。WebSocket 建一次连接，之后每个触控点就是一个
+    // 几字节的帧，而且服务端能实时把错误推回来。
+    HttpResponse HandleTouchStream(const HttpRequest& req);
+
+    // 处理一条触控事件（JSON）。reply 非空时应当回给客户端。
+    // 返回 false 表示这次事件失败。
+    bool HandleTouchEvent(const std::string& text, std::string* reply);
+
     Dispatcher* dispatcher_;
 };
 

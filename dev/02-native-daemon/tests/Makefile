@@ -60,7 +60,7 @@ SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
 APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
                  $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket
 
 all: $(BINS) fake_screencap
 
@@ -72,6 +72,11 @@ test_integration: $(INTEG_SRCS) $(COMMON_HDRS) \
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(INTEG_SRCS)
 
 JSON_SRCS = test_json.cpp $(DAEMON)/json_parser.cpp $(DAEMON)/json_writer.h
+
+WS_SRCS = test_websocket.cpp $(DAEMON)/websocket.cpp $(DAEMON)/log_buffer.cpp
+
+test_websocket: $(WS_SRCS) test_util.h $(DAEMON)/websocket.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(WS_SRCS)
 
 KB_SRCS = test_keyboard.cpp $(DAEMON)/keyboard.cpp $(DAEMON)/log_buffer.cpp
 
@@ -105,6 +110,7 @@ _run: all
 	 ./test_appops;                              a=$$?; echo; \
 	 ./test_json;                                j=$$?; echo; \
 	 ./test_keyboard;                            k=$$?; echo; \
+	 ./test_websocket;                           w=$$?; echo; \
 	 echo "───────────────────────────────"; \
 	 printf "  %-34s %s\n" "注入后端单元测试"   "$$([ $$u -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "端到端集成测试"     "$$([ $$i -eq 0 ] && echo 通过 || echo 失败)"; \
@@ -112,7 +118,8 @@ _run: all
 	 printf "  %-34s %s\n" "应用管理后端"       "$$([ $$a -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "JSON 解析/输出"      "$$([ $$j -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "按键注入"            "$$([ $$k -eq 0 ] && echo 通过 || echo 失败)"; \
-	 exit $$(( u + i + c + a + j + k ))
+	 printf "  %-34s %s\n" "WebSocket 握手"       "$$([ $$w -eq 0 ] && echo 通过 || echo 失败)"; \
+	 exit $$(( u + i + c + a + j + k + w ))
 
 clean:
 	rm -f $(BINS) fake_screencap

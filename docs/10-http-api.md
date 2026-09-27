@@ -124,7 +124,8 @@ curl http://127.0.0.1:8088/api/v1/describe
 | GET | `/api/v1/capture` | 截图，**默认返回 PNG** |
 | GET | `/api/v1/stream` | **MJPEG 实时流**（见 11 号文档） |
 | GET | `/api/v1/capture?format=raw` | 原始 RGBA 像素 |
-| POST | `/api/v1/tap` | `{"x":160,"y":240,"ms":50}` |
+| **WS** | **`/api/v1/touch`** | **流式触控（推荐）**：`down`/`move`/`up` 三原语 |
+| POST | `/api/v1/tap` | `{"x":160,"y":240,"ms":50}`（一次性，或流断开时兜底） |
 | POST | `/api/v1/swipe` | `{"x1":..,"y1":..,"x2":..,"y2":..,"ms":250}` |
 
 | 方法 | 路径 | 说明 |

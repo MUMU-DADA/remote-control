@@ -38,7 +38,8 @@ HOST_SRCS = $(DAEMON)/main.cpp \
             $(DAEMON)/keyboard.cpp \
             $(DAEMON)/clipops.cpp \
             $(DAEMON)/webui.cpp \
-            $(DAEMON)/image_encoder.cpp
+            $(DAEMON)/image_encoder.cpp \
+            $(DAEMON)/websocket.cpp
 
 HOST_HDRS = $(wildcard $(DAEMON)/*.h)
 
