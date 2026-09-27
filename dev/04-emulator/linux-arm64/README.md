@@ -165,11 +165,21 @@ tagged-address ABI，Scudo/堆标签把校验值写进指针高字节，而 **20
 BoringSSL 自检在同一台机器上从 fail 变 pass，也说明这类"看起来像加密库崩溃"的问题
 根子在 TCG 的 CPU 特性模拟上。
 
-⚠️ **改 system.img 的坑**：模拟器/构建会生成 `system-qemu.img`、`vendor-qemu.img`、
+**已尝试但不够的修法**：在 system 镜像的 `init.rc` 的 `on early-init` 里加
+`write /proc/sys/abi/tagged_addr_dis 1`（补丁确实执行了：日志里能看到我插入的
+`TCG-TBI-PATCH` kmsg 标记，init.rc 行号也从 17 变成 21）。
+但 keystore2 的崩溃现场仍是 `tagged_addr_ctrl: 0000000000000001` —— 因为
+**TBI 是由 init 在自身 bionic 初始化时开启的、并被所有子进程继承**，
+early-init 这个时机已经太晚（sysctl 只能拦住之后的 `prctl`，拦不住继承）。
+→ 下一步要在**内核/CPU 层面**关掉 TBI（例如用 QEMU 的 CPU ID 寄存器覆盖
+把 `ID_AA64MMFR2_EL1.TBI` 之类关掉），而不是在 init.rc 里补。
+
+⚠️ **改 system.img 的坑**：构建会生成 `system-qemu.img`、`vendor-qemu.img`、
 `ramdisk-qemu.img`、`product-qemu.img`、`system_ext-qemu.img`（见
 `build/make/core/Makefile` 的 `INSTALLED_QEMU_*`），**guest 实际挂的是这些副本**。
-只改 `system.img` 不会生效（日志里 init.rc 行号仍是原始值即可判定），
-必须先用 `m` 重新生成这些 `*-qemu.img`；而**直接删掉它们会让 first-stage init 崩溃、guest 重启**。
+只改 `system.img` 不会生效（用日志里 init.rc 的行号即可判定），
+必须再用 `m` 重新生成这些 `*-qemu.img`；而**直接删掉它们会让 first-stage init 崩溃、guest 重启**。
+
 
 
 已排除的尝试（都无效）：
