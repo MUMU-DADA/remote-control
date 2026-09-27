@@ -31,6 +31,10 @@ cc_defaults {
         "http_client.cpp",     // libcurl 运行时加载
         "service_state.cpp",   // 服务自身状态（API 的"控制自身"）
         "log_buffer.cpp",      // 进程内日志环形缓冲
+        "http_server.cpp",
+        "rest_api.cpp",
+        "json_parser.cpp",
+        "png_encoder.cpp",
     ],
 
     shared_libs: [

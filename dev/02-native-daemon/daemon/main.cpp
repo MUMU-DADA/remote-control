@@ -8,6 +8,7 @@
 
 #include <getopt.h>
 #include <mutex>
+#include <thread>
 #include <grp.h>
 #include <signal.h>
 #include <stdio.h>
@@ -28,6 +29,8 @@
 #include "protocol.h"
 #include "log_buffer.h"
 #include "selftest.h"
+#include "http_server.h"
+#include "rest_api.h"
 #include "service_state.h"
 #include "socket_server.h"
 
@@ -55,6 +58,10 @@ void PrintUsage(const char* argv0) {
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
   --gid <gid>          配套的 GID，省略则用与 uid 相同的值
   --selftest           检查运行环境后退出（首次部署时先跑这个）
+  --http-bind <地址>    启用 HTTP/JSON API 并绑定该地址（如 127.0.0.1）
+                        不指定则不启用。绑非回环地址时**必须**配 --http-token
+  --http-port <端口>    HTTP 端口，默认 8088
+  --http-token <令牌>   访问 HTTP API 所需的 Bearer token
   --socket-mode <8进制>  socket 文件权限，默认 0660
                         放宽到 0666 可让上位应用以自己的 UID 连入；
                         但那意味着同设备任何进程都能控制本服务，请自行权衡
@@ -115,6 +122,9 @@ int main(int argc, char** argv) {
     bool        dropPrivileges = false;
     bool        selfTest       = false;
     mode_t      socketMode     = 0660;
+    std::string httpBind;                 // 空 = 不启用 HTTP API
+    uint16_t    httpPort       = 8088;
+    std::string httpToken;
 
     enum LongOpt {
         kOptSocket = 1000,
@@ -125,6 +135,9 @@ int main(int argc, char** argv) {
         kOptGid,
         kOptSelfTest,
         kOptSocketMode,
+        kOptHttpBind,
+        kOptHttpPort,
+        kOptHttpToken,
     };
     static const option kLongOptions[] = {
         {"socket",      required_argument, nullptr, kOptSocket},
@@ -135,6 +148,9 @@ int main(int argc, char** argv) {
         {"touch-range", required_argument, nullptr, kOptTouchRange},
         {"selftest",    no_argument,       nullptr, kOptSelfTest},
         {"socket-mode", required_argument, nullptr, kOptSocketMode},
+        {"http-bind",   required_argument, nullptr, kOptHttpBind},
+        {"http-port",   required_argument, nullptr, kOptHttpPort},
+        {"http-token",  required_argument, nullptr, kOptHttpToken},
         {"foreground",  no_argument,       nullptr, 'f'},
         {"verbose",     no_argument,       nullptr, 'v'},
         {"help",        no_argument,       nullptr, 'h'},
@@ -164,6 +180,22 @@ int main(int argc, char** argv) {
                 break;
             case kOptSelfTest:
                 selfTest = true;
+                break;
+
+            case kOptHttpBind:
+                httpBind = optarg;
+                break;
+            case kOptHttpPort: {
+                const long v = strtol(optarg, nullptr, 10);
+                if (v <= 0 || v > 65535) {
+                    fprintf(stderr, "错误: --http-port 需为 1-65535\n");
+                    return 1;
+                }
+                httpPort = static_cast<uint16_t>(v);
+                break;
+            }
+            case kOptHttpToken:
+                httpToken = optarg;
                 break;
 
             case kOptSocketMode: {
@@ -349,17 +381,50 @@ int main(int argc, char** argv) {
     fprintf(stderr, "autod: 就绪, 监听 %s\n", server.path().c_str());
 
     Dispatcher dispatcher(&capture, &injector);
-    // 连接是并发的（每个连接一个线程），但操作必须串行：
-    // Injector 是有状态的 —— 按下/抬起、触控槽位映射、手势的 downTime。
-    // 两个客户端同时注入会互相破坏对方的手势状态。
+
+    // ── HTTP/JSON API ──
     //
-    // 所以锁加在这里，而不是退回"连接也串行" —— 后者会让一个空闲的
-    // 长连接客户端把整个服务占住（实测踩过：上位应用连上后，
-    // 其它客户端全被挡住，直到空闲超时把应用那条连接掐掉）。
+    // 跑在独立线程里：它是**另一条传输**，和 Unix socket 并行服务。
+    // 不该让其中一条的负载影响另一条，也不该因为 socket 侧在忙
+    // 就让 HTTP 请求排队。
+    HttpServer httpServer;
+    RestApi    restApi(&dispatcher);
+    std::thread httpThread;
+    if (!httpBind.empty()) {
+        HttpServer::Options opts;
+        opts.bindAddr = httpBind;
+        opts.port     = httpPort;
+        opts.token    = httpToken;
+        if (!httpServer.Start(opts, &error)) {
+            fprintf(stderr, "autod: HTTP API 启动失败: %s\n", error.c_str());
+            return 1;
+        }
+    }
+
+    // 连接可以并发，但**操作**必须串行：Injector 是有状态的
+    // （按下/抬起、触控槽位映射、手势的 downTime），两个客户端同时
+    // 注入会互相破坏对方的手势状态。
+    //
+    // 锁加在这里而不是退回"连接也串行" —— 后者会让一个空闲的长连接
+    // 客户端把整个服务占住（实测踩过：上位应用连上后其它客户端全被
+    // 挡住，直到空闲超时把应用那条连接掐掉）。
+    //
+    // 注意这把锁同时保护 socket 与 HTTP 两条传输 —— 它们调的是同一个
+    // Dispatcher，锁必须在**共同的那一层**。
     std::mutex opMutex;
-    server.Run([&dispatcher, &opMutex, &server](const Request& req,
-                                                const std::string& payload,
-                                                int reqFd, int peerUid) {
+
+    if (httpServer.running()) {
+        httpThread = std::thread([&httpServer, &restApi, &opMutex]() {
+            httpServer.Run([&restApi, &opMutex](const HttpRequest& req) {
+                std::lock_guard<std::mutex> lock(opMutex);
+                return restApi.Handle(req);
+            });
+        });
+    }
+
+    server.Run([&dispatcher, &opMutex, &server, &httpServer](
+                       const Request& req, const std::string& payload,
+                       int reqFd, int peerUid) {
         ReplyPacket packet;
         {
             std::lock_guard<std::mutex> lock(opMutex);
@@ -372,11 +437,14 @@ int main(int argc, char** argv) {
         // accept 立刻返回。
         if (ServiceState::Instance().ShutdownRequested()) {
             server.Stop();
+            httpServer.Stop();   // 让 HTTP 的 accept 也立刻返回
         }
         return packet;
     });
 
     gServer = nullptr;
+    httpServer.Stop();
+    if (httpThread.joinable()) httpThread.join();
     capture.Shutdown();
 
     // Restart 用退出码 1：init 的 `oneshot` + 外部监督脚本据此区分

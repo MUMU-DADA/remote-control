@@ -70,10 +70,11 @@ DAEMON="$SRC/daemon"
 for f in main.cpp socket_server.cpp dispatch.cpp selftest.cpp \
          capture_screencap.cpp inject.cpp inject_uinput.cpp \
          appops.cpp subprocess.cpp fileops.cpp http_client.cpp \
-         service_state.cpp log_buffer.cpp; do
+         service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp \
+         json_parser.cpp png_encoder.cpp; do
     [ -f "$DAEMON/$f" ] || { bad "缺源文件: daemon/$f"; exit 1; }
 done
-ok "13 个源文件齐备"
+ok "17 个源文件齐备"
 
 # -----------------------------------------------------------------------------
 step "编译 autod"
@@ -109,6 +110,10 @@ COMMON_FLAGS=(
     "$DAEMON/http_client.cpp" \
     "$DAEMON/service_state.cpp" \
     "$DAEMON/log_buffer.cpp" \
+    "$DAEMON/http_server.cpp" \
+    "$DAEMON/rest_api.cpp" \
+    "$DAEMON/json_parser.cpp" \
+    "$DAEMON/png_encoder.cpp" \
     -llog -static-libstdc++
 
 ok "autod → $OUT/$ABI/autod"
