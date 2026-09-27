@@ -80,10 +80,18 @@ const std::string& WebUiHtml() {
       <div id="status" class="dim">就绪</div>
       <div class="row" style="margin-top:8px">
         <button onclick="refresh()">刷新状态</button>
-        <button onclick="setFps(0)">流：暂停</button>
-        <button onclick="setFps(2)">2fps</button>
-        <button onclick="setFps(5)">5fps</button>
-        <button onclick="setFps(10)">10fps</button>
+        <button onclick="setFps(0)">暂停</button>
+        <button onclick="setFps(10)">10</button>
+        <button onclick="setFps(20)">20</button>
+        <button onclick="setFps(30)">30</button>
+        <button onclick="setFps(60)">60</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <span class="dim" style="font-size:11px;align-self:center">画质</span>
+        <button onclick="setCodec('jpeg',70)">JPEG 快</button>
+        <button onclick="setCodec('jpeg',90)">JPEG 清</button>
+        <button onclick="setCodec('webp',75)">WebP</button>
+        <button onclick="setCodec('png',1)">PNG 无损</button>
       </div>
     </div>
 
@@ -163,7 +171,15 @@ const std::string& WebUiHtml() {
 <script>
 const $ = (id) => document.getElementById(id);
 const img = $('screen');
-let fps = 5;
+// 默认 30。
+//
+// ⚠️ 这里原来是 5，而按钮最高只到 10 —— 服务端明明能跑 30fps，
+//    网页却一直在放幻灯片。实测踩过：命令行 curl 测出来 30fps，
+//    但页面上"卡到爆炸"，就是因为这个默认值。
+//    帧率不该由前端偷偷限死，服务端会按自己的能力截断。
+let fps = 30;
+// 降采样宽度。设备屏幕往往比展示区域大得多，全分辨率纯属浪费带宽。
+let maxW = 720;
 let sw = 0, sh = 0;          // 屏幕真实尺寸
 let streamKey = 0;
 
@@ -183,9 +199,23 @@ function api(path, opts) {
 function startStream() {
   if (fps <= 0) { img.removeAttribute('src'); return; }
   streamKey++;
-  img.src = '/api/v1/stream?fps=' + fps + '&_=' + streamKey;
+  img.src = '/api/v1/stream?fps=' + fps
+          + '&format=' + codec + '&quality=' + quality
+          + '&maxWidth=' + maxW + '&_=' + streamKey;
 }
 function setFps(v) { fps = v; startStream(); setStatus('流帧率：' + (v ? v + ' fps' : '已暂停')); }
+
+// 编码格式。
+//
+// PNG 是无损的，一帧要 100+ KB —— 对"看画面、点坐标"来说完全不划算。
+// JPEG/WebP 有损但小一个数量级，浏览器解码也快得多。默认用 JPEG。
+let codec = 'jpeg';
+let quality = 75;
+function setCodec(c, q) {
+  codec = c; quality = q;
+  startStream();
+  setStatus('编码：' + c.toUpperCase() + ' 质量 ' + q);
+}
 
 function refresh() {
   api('/config').then(d => {

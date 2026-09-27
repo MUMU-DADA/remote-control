@@ -18,6 +18,7 @@
 #include "dispatch.h"
 #include "json_parser.h"
 #include "json_writer.h"
+#include "image_encoder.h"
 #include "png_encoder.h"
 #include "protocol.h"
 #include "service_state.h"
@@ -444,22 +445,63 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
         const long v = strtol(s.c_str(), &end, 10);
         if (end != nullptr && *end == '\0' && v >= 0) maxWidth = static_cast<int>(v);
     }
-    // PNG 压缩级别。默认 1（最快）—— 流的场景下带宽换帧率是划算的，
-    // 而且降采样之后字节数本来就小了。
-    int level = 1;
-    {
-        const std::string s = req.queryParam("quality", "1");
-        char* end = nullptr;
-        const long v = strtol(s.c_str(), &end, 10);
-        if (end != nullptr && *end == '\0' && v >= 1 && v <= 9) level = static_cast<int>(v);
-    }
     // 画面没变时是否跳过。默认开 —— 静止画面下编码开销直接归零。
     const bool skipUnchanged = req.queryParam("skipUnchanged", "1") != "0";
 
-    resp.streamer = [this, boundary, intervalMs, maxWidth, level, skipUnchanged](
-                            int fd) {
-        if (!PngEncoder::Instance().Init(nullptr)) {
-            const char* msg = "zlib 不可用，无法编码 PNG\n";
+    // 编码格式。默认 auto —— 设备上用 JPEG，主机上退回 PNG。
+    //
+    // PNG 是无损的，一帧 100+ KB，对"看画面、点坐标"完全不划算。
+    // JPEG/WebP 有损但小一个数量级，浏览器解码也快得多。
+    // 注意别和下面的像素格式 fmt 撞名 —— 那两个是不同层次的东西
+    // （像素格式讲"内存里怎么排"，编码格式讲"怎么压"）。
+    ImageFormat codecFmt = ImageFormat::kAuto;
+    {
+        const std::string s = req.queryParam("format", "auto");
+        if (!ImageEncoder::ParseFormat(s, &codecFmt)) {
+            return HttpResponse::Error(400, "未知格式: " + s +
+                                                "（可用 auto|png|jpeg|webp）");
+        }
+    }
+    if (codecFmt == ImageFormat::kAuto) {
+        codecFmt = ImageEncoder::Instance().BestFormat();
+    }
+    if (codecFmt == ImageFormat::kRaw) {
+        // 流里不做 raw —— 原始像素没有帧边界，浏览器也没法显示。
+        return HttpResponse::Error(400, "流不支持 format=raw");
+    }
+
+    // 质量。**含义随格式变**：
+    //   PNG        1..9   —— zlib 压缩级别（1 最快）
+    //   JPEG/WebP  1..100 —— 有损质量（75/80 是常用默认）
+    //
+    // ⚠️ 原来这里只收 1..9（那是给 PNG 定的），结果 format=jpeg&quality=75
+    //    被静默丢掉、退回 1 —— 实测 q50 和 q75 编出来的帧一样大，
+    //    就是这个问题。参数范围必须跟着格式走。
+    int level = 0;   // 0 = 交给编码器按格式选默认值
+    {
+        const std::string s = req.queryParam("quality", "");
+        if (!s.empty()) {
+            char* end = nullptr;
+            const long v = strtol(s.c_str(), &end, 10);
+            if (end != nullptr && *end == '\0' && v >= 1 && v <= 100) {
+                level = static_cast<int>(v);
+            }
+        }
+    }
+    // 按格式夹到合法区间，并给默认值
+    {
+        const bool lossy = (codecFmt == ImageFormat::kJpeg || codecFmt == ImageFormat::kWebp);
+        if (lossy) {
+            if (level < 1 || level > 100) level = (codecFmt == ImageFormat::kWebp) ? 80 : 75;
+        } else {
+            if (level < 1 || level > 9) level = 1;
+        }
+    }
+
+    resp.streamer = [this, boundary, intervalMs, maxWidth, level, skipUnchanged,
+                     codecFmt](int fd) {
+        if (!ImageEncoder::Instance().Init(nullptr)) {
+            const char* msg = "没有可用的图像编码器\n";
             ssize_t ig = write(fd, msg, strlen(msg));
             (void)ig;
             return;
@@ -550,7 +592,10 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             haveLast = true;
 
             std::string perr;
-            png = PngEncoder::Instance().EncodeRgba(enc, dw, dh, level, &perr);
+            png = ImageEncoder::Instance().Encode(enc, dw, dh, codecFmt, level, &perr);
+            if (png.empty()) {
+                ALOGW("流编码失败: %s", perr.c_str());
+            }
 
             munmap(base, size);
             close(p.fd);
@@ -563,7 +608,9 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             std::string part;
             part.reserve(png.size() + 160);
             part += "--" + boundary + "\r\n";
-            part += "Content-Type: image/png\r\n";
+            part += "Content-Type: ";
+            part += ImageEncoder::MimeType(codecFmt);
+            part += "\r\n";
             part += "Content-Length: " + std::to_string(png.size()) + "\r\n";
             part += "X-Autod-Frame: " + std::to_string(frameNo) + "\r\n";
             part += "X-Autod-Width: " + std::to_string(dw) + "\r\n";

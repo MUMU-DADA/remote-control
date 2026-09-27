@@ -38,6 +38,7 @@ cc_defaults {
         "keyboard.cpp",
         "clipops.cpp",
         "webui.cpp",
+        "image_encoder.cpp",
     ],
 
     // ⚠️ 必须排除静态库的符号导出，否则会与系统的 libc++.so 打架。
@@ -66,6 +67,7 @@ cc_defaults {
         "libbinder",
         "libcutils",
         "libgui",              // SurfaceComposerClient / SyncScreenCaptureListener
+        "libjnigraphics",      // AndroidBitmap_compress：JPEG/WebP/PNG 编码
         "liblog",
         "libui",               // GraphicBuffer / PixelFormat
         "libutils",
