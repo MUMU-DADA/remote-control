@@ -146,7 +146,31 @@ emulator: Done with QEMU main loop          ← QEMU 创建设备失败，直接
 | vendor HAL 正常 | `class_start hal` succeeded，无 HAL 崩溃 |
 
 **未解决 ✗**：guest 起来后 **zygote 段错误**（API 30 镜像）／**keystore2 段错误**
-（API 31 镜像），导致启动无法完成 → init 走 `abort_fuse` → 模拟器退出。
+（API 31 与自制 A12 镜像都一样），导致启动无法完成 → init 走 `abort_fuse` → 模拟器退出。
+
+**崩溃签名（已定位到具体机制）**：
+
+```
+signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0xfdffff864f0d0011
+#00 libpuresoftkeymasterdevice.so (keymaster::PureSoftRemoteProvisioningContext::GenerateBcc(bool)+144)
+```
+
+故障地址高字节 `0xfd` 是 **TBI（Top Byte Ignore）标签** —— guest 启用了 arm64 的
+tagged-address ABI，Scudo/堆标签把校验值写进指针高字节，而 **2021 版 QEMU fork 的 TCG
+在 `virt` 机器上没有正确屏蔽高字节** → 解引用即 SEGV。
+
+**修法方向**（下一步）：在最早期的 init 里执行
+`write /proc/sys/abi/tagged_addr_dis 1` —— 内核禁掉这个 ABI 后，bionic 的
+`prctl(PR_GET_TAGGED_ADDR_CTRL)` 会失败、自动走无标签路径（x86_64 上本来就是这样）。
+BoringSSL 自检在同一台机器上从 fail 变 pass，也说明这类"看起来像加密库崩溃"的问题
+根子在 TCG 的 CPU 特性模拟上。
+
+⚠️ **改 system.img 的坑**：模拟器/构建会生成 `system-qemu.img`、`vendor-qemu.img`、
+`ramdisk-qemu.img`、`product-qemu.img`、`system_ext-qemu.img`（见
+`build/make/core/Makefile` 的 `INSTALLED_QEMU_*`），**guest 实际挂的是这些副本**。
+只改 `system.img` 不会生效（日志里 init.rc 行号仍是原始值即可判定），
+必须先用 `m` 重新生成这些 `*-qemu.img`；而**直接删掉它们会让 first-stage init 崩溃、guest 重启**。
+
 
 已排除的尝试（都无效）：
 
