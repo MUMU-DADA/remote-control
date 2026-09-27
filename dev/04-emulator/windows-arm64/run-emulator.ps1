@@ -165,6 +165,7 @@ Write-Step '等待设备上线'
 
 Write-Step "等待开机完成（最多 $BootTimeoutMin 分钟）"
 $deadline = (Get-Date).AddMinutes($BootTimeoutMin)
+$startTime = Get-Date
 $booted = $false
 
 while ((Get-Date) -lt $deadline) {
@@ -176,7 +177,8 @@ while ((Get-Date) -lt $deadline) {
     }
     $bc = (& $adbExe -s $serial shell getprop sys.boot_completed 2>$null | Out-String).Trim()
     if ($bc -eq '1') { $booted = $true; break }
-    $elapsed = [int]((Get-Date) - $proc.StartTime).TotalSeconds
+    # 用本地计时，别依赖 Process.StartTime（进程刚退出时会抛异常）
+    $elapsed = [int]((Get-Date) - $startTime).TotalSeconds
     Write-Host -NoNewline ("`r  已等待 {0:mm\:ss} …" -f ([TimeSpan]::FromSeconds($elapsed)))
     Start-Sleep -Seconds 15
 }
