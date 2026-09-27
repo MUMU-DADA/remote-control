@@ -72,6 +72,7 @@ class Dispatcher {
     ReplyPacket HandleGesture(const Request& req);
     ReplyPacket HandleKeyEvent(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandleClipboard(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandlePower(const Request& req, const std::vector<std::string>& args);
 
     Capture*  capture_;
     Injector* injector_;

@@ -24,7 +24,8 @@ constexpr uint32_t kMagic = 0x44545541;
 //   2 = 应用管理与文件下载
 //   3 = 服务自身控制（配置 / 自检 / 统计 / 日志 / 生命周期）
 //   4 = 手势（长按/拖拽/双击）、按键注入、剪贴板
-constexpr uint32_t kProtocolVersion = 4;
+//   5 = 设备电源（关机 / 重启）
+constexpr uint32_t kProtocolVersion = 5;
 
 enum class Cmd : uint32_t {
     Info       = 1,   // 查询显示参数，不产生副作用
@@ -79,6 +80,12 @@ enum class Cmd : uint32_t {
     DoubleTap     = 32,  // x,y,durationMs —— 两次点击，间隔由服务端控制
 
     Clipboard     = 33,  // payload: "get" | "set\0<文本>" | "info"
+
+    Power         = 34,  // payload: "reboot" | "shutdown" | "reboot-recovery"
+                         //          | "reboot-bootloader" | "reboot-sideload"
+                         // 走 `svc power reboot|shutdown`（= PowerManager.reboot/
+                         // shutdown），失败时退回 `reboot` 二进制。
+                         // 需要 root 或 shell（REBOOT 权限）。
                          // → {"text":..} / {"ok":true} / {"has":..,"types":[..]}
 
     // KeyEvent = 8 在本版本实现：用 /dev/uinput 建一个虚拟键盘设备。

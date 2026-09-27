@@ -37,8 +37,9 @@ constexpr CURLoption CURLOPT_MAXREDIRS        = 68;
 constexpr CURLoption CURLOPT_NOSIGNAL         = 99;
 constexpr CURLoption CURLOPT_CONNECTTIMEOUT   = 78;
 constexpr CURLoption CURLOPT_FAILONERROR      = 45;
-constexpr CURLoption CURLOPT_SSL_VERIFYPEER   = 64;
-constexpr CURLoption CURLOPT_SSL_VERIFYHOST   = 81;
+// CURLOPT_SSL_VERIFYPEER(64) / VERIFYHOST(81) 不设 = 用 curl 的默认值，
+// 也就是**校验证书**。之前把它们定义出来却没用，AOSP 的 -Werror 会
+// 因为"定义了未使用"直接编译失败。
 constexpr CURLoption CURLOPT_WRITEFUNCTION    = 20011;
 constexpr CURLoption CURLOPT_PROTOCOLS        = 181;   // CURLPROTO_*
 constexpr CURLoption CURLOPT_REDIR_PROTOCOLS  = 182;

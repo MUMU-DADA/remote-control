@@ -52,6 +52,14 @@ const std::string& WebUiHtml() {
           border-radius:4px; border:1px solid #333; }
   #coord { position:absolute; right:4px; bottom:4px; background:rgba(0,0,0,.7);
            padding:2px 6px; border-radius:3px; font-size:11px; }
+  .app { display:flex; align-items:center; gap:6px; padding:3px 0;
+         border-bottom:1px solid #262626; }
+  .app:last-child { border-bottom:none; }
+  .app .pkg { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+              white-space:nowrap; }
+  .app button { padding:2px 7px; font-size:11px; }
+  #apps { max-height:240px; overflow:auto; }
+  #apps input[type=text] { margin-bottom:6px; }
 </style>
 </head>
 <body>
@@ -116,6 +124,29 @@ const std::string& WebUiHtml() {
         <input type="text" id="cliptext" placeholder="要写入的文本">
         <button onclick="clipSet()">写入</button>
         <button onclick="clipGet()">读取</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>应用</h2>
+      <div class="row">
+        <label style="font-size:12px"><input type="checkbox" id="appSys"> 含系统应用</label>
+        <button onclick="loadApps()">刷新列表</button>
+      </div>
+      <div id="apps" class="dim" style="margin-top:6px;font-size:12px">
+        （点「刷新列表」加载）
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>电源</h2>
+      <div class="row">
+        <button onclick="power('reboot')">重启</button>
+        <button onclick="power('shutdown')">关机</button>
+        <button onclick="power('reboot-recovery')">重启到 recovery</button>
+      </div>
+      <div class="dim" style="margin-top:6px;font-size:11px">
+        设备会立即执行，请先确认没有未保存的工作。
       </div>
     </div>
 
@@ -281,6 +312,76 @@ function clipSet() {
                       body: JSON.stringify({op:'set', text:t}) })
     .then(() => { setStatus('已写入剪贴板'); clipGet(); })
     .catch(e => setStatus('写剪贴板失败：' + e, true));
+}
+
+// ── 应用列表 ──
+function loadApps() {
+  const sys = $('appSys').checked ? '1' : '0';
+  $('apps').textContent = '加载中…';
+  api('/apps?system=' + sys + '&meta=0')
+    .then(d => {
+      const box = $('apps');
+      box.textContent = '';
+      box.className = '';
+      const filter = document.createElement('input');
+      filter.type = 'text';
+      filter.placeholder = '过滤包名…';
+      // 137 个应用在下拉里翻很痛苦，加个过滤框
+      const render = () => {
+        const q = filter.value.toLowerCase();
+        // 只渲染前 300 条，避免一次插几千个 DOM 节点
+        const list = (d.apps || []).filter(a =>
+            !q || a.package.toLowerCase().includes(q)).slice(0, 300);
+        listBox.textContent = '';
+        for (const a of list) {
+          const row = document.createElement('div');
+          row.className = 'app';
+          const name = document.createElement('span');
+          name.className = 'pkg';
+          name.textContent = a.package;
+          name.title = a.package;
+          const bLaunch = document.createElement('button');
+          bLaunch.textContent = '启动';
+          bLaunch.onclick = () => appAction(a.package, 'launch');
+          const bKill = document.createElement('button');
+          bKill.textContent = '停止';
+          bKill.onclick = () => appAction(a.package, 'kill');
+          row.append(name, bLaunch, bKill);
+          listBox.append(row);
+        }
+        if (!list.length) {
+          const e = document.createElement('div');
+          e.className = 'dim';
+          e.textContent = '（没有匹配的应用）';
+          listBox.append(e);
+        }
+      };
+      const listBox = document.createElement('div');
+      filter.oninput = render;
+      box.append(filter, listBox);
+      render();
+      setStatus('共 ' + (d.count || 0) + ' 个应用');
+    })
+    .catch(e => setStatus('取应用列表失败：' + e, true));
+}
+
+function appAction(pkg, what) {
+  const path = what === 'launch' ? '/apps/' + encodeURIComponent(pkg) + '/launch'
+                                 : '/apps/' + encodeURIComponent(pkg) + '/kill';
+  api(path, { method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: '{}' })
+    .then(() => setStatus((what === 'launch' ? '已启动 ' : '已停止 ') + pkg))
+    .catch(e => setStatus(what + ' ' + pkg + ' 失败：' + e, true));
+}
+
+// ── 电源 ──
+function power(action) {
+  const label = action === 'shutdown' ? '关机' : '重启';
+  if (!confirm('确定要' + label + '设备吗？')) return;
+  api('/power', { method:'POST', headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({action: action}) })
+    .then(d => setStatus(d.note || (label + '已下发')))
+    .catch(e => setStatus(label + '失败：' + e, true));
 }
 
 // ── 启动 ──

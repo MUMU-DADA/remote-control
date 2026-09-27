@@ -40,6 +40,27 @@ cc_defaults {
         "webui.cpp",
     ],
 
+    // ⚠️ 必须排除静态库的符号导出，否则会与系统的 libc++.so 打架。
+    //
+    //    实测崩溃（启动即 SIGABRT）：
+    //      #06 autod             std::__1::locale::use_facet(...)
+    //      #07 /system/lib64/libc++.so  __stdinbuf<char>::imbue
+    //      #08 /system/lib64/libc++.so  ios_base::Init::Init
+    //      #09 /system/lib64/libc++.so  _GLOBAL__sub_I_iostream.cpp
+    //
+    //    原因：我们把 libc++ 静态链进来了，同时又加载了系统的 libc++.so
+    //    （libgui/libbinder 依赖它）。系统库的 iostream 静态初始化调到了
+    //    **我们二进制里那份** use_facet，而两边的 locale id 对不上，
+    //    于是 use_facet 抛 bad_cast → 没人接 → terminate。
+    //
+    //    只要用 <sstream> 就会把 libc++ 的 locale 拉进来（appops.cpp 用了
+    //    std::istringstream）。设备自带的 screencap 导出 0 个 locale 符号，
+    //    所以它没事 —— 我们导出了 1 个，就中招了。
+    //
+    //    --exclude-libs,ALL 让静态库的符号不进动态符号表，
+    //    系统库就会用自己那份，两边不再混。
+    ldflags: ["-Wl,--exclude-libs,ALL"],
+
     shared_libs: [
         "libbase",
         "libbinder",

@@ -23,6 +23,7 @@
 #include "log_buffer.h"
 #include "selftest.h"
 #include "service_state.h"
+#include "subprocess.h"
 #include "fileops.h"
 #include "json_writer.h"
 
@@ -343,6 +344,8 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleKeyEvent(req, args);
         case Cmd::Clipboard:
             return HandleClipboard(req, args);
+        case Cmd::Power:
+            return HandlePower(req, args);
 
         case Cmd::Describe:
             return HandleDescribe(req);
@@ -717,6 +720,7 @@ const CommandSpec kCommands[] = {
     {"Drag",         31,  4, "x1,y1,x2,y2,durationMs",  "拖拽（起点停顿 + 慢速移动）"},
     {"DoubleTap",    32,  4, "x,y[,intervalMs]",        "双击"},
     {"Clipboard",    33,  4, "get|set\\0<文本>|info",    "剪贴板读写"},
+    {"Power",        34,  5, "reboot|shutdown|reboot-*", "设备关机 / 重启"},
     {"Describe",     20,  3, "无",                      "本清单：有哪些命令、哪些可用"},
     {"GetConfig",    21,  3, "无",                      "当前配置与运行时状态"},
     {"SetConfig",    22,  3, "<key>\0<value>...",       "热改配置"},
@@ -756,6 +760,7 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
             .Field("clipboard", ClipOps::Instance().Init(nullptr))
             .Field("screenStream", PngEncoder::Instance().Init(nullptr))
             .Field("webUi", true)
+            .Field("power", true)
             .Field("selfControl", true)
         .EndObj()
         .Key("commands").Arr();
@@ -1060,6 +1065,77 @@ ReplyPacket Dispatcher::HandleClipboard(const Request& req,
 
     return MakeJsonError(req.cmd, kErrBadArg,
                          "未知操作: " + op + "（可用 get|set|info）");
+}
+
+// ── v5：设备电源 ────────────────────────────────────────────────────────────
+
+ReplyPacket Dispatcher::HandlePower(const Request& req,
+                                    const std::vector<std::string>& args) {
+    const std::string what = args.empty() ? "reboot" : args[0];
+
+    // 走 `svc power reboot|shutdown`（= PowerManager.reboot/shutdown）。
+    //
+    // 为什么不用 `reboot` 二进制：svc 走的是 PowerManager，它会先做
+    // 正常的关机流程（通知应用、卸载文件系统），而 `reboot` 是直接
+    // 让 init 重启。产品环境要前者。
+    // 后者作为退路 —— 有些精简 ROM 没有 svc。
+    std::vector<std::string> argv;
+    bool isShutdown = false;
+
+    if (what == "shutdown" || what == "poweroff") {
+        argv = {"/system/bin/svc", "power", "shutdown"};
+        isShutdown = true;
+    } else if (what == "reboot") {
+        argv = {"/system/bin/svc", "power", "reboot"};
+    } else if (what.compare(0, 7, "reboot-") == 0) {
+        // reboot-recovery / reboot-bootloader / reboot-sideload
+        argv = {"/system/bin/svc", "power", "reboot", what.substr(7)};
+    } else {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "未知的电源操作: " + what +
+                                 "（可用 reboot|shutdown|reboot-recovery|"
+                                 "reboot-bootloader|reboot-sideload）");
+    }
+
+    // 先把应答发出去再真正执行 —— 不然设备已经开始关机，
+    // 客户端只会看到连接被重置，无从判断命令是否被受理。
+    //
+    // 做法：fork 一个子进程延迟 500ms 再执行。父进程立刻返回。
+    json::Writer w;
+    w.Obj()
+        .Field("ok", true)
+        .Field("action", what)
+        .Field("method", "svc power")
+        .Field("note", isShutdown
+                           ? "设备将在约 0.5 秒后开始关机"
+                           : "设备将在约 0.5 秒后重启")
+     .EndObj();
+
+    const pid_t pid = fork();
+    if (pid == 0) {
+        // 子进程：脱离父进程，延迟后执行
+        setsid();
+        usleep(500 * 1000);
+
+        CommandResult r;
+        if (!RunCommand(argv, 30000, 4096, &r, nullptr) || r.exitCode != 0) {
+            // svc 不可用就退回 reboot 二进制
+            std::vector<std::string> fallback;
+            if (isShutdown) {
+                fallback = {"/system/bin/reboot", "-p"};
+            } else {
+                fallback = {"/system/bin/reboot"};
+                if (what.compare(0, 7, "reboot-") == 0) {
+                    fallback.push_back(what.substr(7));
+                }
+            }
+            RunCommand(fallback, 30000, 4096, &r, nullptr);
+        }
+        _exit(0);
+    }
+
+    ALOGW("收到电源请求: %s（子进程 pid=%d 将在 0.5s 后执行）", what.c_str(), pid);
+    return MakeJsonReply(req.cmd, w.str());
 }
 
 }  // namespace autod

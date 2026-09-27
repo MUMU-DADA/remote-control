@@ -40,6 +40,56 @@ std::string ReadFd(int fd, uint64_t expected) {
     return out;
 }
 
+// 盒式降采样。把 w×h 的 RGBA 缩到 (w*num/den) × (h*num/den)。
+//
+// 为什么在编码前缩：PNG 的编码耗时大致随像素数走，缩一半面积就少四分之三
+// 的编码量。控制台用来看画面和点坐标，半分辨率完全够 —— 而且字节数小了，
+// 弱网下帧率反而更高。
+//
+// 用盒式平均而不是最近邻：最近邻会把细线（文字、边框）整条丢掉，
+// 看起来像画面在闪。
+void DownscaleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
+                   uint32_t dw, uint32_t dh, std::vector<uint8_t>* out) {
+    out->resize(static_cast<size_t>(dw) * dh * 4);
+    // 每个目标像素覆盖的源区域 [x0,x1) × [y0,y1)
+    for (uint32_t y = 0; y < dh; ++y) {
+        const uint32_t y0 = static_cast<uint32_t>(static_cast<uint64_t>(y) * sh / dh);
+        uint32_t y1 = static_cast<uint32_t>(static_cast<uint64_t>(y + 1) * sh / dh);
+        if (y1 <= y0) y1 = y0 + 1;
+        for (uint32_t x = 0; x < dw; ++x) {
+            const uint32_t x0 = static_cast<uint32_t>(static_cast<uint64_t>(x) * sw / dw);
+            uint32_t x1 = static_cast<uint32_t>(static_cast<uint64_t>(x + 1) * sw / dw);
+            if (x1 <= x0) x1 = x0 + 1;
+
+            uint32_t r = 0, g = 0, b = 0, a = 0, n = 0;
+            for (uint32_t sy = y0; sy < y1; ++sy) {
+                const uint8_t* row = src + static_cast<size_t>(sy) * sw * 4;
+                for (uint32_t sx = x0; sx < x1; ++sx) {
+                    const uint8_t* p = row + static_cast<size_t>(sx) * 4;
+                    r += p[0]; g += p[1]; b += p[2]; a += p[3];
+                    ++n;
+                }
+            }
+            uint8_t* d = out->data() + (static_cast<size_t>(y) * dw + x) * 4;
+            d[0] = static_cast<uint8_t>(r / n);
+            d[1] = static_cast<uint8_t>(g / n);
+            d[2] = static_cast<uint8_t>(b / n);
+            d[3] = static_cast<uint8_t>(a / n);
+        }
+    }
+}
+
+// FNV-1a。用来判断画面有没有变 —— 比编码便宜得多，
+// 静止画面（大多数时候）可以整帧跳过编码。
+uint64_t HashBytes(const uint8_t* p, size_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 int64_t NowMs() {
     timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -386,21 +436,44 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
     // 与其追求标称帧率，不如保证"不会把设备打满"。
     const int intervalMs = 1000 / fps;
 
-    resp.streamer = [this, boundary, intervalMs](int fd) {
+    // 降采样上限：默认 720 宽。0 = 不缩。
+    int maxWidth = 720;
+    {
+        const std::string s = req.queryParam("maxWidth", "720");
+        char* end = nullptr;
+        const long v = strtol(s.c_str(), &end, 10);
+        if (end != nullptr && *end == '\0' && v >= 0) maxWidth = static_cast<int>(v);
+    }
+    // PNG 压缩级别。默认 1（最快）—— 流的场景下带宽换帧率是划算的，
+    // 而且降采样之后字节数本来就小了。
+    int level = 1;
+    {
+        const std::string s = req.queryParam("quality", "1");
+        char* end = nullptr;
+        const long v = strtol(s.c_str(), &end, 10);
+        if (end != nullptr && *end == '\0' && v >= 1 && v <= 9) level = static_cast<int>(v);
+    }
+    // 画面没变时是否跳过。默认开 —— 静止画面下编码开销直接归零。
+    const bool skipUnchanged = req.queryParam("skipUnchanged", "1") != "0";
+
+    resp.streamer = [this, boundary, intervalMs, maxWidth, level, skipUnchanged](
+                            int fd) {
         if (!PngEncoder::Instance().Init(nullptr)) {
-            // PNG 编不出来就没法流 —— 写一行纯文本让客户端看到原因，
-            // 而不是静默地一直推空帧
             const char* msg = "zlib 不可用，无法编码 PNG\n";
             ssize_t ig = write(fd, msg, strlen(msg));
             (void)ig;
             return;
         }
 
-        uint64_t frameNo = 0;
+        uint64_t frameNo = 0;      // 实际发出的帧数
+        uint64_t iterNo = 0;       // 循环次数（含跳过）
+        uint64_t lastHash = 0;
+        bool     haveLast = false;
+        std::vector<uint8_t> scaled;
+
         while (true) {
             const int64_t t0 = NowMs();
 
-            // 抓一帧
             Request r{};
             r.magic = kMagic;
             r.cmd   = static_cast<uint32_t>(Cmd::Capture);
@@ -408,11 +481,12 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             if (p.reply.status != kOk || p.fd < 0) {
                 if (p.fd >= 0) close(p.fd);
                 usleep(intervalMs * 1000);
-                continue;      // 单帧失败不终止整条流
+                continue;
             }
 
             const uint32_t w = p.reply.width, h = p.reply.height;
             const uint64_t size = p.reply.dataSize;
+            const uint32_t fmt = p.reply.format;
             void* base = mmap(nullptr, size, PROT_READ, MAP_SHARED, p.fd, 0);
             if (base == MAP_FAILED) {
                 close(p.fd);
@@ -421,23 +495,63 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             }
 
             std::string png;
-            std::string perr;
-            const uint32_t fmt = p.reply.format;
-            if (fmt == 1 || fmt == 2 || fmt == 5) {
-                const uint8_t* src = static_cast<const uint8_t*>(base);
-                std::vector<uint8_t> rgba;
-                if (fmt == 5) {
-                    rgba.resize(size);
-                    for (uint64_t i = 0; i + 3 < size; i += 4) {
-                        rgba[i]     = src[i + 2];
-                        rgba[i + 1] = src[i + 1];
-                        rgba[i + 2] = src[i];
-                        rgba[i + 3] = src[i + 3];
-                    }
-                    src = rgba.data();
-                }
-                png = PngEncoder::Instance().EncodeRgba(src, w, h, 3, &perr);
+            bool wroteFrame = false;
+
+            if (fmt != 1 && fmt != 2 && fmt != 5) {
+                // 不支持的像素格式：跳过这一帧，但不终止整条流
+                munmap(base, size);
+                close(p.fd);
+                usleep(intervalMs * 1000);
+                continue;
             }
+
+            // BGRA → RGBA
+            const uint8_t* src = static_cast<const uint8_t*>(base);
+            std::vector<uint8_t> rgba;
+            if (fmt == 5) {
+                rgba.resize(size);
+                for (uint64_t i = 0; i + 3 < size; i += 4) {
+                    rgba[i]     = src[i + 2];
+                    rgba[i + 1] = src[i + 1];
+                    rgba[i + 2] = src[i];
+                    rgba[i + 3] = src[i + 3];
+                }
+                src = rgba.data();
+            }
+
+            // 变化检测要在**降采样之后**做：降采样本来就是平均，
+            // 顺带把传感器噪声这类微小抖动滤掉了，跳过率更高。
+            uint32_t dw = w, dh = h;
+            const uint8_t* enc = src;
+            if (maxWidth > 0 && w > static_cast<uint32_t>(maxWidth)) {
+                dw = static_cast<uint32_t>(maxWidth);
+                dh = static_cast<uint32_t>(static_cast<uint64_t>(h) * dw / w);
+                if (dh == 0) dh = 1;
+                DownscaleRgba(src, w, h, dw, dh, &scaled);
+                enc = scaled.data();
+            }
+
+            const size_t encBytes = static_cast<size_t>(dw) * dh * 4;
+            const uint64_t hash = HashBytes(enc, encBytes);
+
+            if (skipUnchanged && haveLast && hash == lastHash) {
+                // 画面没变 —— 整帧跳过编码。
+                // 不写任何东西：MJPEG 客户端会继续显示上一帧，
+                // 这正是我们要的。连接靠 TCP 自己保活。
+                munmap(base, size);
+                close(p.fd);
+                ++iterNo;
+                const int64_t elapsed = NowMs() - t0;
+                const int64_t rest = intervalMs - elapsed;
+                if (rest > 0) usleep(static_cast<useconds_t>(rest) * 1000);
+                continue;
+            }
+            lastHash = hash;
+            haveLast = true;
+
+            std::string perr;
+            png = PngEncoder::Instance().EncodeRgba(enc, dw, dh, level, &perr);
+
             munmap(base, size);
             close(p.fd);
 
@@ -446,20 +560,18 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
                 continue;
             }
 
-            // 一个 MJPEG part：边界行 + 头 + 空行 + 数据 + CRLF
             std::string part;
-            part.reserve(png.size() + 128);
+            part.reserve(png.size() + 160);
             part += "--" + boundary + "\r\n";
             part += "Content-Type: image/png\r\n";
             part += "Content-Length: " + std::to_string(png.size()) + "\r\n";
             part += "X-Autod-Frame: " + std::to_string(frameNo) + "\r\n";
+            part += "X-Autod-Width: " + std::to_string(dw) + "\r\n";
+            part += "X-Autod-Height: " + std::to_string(dh) + "\r\n";
             part += "\r\n";
             part += png;
             part += "\r\n";
 
-            // 客户端断开时 write 会失败（EPIPE）—— 那就是停止信号。
-            // MSG_NOSIGNAL 不能用于 write，所以先忽略 SIGPIPE（main 里做了），
-            // 这里看到失败就退出循环。
             size_t sent = 0;
             bool broken = false;
             while (sent < part.size()) {
@@ -474,10 +586,12 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             if (broken) break;
 
             ++frameNo;
+            ++iterNo;
+            wroteFrame = true;
+            (void)wroteFrame;
 
-            // 补足到目标间隔（抓帧+编码已经花掉了一部分）
             const int64_t elapsed = NowMs() - t0;
-            int64_t rest = intervalMs - elapsed;
+            const int64_t rest = intervalMs - elapsed;
             if (rest > 0) usleep(static_cast<useconds_t>(rest) * 1000);
         }
     };
@@ -590,6 +704,13 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
     }
     if (res == "clipboard" && (method == "GET" || method == "POST")) {
         return HandleClipboard(req);
+    }
+    // 电源。用 POST：它是有副作用的操作，GET 会被浏览器/爬虫预取。
+    if (res == "power" && method == "POST") {
+        json::Value b; HttpResponse err;
+        if (!ParseJsonBody(req, &b, &err)) return err;
+        const std::string what = b.str("action", "reboot");
+        return Call(Cmd::Power, PackArgs({what}), 0, -1);
     }
     if (res == "info" && method == "GET") {
         return Call(Cmd::Info, "", 0, -1);

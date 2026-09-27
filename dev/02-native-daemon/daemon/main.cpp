@@ -8,7 +8,7 @@
 
 #include <getopt.h>
 #include <mutex>
-#include <thread>
+#include <pthread.h>
 #include <grp.h>
 #include <signal.h>
 #include <stdio.h>
@@ -397,7 +397,11 @@ int main(int argc, char** argv) {
     // 就让 HTTP 请求排队。
     HttpServer httpServer;
     RestApi    restApi(&dispatcher);
-    std::thread httpThread;
+    // 用 pthread 而不是 std::thread：后者创建失败会抛异常，
+    // 而 AOSP 是 -fno-exceptions，抛出去就是整个进程 terminate。
+    // 这里要 join，所以不能走 SpawnDetached（那个是 detached）。
+    pthread_t httpThread{};
+    bool      httpThreadStarted = false;
     if (!httpBind.empty()) {
         HttpServer::Options opts;
         opts.bindAddr = httpBind;
@@ -421,13 +425,33 @@ int main(int argc, char** argv) {
     // Dispatcher，锁必须在**共同的那一层**。
     std::mutex opMutex;
 
+    // HTTP 线程的上下文。用栈上的结构体而不是 lambda 捕获 ——
+    // pthread_create 的入口必须是普通函数指针，捕获得靠传参。
+    struct HttpThreadCtx {
+        HttpServer* server;
+        RestApi*    api;
+        std::mutex* mutex;
+    };
+    HttpThreadCtx httpCtx{&httpServer, &restApi, &opMutex};
+
     if (httpServer.running()) {
-        httpThread = std::thread([&httpServer, &restApi, &opMutex]() {
-            httpServer.Run([&restApi, &opMutex](const HttpRequest& req) {
-                std::lock_guard<std::mutex> lock(opMutex);
-                return restApi.Handle(req);
-            });
-        });
+        const int rc = pthread_create(
+            &httpThread, nullptr,
+            [](void* arg) -> void* {
+                auto* c = static_cast<HttpThreadCtx*>(arg);
+                c->server->Run([c](const HttpRequest& req) {
+                    std::lock_guard<std::mutex> lock(*c->mutex);
+                    return c->api->Handle(req);
+                });
+                return nullptr;
+            },
+            &httpCtx);
+        if (rc != 0) {
+            fprintf(stderr, "autod: 起 HTTP 线程失败(%d)，HTTP API 不可用\n", rc);
+            httpServer.Stop();
+        } else {
+            httpThreadStarted = true;
+        }
     }
 
     server.Run([&dispatcher, &opMutex, &server, &httpServer](
@@ -452,7 +476,7 @@ int main(int argc, char** argv) {
 
     gServer = nullptr;
     httpServer.Stop();
-    if (httpThread.joinable()) httpThread.join();
+    if (httpThreadStarted) pthread_join(httpThread, nullptr);
     capture.Shutdown();
 
     // Restart 用退出码 1：init 的 `oneshot` + 外部监督脚本据此区分

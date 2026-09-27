@@ -4,8 +4,7 @@
 
 #include <string.h>
 
-#include <system_error>
-#include <thread>
+#include "thread_util.h"
 
 #include <vector>
 
@@ -233,14 +232,14 @@ void SocketServer::Run(const RequestHandler& handler) {
         //    真正的互斥放在 handler 里（见 main.cpp）：连接可以并发，
         //    但 Injector 是有状态的（按下/抬起、槽位映射），
         //    并发注入会互相破坏手势，所以**操作**必须串行。
-        try {
-            std::thread([this, connFd, &handler]() {
+        // 线程起不来就退回串行，至少不丢连接。
+        // SpawnDetached 用 pthread_create，失败返回 false 而不是抛异常 ——
+        // AOSP 是 -fno-exceptions，std::thread 抛出来就是整个进程 terminate。
+        if (!SpawnDetached([this, connFd, &handler]() {
                 ServeConnection(connFd, handler);
                 close(connFd);
-            }).detach();
-        } catch (const std::system_error& e) {
-            // 线程起不来（资源耗尽）时退回串行，至少不丢连接
-            ALOGW("autod: 起线程失败(%s)，本连接串行处理", e.what());
+            })) {
+            ALOGW("autod: 起线程失败，本连接串行处理");
             ServeConnection(connFd, handler);
             close(connFd);
         }

@@ -149,6 +149,17 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
     const std::vector<PhysicalDisplayId> ids =
             SurfaceComposerClient::getPhysicalDisplayIds();
     if (ids.empty()) {
+        // 枚举不到显示（比如 SF 还没准备好）：用上一次抓帧缓存的尺寸兜底。
+        // 这比直接报错好 —— 调用方（Info 请求、触控范围计算）需要的是
+        // "屏幕多大"，而不是"SF 现在枚举不出来"。
+        if (lastWidth_ != 0 && lastHeight_ != 0) {
+            DisplayInfo info;
+            info.id     = requestedDisplayId_ ? requestedDisplayId_ : 1;
+            info.width  = lastWidth_;
+            info.height = lastHeight_;
+            out->push_back(info);
+            return true;
+        }
         if (error) *error = "没有找到任何物理显示";
         return false;
     }
@@ -278,6 +289,11 @@ bool Capture::Grab(Frame* out, std::string* error) {
     frame.size   = totalSize;
     frame.width  = width;
     frame.height = height;
+    // 同步更新缓存，和 screencap 后端保持一致。
+    // 这不只是"让 -Werror 闭嘴"：ListDisplays() 拿不到实时信息时会用它兜底，
+    // 两个后端行为一致才不会出现"换个后端尺寸就变 0"这种怪事。
+    lastWidth_   = width;
+    lastHeight_  = height;
     frame.stride = width;   // 我们做了紧凑拷贝，对客户端暴露的 stride 就是 width
     frame.format = format;
 

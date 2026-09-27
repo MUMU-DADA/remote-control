@@ -52,9 +52,10 @@ class HttpClient {
 
   private:
     void* handle_ = nullptr;      // dlopen 句柄
-    void* curl_   = nullptr;      // CURL* （easy handle），每次下载新建
     std::string version_;
-    bool globalInited_ = false;
+    // curl_ / globalInited_ 两个字段删了：定义出来但从没用过，
+    // AOSP 的 -Werror 会因"私有字段未使用"直接编译失败。
+    // easy handle 是每次下载临时建、用完即毁的，不需要成员。
 };
 
 }  // namespace autod

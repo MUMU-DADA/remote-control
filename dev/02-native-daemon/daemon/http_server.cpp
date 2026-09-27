@@ -12,8 +12,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include <system_error>
-#include <thread>
+#include "thread_util.h"
 
 #include "autod_log.h"
 #include "json_writer.h"
@@ -229,12 +228,14 @@ void HttpServer::Run(const HttpHandler& handler) {
 
         // 和 socket 服务端一样：每连接一线程。
         // 一个慢客户端不该让整个 API 卡住。
-        try {
-            std::thread([this, connFd, &handler]() {
+        // 线程起不来就退回串行处理 —— 至少不丢这次连接。
+        // 用 SpawnDetached 而不是 std::thread：后者创建失败会抛异常，
+        // 而 AOSP 是 -fno-exceptions，抛出去就是整个进程 terminate。
+        if (!SpawnDetached([this, connFd, &handler]() {
                 ServeConnection(connFd, handler);
                 close(connFd);
-            }).detach();
-        } catch (const std::system_error&) {
+            })) {
+            ALOGW("HTTP: 起线程失败，本连接串行处理");
             ServeConnection(connFd, handler);
             close(connFd);
         }
@@ -402,14 +403,12 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
         return;
     }
 
-    HttpResponse resp;
-    try {
-        resp = handler(req);
-    } catch (const std::exception& e) {
-        resp = HttpResponse::Error(500, std::string("处理时抛异常: ") + e.what());
-    } catch (...) {
-        resp = HttpResponse::Error(500, "处理时抛异常");
-    }
+    // 直接调用，不包 try/catch。
+    //
+    // AOSP 是 -fno-exceptions，写了也编不过；而且我们全程不用异常，
+    // 处理器本来就不抛。真出了 bad_alloc 这类，-fno-exceptions 下
+    // 本来就是 abort，catch 也救不回来。
+    const HttpResponse resp = handler(req);
 
     // 流式响应没有 Content-Length（长度事先不知道），
     // 也不能带 Content-Length —— 带了客户端会等满那么多字节才渲染。
