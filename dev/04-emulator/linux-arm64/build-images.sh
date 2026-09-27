@@ -94,9 +94,12 @@ if [ "$DETACH" = 1 ]; then
     log "已在后台启动（PID $!）。跟踪进度："
     log "  tail -f ${LOGFILE#"$PROJECT_ROOT"/}"
 else
-    # tee 保留完整日志，同时让编译输出实时可见
+    # tee 保留完整日志，同时让编译输出实时可见。
+    # 只有真的连着终端时才用 -it —— 否则（后台/重定向）docker 会报 "the input device is not a TTY"。
+    if [ -t 0 ] && [ -t 1 ]; then DOCKER_TTY="-it"; else DOCKER_TTY=""; fi
     set +e
-    docker exec -it "$BUILDER_CONTAINER" bash -lc "$INNER" 2>&1 | tee "$LOGFILE"
+    # shellcheck disable=SC2086
+    docker exec $DOCKER_TTY "$BUILDER_CONTAINER" bash -lc "$INNER" 2>&1 | tee "$LOGFILE"
     rc="${PIPESTATUS[0]}"
     set -e
     [ "$rc" = 0 ] || die "编译失败（exit $rc），完整日志：$LOGFILE"
