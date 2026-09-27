@@ -80,11 +80,14 @@ mkdir -p "$RUN_DIR"
 EMULATOR_PORT="${EMULATOR_PORT:-5554}"
 EMULATOR_MEMORY_MB="${EMULATOR_MEMORY_MB:-4096}"     # TCG 吃内存，别低于 3072
 EMULATOR_CORES="${EMULATOR_CORES:-4}"
-# 默认 guest（guest 侧软件渲染）而不是 swiftshader_indirect：
-# 实测在 Debian 13 上 swiftshader_indirect 会让 emulator 段错误
-# （dmesg: emulator[...]: segfault，崩在初始化阶段，日志停在"下发 adb 公钥"后），
-# 而 -gpu guest 不会。guest 模式仍然真实合成画面，screencap/captureDisplay 正常。
-EMULATOR_GPU="${EMULATOR_GPU:-guest}"
+# GPU 模式：swiftshader_indirect（宿主侧软件渲染）。
+# 注意这里踩过两次坑，别再改回去：
+#   1. 一开始报段错误，根因不是 swiftshader 本身，而是宿主缺 libegl1/libgles2/GL 系列库
+#      （装上之后 swiftshader_indirect 完全正常）。
+#   2. 之后改成 guest（guest 侧渲染）反而在自制镜像上**卡死**（QEMU 根本不启动），
+#      成品镜像上则被模拟器判定为不支持、自动回落。
+# 结论：用 swiftshader_indirect；画面仍然真实合成，screencap/captureDisplay 正常。
+EMULATOR_GPU="${EMULATOR_GPU:-swiftshader_indirect}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }

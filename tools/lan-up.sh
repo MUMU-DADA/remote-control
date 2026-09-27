@@ -103,9 +103,24 @@ ok "127.0.0.1:$ADB_FWD_PORT → 模拟器:8088"
 
 # -----------------------------------------------------------------------------
 step "3/4  autod"
-BIN="$PROJECT_DIR/dev/02-native-daemon/out/ndk/x86_64/autod"
-CTL="$PROJECT_DIR/dev/02-native-daemon/out/ndk/x86_64/autodctl"
-[ -f "$BIN" ] || { bad "没编出 autod（bash tools/build-ndk.sh ABI=x86_64）"; exit 1; }
+# 优先用 AOSP 构建（SurfaceFlinger 直连后端），它比 NDK 版快 3 倍：
+#   实测 NDK/screencap 后端 120ms/帧 → 9.6 fps
+#        AOSP/SF 后端       23ms/帧 → 29.9 fps
+# NDK 版作为退路 —— 它不依赖平台私有库，任何 root 设备都能跑。
+AOSP_BIN="$PROJECT_DIR/aosp/out/target/product/emulator64_x86_64/system/bin/autod"
+AOSP_CTL="$PROJECT_DIR/aosp/out/target/product/emulator64_x86_64/system/bin/autodctl"
+NDK_BIN="$PROJECT_DIR/dev/02-native-daemon/out/ndk/x86_64/autod"
+NDK_CTL="$PROJECT_DIR/dev/02-native-daemon/out/ndk/x86_64/autodctl"
+
+if [ -f "$AOSP_BIN" ]; then
+    BIN="$AOSP_BIN"; CTL="$AOSP_CTL"
+    ok "用 AOSP 构建（SurfaceFlinger 后端）"
+else
+    BIN="$NDK_BIN"; CTL="$NDK_CTL"
+    warn "没有 AOSP 产物，退回 NDK 构建（screencap 后端，慢约 3 倍）"
+    warn "  编它： TARGET=sdk_phone64_x86_64-userdebug bash tools/build-autod.sh"
+fi
+[ -f "$BIN" ] || { bad "没编出 autod"; exit 1; }
 
 "$ADB" -s "$SERIAL" shell "pkill -f 'autod --socket' 2>/dev/null; rm -f $DEV/autod.sock" || true
 "$ADB" -s "$SERIAL" push "$BIN" "$DEV/autod" >/dev/null

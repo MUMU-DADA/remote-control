@@ -190,6 +190,69 @@ GET  /                           → 网页控制台，10989 字节
 
 ---
 
+---
+
+## 6 · 性能：9.6 fps → 29.8 fps
+
+**先测量再优化。** 测下来瓶颈完全在抓帧，不在编码：
+
+```
+raw 抓帧 120ms/次  →  单这一项就封顶 8.3 fps
+```
+
+根因：NDK 构建用的 `capture_screencap` **每帧 fork+exec 一个
+`screencap` 进程**。
+
+| | screencap 后端 | SurfaceFlinger 后端 |
+|---|---|---|
+| 单次抓帧 | 120 ms | **23 ms**（快 5.2 倍） |
+| 流帧率 | 9.6 fps | **29.8 fps**（打满 30 上限） |
+
+另外三项优化（对两种后端都有效）：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `maxWidth` | 720 | 降采样。盒式平均而不是最近邻 —— 最近邻会把细线（文字、边框）整条丢掉，看起来像画面在闪 |
+| `skipUnchanged` | 1 | 画面没变就整帧跳过编码。静止画面下编码开销归零（实测 10 秒只发 1 帧） |
+| `quality` | 1 | PNG 压缩级别。流的场景下带宽换帧率划算 |
+
+```bash
+# 全速：不降采样、每帧都发
+curl 'http://host:8088/api/v1/stream?fps=30&maxWidth=0&skipUnchanged=0'
+
+# 省流：半分辨率、静止时几乎不发
+curl 'http://host:8088/api/v1/stream?fps=10&maxWidth=480'
+```
+
+---
+
+## 7 · 电源控制
+
+```
+POST /api/v1/power   {"action":"reboot"}
+                     {"action":"shutdown"}
+                     {"action":"reboot-recovery"|"reboot-bootloader"|"reboot-sideload"}
+```
+
+走 `svc power reboot|shutdown`（= `PowerManager.reboot/shutdown`），
+它会先做正常的关机流程（通知应用、卸载文件系统）；
+`reboot` 二进制只作为退路（有些精简 ROM 没有 svc）。
+
+**应答先发出去再执行**：fork 一个子进程延迟 500ms 再动。
+不这么做的话，设备已经开始关机，客户端只会看到连接被重置，
+无从判断命令是否被受理。
+
+实测：
+
+```
+发送前 uptime 8723.55 秒
+响应 {"ok":true,"action":"reboot","note":"设备将在约 0.5 秒后重启"}
+10 秒后 设备离线
+开机后 uptime 22.75 秒    ← 真的重启了
+```
+
+---
+
 ## 相关文件
 
 | 路径 | 内容 |

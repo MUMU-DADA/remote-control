@@ -114,13 +114,15 @@ curl http://127.0.0.1:8088/api/v1/describe
 | POST | `/api/v1/selftest` | 环境自检（**有副作用**：会抓帧、建设备） |
 | GET | `/api/v1/stats` | 请求数、错误数、各命令计数、运行时长 |
 | GET | `/api/v1/log?since=N` | 取日志（增量拉取） |
-| POST | `/api/v1/shutdown` | 优雅退出 |
+| POST | `/api/v1/shutdown` | 优雅退出 **autod 自身**（不是设备） |
+| POST | `/api/v1/power` | **设备**关机/重启：`{"action":"reboot"\|"shutdown"}` |
 | POST | `/api/v1/restart` | 退出并由 init 重启 |
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/info` | 显示参数 |
 | GET | `/api/v1/capture` | 截图，**默认返回 PNG** |
+| GET | `/api/v1/stream` | **MJPEG 实时流**（见 11 号文档） |
 | GET | `/api/v1/capture?format=raw` | 原始 RGBA 像素 |
 | POST | `/api/v1/tap` | `{"x":160,"y":240,"ms":50}` |
 | POST | `/api/v1/swipe` | `{"x1":..,"y1":..,"x2":..,"y2":..,"ms":250}` |
