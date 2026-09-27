@@ -167,6 +167,37 @@ df -h /root/AutoSnapshotAndroid
 docker exec autod-builder pgrep -f "repo/main.py" >/dev/null && echo 运行中 || echo 已停止
 ```
 
+### 模拟器：跑 arm64 安卓验证 `autod`（不需要真机）
+
+```bash
+cd dev/04-emulator/linux-arm64
+./check-env.sh          # 前置检查
+./build-images.sh       # 容器内 lunch sdk_phone64_arm64-userdebug && m
+./run-emulator.sh       # 无显示宿主：-no-window + swiftshader
+./smoke-autod.sh        # push autod/autodctl 并冒烟
+```
+
+| 项 | 值 |
+|---|---|
+| lunch 目标 | **`sdk_phone64_arm64-userdebug`** |
+| 产物目录 | `out/target/product/emulator64_arm64/` |
+| 模拟器二进制 | `aosp/prebuilts/android-emulator/linux-x86_64/emulator`（**30.8.3**，内含 `qemu/linux-x86_64/qemu-system-aarch64`） |
+| arm64 内核 | `kernel/prebuilts/5.10/arm64/kernel-5.10-gz` → 产物里的 `kernel-ranchu` |
+
+**宿主额外依赖（本次已装）：**
+
+```bash
+apt-get install -y libpulse0 libgl1     # 模拟器二进制的动态依赖，缺了它 emulator 起不来
+```
+
+**两条必须记住的限制：**
+
+1. **`aosp_arm64-userdebug` 是 GSI，起不了模拟器**（Android 12 的
+   `build/make/target/product/aosp_arm64.mk` 注释写明），产物在 `generic_arm64/`，
+   没有 `kernel-ranchu` / `ramdisk.img` / `vendor.img`。模拟器必须用 `sdk_phone64_arm64`。
+2. **跨架构没有硬件加速**：guest arm64 / 宿主 x86_64 ⇒ 只能 TCG，`/dev/kvm` 用不上，
+   首次开机 **10~40 分钟**。这是物理限制。
+
 ---
 
 ## 7. 注意事项

@@ -51,10 +51,11 @@ AutoSnapshotAndroid/
 │
 ├── aosp/                      ← AOSP 源码树（~85 GB，已同步中）
 │
-└── dev/                       ← 三条开发轨道（编号 = 建议顺序）
+└── dev/                       ← 四条轨道（01–03 是开发轨道，04 是验证环境）
     ├── 01-ndk-prototype/         阶段 0：纯 NDK 快速验证（当天可跑）
     ├── 02-native-daemon/         阶段 1–2：AOSP native daemon（主体代码）
-    └── 03-java-service/          阶段 3：Java 系统服务（长期形态）
+    ├── 03-java-service/          阶段 3：Java 系统服务（长期形态）
+    └── 04-emulator/              QEMU 验证环境：开发机跑 arm64 原版、Windows 跑自制 ROM
 ```
 
 ---
@@ -80,7 +81,7 @@ tail -f /var/log/aosp-sync.log
 
 ---
 
-## 三条轨道怎么选
+## 四条轨道怎么选
 
 ```
                     ┌─────────────────────────────┐
@@ -107,6 +108,10 @@ tail -f /var/log/aosp-sync.log
 | `01-ndk-prototype` | NDK + 一台 root 安卓机 | **当天** | 验证思路可行性 |
 | `02-native-daemon` | AOSP 源码树（~85 GB） | 首次 1 小时，之后分钟级 | 长期主线 |
 | `03-java-service` | AOSP 源码树 + 系统签名 | 数天 | 补 Android 12 的触控缺口 |
+| `04-emulator` | 上面两个 + `out/` ~100 GB | 首次编译数小时，之后分钟级 | **免真机**验证 02：开发机跑 arm64 原版安卓，Windows 跑编好的 ROM |
+
+> `04-emulator` 不是产品形态，是 02 的**验证基础设施**：`02` 的「等一台 root 的 ARM64 真机」
+> 这个前置条件，用它可以先绕过去。详见 [`dev/04-emulator/README.md`](dev/04-emulator/README.md)。
 
 ---
 

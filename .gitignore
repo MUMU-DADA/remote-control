@@ -20,6 +20,21 @@
 *.so
 *.so.*
 
+# 主机侧构建产物（tools/build-autod.sh、tests/Makefile 编出来的 ELF，不是源码）
+# 对应源码是 .c/.cpp，文件名不同，不会被误伤
+/dev/02-native-daemon/autod-host
+/dev/02-native-daemon/autodctl-host
+/dev/**/tests/fake_screencap
+/dev/**/tests/test_capture_screencap
+
+# --- dev/04-emulator：运行期文件与下载物，都不入库 ---
+# 开发机侧：userdata 覆盖层、模拟器控制台日志、冒烟测试截图
+/dev/04-emulator/linux-arm64/.run/
+# Windows 侧：下载的 SDK emulator、从开发机拉来的镜像（数 GB）、userdata 覆盖层
+/dev/04-emulator/windows-arm64/sdk/
+/dev/04-emulator/windows-arm64/images/
+/dev/04-emulator/windows-arm64/data/
+
 # --- AOSP 构建输出 ---
 # 正常情况下会落在 aosp/out/（已被上面的 /aosp/ 覆盖），这里只是留个记号
 out/
