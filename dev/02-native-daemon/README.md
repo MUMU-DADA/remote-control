@@ -43,9 +43,11 @@
 │
 ├── tests/                            主机侧测试（g++ 直接编译，不需要 AOSP）
 │   ├── Makefile
-│   ├── test_util.h                   公共工具
-│   ├── test_inject_uinput.cpp        注入后端单元测试（31 项）
-│   └── test_integration.cpp          端到端集成测试（32 项）
+│   ├── test_util.h                   公共工具（断言、设备节点发现、事件读回）
+│   ├── test_inject_uinput.cpp        注入后端单元测试（35 项）
+│   ├── test_integration.cpp          端到端集成测试（39 项）
+│   ├── test_capture_screencap.cpp    screencap 后端测试（18 项）
+│   └── fake_screencap.c              冒充 /system/bin/screencap 的替身
 │
 ├── client/
 │   ├── Android.bp
@@ -92,8 +94,9 @@ sudo make run   # 编译并运行全部测试
 
 | 测试 | 覆盖范围 | 检查项 |
 |---|---|---|
-| `test_inject_uinput` | 注入后端本身 | 31 |
-| `test_integration` | **端到端**：socket → dispatch → 帧通道 / 注入 → 内核 | 32 |
+| `test_inject_uinput` | 注入后端本身 | 35 |
+| `test_integration` | **端到端**：socket → dispatch → 帧通道 / 注入 → 内核 | 39 |
+| `test_capture_screencap` | screencap 后端：fork/exec → 解析 → memfd | 18 |
 
 集成测试用的是**真实的** `Dispatcher` / `SocketServer` / `Injector`，
 只把截图后端换成桩（`capture_stub.cpp`）。覆盖链路：
@@ -105,34 +108,107 @@ sudo make run   # 编译并运行全部测试
                                                                   └─ /dev/uinput ──> 内核 ──> eventN 读回
 ```
 
-**实测结果：63 项检查全部通过**
+**实测结果：92 项检查全部通过**
 
 ```
-test_inject_uinput（31 项）
+test_inject_uinput（35 项）
   [1] 单击       事件序列正确（BTN_TOUCH / TRACKING_ID / 坐标 / 压力 全对）
   [2] 滑动       200ms 产生 12 个 MOVE，坐标从 200 单调走到 800
   [3] 双指多点   使用 2 个槽位、2 个 TRACKING_ID，BTN_TOUCH 只在首尾各置位一次
-  [4] 异常路径   孤立的 TouchUp 安全返回
-  [5] 设备能力位 内核记录的 PROP/ABS/KEY 位图逐个解码验证
+  [4] 槽位耗尽   连按 12 个指针：前 10 个成功，第 11 个干净失败而非静默丢弃；
+                 全部抬起后槽位能复用
+  [5] 异常路径   孤立的 TouchUp 安全返回
+  [6] 设备能力位 内核记录的 PROP/ABS/KEY 位图逐个解码验证
 
-test_integration（32 项）
+test_integration（39 项）
   [1] Info 请求      协议往返正确
   [2] Capture 帧通道 fd 通过 SCM_RIGHTS 到达，可 mmap，
                      8,294,400 字节，渐变像素值逐个校验通过
   [3] Tap 全链路     坐标 321,654 穿过整条链路未被破坏
   [4] Swipe 全链路   终点坐标准确到达
   [5] 协议健壮性     错误 magic 被拒绝且连接不断；异常后正常请求仍可用
+  [6] 空闲超时       连上不发数据的连接会被断开，且服务不被卡死
+  [7] fd 泄漏        200 次抓帧后 fd 数量不变（10 → 10）
+                     —— 常驻服务最要紧的一类问题
+
+test_capture_screencap（18 项）
+  正常路径 / 非方形尺寸 / 连续抓帧不泄 fd /
+  未知像素格式 / 输出截断 / 子进程非零退出 / 可执行文件不存在 /
+  尺寸超范围被拒（边界值 16384 放行）
 ```
 
-### 集成测试直接抓到的 bug
+### 主机化改造抓到的 bug
 
-`SocketServer` 禁用了拷贝构造但**没有提供移动构造**，工厂函数
-`FromPath()` / `FromInitSocket()` 里的 `return s;` 编译不过。
+把平台相关代码改成主机可编译，不只是为了测试——它直接暴露了三个**从未被编译过**
+的代码里的真实缺陷：
 
-这段代码此前从未被编译过——**在 AOSP 构建时也会失败**。已补上移动构造与移动赋值。
+**1. `SocketServer` 缺移动构造。**
+禁用了拷贝构造但没提供移动构造，工厂函数 `FromPath()` / `FromInitSocket()` 里的
+`return s;` 编译不过。这段代码在 AOSP 构建时**也会失败**。
 
-> 这也是把 `socket_server.cpp` 改成主机可编译的价值：不需要等 AOSP 同步完
-> 就能发现这类问题。
+**2. `autodctl` 的 `-o` 选项是坏的。**
+usage 里写着 `-o 文件`，但 `getopt_long` 的短选项 `-o` 返回的是 `'o'`，
+而 switch 里只处理了长选项对应的 `kOptOut` —— 于是 `-o 路径` 落进 `default`
+被静默吞掉，输出永远落到默认的 `/data/local/tmp/shot.png`。
+**这类 bug 只有真正跑一遍才会发现**，编译期完全看不出来。
+
+**3. 测试自身的求值顺序缺陷。**
+`Check(LastValueOf(...,&x) && x == 540, "...", x)` —— C++ 实参求值顺序未指定，
+打印的是旧值。会造成「断言通过但诊断信息骗人」，掩盖真实故障。
+
+> 这三个都是同一个思路的收益：**让代码在开发机上跑起来**。
+> 不需要等 AOSP、不需要设备，就能发现整类问题。
+
+---
+
+## 🖥️ 在开发机上跑真正的 autod
+
+平台相关的部分已经全部隔离（`ProcessState` 用 `#ifdef __ANDROID__` 包住、
+截图后端可替换、日志有兼容层），所以**真正的 `autod` 二进制可以在开发机上编译运行**：
+
+```bash
+cd dev/02-native-daemon
+make                  # 编译 autod-host + autodctl-host
+sudo make run         # 前台跑起来
+# 另开终端用真正的客户端连它
+python3 client/autod_client.py --socket /tmp/autod-host.sock info
+python3 client/autod_client.py --socket /tmp/autod-host.sock capture -o shot.png
+python3 client/autod_client.py --socket /tmp/autod-host.sock tap 540 960
+./autodctl-host --socket /tmp/autod-host.sock info     # 设备端 C++ 客户端
+
+sudo make smoke       # 或者一条命令跑完：起服务 + 两个客户端 + 收尾
+```
+
+**实测输出**（两个客户端都验证）：
+
+```
+── Python 客户端 ──
+分辨率: 1080 x 1920
+已写入 /tmp/autod-host-shot.png（PNG，1080x1920）
+已点击 (540, 960)
+已滑动 (200,1600) -> (800,400)
+
+── C++ 客户端 (autodctl) ──
+显示数量: 1
+分辨率:   1080 x 1920
+已写入 /tmp/autodctl-shot.ppm (PPM)
+已点击 (100, 200)
+已滑动 (100,1700) -> (900,200)
+```
+
+> 主机上 `autodctl` 的 capture 走 PPM 分支（没有 `AndroidBitmap_compress`），
+> 设备上走 PNG。两条路径的帧解析逻辑相同。
+
+PNG / PPM 逐像素校验，与桩后端的渐变完全吻合：
+
+```
+左上角 RGB = (0, 0, 64)        右上角 RGB = (255, 0, 64)
+左下角 RGB = (0, 255, 64)      右下角 RGB = (255, 255, 64)
+中点   RGB = (127, 127, 64)
+```
+
+**这意味着：除了 SurfaceFlinger 抓屏和 SELinux 之外，整个服务已经可以在开发机上
+完整运行和交互了。** 剩下的两个环节都只能在目标设备上验证。
 
 其中 `[5]` 验证了 **`INPUT_PROP_DIRECT`** —— 这是最容易被忽略的一步，
 不设它 Android 的 InputReader 不会把设备识别成触摸屏。
@@ -197,7 +273,7 @@ python3 autod_client.py --socket /tmp/autod.sock swipe 540 1600 540 400
 | 项 | 状态 | 依赖 |
 |---|---|---|
 | 截图（`capture_surfaceflinger.cpp`）编译验证 | ⏳ 等 AOSP 同步 | `frameworks/native/libs/gui` |
-| 在真机上跑 `autod`（`--inject-backend` 已就绪） | ⏳ 待开始 | 一台 root 的 ARM64 设备 |
+| 在真机上跑 `autod`（`--inject-backend` 已就绪） | ⏳ 待开始 | 一台 root 的 ARM64 设备，**或** [`../04-emulator/`](../04-emulator/README.md) |
 | SELinux 规则调通 | ⏳ 待开始 | 上面两项 |
 | 真机端到端（真实截图 + 触控） | ⏳ 待开始 | 上面三项 |
 | `KeyEvent` / 文本输入 | ⏳ 未实现 | —— |
@@ -211,7 +287,9 @@ python3 autod_client.py --socket /tmp/autod.sock swipe 540 1600 540 400
 
 **不要一上来就写 sepolicy。** 先在已经宽松的环境里把链路跑通。
 
-在 Magisk root 的真机或 Cuttlefish（userdebug）上：
+在 Magisk root 的真机、Cuttlefish（userdebug），或
+**[`../04-emulator/`](../04-emulator/README.md) 里起的 arm64 模拟器**上
+（模拟器是免真机的路径，适合先验证截图与触控链路）：
 
 ```bash
 # 1. 编好 autod 和 autodctl 后
@@ -238,6 +316,11 @@ adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 
 
 > 注意：`deploy_cuttlefish.sh` 目前写的是新版 `cvd` 工具链的用法。
 > **Android 12 用的是老的 `launch_cvd`**，需要相应调整。
+>
+> 在 `04-emulator` 的模拟器上请改用
+> [`../04-emulator/linux-arm64/smoke-autod.sh`](../04-emulator/linux-arm64/smoke-autod.sh)：
+> 本脚本把二进制推进 `/system/bin`，需要模拟器以 `--writable-system` 启动；
+> 而冒烟脚本走的是上表的 `/data/local/tmp` 阶段 1 路径，不需要 remount。
 
 ### 阶段 2：固化 init 服务 + sepolicy
 
