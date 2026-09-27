@@ -7,6 +7,7 @@
 //   4. 处理信号，优雅退出
 
 #include <getopt.h>
+#include <mutex>
 #include <grp.h>
 #include <signal.h>
 #include <stdio.h>
@@ -51,6 +52,9 @@ void PrintUsage(const char* argv0) {
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
   --gid <gid>          配套的 GID，省略则用与 uid 相同的值
   --selftest           检查运行环境后退出（首次部署时先跑这个）
+  --socket-mode <8进制>  socket 文件权限，默认 0660
+                        放宽到 0666 可让上位应用以自己的 UID 连入；
+                        但那意味着同设备任何进程都能控制本服务，请自行权衡
   --foreground         前台运行，日志输出到 stderr
   --verbose            详细日志
   -h, --help           显示本帮助
@@ -107,6 +111,7 @@ int main(int argc, char** argv) {
     gid_t       targetGid  = 0;
     bool        dropPrivileges = false;
     bool        selfTest       = false;
+    mode_t      socketMode     = 0660;
 
     enum LongOpt {
         kOptSocket = 1000,
@@ -116,6 +121,7 @@ int main(int argc, char** argv) {
         kOptTouchRange,
         kOptGid,
         kOptSelfTest,
+        kOptSocketMode,
     };
     static const option kLongOptions[] = {
         {"socket",      required_argument, nullptr, kOptSocket},
@@ -125,6 +131,7 @@ int main(int argc, char** argv) {
         {"gid",         required_argument, nullptr, kOptGid},
         {"touch-range", required_argument, nullptr, kOptTouchRange},
         {"selftest",    no_argument,       nullptr, kOptSelfTest},
+        {"socket-mode", required_argument, nullptr, kOptSocketMode},
         {"foreground",  no_argument,       nullptr, 'f'},
         {"verbose",     no_argument,       nullptr, 'v'},
         {"help",        no_argument,       nullptr, 'h'},
@@ -155,6 +162,17 @@ int main(int argc, char** argv) {
             case kOptSelfTest:
                 selfTest = true;
                 break;
+
+            case kOptSocketMode: {
+                // 八进制解析：写成 0666 或 666 都接受
+                const unsigned long v = strtoul(optarg, nullptr, 8);
+                if (v == 0 || v > 0777) {
+                    fprintf(stderr, "错误: --socket-mode 需为八进制权限位（如 0660/0666）\n");
+                    return 1;
+                }
+                socketMode = static_cast<mode_t>(v);
+                break;
+            }
 
             case kOptTouchRange: {
                 // 形如 1080x2400。不指定则用显示分辨率。
@@ -248,6 +266,11 @@ int main(int argc, char** argv) {
     SocketServer server = initSocketName.empty()
                               ? SocketServer::FromPath(socketPath)
                               : SocketServer::FromInitSocket(initSocketName);
+    // init 模式下 socket 由 init 创建并按 .rc 里的 socket 行设权限，
+    // 此时 --socket-mode 无效（我们不会去改 init 建的文件）。
+    if (initSocketName.empty()) {
+        server.SetSocketMode(socketMode);
+    }
 
     if (!server.Start(&error)) {
         ALOGE("autod: socket 启动失败: %s", error.c_str());
@@ -281,8 +304,18 @@ int main(int argc, char** argv) {
     fprintf(stderr, "autod: 就绪, 监听 %s\n", server.path().c_str());
 
     Dispatcher dispatcher(&capture, &injector);
-    server.Run([&dispatcher](const Request& req, const std::string& payload,
-                             int reqFd, int peerUid) {
+    // 连接是并发的（每个连接一个线程），但操作必须串行：
+    // Injector 是有状态的 —— 按下/抬起、触控槽位映射、手势的 downTime。
+    // 两个客户端同时注入会互相破坏对方的手势状态。
+    //
+    // 所以锁加在这里，而不是退回"连接也串行" —— 后者会让一个空闲的
+    // 长连接客户端把整个服务占住（实测踩过：上位应用连上后，
+    // 其它客户端全被挡住，直到空闲超时把应用那条连接掐掉）。
+    std::mutex opMutex;
+    server.Run([&dispatcher, &opMutex](const Request& req,
+                                       const std::string& payload,
+                                       int reqFd, int peerUid) {
+        std::lock_guard<std::mutex> lock(opMutex);
         return dispatcher.Handle(req, payload, reqFd, peerUid);
     });
 

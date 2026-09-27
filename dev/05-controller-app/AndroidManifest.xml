@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  autod 上位应用。
+
+  这是一个控制系统服务的工具，需要 android:sharedUserId 之外的平台身份才能
+  读别人的 socket —— 实际上 daemon 的 socket 是 0660 root:root，
+  所以本应用要以 root 身份运行 adb 推送后手动启动，或者装成系统应用。
+
+  没有申请任何权限：所有能力都由 daemon 执行，本应用只是个客户端。
+  这样即使应用被替换，能做的事也不会超过 daemon 暴露的协议。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.autod.controller">
+
+    <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="31" />
+
+    <application
+        android:label="autod 控制台"
+        android:allowBackup="false"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="autod 控制台">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

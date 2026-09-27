@@ -181,11 +181,28 @@ bool AppOps::ListApps(bool includeSystem, bool withMetadata,
         std::string rest = line.substr(8);
 
         AppEntry e;
-        // 形如 /data/app/~~x==/com.foo-y==/base.apk=com.foo
-        const size_t eq = rest.find('=');
-        if (withMetadata && eq != std::string::npos) {
-            e.apkPath = rest.substr(0, eq);
-            rest     = rest.substr(eq + 1);
+        // 带 -f 时第一个字段形如：
+        //   package:/data/app/~~RV2tSp9GaJ8wp2iv2AkdIw==/com.foo-xxx==/base.apk=com.foo
+        // 后面还有 " versionCode:42  installer=null"。
+        //
+        // ⚠️ 找分隔等号不能简单用 find 或 rfind：
+        //    - find('=')  会切在**路径内部**（Android 11+ 的 /data/app 目录名是
+        //                 base64 风格的 ~~xxx==），把 apkPath 当成包名；
+        //    - rfind('=') 会切在后面的 installer=null 上。
+        //    这个坑只有装上真实的第三方应用才暴露 —— 系统应用路径里没有 '='。
+        //
+        //    正确规则：分隔等号 = **最后一个 '/' 之后的第一个 '='**。
+        //    包名里不含 '/'，所以这个等号一定是路径与包名的分界。
+        if (withMetadata) {
+            const std::string first = rest.substr(0, rest.find(' '));
+            const size_t slash = first.rfind('/');
+            const size_t eq = (slash == std::string::npos)
+                                  ? first.find('=')
+                                  : first.find('=', slash);
+            if (eq != std::string::npos) {
+                e.apkPath = first.substr(0, eq);
+                rest      = first.substr(eq + 1) + rest.substr(first.size());
+            }
         }
 
         // rest 现在是 "com.foo" 或 "com.foo versionCode:42 installer=com.bar"

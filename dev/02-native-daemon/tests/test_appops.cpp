@@ -189,6 +189,42 @@ void TestParsePmList() {
     Check(withVersion == parsed, "每行都有 versionCode（%d/%d）", withVersion,
           parsed);
 
+    // ⚠️ 路径里含 '=' 的情况（真实的第三方应用路径就是这样）。
+    //    必须用 rfind 找分隔符 —— 用 find 会切在路径中间。
+    //    这个 bug 只有装上真实第三方应用才暴露：系统应用路径里没有 '='。
+    {
+        const std::string third = Slurp("pm-list-3rd-party.txt");
+        Check(!third.empty(), "第三方应用夹具已加载");
+        std::istringstream tis(third);
+        std::string tl;
+        int checked = 0;
+        while (std::getline(tis, tl)) {
+            if (tl.rfind("package:", 0) != 0) continue;
+            std::string r = tl.substr(8);
+            // 规则：分隔等号 = 最后一个 '/' 之后的第一个 '='
+            // （用 find 会切在路径内部，用 rfind 会切在 installer= 上）
+            const std::string first = r.substr(0, r.find(' '));
+            const size_t slash = first.rfind('/');
+            const size_t eq = (slash == std::string::npos)
+                                  ? first.find('=')
+                                  : first.find('=', slash);
+            Check(eq != std::string::npos, "找到分隔等号");
+            if (eq == std::string::npos) continue;
+            const std::string path = first.substr(0, eq);
+            std::istringstream fs2(first.substr(eq + 1));
+            std::string pkg;
+            fs2 >> pkg;
+            Check(pkg.find('=') == std::string::npos,
+                  "包名里没有残留的 '=' : %s", pkg.c_str());
+            Check(pkg.rfind("com.", 0) == 0, "包名以 com. 开头: %s", pkg.c_str());
+            Check(path.find("~~") != std::string::npos,
+                  "路径里确实含 '='（~~xxx== 形式），验证了这个坑: %s",
+                  path.substr(0, 40).c_str());
+            ++checked;
+        }
+        Check(checked == 2, "校验了 %d 条含 '=' 的路径", checked);
+    }
+
     // 双空格：真实输出是 "versionCode:31  installer=null"，
     // 用 istringstream >> 切词能正确处理，这里固定住这个假设
     const std::string sample =

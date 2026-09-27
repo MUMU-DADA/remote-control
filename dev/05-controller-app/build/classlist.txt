@@ -1,0 +1,11 @@
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/AppListAdapter$Item.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/AutodClient$1.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/AutodClient$Result.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/Protocol$Reply.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/Protocol.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/MainActivity$Done.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/MainActivity$Job.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/R.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/AutodClient.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/AppListAdapter.class
+/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/MainActivity.class

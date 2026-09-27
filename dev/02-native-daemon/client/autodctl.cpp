@@ -602,6 +602,19 @@ int main(int argc, char** argv) {
     if (sockFd < 0) return 1;
 
     int rc = 0;
+    // ⚠️ 子命令自己的选项必须在这里解析。
+    //    optstring 加了 "+" 之后 getopt 遇到第一个非选项（也就是子命令）就停，
+    //    `capture -o /path` 里的 -o 不会再被顶层解析到 ——
+    //    结果是输出悄悄落到默认路径，看起来像"选项没生效"。
+    for (int i = 0; i < remaining - 1; ++i) {
+        if ((strcmp(args[i], "-o") == 0 || strcmp(args[i], "--output") == 0) &&
+            i + 1 < remaining - 1) {
+            outPath = args[++i];
+        } else if (strcmp(args[i], "--raw") == 0) {
+            raw = true;
+        }
+    }
+
     if (cmd == "info") {
         rc = CmdInfo(sockFd);
     } else if (cmd == "capture") {

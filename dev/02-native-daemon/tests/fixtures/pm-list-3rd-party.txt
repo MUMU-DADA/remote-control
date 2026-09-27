@@ -1,0 +1,2 @@
+package:/data/app/~~RV2tSp9GaJ8wp2iv2AkdIw==/com.autod.controller-sZiTA1o_5yt3m5JXZda4cw==/base.apk=com.autod.controller versionCode:1  installer=null
+package:/data/app/~~abcdefgh==/com.example.app-xyz==/base.apk=com.example.app versionCode:42  installer=com.android.vending

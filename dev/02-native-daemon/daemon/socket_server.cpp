@@ -4,6 +4,9 @@
 
 #include <string.h>
 
+#include <system_error>
+#include <thread>
+
 #include <vector>
 
 #include <errno.h>
@@ -35,8 +38,8 @@ constexpr int    kBacklog          = 8;
 // 没有超时的话，一个连上来就不发数据的客户端会让 recvmsg 永久阻塞，
 // 整个服务随之卡死（症状："服务还在，但谁来都没反应"）。
 //
-// 为什么不做并发：Injector 是有状态的（downTime、触控槽位映射），
-// 多线程并发注入会互相破坏手势状态。串行是这里的正确设计。
+// 为什么操作仍要串行：Injector 是有状态的（downTime、触控槽位映射），
+// 并发注入会互相破坏手势状态。连接可以并发，操作不行。
 constexpr int kDefaultIdleTimeoutSec = 30;
 
 // 允许用环境变量覆盖，方便测试（不然一个用例要等 30 秒）
@@ -168,8 +171,12 @@ bool SocketServer::Start(std::string* error) {
     }
 
     // 只允许属主和同组访问。调用方 UID 还会在 ServeConnection 里二次校验。
-    if (chmod(path_.c_str(), 0660) < 0) {
-        ALOGW("autod: chmod(%s) 失败: %s", path_.c_str(), strerror(errno));
+    // 默认 0660：属主与同组可访问。要放宽用 --socket-mode（例如让上位应用
+    // 以自己的 UID 连进来）。放宽的代价是同一台设备上任何进程都能控制服务，
+    // 所以默认保守，由部署方显式决定。
+    if (chmod(path_.c_str(), socketMode_) < 0) {
+        ALOGW("autod: chmod(%s, %04o) 失败: %s", path_.c_str(),
+              static_cast<unsigned>(socketMode_), strerror(errno));
     }
 
     if (listen(listenFd_, kBacklog) < 0) {
@@ -208,19 +215,35 @@ void SocketServer::Run(const RequestHandler& handler) {
             continue;
         }
 
-        // 给连接设个空闲超时。
-        //
-        // 没有它的话，一个连上来就不说话的客户端会让 RecvRequest 里的
-        // recvmsg 永久阻塞 —— 而 ServeConnection 是串行调用的，
-        // 整个服务就被这一个连接卡死了。这是很容易踩的坑：
-        // 症状是"服务还在，但谁来都没反应"。
+        // 给连接设个空闲超时 —— 防止连上来就不说话的客户端永久占着线程。
         timeval tv{};
         tv.tv_sec  = IdleTimeoutSec();
         tv.tv_usec = 0;
         setsockopt(connFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        ServeConnection(connFd, handler);
-        close(connFd);
+        // 每个连接一个线程。
+        //
+        // ⚠️ 这里曾经是串行调用（ServeConnection 直接在 accept 循环里跑），
+        //    后果是**一个长连接的客户端会把整个服务占住**：
+        //      - 上位应用连上后处于空闲，其它客户端连不进来
+        //      - 空闲超时一到，服务端把应用那条连接关掉，
+        //        而应用并不知道，下次写入直接 Broken pipe
+        //    实测就是这么暴露的。
+        //
+        //    真正的互斥放在 handler 里（见 main.cpp）：连接可以并发，
+        //    但 Injector 是有状态的（按下/抬起、槽位映射），
+        //    并发注入会互相破坏手势，所以**操作**必须串行。
+        try {
+            std::thread([this, connFd, &handler]() {
+                ServeConnection(connFd, handler);
+                close(connFd);
+            }).detach();
+        } catch (const std::system_error& e) {
+            // 线程起不来（资源耗尽）时退回串行，至少不丢连接
+            ALOGW("autod: 起线程失败(%s)，本连接串行处理", e.what());
+            ServeConnection(connFd, handler);
+            close(connFd);
+        }
     }
     ALOGI("autod: accept 循环退出");
 }

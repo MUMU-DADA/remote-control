@@ -31,6 +31,17 @@ class SocketServer {
     // 手动 bind 模式（开发期用）
     static SocketServer FromPath(const std::string& path);
 
+    // 放宽 socket 文件权限。
+    //
+    // 默认 0660 只允许属主和同组访问。上位应用以自己的 UID 运行时不在此列，
+    // 需要放宽到 0666。**这是一个真实的安全权衡**：放宽后同一台设备上
+    // 任何进程都能控制这个服务（截图、注入触控、装应用、删下载目录里的文件），
+    // 所以默认保守，由部署方显式决定。
+    //
+    // 生产环境的更好做法是建一个专用 AID、让客户端进程加入该组，
+    // 并在 ServeConnection 里按 SO_PEERCRED 校验 uid —— 那段 TODO 还在。
+    void SetSocketMode(mode_t mode) { socketMode_ = mode; }
+
     ~SocketServer();
 
     // 可移动、不可拷贝。
@@ -73,7 +84,9 @@ class SocketServer {
     // 发应答，可选带一个 fd。
     bool SendReply(int connFd, const ReplyPacket& packet);
 
-    std::string path_;              // 手动模式下的 socket 路径；init 模式下为空
+    std::string path_;
+    // 手动模式下的 socket 路径；init 模式下为空
+    mode_t      socketMode_ = 0660;   // 可用 --socket-mode 放宽，见 main.cpp 的说明
     std::string initSocketName_;    // init 模式下的 socket 名
     int  listenFd_ = -1;
     bool stop_     = false;
