@@ -88,6 +88,20 @@ EMULATOR_BIN=/tmp/emu37/emulator/emulator ./run-emulator.sh --arm64
 - [ ] 截图**不是全黑**（`smoke-autod.sh` 会自动判定）
 - [ ] 两个平台的 `ro.build.fingerprint` 一致（证明跑的是同一份 ROM）
 
+### 4. arm64 在 x86_64 宿主上要换 QEMU 机器（否则必挂）
+
+模拟器给 arm64 guest 挂了 16 个 PCI 设备（`virtio-serial-pci`、
+`virtio_input_multi_touch_pci_*`、`virtio-wifi-pci`、`virtio-vsock-pci`、`-soundhw hda`），
+而 arm 的 `ranchu` 机器**没有 PCI 总线** → QEMU 直接退出，日志只有一行：
+
+```
+qemu-system-aarch64-headless: PCI bus not available for hda
+emulator: Done with QEMU main loop
+```
+
+**解法**：`-qemu -machine type=virt`（`run-emulator.sh` 在 arm64 下已自动追加）。
+完整排查过程与无效尝试见 [`linux-arm64/README.md`](linux-arm64/README.md)。
+
 ---
 
 ## 先读这一节：三个硬约束

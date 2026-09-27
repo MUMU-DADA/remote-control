@@ -168,6 +168,14 @@ while :; do
         echo
         warn "模拟器进程退出了。日志尾部："
         tail -30 "$LOG" >&2
+        # 已知故障模式：给出直接可用的解法，别让人对着日志猜
+        if grep -q "PCI bus not available" "$LOG" 2>/dev/null; then
+            echo >&2
+            warn "诊断：模拟器给 arm64 guest 挂了 PCI 设备（virtio-*-pci / -soundhw hda），"
+            warn "      但 arm 的 ranchu 机器没有 PCI 总线 → QEMU 直接退出。"
+            warn "      解法：arm64 下加 -qemu -machine type=virt（本脚本默认已加）"
+            warn "      若是被 EMU_MACHINE_OVERRIDE=none 关掉的，去掉即可。"
+        fi
         die "启动失败（日志：$LOG）"
     fi
     bc="$("$ADB_BIN" -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
