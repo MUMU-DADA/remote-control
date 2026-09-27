@@ -25,7 +25,10 @@ CXXFLAGS ?= -std=c++20 -O1 -g -Wall -Wextra -Wno-unused-parameter
 INCLUDES = -I$(DAEMON) -I.
 DAEMON    = ../daemon
 
-COMMON_SRCS = $(DAEMON)/inject.cpp $(DAEMON)/inject_uinput.cpp
+# log_buffer 现在是所有用到 ALOG* 的模块的依赖（日志同时进环形缓冲），
+# 所以放进公共源，而不是每个测试各加一遍。
+COMMON_SRCS = $(DAEMON)/inject.cpp $(DAEMON)/inject_uinput.cpp \
+              $(DAEMON)/log_buffer.cpp
 COMMON_HDRS = $(DAEMON)/inject.h $(DAEMON)/inject_backend.h \
               $(DAEMON)/autod_log.h $(DAEMON)/autod_platform.h \
               $(DAEMON)/protocol.h test_util.h
@@ -42,13 +45,17 @@ INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
              $(DAEMON)/appops.cpp \
              $(DAEMON)/subprocess.cpp \
              $(DAEMON)/fileops.cpp \
-             $(DAEMON)/http_client.cpp
+             $(DAEMON)/http_client.cpp \
+             $(DAEMON)/service_state.cpp \
+             $(DAEMON)/selftest.cpp
 
 # [3] screencap 截图后端：配 fake_screencap 冒充设备命令
-SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp
-APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp
+SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
+                 $(DAEMON)/log_buffer.cpp
+APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
+                 $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json
 
 all: $(BINS) fake_screencap
 
@@ -58,6 +65,11 @@ test_inject_uinput: $(UNIT_SRCS) $(COMMON_HDRS)
 test_integration: $(INTEG_SRCS) $(COMMON_HDRS) \
                   $(DAEMON)/socket_server.h $(DAEMON)/dispatch.h $(DAEMON)/capture.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(INTEG_SRCS)
+
+JSON_SRCS = test_json.cpp $(DAEMON)/json_parser.cpp $(DAEMON)/json_writer.h
+
+test_json: $(JSON_SRCS) test_util.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(JSON_SRCS)
 
 test_appops: $(APPOPS_SRCS) test_util.h $(DAEMON)/appops.h $(DAEMON)/subprocess.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^
@@ -81,12 +93,14 @@ _run: all
 	 ./test_integration;                         i=$$?; echo; \
 	 ./test_capture_screencap ./fake_screencap;  c=$$?; echo; \
 	 ./test_appops;                              a=$$?; echo; \
+	 ./test_json;                                j=$$?; echo; \
 	 echo "───────────────────────────────"; \
 	 printf "  %-34s %s\n" "注入后端单元测试"   "$$([ $$u -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "端到端集成测试"     "$$([ $$i -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "screencap 截图后端" "$$([ $$c -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "应用管理后端"       "$$([ $$a -eq 0 ] && echo 通过 || echo 失败)"; \
-	 exit $$(( u + i + c + a ))
+	 printf "  %-34s %s\n" "JSON 解析/输出"      "$$([ $$j -eq 0 ] && echo 通过 || echo 失败)"; \
+	 exit $$(( u + i + c + a + j ))
 
 clean:
 	rm -f $(BINS) fake_screencap
