@@ -1,0 +1,297 @@
+// webui.cpp — 内置网页控制台（单文件，零依赖）
+
+#include "webui.h"
+
+namespace autod {
+
+const std::string& WebUiHtml() {
+    // 用原始字符串字面量：HTML 里有大量引号和反斜杠，
+    // 逐个转义既难写又难读。分隔符用 )HTML" 避免和内容冲突。
+    static const std::string kHtml = R"HTML(<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>autod 控制台</title>
+<style>
+  :root { --bg:#111; --fg:#eee; --dim:#888; --accent:#4a9; --warn:#c55; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  header { padding:8px 12px; background:#1b1b1b; border-bottom:1px solid #333;
+           display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .dim { color:var(--dim); }
+  main { display:flex; gap:12px; padding:12px; align-items:flex-start;
+         flex-wrap:wrap; }
+  .screen { flex:0 0 auto; position:relative; background:#000;
+            border:1px solid #333; }
+  /* 画面用 image-rendering:pixelated 保持原始比例 —— 默认的平滑
+     会让小屏截图糊成一团，坐标也难对准 */
+  #screen { display:block; max-width:min(90vw,560px); height:auto;
+            image-rendering:pixelated; cursor:crosshair;
+            touch-action:none; user-select:none; }
+  .panel { flex:1 1 260px; min-width:260px; display:flex; flex-direction:column;
+           gap:10px; }
+  .card { background:#1b1b1b; border:1px solid #333; border-radius:6px;
+          padding:10px; }
+  .card h2 { font-size:12px; margin:0 0 8px; color:var(--dim);
+             font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; }
+  button { background:#2a2a2a; color:var(--fg); border:1px solid #444;
+           border-radius:4px; padding:6px 10px; font-size:12px; cursor:pointer; }
+  button:hover { background:#333; }
+  button:active { background:var(--accent); color:#000; }
+  input[type=text] { flex:1; background:#0d0d0d; color:var(--fg);
+                     border:1px solid #444; border-radius:4px; padding:6px 8px;
+                     font-size:12px; min-width:0; }
+  #status { font-size:12px; min-height:1.4em; }
+  .ok { color:var(--accent); } .err { color:var(--warn); }
+  #clip { white-space:pre-wrap; word-break:break-all; font-size:12px;
+          max-height:120px; overflow:auto; background:#0d0d0d; padding:6px;
+          border-radius:4px; border:1px solid #333; }
+  #coord { position:absolute; right:4px; bottom:4px; background:rgba(0,0,0,.7);
+           padding:2px 6px; border-radius:3px; font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>autod 控制台</h1>
+  <span class="dim" id="meta">连接中…</span>
+</header>
+
+<main>
+  <div class="screen">
+    <img id="screen" alt="屏幕">
+    <div id="coord"></div>
+  </div>
+
+  <div class="panel">
+    <div class="card">
+      <h2>状态</h2>
+      <div id="status" class="dim">就绪</div>
+      <div class="row" style="margin-top:8px">
+        <button onclick="refresh()">刷新状态</button>
+        <button onclick="setFps(0)">流：暂停</button>
+        <button onclick="setFps(2)">2fps</button>
+        <button onclick="setFps(5)">5fps</button>
+        <button onclick="setFps(10)">10fps</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>按键</h2>
+      <div class="row">
+        <button onclick="key('home')">Home</button>
+        <button onclick="key('back')">返回</button>
+        <button onclick="key('appswitch')">最近</button>
+        <button onclick="key('menu')">菜单</button>
+        <button onclick="key('enter')">回车</button>
+        <button onclick="key('power')">电源</button>
+        <button onclick="key('volumeup')">音量+</button>
+        <button onclick="key('volumedown')">音量−</button>
+        <button onclick="key('up')">↑</button>
+        <button onclick="key('down')">↓</button>
+        <button onclick="key('left')">←</button>
+        <button onclick="key('right')">→</button>
+        <button onclick="key('backspace')">⌫</button>
+        <button onclick="key('tab')">Tab</button>
+        <button onclick="key('space')">空格</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="keytext" placeholder="输入键名或键码，回车发送"
+               onkeydown="if(event.key==='Enter'){key(this.value);this.value='';}">
+      </div>
+      <div class="dim" style="margin-top:6px;font-size:11px">
+        键名见 /api/v1/describe；也可直接填数字键码。长按用
+        <button style="padding:1px 5px;font-size:11px"
+                onclick="keyLong()">长按最后输入的键</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>剪贴板</h2>
+      <div id="clip" class="dim">（点「读剪贴板」查看）</div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="cliptext" placeholder="要写入的文本">
+        <button onclick="clipSet()">写入</button>
+        <button onclick="clipGet()">读取</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>操作提示</h2>
+      <div class="dim" style="font-size:12px">
+        在画面上：<b>单击</b>=点击 · <b>按住不动</b>=长按 ·
+        <b>按住拖动</b>=拖拽
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const img = $('screen');
+let fps = 5;
+let sw = 0, sh = 0;          // 屏幕真实尺寸
+let streamKey = 0;
+
+function setStatus(t, err) {
+  const el = $('status');
+  el.textContent = t;
+  el.className = err ? 'err' : 'ok';
+}
+
+function api(path, opts) {
+  return fetch('/api/v1' + path, opts).then(r => r.json());
+}
+
+// ── 实时画面 ──
+// MJPEG：浏览器把 multipart/x-mixed-replace 当成会不断更新的图，
+// 原生支持，不需要 JS 解帧 —— 这是最省事也最省电的做法。
+function startStream() {
+  if (fps <= 0) { img.removeAttribute('src'); return; }
+  streamKey++;
+  img.src = '/api/v1/stream?fps=' + fps + '&_=' + streamKey;
+}
+function setFps(v) { fps = v; startStream(); setStatus('流帧率：' + (v ? v + ' fps' : '已暂停')); }
+
+function refresh() {
+  api('/config').then(d => {
+    const r = d.runtime, c = d.config;
+    sw = (r.capture && r.capture.primaryWidth) || 0;
+    sh = (r.capture && r.capture.primaryHeight) || 0;
+    $('meta').textContent = sw + '×' + sh + ' · ' + r.capture.backend
+        + ' · pid ' + r.pid + ' · 协议 v' + r.protocolVersion;
+  }).catch(e => setStatus('取状态失败：' + e, true));
+}
+
+// 画面尺寸拿到之前先轮询 —— img 的 naturalWidth 要等第一帧到达
+img.addEventListener('load', () => {
+  if (!sw) {
+    sw = img.naturalWidth; sh = img.naturalHeight;
+    $('meta').textContent = sw + '×' + sh;
+  }
+});
+
+// ── 坐标换算 ──
+// 页面上的像素 → 屏幕像素。必须按**渲染后的显示尺寸**换算，
+// 而不是 naturalWidth：画面被 CSS 缩放过。
+function toScreen(ev) {
+  const rect = img.getBoundingClientRect();
+  const x = Math.round((ev.clientX - rect.left) / rect.width * (sw || img.naturalWidth));
+  const y = Math.round((ev.clientY - rect.top) / rect.height * (sh || img.naturalHeight));
+  return {
+    x: Math.max(0, Math.min((sw || img.naturalWidth) - 1, x)),
+    y: Math.max(0, Math.min((sh || img.naturalHeight) - 1, y))
+  };
+}
+
+function tap(x, y) {
+  api('/tap', { method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({x:x, y:y, ms:50}) })
+    .then(() => setStatus('点击 ' + x + ',' + y))
+    .catch(e => setStatus('点击失败：' + e, true));
+}
+function longPress(x, y) {
+  api('/longpress', { method:'POST', headers:{'Content-Type':'application/json'},
+                      body: JSON.stringify({x:x, y:y, ms:800}) })
+    .then(() => setStatus('长按 ' + x + ',' + y))
+    .catch(e => setStatus('长按失败：' + e, true));
+}
+function drag(x1, y1, x2, y2) {
+  api('/drag', { method:'POST', headers:{'Content-Type':'application/json'},
+                 body: JSON.stringify({x1:x1, y1:y1, x2:x2, y2:y2, ms:600}) })
+    .then(() => setStatus('拖拽 ' + x1 + ',' + y1 + ' → ' + x2 + ',' + y2))
+    .catch(e => setStatus('拖拽失败：' + e, true));
+}
+
+// ── 鼠标 / 触摸交互 ──
+// 用 pointer 事件而不是分别处理 mouse/touch：一套代码两条输入都覆盖。
+const LONG_PRESS_MS = 600;
+const DRAG_SLOP = 8;          // 超过这个位移就算拖拽，不再触发长按/点击
+let press = null;
+
+img.addEventListener('pointerdown', (ev) => {
+  ev.preventDefault();
+  img.setPointerCapture(ev.pointerId);
+  const p = toScreen(ev);
+  press = { start: p, cur: p, timer: setTimeout(() => {
+    // 时间到了还没松开、也没移动 → 长按
+    longPress(p.x, p.y);
+    press.fired = 'long';
+  }, LONG_PRESS_MS), moved: false };
+});
+
+img.addEventListener('pointermove', (ev) => {
+  const p = toScreen(ev);
+  $('coord').textContent = p.x + ',' + p.y;
+  if (!press) return;
+  press.cur = p;
+  const dx = p.x - press.start.x, dy = p.y - press.start.y;
+  if (Math.abs(dx) > DRAG_SLOP || Math.abs(dy) > DRAG_SLOP) {
+    press.moved = true;
+    if (press.timer) { clearTimeout(press.timer); press.timer = null; }
+  }
+});
+
+function endPress(ev) {
+  if (!press) return;
+  const p = press;
+  if (p.timer) { clearTimeout(p.timer); p.timer = null; }
+  press = null;
+  if (p.fired === 'long') return;             // 长按已经发过了
+  if (p.moved) {
+    drag(p.start.x, p.start.y, p.cur.x, p.cur.y);
+  } else {
+    tap(p.cur.x, p.cur.y);
+  }
+}
+img.addEventListener('pointerup', endPress);
+img.addEventListener('pointercancel', () => { if (press && press.timer) clearTimeout(press.timer); press = null; });
+
+// ── 按键 ──
+function key(name, longPress) {
+  if (!name) return;
+  api('/key', { method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({key:name, long:!!longPress}) })
+    .then(d => setStatus('按键 ' + d.key + '（键码 ' + d.keyCode + '）')
+        )
+    .catch(e => setStatus('按键失败：' + e, true));
+}
+function keyLong() {
+  const v = $('keytext').value.trim();
+  if (v) key(v, true); else setStatus('先在输入框里填键名', true);
+}
+
+// ── 剪贴板 ──
+function clipGet() {
+  api('/clipboard?op=get')
+    .then(d => {
+      $('clip').textContent = d.has ? d.text : '（剪贴板为空）';
+      $('clip').className = d.has ? '' : 'dim';
+      setStatus('已读取剪贴板');
+    })
+    .catch(e => setStatus('读剪贴板失败：' + e, true));
+}
+function clipSet() {
+  const t = $('cliptext').value;
+  if (!t) { setStatus('请输入要写入的文本', true); return; }
+  api('/clipboard', { method:'POST', headers:{'Content-Type':'application/json'},
+                      body: JSON.stringify({op:'set', text:t}) })
+    .then(() => { setStatus('已写入剪贴板'); clipGet(); })
+    .catch(e => setStatus('写剪贴板失败：' + e, true));
+}
+
+// ── 启动 ──
+refresh();
+startStream();
+setInterval(refresh, 10000);   // 定期刷状态，页面放着不动也不会显示过期信息
+</script>
+</body>
+</html>
+)HTML";
+    return kHtml;
+}
+
+}  // namespace autod

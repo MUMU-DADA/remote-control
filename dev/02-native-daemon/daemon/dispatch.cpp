@@ -17,6 +17,9 @@
 #include <memory>
 
 #include "appops.h"
+#include "clipops.h"
+#include "png_encoder.h"
+#include "keyboard.h"
 #include "log_buffer.h"
 #include "selftest.h"
 #include "service_state.h"
@@ -331,6 +334,15 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleDownload(req, args);
         case Cmd::FileOp:
             return HandleFileOp(req, args);
+
+        case Cmd::LongPress:
+        case Cmd::Drag:
+        case Cmd::DoubleTap:
+            return HandleGesture(req);
+        case Cmd::KeyEvent:
+            return HandleKeyEvent(req, args);
+        case Cmd::Clipboard:
+            return HandleClipboard(req, args);
 
         case Cmd::Describe:
             return HandleDescribe(req);
@@ -692,7 +704,7 @@ const CommandSpec kCommands[] = {
     {"TouchDown",     5,  1, "pointerId,x,y",           "多点触控：按下"},
     {"TouchMove",     6,  1, "pointerId,x,y",           "多点触控：移动"},
     {"TouchUp",       7,  1, "pointerId,x,y",           "多点触控：抬起"},
-    {"KeyEvent",      8,  1, "—",                       "按键注入（未实现）"},
+    {"KeyEvent",      8,  4, "<键名或键码>",             "按键注入（uinput 虚拟键盘）"},
     {"ListApps",     10,  2, "flags",                   "列出应用"},
     {"AppInfo",      11,  2, "<package>",               "应用详情与清单"},
     {"LaunchApp",    12,  2, "<package>[,activity]",    "启动应用"},
@@ -701,6 +713,10 @@ const CommandSpec kCommands[] = {
     {"InstallApp",   15,  2, "fd=APK, flags",           "安装 APK"},
     {"Download",     16,  2, "<url>[,filename[,subdir]]","下载到下载目录"},
     {"FileOp",       17,  2, "<op>[,path[,arg]]",       "下载目录文件操作"},
+    {"LongPress",    30,  4, "x,y,durationMs",          "长按（按下不动再抬起）"},
+    {"Drag",         31,  4, "x1,y1,x2,y2,durationMs",  "拖拽（起点停顿 + 慢速移动）"},
+    {"DoubleTap",    32,  4, "x,y[,intervalMs]",        "双击"},
+    {"Clipboard",    33,  4, "get|set\\0<文本>|info",    "剪贴板读写"},
     {"Describe",     20,  3, "无",                      "本清单：有哪些命令、哪些可用"},
     {"GetConfig",    21,  3, "无",                      "当前配置与运行时状态"},
     {"SetConfig",    22,  3, "<key>\0<value>...",       "热改配置"},
@@ -736,6 +752,10 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
             .Field("appManagement", appOps_ != nullptr && appOps_->Init(nullptr))
             .Field("download", fileOps_ != nullptr && fileOps_->httpAvailable())
             .Field("fileManagement", fileOps_ != nullptr && fileOps_->Init(nullptr))
+            .Field("keyInjection", access("/dev/uinput", W_OK) == 0)
+            .Field("clipboard", ClipOps::Instance().Init(nullptr))
+            .Field("screenStream", PngEncoder::Instance().Init(nullptr))
+            .Field("webUi", true)
             .Field("selfControl", true)
         .EndObj()
         .Key("commands").Arr();
@@ -752,8 +772,12 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
         std::string reason;
         switch (static_cast<Cmd>(c.cmd)) {
             case Cmd::KeyEvent:
-                available = false;
-                reason = "未实现（Android 12 无 native 按键注入接口）";
+                // 按键走 uinput 虚拟键盘（延迟创建）。
+                // 这里只判断能不能建 —— 真去建设备会让 Describe 产生副作用。
+                available = access("/dev/uinput", W_OK) == 0;
+                if (!available) {
+                    reason = "/dev/uinput 不可写，无法创建虚拟键盘";
+                }
                 break;
             case Cmd::ListApps:
             case Cmd::AppInfo:
@@ -779,6 +803,12 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
                                  ? "设备上没有可用的 libcurl，服务端无法下载"
                                  : err;
                 }
+                break;
+            }
+            case Cmd::Clipboard: {
+                std::string err;
+                available = ClipOps::Instance().Init(&err);
+                if (!available) reason = err;
                 break;
             }
             case Cmd::FileOp: {
@@ -898,6 +928,138 @@ ReplyPacket Dispatcher::HandleShutdown(const Request& req, bool restart) {
      .EndObj();
     ALOGI("收到 %s 请求，准备退出", restart ? "重启" : "关闭");
     return MakeJsonReply(req.cmd, w.str());
+}
+
+// ── v4：手势 / 按键 / 剪贴板 ─────────────────────────────────────────────────
+
+ReplyPacket Dispatcher::HandleGesture(const Request& req) {
+    ReplyPacket packet;
+    packet.reply = MakeReply(kOk, req.cmd);
+
+    const bool async = (req.flags & kFlagAsync) != 0;
+    std::string error;
+    bool ok = false;
+    const char* name = "?";
+
+    switch (static_cast<Cmd>(req.cmd)) {
+        case Cmd::LongPress: {
+            name = "longPress";
+            ok = injector_->LongPress(PointFromRequest(req), req.durationMs,
+                                      async, &error);
+            break;
+        }
+        case Cmd::Drag: {
+            name = "drag";
+            TouchPoint from = PointFromRequest(req);
+            TouchPoint to   = from;
+            to.x = req.x2;
+            to.y = req.y2;
+            ok = injector_->Drag(from, to, req.durationMs, async, &error);
+            break;
+        }
+        case Cmd::DoubleTap: {
+            name = "doubleTap";
+            ok = injector_->DoubleTap(PointFromRequest(req), req.durationMs,
+                                      async, &error);
+            break;
+        }
+        default:
+            packet.reply.status = kErrUnsupported;
+            return packet;
+    }
+
+    if (!ok) {
+        packet.reply.status = kErrInjected;
+        ALOGE("%s 失败: %s", name, error.c_str());
+        return packet;
+    }
+    ALOGI("%s 完成 (%d,%d)", name, req.x, req.y);
+    return packet;
+}
+
+ReplyPacket Dispatcher::HandleKeyEvent(const Request& req,
+                                       const std::vector<std::string>& args) {
+    if (args.empty() || args[0].empty()) {
+        return MakeJsonError(req.cmd, kErrPayload,
+                             "缺少键名参数（payload 应为 <键名或键码>）");
+    }
+
+    uint32_t code = 0;
+    if (!Keyboard::ResolveKeyCode(args[0], &code)) {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "不认识的键: " + args[0] + "。可用: " +
+                                 Keyboard::KnownKeyNames());
+    }
+
+    // 延迟初始化：键盘设备是有副作用的（会在系统里多一个输入设备），
+    // 没用到就不该建。touch 那边是启动时就建，因为它总是要用。
+    if (keyboard_ == nullptr) {
+        keyboard_ = std::make_unique<Keyboard>();
+    }
+    if (!keyboard_->ready()) {
+        std::string err;
+        if (!keyboard_->Init(&err)) {
+            return MakeJsonError(req.cmd, kErrUnsupported, err);
+        }
+    }
+
+    const bool longPress = (req.flags & kFlagKeyLongPress) != 0;
+    std::string error;
+    if (!keyboard_->Key(code, longPress, &error)) {
+        return MakeJsonError(req.cmd, kErrInjected, error);
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("key", args[0])
+           .Field("keyCode", code).Field("longPress", longPress)
+     .EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleClipboard(const Request& req,
+                                        const std::vector<std::string>& args) {
+    const std::string op = args.empty() ? "get" : args[0];
+
+    ClipOps& clip = ClipOps::Instance();
+    std::string error;
+    if (!clip.Init(&error)) {
+        return MakeJsonError(req.cmd, kErrUnsupported, error);
+    }
+
+    if (op == "get" || op == "info") {
+        ClipInfo info;
+        bool empty = false;
+        if (!clip.Get(&info, &empty, &error)) {
+            return MakeJsonError(req.cmd, kErrInternal, error);
+        }
+        json::Writer w;
+        w.Obj().Field("ok", true).Field("has", !empty);
+        if (!empty && op == "get") {
+            w.Field("text", info.text);
+        }
+        if (!empty && op == "info") {
+            w.Field("text", info.text);
+        }
+        w.EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    if (op == "set") {
+        if (args.size() < 2) {
+            return MakeJsonError(req.cmd, kErrPayload,
+                                 "set 需要文本参数（payload: set\\0<文本>）");
+        }
+        if (!clip.Set(args[1], &error)) {
+            return MakeJsonError(req.cmd, kErrPermission, error);
+        }
+        json::Writer w;
+        w.Obj().Field("ok", true).Field("length", static_cast<uint64_t>(args[1].size()))
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    return MakeJsonError(req.cmd, kErrBadArg,
+                         "未知操作: " + op + "（可用 get|set|info）");
 }
 
 }  // namespace autod

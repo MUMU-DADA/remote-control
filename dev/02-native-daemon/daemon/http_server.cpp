@@ -117,6 +117,13 @@ HttpResponse HttpResponse::Text(int status, const std::string& text) {
     return r;
 }
 
+HttpResponse HttpResponse::Stream(const std::string& contentType) {
+    HttpResponse r;
+    r.status = 200;
+    r.contentType = contentType;
+    return r;
+}
+
 HttpResponse HttpResponse::Error(int status, const std::string& message) {
     json::Writer w;
     w.Obj().Field("ok", false).Field("status", status)
@@ -404,14 +411,18 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
         resp = HttpResponse::Error(500, "处理时抛异常");
     }
 
+    // 流式响应没有 Content-Length（长度事先不知道），
+    // 也不能带 Content-Length —— 带了客户端会等满那么多字节才渲染。
     std::string head =
             "HTTP/1.1 " + std::to_string(resp.status) + " " +
             StatusText(resp.status) + "\r\n" +
             "Content-Type: " + resp.contentType + "\r\n" +
-            "Content-Length: " + std::to_string(resp.body.size()) + "\r\n" +
             // 一个请求一个连接：不实现 keep-alive 就没有连接状态的复杂度
             "Connection: close\r\n" +
             "Cache-Control: no-store\r\n";
+    if (!resp.isStreaming()) {
+        head += "Content-Length: " + std::to_string(resp.body.size()) + "\r\n";
+    }
     for (const auto& kv : resp.extraHeaders) {
         head += kv.first + ": " + kv.second + "\r\n";
     }
@@ -419,6 +430,15 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
 
     // 先发头再发体，避免大响应体在内存里再拼一次
     if (write(connFd, head.data(), head.size()) < 0) return;
+
+    if (resp.isStreaming()) {
+        // 交给回调。它自己判断何时停 —— 客户端断开时 write 会失败。
+        // 这里不做超时：长连接是流式响应的正常形态，
+        // 真正要防的"客户端不发数据就占着"在 ReadRequest 那边已经用
+        // SO_RCVTIMEO 挡掉了。
+        resp.streamer(connFd);
+        return;
+    }
     size_t sent = 0;
     while (sent < resp.body.size()) {
         const ssize_t n = write(connFd, resp.body.data() + sent,

@@ -6,8 +6,10 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include <vector>
@@ -19,6 +21,7 @@
 #include "png_encoder.h"
 #include "protocol.h"
 #include "service_state.h"
+#include "webui.h"
 
 namespace autod {
 namespace {
@@ -35,6 +38,12 @@ std::string ReadFd(int fd, uint64_t expected) {
     }
     close(fd);
     return out;
+}
+
+int64_t NowMs() {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
 }
 
 // 路径分段，用于 /api/v1/apps/{pkg}/launch 这类路由
@@ -272,6 +281,209 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
     return resp;
 }
 
+// ── 手势 ────────────────────────────────────────────────────────────────────
+HttpResponse RestApi::HandleGesture(const HttpRequest& req, Cmd cmd,
+                                    bool needsEnd) {
+    json::Value b;
+    HttpResponse err;
+    if (!ParseJsonBody(req, &b, &err)) return err;
+
+    // 坐标字段名同时接受两种写法。
+    //
+    // 三种手势里 drag 天然要两个点，所以 x1/y1/x2/y2 更自然；
+    // 而 longpress/doubletap 只有一个点，x/y 更自然。
+    // 与其让调用方记两套，不如两种都收 —— 之前只认 x/y，
+    // 结果网页发 x1/y1 的 drag 一直报"需要 x 与 y"。
+    auto pick = [&b](const char* a, const char* c) -> int64_t {
+        if (b.has(a)) return b.num(a);
+        return b.num(c);
+    };
+    const bool hasPoint = (b.has("x") || b.has("x1")) &&
+                          (b.has("y") || b.has("y1"));
+    if (!hasPoint) {
+        return HttpResponse::Error(400, "需要坐标（x/y 或 x1/y1）");
+    }
+    if (needsEnd && (!b.has("x2") || !b.has("y2"))) {
+        return HttpResponse::Error(400, "拖拽需要终点 x2/y2");
+    }
+
+    Request r{};
+    r.magic = kMagic;
+    r.cmd   = static_cast<uint32_t>(cmd);
+    r.x     = static_cast<int32_t>(pick("x", "x1"));
+    r.y     = static_cast<int32_t>(pick("y", "y1"));
+    r.x2    = static_cast<int32_t>(pick("x2", "x2"));
+    r.y2    = static_cast<int32_t>(pick("y2", "y2"));
+    r.durationMs = static_cast<uint32_t>(b.num("ms", 0));
+    if (b.flag("long")) r.flags |= kFlagKeyLongPress;
+
+    ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
+    ServiceState::Instance().CountRequest(r.cmd, p.reply.status);
+    if (p.fd >= 0) close(p.fd);
+    if (p.reply.status != kOk) {
+        return HttpResponse::Error(500, StatusName(p.reply.status));
+    }
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("x", r.x).Field("y", r.y);
+    if (needsEnd) w.Field("x2", r.x2).Field("y2", r.y2);
+    w.EndObj();
+    return HttpResponse::Json(200, w.str());
+}
+
+// ── 按键 ────────────────────────────────────────────────────────────────────
+HttpResponse RestApi::HandleKey(const HttpRequest& req) {
+    json::Value b;
+    HttpResponse err;
+    if (!ParseJsonBody(req, &b, &err)) return err;
+
+    const std::string k = b.str("key");
+    if (k.empty()) return HttpResponse::Error(400, "需要 key（键名或键码）");
+
+    const uint32_t flags = b.flag("long")
+                               ? static_cast<uint32_t>(kFlagKeyLongPress) : 0u;
+    return Call(Cmd::KeyEvent, PackArgs({k}), flags, -1);
+}
+
+// ── 剪贴板 ──────────────────────────────────────────────────────────────────
+HttpResponse RestApi::HandleClipboard(const HttpRequest& req) {
+    if (req.method == "GET") {
+        const std::string op = req.queryParam("op", "get");
+        return Call(Cmd::Clipboard, PackArgs({op}), 0, -1);
+    }
+    json::Value b;
+    HttpResponse err;
+    if (!ParseJsonBody(req, &b, &err)) return err;
+
+    const std::string op = b.str("op", "get");
+    if (op == "set") {
+        const std::string t = b.str("text");
+        if (t.empty()) return HttpResponse::Error(400, "set 需要 text");
+        return Call(Cmd::Clipboard, PackArgs({"set", t}), 0, -1);
+    }
+    return Call(Cmd::Clipboard, PackArgs({op}), 0, -1);
+}
+
+// ── 实时画面流 ──────────────────────────────────────────────────────────────
+HttpResponse RestApi::HandleStream(const HttpRequest& req) {
+    // 帧率：默认 5，限制在 1..30。
+    // 上限不是为了省事 —— 服务端每帧都要抓屏 + 编 PNG，30fps 在
+    // 低端设备上会把 CPU 吃满，而画面只会更卡。
+    int fps = 5;
+    {
+        const std::string s = req.queryParam("fps", "5");
+        char* end = nullptr;
+        const long v = strtol(s.c_str(), &end, 10);
+        if (end != nullptr && *end == '\0' && v > 0) fps = static_cast<int>(v);
+    }
+    if (fps > 30) fps = 30;
+    if (fps < 1)  fps = 1;
+
+    const std::string boundary = "autodframe";
+    HttpResponse resp = HttpResponse::Stream(
+            "multipart/x-mixed-replace; boundary=" + boundary);
+
+    // 每帧之间至少隔这么久。抓帧本身就要几十毫秒，实际帧率会更低 ——
+    // 与其追求标称帧率，不如保证"不会把设备打满"。
+    const int intervalMs = 1000 / fps;
+
+    resp.streamer = [this, boundary, intervalMs](int fd) {
+        if (!PngEncoder::Instance().Init(nullptr)) {
+            // PNG 编不出来就没法流 —— 写一行纯文本让客户端看到原因，
+            // 而不是静默地一直推空帧
+            const char* msg = "zlib 不可用，无法编码 PNG\n";
+            ssize_t ig = write(fd, msg, strlen(msg));
+            (void)ig;
+            return;
+        }
+
+        uint64_t frameNo = 0;
+        while (true) {
+            const int64_t t0 = NowMs();
+
+            // 抓一帧
+            Request r{};
+            r.magic = kMagic;
+            r.cmd   = static_cast<uint32_t>(Cmd::Capture);
+            ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
+            if (p.reply.status != kOk || p.fd < 0) {
+                if (p.fd >= 0) close(p.fd);
+                usleep(intervalMs * 1000);
+                continue;      // 单帧失败不终止整条流
+            }
+
+            const uint32_t w = p.reply.width, h = p.reply.height;
+            const uint64_t size = p.reply.dataSize;
+            void* base = mmap(nullptr, size, PROT_READ, MAP_SHARED, p.fd, 0);
+            if (base == MAP_FAILED) {
+                close(p.fd);
+                usleep(intervalMs * 1000);
+                continue;
+            }
+
+            std::string png;
+            std::string perr;
+            const uint32_t fmt = p.reply.format;
+            if (fmt == 1 || fmt == 2 || fmt == 5) {
+                const uint8_t* src = static_cast<const uint8_t*>(base);
+                std::vector<uint8_t> rgba;
+                if (fmt == 5) {
+                    rgba.resize(size);
+                    for (uint64_t i = 0; i + 3 < size; i += 4) {
+                        rgba[i]     = src[i + 2];
+                        rgba[i + 1] = src[i + 1];
+                        rgba[i + 2] = src[i];
+                        rgba[i + 3] = src[i + 3];
+                    }
+                    src = rgba.data();
+                }
+                png = PngEncoder::Instance().EncodeRgba(src, w, h, 3, &perr);
+            }
+            munmap(base, size);
+            close(p.fd);
+
+            if (png.empty()) {
+                usleep(intervalMs * 1000);
+                continue;
+            }
+
+            // 一个 MJPEG part：边界行 + 头 + 空行 + 数据 + CRLF
+            std::string part;
+            part.reserve(png.size() + 128);
+            part += "--" + boundary + "\r\n";
+            part += "Content-Type: image/png\r\n";
+            part += "Content-Length: " + std::to_string(png.size()) + "\r\n";
+            part += "X-Autod-Frame: " + std::to_string(frameNo) + "\r\n";
+            part += "\r\n";
+            part += png;
+            part += "\r\n";
+
+            // 客户端断开时 write 会失败（EPIPE）—— 那就是停止信号。
+            // MSG_NOSIGNAL 不能用于 write，所以先忽略 SIGPIPE（main 里做了），
+            // 这里看到失败就退出循环。
+            size_t sent = 0;
+            bool broken = false;
+            while (sent < part.size()) {
+                const ssize_t n = write(fd, part.data() + sent, part.size() - sent);
+                if (n <= 0) {
+                    if (n < 0 && errno == EINTR) continue;
+                    broken = true;
+                    break;
+                }
+                sent += static_cast<size_t>(n);
+            }
+            if (broken) break;
+
+            ++frameNo;
+
+            // 补足到目标间隔（抓帧+编码已经花掉了一部分）
+            const int64_t elapsed = NowMs() - t0;
+            int64_t rest = intervalMs - elapsed;
+            if (rest > 0) usleep(static_cast<useconds_t>(rest) * 1000);
+        }
+    };
+    return resp;
+}
+
 // ── 路由 ────────────────────────────────────────────────────────────────────
 HttpResponse RestApi::Handle(const HttpRequest& req) {
     // 归一化尾斜杠：/api/v1/ 与 /api/v1 应当等价。
@@ -284,7 +496,16 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
 
     // 期望形如 api / v1 / <resource> [/{id} [/action]]
     if (seg.size() < 3 || seg[0] != "api" || seg[1] != "v1") {
-        if (path == "/" || path == "/api" || path == "/api/v1") {
+        // 根路径给网页控制台 —— 用浏览器打开服务地址就能用，
+        // 不必先去读文档找接口路径。
+        if (path == "/" || path == "/index.html" || path == "/ui") {
+            HttpResponse ui;
+            ui.status = 200;
+            ui.contentType = "text/html; charset=utf-8";
+            ui.body = WebUiHtml();
+            return ui;
+        }
+        if (path == "/api" || path == "/api/v1") {
             // 给个索引，浏览器打开根路径时不至于 404 得莫名其妙
             json::Writer w;
             w.Obj().Field("service", "autod")
@@ -348,9 +569,27 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         return Call(Cmd::Restart, "", 0, -1);
     }
 
-    // ── 截图与触控 ──
+    // ── 截图 / 流 / 触控 ──
     if (res == "capture" && (method == "GET" || method == "POST")) {
         return HandleCapture(req);
+    }
+    if (res == "stream" && method == "GET") {
+        return HandleStream(req);
+    }
+    if (res == "longpress" && method == "POST") {
+        return HandleGesture(req, Cmd::LongPress, /*needsEnd=*/false);
+    }
+    if (res == "drag" && method == "POST") {
+        return HandleGesture(req, Cmd::Drag, /*needsEnd=*/true);
+    }
+    if (res == "doubletap" && method == "POST") {
+        return HandleGesture(req, Cmd::DoubleTap, /*needsEnd=*/false);
+    }
+    if (res == "key" && method == "POST") {
+        return HandleKey(req);
+    }
+    if (res == "clipboard" && (method == "GET" || method == "POST")) {
+        return HandleClipboard(req);
     }
     if (res == "info" && method == "GET") {
         return Call(Cmd::Info, "", 0, -1);

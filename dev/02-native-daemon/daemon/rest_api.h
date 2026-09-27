@@ -40,6 +40,17 @@ class RestApi {
     // 安装：请求体就是 APK 字节，落成临时文件后用 fd 送过去
     HttpResponse HandleInstall(const HttpRequest& req);
 
+    // 实时画面流（MJPEG over multipart/x-mixed-replace）。
+    // 浏览器把它当"会不断更新的图"，原生支持，不需要 JS 解帧。
+    HttpResponse HandleStream(const HttpRequest& req);
+
+    // 手势类：x,y 走请求头的字段（和 tap/swipe 一致）
+    HttpResponse HandleGesture(const HttpRequest& req, Cmd cmd, bool needsEnd);
+
+    // 按键 / 剪贴板
+    HttpResponse HandleKey(const HttpRequest& req);
+    HttpResponse HandleClipboard(const HttpRequest& req);
+
     Dispatcher* dispatcher_;
 };
 

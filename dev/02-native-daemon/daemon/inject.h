@@ -75,6 +75,28 @@ class Injector {
                std::string* error);
 
     // 手动多点触控序列。调用方负责配对 down/move/up。
+    // ── 常见手势 ────────────────────────────────────────────────────────────
+    //
+    // 这三个不是 Tap/Swipe 的语法糖，它们的时序有硬要求：
+    //   长按：按下后**不能发 MOVE**，否则系统判成拖拽，长按菜单不弹。
+    //   拖拽：起点要先停顿再移动，否则会被判成滑动（fling）。
+    //   双击：两次点击的间隔要落在系统阈值内。
+    // 让调用方自己拼 Touch* 序列几乎一定会踩这些坑，所以内置。
+
+    // 长按。durationMs 默认 800（Android 的长按阈值约 500ms）
+    bool LongPress(const TouchPoint& point, uint32_t durationMs, bool async,
+                   std::string* error);
+
+    // 拖拽。与 Swipe 的区别是**起点有停顿、移动更慢**，
+    // 这样才会被识别成"按住拖动"而不是"甩一下"。
+    bool Drag(const TouchPoint& from, const TouchPoint& to, uint32_t durationMs,
+              bool async, std::string* error);
+
+    // 双击。intervalMs 是两次点击之间的间隔，默认 120ms
+    // （系统双击阈值约 300ms，留足余量但也不能太慢）。
+    bool DoubleTap(const TouchPoint& point, uint32_t intervalMs, bool async,
+                   std::string* error);
+
     bool TouchDown(const TouchPoint& point, bool async, std::string* error);
     bool TouchMove(const TouchPoint& point, bool async, std::string* error);
     bool TouchUp(const TouchPoint& point, bool async, std::string* error);

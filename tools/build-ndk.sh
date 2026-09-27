@@ -71,10 +71,11 @@ for f in main.cpp socket_server.cpp dispatch.cpp selftest.cpp \
          capture_screencap.cpp inject.cpp inject_uinput.cpp \
          appops.cpp subprocess.cpp fileops.cpp http_client.cpp \
          service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp \
-         json_parser.cpp png_encoder.cpp; do
+         json_parser.cpp png_encoder.cpp keyboard.cpp clipops.cpp \
+         webui.cpp; do
     [ -f "$DAEMON/$f" ] || { bad "缺源文件: daemon/$f"; exit 1; }
 done
-ok "17 个源文件齐备"
+ok "20 个源文件齐备"
 
 # -----------------------------------------------------------------------------
 step "编译 autod"
@@ -114,6 +115,9 @@ COMMON_FLAGS=(
     "$DAEMON/rest_api.cpp" \
     "$DAEMON/json_parser.cpp" \
     "$DAEMON/png_encoder.cpp" \
+    "$DAEMON/keyboard.cpp" \
+    "$DAEMON/clipops.cpp" \
+    "$DAEMON/webui.cpp" \
     -llog -static-libstdc++
 
 ok "autod → $OUT/$ABI/autod"

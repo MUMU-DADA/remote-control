@@ -72,11 +72,9 @@ bool CommandExists(const char* name) {
     return false;
 }
 
-bool RunCommand(const std::vector<std::string>& argv,
-                int timeoutMs,
-                size_t maxOutputBytes,
-                CommandResult* result,
-                std::string* error) {
+bool RunCommandAs(const std::vector<std::string>& argv, int uid, int gid,
+                  int timeoutMs, size_t maxOutputBytes, CommandResult* result,
+                  std::string* error) {
     if (argv.empty()) {
         if (error) *error = "argv 为空";
         return false;
@@ -113,6 +111,19 @@ bool RunCommand(const std::vector<std::string>& argv,
         dup2(errPipe[1], STDERR_FILENO);
         close(outPipe[0]); close(outPipe[1]);
         close(errPipe[0]); close(errPipe[1]);
+
+        // 降权。**失败就直接退出，绝不继续 exec** ——
+        // 静默地以 root 跑出去，子进程拿到的权限比调用方以为的大得多，
+        // 而调用方还以为自己已经降权了。
+        if (uid >= 0) {
+            if (setgid(static_cast<gid_t>(gid >= 0 ? gid : uid)) != 0 ||
+                setuid(static_cast<uid_t>(uid)) != 0) {
+                const char* m = "setuid/setgid failed\n";
+                ssize_t ig = write(STDERR_FILENO, m, strlen(m));
+                (void)ig;
+                _exit(126);
+            }
+        }
 
         std::vector<char*> cargv;
         cargv.reserve(argv.size() + 1);
@@ -208,9 +219,17 @@ bool RunCommand(const std::vector<std::string>& argv,
     return true;
 }
 
+bool RunCommand(const std::vector<std::string>& argv,
+                int timeoutMs,
+                size_t maxOutputBytes,
+                CommandResult* result,
+                std::string* error) {
+    return RunCommandAs(argv, -1, -1, timeoutMs, maxOutputBytes, result, error);
+}
+
 bool RunCommand(const std::vector<std::string>& argv, CommandResult* result,
                 std::string* error) {
-    return RunCommand(argv, 10000, 1u << 20, result, error);
+    return RunCommandAs(argv, -1, -1, 10000, 1u << 20, result, error);
 }
 
 }  // namespace autod

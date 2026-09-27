@@ -10,6 +10,8 @@
 
 #include "inject.h"
 
+#include "protocol.h"   // kDefaultTapMs 等默认手势参数
+
 #include <time.h>
 #include <unistd.h>
 
@@ -163,6 +165,84 @@ bool Injector::Swipe(const TouchPoint& from, const TouchPoint& to,
 // ---------------------------------------------------------------------------
 // 手动多点触控
 // ---------------------------------------------------------------------------
+
+// ── 常见手势 ────────────────────────────────────────────────────────────────
+
+bool Injector::LongPress(const TouchPoint& point, uint32_t durationMs,
+                         bool async, std::string* error) {
+    // Android 的 longPressTimeout 约 500ms。默认给 800 留余量：
+    // 太接近阈值会因为事件到达抖动而偶尔不触发。
+    if (durationMs == 0) durationMs = 800;
+
+    const int64_t t0 = NowNs();
+    if (!SendSingle(kActionDown, point, t0, async, error)) return false;
+
+    // ⚠️ 关键：**中间一个 MOVE 都不能发**。
+    //    Android 的 GestureDetector 一旦收到移动超过 touchSlop 的 MOVE，
+    //    就会把这次按压从"长按"改判成"拖拽"，长按菜单再也不弹。
+    //    实测症状是"长按没反应，但拖拽正常"。
+    usleep(static_cast<useconds_t>(durationMs) * 1000);
+
+    return SendSingle(kActionUp, point, NowNs(), async, error);
+}
+
+bool Injector::Drag(const TouchPoint& from, const TouchPoint& to,
+                    uint32_t durationMs, bool async, std::string* error) {
+    if (durationMs == 0) durationMs = 600;
+
+    const int64_t t0 = NowNs();
+    if (!SendSingle(kActionDown, from, t0, async, error)) return false;
+
+    // 起点的停顿：让系统先把这次按压认定为"按住"，
+    // 而不是"手指划过"。少了它，快速拖拽会被判成 fling。
+    usleep(120 * 1000);
+
+    // 步数比 Swipe 少一些、节奏更慢 —— 拖拽是要"跟着走"的，
+    // 事件太密反而容易被 InputFlinger 归并掉中间点。
+    const uint32_t steps = 24;
+    const int64_t moveStart = NowNs();
+    const int64_t perStepNs =
+            static_cast<int64_t>(durationMs) * 1000000LL / steps;
+
+    for (uint32_t i = 1; i <= steps; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(steps);
+        TouchPoint mid;
+        mid.id = from.id;
+        mid.x = static_cast<int32_t>(static_cast<float>(from.x) +
+                                     static_cast<float>(to.x - from.x) * t + 0.5f);
+        mid.y = static_cast<int32_t>(static_cast<float>(from.y) +
+                                     static_cast<float>(to.y - from.y) * t + 0.5f);
+        mid.pressure = from.pressure;
+        mid.size     = from.size;
+
+        const int64_t when = moveStart + perStepNs * i;
+        if (!SendSingle(kActionMove, mid, when, async, error)) return false;
+
+        const int64_t now = NowNs();
+        if (when > now) usleep(static_cast<useconds_t>((when - now) / 1000));
+    }
+
+    // 终点也停一下再抬起：拖拽到目标位置后立刻松手，
+    // 某些控件会来不及处理 drop。
+    usleep(80 * 1000);
+
+    if (!SendSingle(kActionUp, to, NowNs(), async, error)) return false;
+
+    // 手势之间留间隔，否则紧接着的下一个手势会被并进这一次
+    usleep(60 * 1000);
+    return true;
+}
+
+bool Injector::DoubleTap(const TouchPoint& point, uint32_t intervalMs,
+                         bool async, std::string* error) {
+    // 系统双击阈值约 300ms。默认 120ms：足够区分两次点击，
+    // 又远小于阈值，不会因为调度抖动而超时。
+    if (intervalMs == 0) intervalMs = 120;
+
+    if (!Tap(point, kDefaultTapMs, async, error)) return false;
+    usleep(static_cast<useconds_t>(intervalMs) * 1000);
+    return Tap(point, kDefaultTapMs, async, error);
+}
 
 bool Injector::TouchDown(const TouchPoint& point, bool async, std::string* error) {
     return SendSingle(kActionDown, point, NowNs(), async, error);

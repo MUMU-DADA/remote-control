@@ -40,6 +40,19 @@ bool RunCommand(const std::vector<std::string>& argv,
 bool RunCommand(const std::vector<std::string>& argv, CommandResult* result,
                 std::string* error);
 
+// 降权到指定 uid/gid 后再 exec。
+//
+// 为什么需要：有些系统服务的访问控制是**按 UID 和包名一起**判定的，
+// 从 root 调用反而会被拒。剪贴板就是这样 —— root+包名"android"被拒，
+// 而 shell(2000)+"com.android.shell"通过（后者持有
+// READ_CLIPBOARD_IN_BACKGROUND）。
+//
+// uid/gid 传 -1 表示保持不变。降权失败直接 _exit，不 exec ——
+// 静默地以 root 跑出去会拿到比预期大得多的权限。
+bool RunCommandAs(const std::vector<std::string>& argv, int uid, int gid,
+                  int timeoutMs, size_t maxOutputBytes, CommandResult* result,
+                  std::string* error);
+
 // 命令是否存在（查 PATH）
 bool CommandExists(const char* name);
 

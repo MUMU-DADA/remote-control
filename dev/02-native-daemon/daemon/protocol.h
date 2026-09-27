@@ -23,7 +23,8 @@ constexpr uint32_t kMagic = 0x44545541;
 //   1 = 截图 / 触控
 //   2 = 应用管理与文件下载
 //   3 = 服务自身控制（配置 / 自检 / 统计 / 日志 / 生命周期）
-constexpr uint32_t kProtocolVersion = 3;
+//   4 = 手势（长按/拖拽/双击）、按键注入、剪贴板
+constexpr uint32_t kProtocolVersion = 4;
 
 enum class Cmd : uint32_t {
     Info       = 1,   // 查询显示参数，不产生副作用
@@ -33,7 +34,10 @@ enum class Cmd : uint32_t {
     TouchDown  = 5,   // 手动多点触控：按下
     TouchMove  = 6,   // 手动多点触控：移动
     TouchUp    = 7,   // 手动多点触控：抬起
-    KeyEvent   = 8,   // 按键注入（保留）
+    KeyEvent   = 8,   // 按键注入。payload: "<键名或键码>"
+                      // 键名用 Linux input 的 KEY_* 去掉前缀并小写，如
+                      // "home" "back" "enter" "a" "volumeup"；
+                      // 也可以直接给数字键码。flags & kFlagKeyLongPress 表示长按
 
     // ── 应用与文件管理（v2）───────────────────────────────────────────────
     //
@@ -62,6 +66,24 @@ enum class Cmd : uint32_t {
     FileOp        = 17,  // payload: "<op>[\0<path>[\0<arg>]]"
                          // op: list|stat|mkdir|delete|rename|exists
                          // → 随 op 不同，见 docs/09-file-and-app-api.md
+
+    // ── 手势 / 按键 / 剪贴板（v4）────────────────────────────────────────
+    //
+    // 常见的触控操作不能只靠 Tap + Swipe 拼：
+    //   长按要"按下后保持不动再抬起"，中间不能有 MOVE，
+    //   否则系统会当成拖拽而不是长按（实测：发了 MOVE 就触发不了长按菜单）。
+    //   拖拽要在起点**先停顿**再移动，否则会被识别成滑动。
+    // 所以这三种各给一条命令，而不是让调用方自己拼 Touch* 序列。
+    LongPress     = 30,  // x,y,durationMs —— 按下保持不动再抬起
+    Drag          = 31,  // x,y,x2,y2,durationMs —— 按下→停顿→移动→停顿→抬起
+    DoubleTap     = 32,  // x,y,durationMs —— 两次点击，间隔由服务端控制
+
+    Clipboard     = 33,  // payload: "get" | "set\0<文本>" | "info"
+                         // → {"text":..} / {"ok":true} / {"has":..,"types":[..]}
+
+    // KeyEvent = 8 在本版本实现：用 /dev/uinput 建一个虚拟键盘设备。
+    // Android 12 没有可用的 native 按键注入接口（IInputManager 是 Java-only），
+    // uinput 是唯一路径 —— 和触控同样的理由。
 
     // ── 服务自身（v3）────────────────────────────────────────────────────
     //
@@ -104,6 +126,7 @@ enum Flags : uint32_t {
     kFlagWithMetadata  = 1u << 4,  // ListApps：附带标签/版本/安装时间（更慢）
     kFlagReplace       = 1u << 5,  // InstallApp：-r 覆盖安装
     kFlagRecursive     = 1u << 6,  // FileOp delete：递归删除目录
+    kFlagKeyLongPress  = 1u << 7,  // KeyEvent：长按（保持按下更久）
 };
 
 struct Request {

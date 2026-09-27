@@ -24,6 +24,8 @@ class Capture;
 class Injector;
 class AppOps;
 class FileOps;
+class Keyboard;
+class ClipOps;
 
 class Dispatcher {
   public:
@@ -66,10 +68,18 @@ class Dispatcher {
     ReplyPacket HandleLog(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandleShutdown(const Request& req, bool restart);
 
+    // ── v4：手势 / 按键 / 剪贴板 ──
+    ReplyPacket HandleGesture(const Request& req);
+    ReplyPacket HandleKeyEvent(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleClipboard(const Request& req, const std::vector<std::string>& args);
+
     Capture*  capture_;
     Injector* injector_;
     std::unique_ptr<AppOps>  appOps_;
     std::unique_ptr<FileOps> fileOps_;
+    // 键盘是延迟创建的：建了就会在系统里多一个输入设备，
+    // 没用到按键功能的部署不该平白多出它。
+    std::unique_ptr<Keyboard> keyboard_;
 };
 
 }  // namespace autod

@@ -46,9 +46,26 @@ struct HttpResponse {
     std::string body;
     std::vector<std::pair<std::string, std::string>> extraHeaders;
 
+    // 流式响应。
+    //
+    // 非空时 body/status 只用来写响应头（通常 200 + 一个长连接的
+    // Content-Type），**响应体由这个回调负责**：它拿到 connFd，
+    // 自己循环写数据直到不想写了再返回。
+    //
+    // 为什么需要：MJPEG 这类"一直推下去"的响应没有 Content-Length，
+    // 也不能先在内存里拼好 —— 那会把整个流缓冲成字符串。
+    // 回调返回后连接就关闭，所以它必须自己判断何时停
+    // （客户端断开时 write 会失败，那就是停止信号）。
+    std::function<void(int connFd)> streamer;
+
+    bool isStreaming() const { return static_cast<bool>(streamer); }
+
     static HttpResponse Json(int status, const std::string& json);
     static HttpResponse Text(int status, const std::string& text);
     static HttpResponse Error(int status, const std::string& message);
+
+    // 构造一个流式响应。contentType 里的 boundary 由调用方给全。
+    static HttpResponse Stream(const std::string& contentType);
 };
 
 using HttpHandler = std::function<HttpResponse(const HttpRequest&)>;

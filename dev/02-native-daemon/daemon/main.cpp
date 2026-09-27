@@ -374,6 +374,14 @@ int main(int argc, char** argv) {
     gServer = &server;
     signal(SIGTERM, OnSignal);
     signal(SIGINT,  OnSignal);
+    // 忽略 SIGPIPE。
+    //
+    // socket 侧用 MSG_NOSIGNAL 就够了，但 HTTP 的流式响应用的是
+    // write()（没有 per-call 的等价标志）。客户端关掉 MJPEG 页面时
+    // 就会触发 SIGPIPE —— 默认行为是**直接杀掉进程**，
+    // 那意味着"关一次网页就把服务干掉了"。
+    // 忽略之后 write 返回 EPIPE，流式回调据此正常退出。
+    signal(SIGPIPE, SIG_IGN);
 
     if (verbose) {
         ALOGI("autod: 就绪, socket=%s", server.path().c_str());

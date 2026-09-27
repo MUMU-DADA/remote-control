@@ -35,6 +35,9 @@ cc_defaults {
         "rest_api.cpp",
         "json_parser.cpp",
         "png_encoder.cpp",
+        "keyboard.cpp",
+        "clipops.cpp",
+        "webui.cpp",
     ],
 
     shared_libs: [

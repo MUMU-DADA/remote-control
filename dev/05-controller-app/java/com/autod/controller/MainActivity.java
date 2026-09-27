@@ -240,6 +240,48 @@ public class MainActivity extends Activity {
                         0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         col.addView(r);
 
+        // ── 剪贴板 ──
+        //
+        // 为什么放在上位应用而不是 daemon：Android 的剪贴板访问控制里，
+        // OP_WRITE_CLIPBOARD 最终要过 AppOps.noteOp(uid, callingPackage)，
+        // 而且 CLI 在 Android 12 上根本没有（`cmd clipboard` 不存在）。
+        // **前台应用**写剪贴板是正常的、被支持的路径。
+        // daemon 侧只需要"读"，见 ClipTool。
+        col.addView(label("剪贴板（本应用读写）"));
+
+        final TextView clipView = new TextView(this);
+        clipView.setTextSize(12);
+        clipView.setPadding(dp(10), dp(2), dp(10), dp(2));
+        clipView.setTextIsSelectable(true);
+        clipView.setText("（点「读剪贴板」查看）");
+
+        LinearLayout clipRow = row();
+        final EditText clipEdit = field("要写入剪贴板的文本", 1);
+        clipRow.addView(clipEdit);
+        clipRow.addView(button("写入", v -> {
+            CharSequence t = clipEdit.getText();
+            if (t == null || t.length() == 0) { toast("请先填内容"); return; }
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager)
+                            getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("autod", t));
+            toast("已写入剪贴板");
+        }));
+        clipRow.addView(button("读剪贴板", v -> {
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager)
+                            getSystemService(CLIPBOARD_SERVICE);
+            if (!cm.hasPrimaryClip()) { clipView.setText("（剪贴板为空）"); return; }
+            android.content.ClipData d = cm.getPrimaryClip();
+            if (d == null || d.getItemCount() == 0) {
+                clipView.setText("（剪贴板为空）"); return;
+            }
+            CharSequence t = d.getItemAt(0).coerceToText(this);
+            clipView.setText("剪贴板内容：\n" + (t == null ? "(null)" : t.toString()));
+        }));
+        col.addView(clipRow);
+        col.addView(clipView);
+
         statusDetail = new TextView(this);
         statusDetail.setTextSize(13);
         statusDetail.setPadding(dp(10), dp(8), dp(10), dp(8));
