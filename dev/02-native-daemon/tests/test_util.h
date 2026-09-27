@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <cstdint>   // uint16_t 等；不要依赖 <linux/input.h> 间接引入
+
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>

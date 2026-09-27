@@ -418,8 +418,9 @@ int main() {
     }
 
     std::thread serverThread([&] {
-        server.Run([&](const Request& req, int peerUid) {
-            return dispatcher.Handle(req, peerUid);
+        server.Run([&](const Request& req, const std::string& payload,
+                       int reqFd, int peerUid) {
+            return dispatcher.Handle(req, payload, reqFd, peerUid);
         });
     });
 
