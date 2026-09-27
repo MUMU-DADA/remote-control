@@ -50,6 +50,22 @@ cd dev\04-emulator\windows-arm64
 新版模拟器跑 Android 12 镜像**通常**没问题（向后兼容），且 `-sysdir`、`-wipe-data`、
 `-writable-system` 这些老参数仍在。万一启动失败，按顺序试：
 
+> **好消息：这个风险可以在 Linux 上提前验证，不必等装好 Windows 才知道。**
+> 把 37.1.11 的 **linux** 包下下来，用同一份镜像跑一次（guest 侧行为与 Windows 一致）：
+>
+> ```bash
+> # 在开发机上
+> curl -sSL -o /tmp/emu37.zip \
+>   https://mirrors.cloud.tencent.com/AndroidSDK/emulator-linux_x64-15917651.zip
+> unzip -q /tmp/emu37.zip -d /tmp/emu37
+> cd dev/04-emulator/linux-arm64
+> EMULATOR_BIN=/tmp/emu37/emulator/emulator ./run-emulator.sh --arm64
+> ```
+>
+> 能开机 → Windows 侧用 37.x 基本没悬念；起不来 → 提前切下面的降级方案。
+> （已核对：37.1.11 的 `-sysdir`/`-datadir`/`-accel`/`-gpu`/`-wipe-data`/`-writable-system`
+> 全部保留，`run-emulator.ps1` 传的参数合法。）
+
 ### 降级 A：换渠道
 
 ```powershell
@@ -115,7 +131,7 @@ WSLg 会把模拟器窗口显示出来（Win11 / Win10 装了 WSLg 的话）；�
 # 1) 本机有代理工具（v2ray/Clash 之类，常见端口 10809）
 .\fetch-emulator.ps1 -Proxy http://127.0.0.1:10809
 
-# 2) 换镜像源
+# 2) 换镜像源（★ 已实测：腾讯镜像与 Google 官方同源同字节）
 .\fetch-emulator.ps1 -RepoBase https://mirrors.cloud.tencent.com/AndroidSDK
 
 # 3) 自己下好 zip 再喂进来（本地文件或 URL 都行）
@@ -125,7 +141,15 @@ WSLg 会把模拟器窗口显示出来（Win11 / Win10 装了 WSLg 的话）；�
 .\fetch-emulator.ps1 -DryRun
 ```
 
-装了 Android Studio 的话第 1 步就会直接命中已有 SDK，根本不下载。
+**镜像可用性实测**（脚本默认会下的那个包，2026-09-28）：
+
+| 来源 | `repository2-3.xml` | `emulator-windows_x64-15917651.zip` |
+|---|---|---|
+| `dl.google.com/android/repository` | HTTP 200 | HTTP 200，441926448 字节 |
+| `mirrors.cloud.tencent.com/AndroidSDK` | HTTP 200（与官方同大小） | HTTP 200，441926448 字节（**与清单声明一致**） |
+
+所以国内网络直接用第 2 条：`-RepoBase` 会把清单和 zip 都从镜像取，SHA1 校验照样过。
+装了 Android Studio 的话连下载都不需要 —— 第一步就会命中它自带的 SDK。
 
 ---
 

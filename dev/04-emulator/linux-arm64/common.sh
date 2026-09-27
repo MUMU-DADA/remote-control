@@ -56,9 +56,11 @@ else
 fi
 
 # AOSP 自带的模拟器（30.8.3），内含 qemu/linux-x86_64/qemu-system-{aarch64,x86_64}
+# 可用 EMULATOR_BIN=<别处的 emulator> 覆盖 —— 例如用 SDK 版 37.x 在 Linux 上
+# 提前验证"新版模拟器能不能启动 A12 镜像"（等价于 Windows 侧要面对的问题）。
 EMULATOR_PREBUILTS="$AOSP_DIR/prebuilts/android-emulator/linux-x86_64"
-EMULATOR_BIN="$EMULATOR_PREBUILTS/emulator"
-EMULATOR_CHECK="$EMULATOR_PREBUILTS/emulator-check"
+EMULATOR_BIN="${EMULATOR_BIN:-$EMULATOR_PREBUILTS/emulator}"
+EMULATOR_CHECK="${EMULATOR_CHECK:-$EMULATOR_PREBUILTS/emulator-check}"
 
 # 宿主没有 adb，用 AOSP 编出来的（m adb / 全量构建都会产出）
 ADB="${ADB:-$AOSP_DIR/out/host/linux-x86/bin/adb}"

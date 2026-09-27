@@ -5,8 +5,11 @@
 
 | 路径 | 宿主 | 跑什么 | 用途 |
 |---|---|---|---|
-| [`linux-arm64/`](linux-arm64/README.md) | 开发机（Debian 13 x86_64，无显示） | `sdk_phone64_arm64` **原版镜像**（本机自己编） | 验证 `autod` 的截图与触控 |
-| [`windows-arm64/`](windows-arm64/README.md) | Windows x64 | 编好之后的 **arm64 ROM 镜像** | 交付前的整机运行验证 |
+| [`linux-arm64/`](linux-arm64/README.md) | 开发机（Debian 13 x86_64，无显示） | 本机编的 arm64 镜像：**原版**（验证 `autod`）/ **自制 ROM** | 开发内循环 + 本平台验证 |
+| [`windows-arm64/`](windows-arm64/README.md) | Windows x64 | **同一份 arm64 自制 ROM**（scp 过去） | 交付环境的整机运行验证 |
+
+> **两个平台都要跑真实 ROM。** 镜像只编一次，两边共用；
+> 平台差异只有模拟器版本与显示方式，见下面「两个平台跑同一份 ROM」。
 
 ---
 
@@ -32,6 +35,58 @@
 
 编译成本：arm64 与 x86_64 是两套 target 产物（host 工具与大部分中间产物复用），
 `out/` 会各占几十 GB。磁盘不够时可以 `rm -rf out/target/product/<不要的那个>`。
+
+---
+
+## 两个平台跑同一份 ROM（交付验证路径）
+
+真实 ROM 要在 **Linux 开发机**与 **Windows x64** 上都跑一遍，两边共用**同一份 arm64 镜像产物**：
+
+```
+开发机编一次 → out/target/product/emulator64_arm64/
+     ├── 本机跑     : ./run-emulator.sh                     （AOSP 自带模拟器 30.8.3）
+     └── 拷到 Windows: windows-arm64\fetch-images.ps1        （SDK 模拟器 37.x）
+```
+
+| | Linux 开发机 | Windows x64 |
+|---|---|---|
+| 模拟器来源 | AOSP 自带 `prebuilts/android-emulator/linux-x86_64` | 脚本自动下载 SDK emulator |
+| 版本 | **30.8.3**（与 AOSP 12 树同源） | **37.1.11**（Google 只留最新，老包已 404） |
+| 加速 | arm64 guest → 只能 TCG | arm64 guest → 只能 TCG（Hyper-V/WHPX 无效） |
+| 开机 | 10~40 分钟 | 10~40 分钟（同一个物理限制） |
+| 镜像 | 本机编，直接引用宿主路径 | `fetch-images.ps1` scp 过来 + md5 校验 |
+| adb | AOSP 编出的 `out/host/linux-x86/bin/adb` | platform-tools（脚本一并下载） |
+| 显示 | 无 DISPLAY → `-no-window` + swiftshader | 有窗口（加 `-Headless` 可无窗口） |
+
+**唯一的不对称是模拟器版本**（Linux 同源、Windows 新两个大版本），所以：
+
+1. Windows 侧备了三条降级预案（换渠道 / AVD / WSL2 用同款 30.8.3），见该平台 README；
+2. **这个版本风险可以在 Linux 上提前验证**，不必等装好 Windows 才发现：
+
+```bash
+# 在同一台开发机上，用 SDK 版 37.x 跑同一份镜像（guest 侧行为与 Windows 一致）
+curl -sSL -o /tmp/emu37.zip \
+  https://mirrors.cloud.tencent.com/AndroidSDK/emulator-linux_x64-15917651.zip
+unzip -q /tmp/emu37.zip -d /tmp/emu37
+
+cd dev/04-emulator/linux-arm64
+EMULATOR_BIN=/tmp/emu37/emulator/emulator ./run-emulator.sh --arm64
+```
+
+- 能开机 → Windows 侧用 37.x 基本没悬念
+- 起不来 → 提前切到降级方案
+
+> 已核对：37.1.11 的 `-sysdir` / `-datadir` / `-accel` / `-gpu` / `-wipe-data` /
+> `-writable-system` 等参数**全部保留**，`run-emulator.ps1` 传的参数在 37.x 上合法。
+
+### 交付验证清单（两个平台各过一遍）
+
+- [ ] 模拟器起来，`adb devices` 有设备；`getprop ro.build.version.sdk` = **31**
+- [ ] `adb root` 成功（userdebug 镜像）
+- [ ] `/dev/uinput` 存在（autod 的触控后端依赖它）
+- [ ] `autod` 起得来；`autodctl info` / `capture` / `tap` / `swipe` 全通
+- [ ] 截图**不是全黑**（`smoke-autod.sh` 会自动判定）
+- [ ] 两个平台的 `ro.build.fingerprint` 一致（证明跑的是同一份 ROM）
 
 ---
 
