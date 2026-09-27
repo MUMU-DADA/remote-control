@@ -133,13 +133,47 @@ emulator: Done with QEMU main loop          ← QEMU 创建设备失败，直接
 | AVD 模式（`-avd`，配置里音频已关） | 模拟器段错误 / 报 Broken AVD system path |
 | 换 31.x 模拟器 | 同样的 PCI 报错 |
 
+### 当前进展与未解问题（2026-09-28，逐条实测）
+
+**已解决 ✓**
+
+| 项 | 证据 |
+|---|---|
+| arm64 模拟器在 x86_64 Linux 上**能启动** | QEMU 持续运行，不再秒退 |
+| arm64 guest **内核 + userspace 起来** | `-show-kernel` 可见 `init`/`ueventd`/HAL 服务全启 |
+| **adb 认到设备** | `adb devices` → `emulator-5556` |
+| 分区挂载正常 | `dm-0..dm-3` = system/system_ext/product/vendor，`/vendor` 挂载成功 |
+| vendor HAL 正常 | `class_start hal` succeeded，无 HAL 崩溃 |
+
+**未解决 ✗**：guest 起来后 **zygote 段错误**（API 30 镜像）／**keystore2 段错误**
+（API 31 镜像），导致启动无法完成 → init 走 `abort_fuse` → 模拟器退出。
+
+已排除的尝试（都无效）：
+
+| 尝试 | 结果 |
+|---|---|
+| `-cores 1 / 2 / 4 / 6`（排除 MTTCG 竞态） | 单核同样崩 |
+| `-cpu cortex-a53`（关掉加密扩展，排除 TCG 密码学 bug） | BoringSSL 自检从 fail 变 pass，但 keystore2 仍崩 |
+| `-prop dalvik.vm.usejit=false`（排除 JIT/指令缓存一致性） | zygote 仍崩 |
+| 清理历史 qcow2/`data` 覆盖层 + 全新 datadir | 同样崩 |
+| `-memory 3072 / 4096` | 无变化 |
+| 换模拟器版本（30.8.3 / 31.x） | 都崩，位置相同 |
+
+判断：这更像 **2021 年的 QEMU fork 的 arm64 TCG 与现代 Android 用户态代码的兼容问题**
+（Google 也正是因此在 34+ 版本里去掉了 x86_64 宿主上的 arm64 支持）。
+
+**下一步（最有希望的对照实验）**：用**自己编的 arm64 镜像**（`sdk_phone64_arm64`，
+与模拟器同一棵树、同一版本）再跑一次 —— 若同样崩，即可确认是 TCG 层面的限制，
+届时 arm64 只能走真机 / arm64 宿主；日常开发用 `--fast`（x86_64 + KVM）那条已经验证可用的路。
+
 ### 成品镜像（`get-stock-image.sh`）
 
-`get-stock-image.sh` 下载 Google 官方的 Android 12 arm64 成品镜像
-（`system-images;android-31;default;arm64-v8a`，606MB，SHA1 与清单一致 ✓），
-`run-stock-image.sh` 直接以构建模式启动它 —— 不需要 AVD、不需要 SDK 布局。
-用途：还没编出自己的镜像时先确认环境，或在自制镜像出问题时做对照
-（与自制镜像**共用同一套启动参数**，所以能直接判断问题出在环境还是镜像）。
+`get-stock-image.sh` 下载 Google 官方的 arm64 成品镜像
+（默认 `system-images;android-31;default;arm64-v8a`，606MB，SHA1 与清单一致 ✓；
+`--api 29/30/31` 可切换，`run-stock-image.sh` 直接以构建模式启动它 ——
+不需要 AVD、不需要 SDK 布局）。用途：还没编出自己的镜像时先验证环境，
+或在自制镜像出问题时做对照（与自制镜像**共用同一套启动参数**，
+所以能直接判断问题出在环境还是镜像）。
 
 镜像里的 `build.prop` 在顶层，构建模式需要 `system/build.prop`；
 `initrd` 也缺 —— 这两个由 `get-stock-image.sh` / `run-stock-image.sh` 自动补齐（见坑 2、3）。
