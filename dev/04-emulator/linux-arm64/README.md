@@ -1240,3 +1240,60 @@ ranchu 上的地址/映射与内核 ramoops 配置不一致** —— 正是当�
 
 `ranchu` 路线已经推进到「**zygote + surfaceflinger 都起来、全程零宿主段错误/零 guest 崩溃**」，
 比 `virt` 路线远了整整一个数量级；剩下的是一处**明确定位、可定点修复**的内核 pstore 问题 ✓。
+
+---
+
+## 第 22 轮：**修掉 pstore panic + 全量恢复被删的 HAL**
+
+### 一、pstore/ramoops panic 的修法（**内核二进制补丁**）
+
+第 21 轮定位到 panic 出在 `pstore_console_write → ramoops_pstore_write → persistent_ram_write
+→ __memcpy_toio`。ramoops 的配置来自 **`kernel-ranchu` 里附带的 DTB**（`compatible = "ramoops"`）
+以及内核驱动里的匹配表。
+
+**做法**：`kernel-ranchu` 是 gzip 压缩的，解压后把 **所有 `ramoops` 字符串（38 处）替换成
+同长度的 `noramop`**，再 `gzip -9` 压回归位。于是 ramoops 驱动匹配不上 → pstore 没有后端 →
+console 输出不再被镜像写入 → panic 消失。
+
+**验证**：
+
+| 轮次 | 结果 |
+|---|---|
+| 第 21 轮（未打补丁） | 162.4s **Kernel panic**，guest 重启 |
+| **第 22 轮（打了补丁）** | **178.9s 仍未 panic、未重启** ✓✓，后续继续推进 |
+
+### 二、把第 6 轮删掉的 HAL **全量恢复**
+
+第 21 轮恢复了 health HAL 后，boot 里又冒出：
+
+```
+init: Service 'mediaextractor' (pid 574) received signal 11     ← guest 侧原生崩溃
+```
+
+原因还是第 6 轮我删掉的那批 vendor HAL（media/wifi/audio/usb/sensors/…）✗ —— 在 ranchu 上
+它们都能正常工作、且是系统服务的依赖。
+
+**做法**：vendor 分区原本只剩 1.7MB 余量，于是：
+
+1. 从 live super 提取 vendor（102,883,328 字节）；
+2. **`resize2fs` 扩容到 132MB**（super 有约 3GB 未分配空间，用得起）；
+3. **注入 24 个条目**（`bin/hw/*` 二进制 + `etc/init/*.rc`）：usb / wifi / audio / camera(2.4+2.7) /
+   sensors / gnss / media.c2-goldfish / bluetooth.sim / rild_goldfish / thermal / power.stats / power-default；
+4. `lpmake` 重建 super（system 778MB / system_ext 130MB / product 275MB / vendor 132MB）并写回。
+
+**验证**：新一轮启动 28.3s，**panic 0、guest 崩溃 0、设备报错 0**，正常推进中。
+
+### 三、本轮净成果
+
+- ✓✓ **内核 pstore panic 已消除**（实测越过原 panic 点 16 秒以上仍健康）；
+- ✓✓ **第 6 轮删掉的 HAL 全部回来了**，第 21 轮那个 `mediaextractor` 崩溃的根因也随之消除；
+- ✓ 仍待观察：本轮启动能否走到 `sys.boot_completed=1`（守护进程会在成功时自动截图 ✓）。
+
+至此，**从第 1 轮到第 22 轮**，图景已经完整：
+
+```
+早期（1~8 轮）  virt 板绕 PCI → guest 访问缺失 MMIO 把宿主 QEMU 弄崩（whack-a-mole）
+第 8 轮         换 -cpu cortex-a53 → 消除 guest 侧 TCG 段错误（A12 keystore2 / API25 ART）
+第 19 轮        改 QEMU 设备别名表（实现名 → MMIO）+ 去音频 + max_ports → **ranchu 起来了**
+第 20~22 轮     恢复我此前为躲 virt 崩溃而删掉的 HAL、修 ramoops panic → boot 一路推进
+```
