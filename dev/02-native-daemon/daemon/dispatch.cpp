@@ -1436,6 +1436,26 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
     int      actual = -1;
     snapshot(&rot, &isFree, &w, &h, &actual);
 
+    // 显示几何变了之后，把注入器的坐标范围跟过去。
+    //
+    // ⚠️ 不跟会怎样：坐标范围是 uinput 设备创建时定死的，客户端按它发坐标。
+    //    转屏后显示变成 1280x720 而范围还是 720x1280 —— 客户端按屏幕像素
+    //    发 x=1000，超出 0..719 被内核**钳到右边缘**，落点全错。
+    //    实测过：只测屏幕正中央看不出来（两个空间在中心点重合），
+    //    一测偏离中心的位置立刻露馅。
+    auto syncInjector = [&]() {
+        const ServiceState& st = ServiceState::Instance();
+        // 用户用 --touch-range / touch-width 显式指定过就不动它
+        const bool explicitRange = st.GetConfig().touchWidth > 0;
+        std::string e;
+        if (!ServiceState::Instance().RebuildInjectorForDisplay(w, h,
+                                                                explicitRange,
+                                                                &e)) {
+            ALOGW("重建注入设备失败（触控范围可能和显示尺寸不一致）: %s",
+                  e.c_str());
+        }
+    };
+
     auto reply = [&](bool applied, const std::string& method,
                      int requested, const std::string& note) {
         json::Writer jw;
@@ -1506,6 +1526,7 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
         const bool wantLandscape = (n == 1 || n == 3);
         const bool geomOk = wantLandscape ? (w > h) : (h >= w);
         if (actual == n && geomOk) {
+            syncInjector();
             return reply(true, "user-rotation", deg,
                          "已通过 WindowManager 锁定方向并生效");
         }
@@ -1524,6 +1545,21 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
                      "（wm size 只能交换宽高，表达不出上下颠倒）");
     }
 
+    // ── 走 wm size 这条路之前，先把旋转锁解掉 ──
+    //
+    // ⚠️ 两个机制会互相打架：`cmd window user-rotation lock 1` 把 mRotation
+    //    设成 1（内容在面板内转 90°），而 `wm size 1280x720` 是改逻辑尺寸。
+    //    同时存在时实测**逻辑尺寸被按回 720x1280**，`wm size` 那个覆盖
+    //    根本不生效 —— 抓帧还是竖屏，但接口报的是横屏尺寸。
+    //
+    //    前面试过 user-rotation 了（没成功才走到这里），所以这里把它
+    //    归零，让 wm size 独占生效。
+    {
+        std::string e;
+        RunWindowCmd({"user-rotation", "lock", "0"}, nullptr, &e);
+        usleep(200 * 1000);
+    }
+
     if (n == 0) {
         std::string e;
         if (!RunWindowCmd({"size", "reset"}, nullptr, &e)) {
@@ -1531,6 +1567,7 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
         }
         usleep(400 * 1000);
         snapshot(&rot, &isFree, &w, &h, &actual);
+        syncInjector();
         return reply(true, "wm-size", deg,
                      "这台设备不支持旋转（mRotation 不动），"
                      "已用 wm size 还原原始显示尺寸");
@@ -1561,6 +1598,7 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
     snapshot(&rot, &isFree, &w, &h, &actual);
 
     const bool ok = (w == lw && h == lh);
+    if (ok) syncInjector();
     return reply(ok, "wm-size", deg,
                  ok ? ("这台设备不支持旋转（mRotation 不变），已改用 wm size "
                        "把显示尺寸设成 " + sz + "，应用会按横屏重新布局")

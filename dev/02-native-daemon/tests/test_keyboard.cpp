@@ -21,16 +21,19 @@ void TestResolve() {
     printf("\n\033[1;34m[1] 键名解析\033[0m\n");
     const Case cases[] = {
         // Android 四大键：Linux 键码（不是 Android 的 KEYCODE_*）
-        {"home",       true,  102, "KEY_HOME"},
+        // ⚠️ 172（KEY_HOMEPAGE）不是 102（KEY_HOME）。
+        //    设备上的 Generic.kl 把 102 翻成 MOVE_HOME（光标到行首），
+        //    172 才是 Android 的 HOME。详见下面 [3] 那段。
+        {"home",       true,  172, "KEY_HOMEPAGE → Generic.kl: HOME"},
         {"back",       true,  158, "KEY_BACK"},
         {"menu",       true,  139, "KEY_MENU"},
         {"appswitch",  true,  580, "KEY_APPSELECT"},
         {"power",      true,  116, "KEY_POWER"},
         {"volumeup",   true,  115, "KEY_VOLUMEUP"},
         // 大小写与前缀
-        {"HOME",       true,  102, "大小写不敏感"},
-        {"KEY_HOME",   true,  102, "内核文档写法"},
-        {"Key_Home",   true,  102, "混合大小写 + 前缀"},
+        {"HOME",       true,  172, "大小写不敏感"},
+        {"KEY_HOME",   true,  172, "内核文档写法（名字指功能，不指 Linux 常量）"},
+        {"Key_Home",   true,  172, "混合大小写 + 前缀"},
         // 字符键
         {"1",          true,    2, "KEY_1 —— 必须先按字符解释（见下）"},
         {"0",          true,   11, "KEY_0 不在 KEY_1..KEY_9 之后连续"},
@@ -58,6 +61,61 @@ void TestResolve() {
     Check(true, "已知键名列表非空: %.60s...", Keyboard::KnownKeyNames());
 }
 
+// 具名键：断言**扫描码**和它经 Generic.kl 翻译后的 **Android keycode**。
+//
+// ⚠️ 光断言扫描码是不够的 —— 用户感知的是 Android 那边的行为。
+//    `home` 原来发 KEY_HOME(102)，扫描码"没错"（Linux 里它确实叫 HOME），
+//    但设备上的 Generic.kl 把 102 翻成 MOVE_HOME（光标移到行首），
+//    桌面纹丝不动。只测扫描码的用例会一路绿着放它过去。
+//
+//    期望值取自设备上实际的 /system/usr/keylayout/Generic.kl，不是猜的：
+//        key 102  MOVE_HOME     key 150  EXPLORER    key 172  HOME
+//        key 353  DPAD_CENTER   （KEY_OK 352 没有映射）
+void TestNamedKeysAgainstLayout() {
+    printf("\n\033[1;34m[3] 具名键 vs Generic.kl 翻译结果\033[0m\n");
+    struct C { const char* name; uint32_t scan; const char* android; };
+    static const C kCases[] = {
+        {"home",        172, "HOME"},         // 不是 102（那是 MOVE_HOME）
+        {"back",        158, "BACK"},
+        {"menu",        139, "MENU"},
+        {"appswitch",   580, "APP_SWITCH"},
+        {"search",      217, "SEARCH"},
+        {"power",       116, "POWER"},
+        {"volumeup",    115, "VOLUME_UP"},
+        {"volumedown",  114, "VOLUME_DOWN"},
+        {"mute",        113, "VOLUME_MUTE"},
+        {"enter",        28, "ENTER"},
+        {"delete",      111, "FORWARD_DEL"},
+        {"backspace",    14, "DEL"},
+        {"space",        57, "SPACE"},
+        {"tab",          15, "TAB"},
+        {"escape",        1, "ESCAPE"},
+        {"up",          103, "DPAD_UP"},
+        {"down",        108, "DPAD_DOWN"},
+        {"left",        105, "DPAD_LEFT"},
+        {"right",       106, "DPAD_RIGHT"},
+        {"center",      353, "DPAD_CENTER"},  // 不是 352（那个没映射）
+        {"playpause",   164, "MEDIA_PLAY_PAUSE"},
+        {"nextsong",    163, "MEDIA_NEXT"},
+        {"previoussong",165, "MEDIA_PREVIOUS"},
+        {"stop",        166, "MEDIA_STOP"},
+        {"camera",      212, "CAMERA"},
+        {"browser",     150, "EXPLORER"},     // 不是 172（那会回桌面）
+    };
+    for (const auto& c : kCases) {
+        uint32_t got = 0;
+        const bool ok = Keyboard::ResolveKeyCode(c.name, &got);
+        Check(ok && got == c.scan, "%-13s → 扫描码 %-4u（期望 %-4u，%s）",
+              c.name, got, c.scan, c.android);
+    }
+    // 单独钉住最容易搞错的那对：Linux 里叫 HOME 的常量**不是**回桌面
+    uint32_t homeScan = 0;
+    Keyboard::ResolveKeyCode("home", &homeScan);
+    Check(homeScan != 102,
+          "home **不能**发 102（Generic.kl 把 102 翻成 MOVE_HOME）");
+    Check(homeScan == 172, "home 发 172（Generic.kl: key 172 HOME）");
+}
+
 // 26 个字母逐个核对。
 //
 // ⚠️ 这段是补出来的，因为原来的用例只写了 {"a", 30} 和 {"z", 55} ——
@@ -71,7 +129,7 @@ void TestResolve() {
 //    期望值一律来自内核头文件
 //    （bionic/libc/kernel/uapi/linux/input-event-codes.h），不手算。
 void TestLetters() {
-    printf("\n\033[1;34m[2] 26 个字母逐个核对\033[0m\n");
+    printf("\n\033[1;34m[4] 26 个字母逐个核对\033[0m\n");
     static const struct { char ch; uint32_t code; } kL[26] = {
         {'a', 30}, {'b', 48}, {'c', 46}, {'d', 32}, {'e', 18}, {'f', 33},
         {'g', 34}, {'h', 35}, {'i', 23}, {'j', 36}, {'k', 37}, {'l', 38},
@@ -99,6 +157,7 @@ void TestLetters() {
 int main() {
     printf("\033[1m=== 按键注入测试 ===\033[0m\n");
     TestResolve();
+    TestNamedKeysAgainstLayout();
     TestLetters();
     return Summary("按键");
 }

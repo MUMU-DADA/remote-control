@@ -63,6 +63,19 @@ class ServiceState {
     //   - 热改配置时真正作用到后端上（改显示、重建 uinput 设备）
     void SetBackends(Capture* capture, Injector* injector);
     void SetInjectorConfig(const InjectorConfig& cfg);   // 供热改后更新记录
+
+    // 显示尺寸变了（转屏 / 改分辨率）之后，把注入器的坐标范围**跟过去**。
+    //
+    // 为什么必须跟：坐标范围是 uinput 设备创建时定死的，客户端按它发坐标。
+    // 转屏后显示变成 1280x720 而范围还是 720x1280 —— 客户端按屏幕像素发
+    // x=1000，超出 0..719 会被内核钳到右边缘，落点全错。
+    // 实测过：只测屏幕正中央看不出问题（两个空间在中心点重合），
+    // 一测偏离中心的位置就露馅。
+    //
+    // `explicitRange` 为 true 表示用户用 --touch-range / touch-width
+    // 显式指定过 —— 那种情况下不动它（用户自己知道要什么）。
+    bool RebuildInjectorForDisplay(uint32_t w, uint32_t h, bool explicitRange,
+                                   std::string* error);
     const InjectorConfig& GetInjectorConfig() const;
 
     // ── 运行时状态（每次调用重新采集）────────────────────────────────────────

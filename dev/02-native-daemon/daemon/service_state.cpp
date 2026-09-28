@@ -123,6 +123,35 @@ void ServiceState::SetInjectorConfig(const InjectorConfig& cfg) {
     injectorConfig_ = cfg;
 }
 
+bool ServiceState::RebuildInjectorForDisplay(uint32_t w, uint32_t h,
+                                             bool explicitRange,
+                                             std::string* error) {
+    if (w == 0 || h == 0) return true;          // 没尺寸信息，不动
+    if (explicitRange) return true;             // 用户指定过，尊重它
+
+    Injector* inj = nullptr;
+    InjectorConfig cur;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        inj = injector_;
+        cur = injectorConfig_;
+    }
+    if (inj == nullptr) return true;
+    if (cur.touchWidth == w && cur.touchHeight == h) return true;   // 已经一致
+
+    InjectorConfig cfg = cur;
+    cfg.touchWidth  = w;
+    cfg.touchHeight = h;
+    if (!inj->Init(cfg, error)) return false;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        injectorConfig_ = cfg;
+    }
+    ALOGI("显示尺寸变为 %ux%u，已重建注入设备（坐标范围跟进）", w, h);
+    return true;
+}
+
 const InjectorConfig& ServiceState::GetInjectorConfig() const {
     // 返回引用，调用方自己保证不在并发修改时用 —— 这一层是"读到就够用"，
     // 不做拷贝是因为 InjectorConfig 里有 const char* 成员，拷贝语义不完整。

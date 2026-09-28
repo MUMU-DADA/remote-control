@@ -748,6 +748,14 @@ function startStream() {
           sw = m.w; sh = m.h;
           updateMeta();
           syncMaxWidthButtons();
+          // ⚠️ 画面尺寸变了，**触控坐标空间多半也变了** —— 服务端转屏时会
+          //    重建注入器让坐标范围跟着显示走。必须重取，否则之后的点击
+          //    全按旧空间换算（转屏前能点中，转屏后全偏）。
+          //
+          //    放在这里而不是只放在 rotate() 里：旋转可能是**别人**触发的
+          //    —— 另一个客户端调 API、上游程序调、甚至 adb 改的分辨率。
+          //    页面只认服务端的通知，不认"是不是我按的按钮"。
+          loadTouchRange();
         }
       } else if (m.t === 'codec') {
         // 服务端在**第一帧之前**告诉 codec 串 —— WebCodecs 必须要它，
@@ -1329,6 +1337,12 @@ function rotate(to) {
       el.style.color = ok ? '' : '#e0a020';
     }
     setStatus(msg);
+    // ⚠️ 必须重取触控坐标空间。
+    //
+    // 服务端转屏时会**重建注入器**让坐标范围跟着显示走（见 dispatch.cpp 的
+    // syncInjector），所以页面加载时取的那份就过期了。不重取的话，
+    // 之后所有点击都会按旧空间换算 —— 转屏前能点中，转屏后全偏。
+    loadTouchRange();
     setTimeout(refresh, 600);      // 尺寸变了，状态行也要跟着更新
   }).catch(e => setStatus('切方向失败：' + e, true));
 }

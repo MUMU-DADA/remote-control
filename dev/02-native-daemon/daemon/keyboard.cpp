@@ -31,12 +31,26 @@ constexpr int kSettleUs = 100 * 1000;
 // 想用表外的键，直接给数字键码即可（ResolveKeyCode 支持）。
 const std::map<std::string, uint32_t>& KeyTable() {
     static const std::map<std::string, uint32_t> kTable = {
-        // Android 四大键
-        {"home",        KEY_HOME},        // 172
-        {"back",        KEY_BACK},        // 158
-        {"menu",        KEY_MENU},        // 139
-        {"appswitch",   KEY_APPSELECT},   // 580
-        {"search",      KEY_SEARCH},      // 217
+        // ── Android 四大键 ──
+        //
+        // ⚠️ 这里的关键不是"Linux 里哪个常量叫 HOME"，而是
+        //    **设备上的 Generic.kl 把这个扫描码翻译成哪个 Android keycode**。
+        //
+        //    两者会错位：Generic.kl 里
+        //        key 102  MOVE_HOME     ← Linux 的 KEY_HOME(102) 变成了
+        //                                 "光标移到行首"，不是"回桌面"
+        //        key 172  HOME          ← Linux 的 KEY_HOMEPAGE(172) 才是"回桌面"
+        //
+        //    实测：发 102，logcat 里是 keyCode=KEYCODE_MOVE_HOME，桌面不动；
+        //          发 172 才真的回桌面。
+        //
+        //    表里原来写的是 {"home", KEY_HOME} 并注释成 172 —— 注释和常量
+        //    对不上，正是这个 bug 的来源。**注释断言了假事实比没注释更糟。**
+        {"home",        KEY_HOMEPAGE},    // 172 → Generic.kl: HOME
+        {"back",        KEY_BACK},        // 158 → BACK
+        {"menu",        KEY_MENU},        // 139 → MENU
+        {"appswitch",   KEY_APPSELECT},   // 580 → APP_SWITCH
+        {"search",      KEY_SEARCH},      // 217 → SEARCH
 
         // 电源与音量
         {"power",       KEY_POWER},       // 116
@@ -60,7 +74,9 @@ const std::map<std::string, uint32_t>& KeyTable() {
         {"down",        KEY_DOWN},        // 108
         {"left",        KEY_LEFT},        // 105
         {"right",       KEY_RIGHT},       // 106
-        {"center",      KEY_OK},          // 352
+        // Generic.kl 里 `key 353 DPAD_CENTER`；KEY_OK(352) **没有映射**，
+        // 发出去等于没按（实测）。KEY_SELECT(353) 才是对的那个。
+        {"center",      KEY_SELECT},      // 353 → DPAD_CENTER
 
         // 媒体
         {"playpause",   KEY_PLAYPAUSE},   // 164
@@ -74,8 +90,9 @@ const std::map<std::string, uint32_t>& KeyTable() {
         // 直接用数值，免得编到别的头文件上又找不到。
         {"focus",       0x210},
 
-        // 浏览器
-        {"browser",     KEY_HOMEPAGE},    // 172
+        // 浏览器。Generic.kl 里 `key 150 EXPLORER`。
+        // 原来写的 KEY_HOMEPAGE(172) 会翻译成 HOME —— "浏览器"键把人送回桌面。
+        {"browser",     KEY_WWW},         // 150 → EXPLORER
     };
     return kTable;
 }

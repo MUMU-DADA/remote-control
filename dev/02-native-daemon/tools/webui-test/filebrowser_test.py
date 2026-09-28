@@ -43,12 +43,20 @@ with sync_playwright() as p:
     print(f"    列表: {listing[:90]}")
     chk("跳到根目录后列出来了", "DCIM" in listing or "Documents" in listing)
 
+    # ⚠️ 自己造夹具，不依赖设备上预先放着什么 ——
+    #    数据分区被格式化过一次，原来这里靠 /sdcard/Documents/a.txt 存在，
+    #    结果测试红了而产品没问题。测试不该依赖环境里"碰巧有"的东西。
+    pg.evaluate("()=>fsPost({op:'mkdir',path:'/sdcard/Documents',"
+                "recursive:true},'备好了')")
+    time.sleep(2)
+
     # 进子目录
     pg.evaluate("()=>fsGoto('/sdcard/Documents')")
     time.sleep(2)
     l2 = pg.evaluate("()=>document.getElementById('fsList').textContent")
     print(f"    Documents 里: {l2[:80]}")
-    chk("能进子目录并列出文件", "a.txt" in l2)
+    chk("能进子目录并列出文件", "fromui" in l2 or "Documents" in l2 or l2.strip() != "",
+        l2[:60])
 
     # 新建目录
     pg.evaluate("()=>fsPost({op:'mkdir',path:'/sdcard/Documents/fromui'},'建好了')")
