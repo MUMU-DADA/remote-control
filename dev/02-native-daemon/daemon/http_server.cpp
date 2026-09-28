@@ -23,6 +23,20 @@ namespace autod {
 namespace {
 
 constexpr int kReadTimeoutSec = 30;
+
+// 流式响应的**发送**超时。
+//
+// 客户端不读了（进程被杀 / 卡住 / 网断了）时 write 会永远阻塞，
+// 而流式循环靠 write 失败发现断开、释放 FrameHub 的订阅。
+// 没有这个超时，一个僵尸客户端能让服务端一直按满速给它抓帧+编码，
+// 永不停止。
+//
+// 实测踩过：被杀掉的测试客户端留下一条 Send-Q 堆到 14KB 的连接，
+// 服务端仍在 60fps 地抓帧，看起来像"抓帧率不跟随需求"。
+//
+// 10 秒是宽松值：真正慢的客户端是"读得慢但一直在读"，
+// 每一帧都能写出去一部分，攒不到 10 秒。
+constexpr int kSendTimeoutSec = 10;
 constexpr size_t kMaxHeaderBytes = 64 * 1024;
 
 std::string ToLower(const std::string& s) {
@@ -640,7 +654,26 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
         tv.tv_sec  = 0;
         tv.tv_usec = 0;
         setsockopt(connFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(connFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        // ⚠️ 读超时要清掉，**发送超时不能清**。
+        //
+        //    读：WebSocket 空闲是正常的（用户没碰屏幕就没有事件），
+        //        带读超时的话空闲几秒就被自己掐断，
+        //        表现为"停一会儿不动，再拖就失灵了"。
+        //
+        //    写：清掉的话客户端**不读了**（进程被杀、网线拔了、
+        //        单纯卡住）write 会永远阻塞 —— 而流式循环靠 write
+        //        失败来发现断开、释放 FrameHub 的订阅。
+        //        实测踩过：一个被杀掉的客户端留下一条 Send-Q 堆到
+        //        14KB 的连接，服务端还在按 60fps 给它抓帧+编码，
+        //        一直不停。
+        //
+        //    10 秒是宽松值：真正慢的客户端是"读得慢但一直在读"，
+        //    每一帧都能写出去一部分，不会攒到 10 秒。
+        timeval snd{};
+        snd.tv_sec  = kSendTimeoutSec;
+        snd.tv_usec = 0;
+        setsockopt(connFd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
 
         resp.streamer(connFd);
         return;
@@ -668,9 +701,15 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
 
     if (resp.isStreaming()) {
         // 交给回调。它自己判断何时停 —— 客户端断开时 write 会失败。
-        // 这里不做超时：长连接是流式响应的正常形态，
-        // 真正要防的"客户端不发数据就占着"在 ReadRequest 那边已经用
-        // SO_RCVTIMEO 挡掉了。
+        //
+        // 读超时不设（长连接是流式响应的正常形态），但**发送超时要设**：
+        // 客户端不读了的话，write 会永远阻塞，而这个循环发现断开
+        // 靠的就是 write 失败 —— 没有超时它永远发现不了，
+        // FrameHub 的订阅也就永远不释放（实测踩过，见 WebSocket 那处）。
+        timeval snd{};
+        snd.tv_sec  = kSendTimeoutSec;
+        snd.tv_usec = 0;
+        setsockopt(connFd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
         resp.streamer(connFd);
         return;
     }

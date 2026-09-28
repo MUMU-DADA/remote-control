@@ -317,9 +317,34 @@ function hasIdr(buf) {
   return false;
 }
 
-function startH264(codecStr) {
+// 配置 H.264 解码器。
+//
+// **异步**，因为要用 VideoDecoder.isConfigSupported 真探一次 ——
+// 光看 `typeof VideoDecoder` 是不够的：
+//   Firefox 从 130 起有 VideoDecoder，但 H.264 的解码能力依赖平台，
+//   在 Linux 上可能是 unsupported。Chromium 同理（受编译开关影响）。
+//   不探就 configure 的话，报错信息是 "not supported"，而用户看到的
+//   只是黑屏。
+async function startH264(codecStr) {
   stopH264();
   if (!hasWebCodecs) return false;
+
+  let cfg = { codec: codecStr, optimizeForLatency: true };
+  if (sw > 0 && sh > 0) { cfg.codedWidth = sw; cfg.codedHeight = sh; }
+
+  try {
+    const sup = await VideoDecoder.isConfigSupported(cfg);
+    dbg('isConfigSupported(' + codecStr + ') = ' + JSON.stringify(sup.supported));
+    if (!sup.supported) {
+      setStatus('这个浏览器不支持 H.264 解码（' + codecStr +
+                '）—— 可能是平台没有 H.264 解码器', true);
+      return false;
+    }
+  } catch (e) {
+    dbg('isConfigSupported 抛异常: ' + e);
+    return false;
+  }
+
   try {
     h264Dec = new VideoDecoder({
       output: (frame) => {
@@ -341,7 +366,7 @@ function startH264(codecStr) {
       }
     });
     // optimizeForLatency：别为了重排攒缓冲。画面流要的是低延迟。
-    h264Dec.configure({ codec: codecStr, optimizeForLatency: true });
+    h264Dec.configure(cfg);
     h264Ready = true;
     dbg('H.264 解码器已配置: ' + codecStr);
     return true;
@@ -518,7 +543,19 @@ function startStream() {
   }
   try { streamWs = new WebSocket(url); }
   catch (e) { dbg('new WebSocket 失败: ' + e); setStatus('画面流建立失败：' + e, true); return; }
-  streamWs.binaryType = 'blob';
+  // ⚠️ 必须是 arraybuffer，不能是 blob。
+  //
+  //    EncodedVideoChunk 的 data 要 **BufferSource**：
+  //      - 传 Blob 直接抛 TypeError
+  //      - new Uint8Array(blob) 得到的是**空数组**（不是内容）——
+  //        于是 hasIdr() 永远返回 false，所有帧都被标成 delta
+  //
+  //    两条加在一起 = H.264 在任何浏览器里都开不了（实测就是这样）。
+  //
+  //    JPEG 那边 createImageBitmap 收不了 ArrayBuffer，
+  //    所以在解码处包一层 Blob —— 一次分配，比在这里 await 转换安全：
+  //    await 会让 onmessage 交错执行，H.264 的帧是有顺序依赖的。
+  streamWs.binaryType = 'arraybuffer';
 
   streamWs.onopen = () => {
     streamReady = true;
@@ -556,7 +593,7 @@ function startStream() {
       } else if (m.t === 'codec') {
         // 服务端在**第一帧之前**告诉 codec 串 —— WebCodecs 必须要它，
         // 而各设备的 profile/level 不同，不能写死。
-        if (!startH264(m.codec)) {
+        if (!(await startH264(m.codec))) {
           setStatus('这个浏览器不支持 H.264（需要 WebCodecs），已退回 JPEG', true);
           dbg('没有 WebCodecs，退回 JPEG');
           fallbackToJpeg();
@@ -575,7 +612,7 @@ function startStream() {
         h264Dec.decode(new EncodedVideoChunk({
           type: hasIdr(ev.data) ? 'key' : 'delta',
           timestamp: (h264Ts += 33333),   // 微秒；单调递增即可
-          data: ev.data
+          data: ev.data                   // ArrayBuffer（见 binaryType 那处）
         }));
       } catch (e) {
         if (streamFrames === 0) dbg('H.264 decode 失败: ' + e);
@@ -592,7 +629,7 @@ function startStream() {
           + (typeof createImageBitmap));
     }
     try {
-      const bmp = await createImageBitmap(ev.data);
+      const bmp = await createImageBitmap(new Blob([ev.data]));
       if (cvs.width !== bmp.width || cvs.height !== bmp.height) {
         cvs.width = bmp.width; cvs.height = bmp.height;
         sw = bmp.width; sh = bmp.height;
@@ -647,21 +684,67 @@ function setFps(v) {
 //
 // 只在点击时报错是不够的 —— 用户会以为"这个选项应该有画面"，
 // 点几下才发现不行。置灰 + title 说明是更清楚的表达。
-(function disableH264IfUnsupported() {
-  if (hasWebCodecs) return;
+// ⚠️ **不自动置灰**。
+//
+//    能探测到"这个浏览器没有 VideoDecoder"，但那不该成为**禁止**用户
+//    尝试的理由：
+//      - 探测本身可能不准（不同版本/前缀/实验开关）
+//      - 用户可能知道自己环境里有什么（比如准备换浏览器再点）
+//      - 大不了就是放不出来，页面会明确说出原因
+//
+//    替他做决定，比让他自己试一次更糟。按钮旁边给个提示就够了。
+if (!hasWebCodecs) {
   const b = document.getElementById('btn-h264');
   if (b) {
-    b.disabled = true;
-    b.title = '这个浏览器不支持 WebCodecs（需要 Chrome/WebView 94+），无法解码 H.264';
-    b.style.opacity = '0.4';
-    b.style.cursor = 'not-allowed';
+    b.title = '这台浏览器的 WebCodecs 不可用（VideoDecoder 未定义），'
+            + '点了可能无法播放 —— H.264 需要 Chrome/WebView 94+。'
+            + '也可以用 ?format=h264 强制启动。';
   }
-})();
+}
+
+// ── URL 参数 ──
+//
+// 给一个**从地址栏直接启动 H.264** 的方式：
+//
+//   http://<设备>:8088/?format=h264
+//   http://<设备>:8088/?format=h264&fps=30&quality=75
+//   http://<设备>:8088/?format=webp&fps=15
+//
+// 比"打开页面再找按钮点"可靠 —— 尤其设备内 WebView 里页面很长、
+// 按钮要滚很久才看得到的时候。
+function applyUrlParams() {
+  let q;
+  try { q = new URLSearchParams(location.search); } catch (e) { return; }
+
+  const wantFmt = q.get('format');
+  if (wantFmt) {
+    const f = wantFmt.toLowerCase();
+    if (['jpeg', 'jpg', 'webp', 'png', 'h264', 'auto'].indexOf(f) >= 0) {
+      codec = (f === 'jpg') ? 'jpeg' : f;
+    }
+  }
+  const wantFps = parseInt(q.get('fps') || '', 10);
+  if (!isNaN(wantFps) && wantFps >= 1 && wantFps <= 60) fps = wantFps;
+
+  const wantQ = parseInt(q.get('quality') || '', 10);
+  if (!isNaN(wantQ) && wantQ >= 1 && wantQ <= 100) quality = wantQ;
+
+  const wantW = parseInt(q.get('maxWidth') || '', 10);
+  if (!isNaN(wantW) && wantW >= 0) maxW = wantW;
+
+  if (q.get('skipUnchanged') === '0') skipUnchanged = false;
+  if (q.get('skipUnchanged') === '1') skipUnchanged = true;
+
+  if (wantFmt || q.get('fps') || q.get('quality')) {
+    dbg('URL 参数: format=' + codec + ' fps=' + fps + ' quality=' + quality);
+  }
+}
 
 function setCodec(c, q) {
+  // 不拦。浏览器不支持就放不出来，那时候会给出明确原因并退回 JPEG ——
+  // 但"让不让试"这个决定权在用户手里。
   if (c === 'h264' && !hasWebCodecs) {
-    setStatus('这个浏览器不支持 H.264（WebCodecs 需要 Chrome/WebView 94+）', true);
-    return;
+    dbg('注意：这个浏览器没有 VideoDecoder，H.264 很可能放不出来');
   }
   codec = c; quality = q;
   startStream();
@@ -1193,6 +1276,11 @@ function logHistory() {
 }
 
 // ── 启动 ──
+//
+// ⚠️ applyUrlParams 必须在 startStream 之前 —— 它决定用哪个格式。
+//    放在后面的话第一帧已经按默认的 jpeg 拉了，
+//    ?format=h264 要等下一次重连才生效。
+applyUrlParams();
 applyCollapsed();
 refresh();
 refreshService();
