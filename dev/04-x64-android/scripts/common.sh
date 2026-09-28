@@ -65,3 +65,140 @@ JOBS="${JOBS:-12}"
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# 从 emulator/config.ini 读"硬件"参数
+#
+# ⚠️ 这些值以前是**写死在 run-linux.sh 的命令行上**的（-memory 4096 -cores 4
+#    -gpu swiftshader_indirect），而**命令行优先于 config.ini** ——
+#    于是改 config.ini 里的 hw.ramSize 一点用都没有：hardware-qemu.ini 里
+#    照样是命令行那个值。现在命令行不再写死，统一从这里读，只有一处真源。
+config_get() {   # config_get <键> [默认值]
+    local key="$1" def="${2-}" v=""
+    if [ -s "$EMULATOR_CONFIG" ]; then
+        # 取最后一个匹配：文件里同一键可能先举例后赋值
+        v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p" \
+             "$EMULATOR_CONFIG" | tail -1)"
+    fi
+    if [ -n "$v" ]; then printf '%s' "$v"; else printf '%s' "$def"; fi
+}
+
+# 宿主有没有**可用的** GPU 渲染节点。
+#
+# ⚠️ 不能只看 /dev/dri 目录在不在 —— 容器里经常挂着一个空目录。
+#    要看 renderD* 是真字符设备、而且当前用户能打开（否则 -gpu host 会
+#    起不来，或者起来之后画面全黑）。
+host_gpu_available() {
+    local d
+    for d in /dev/dri/renderD*; do
+        [ -c "$d" ] && [ -r "$d" ] && [ -w "$d" ] && return 0
+    done
+    return 1
+}
+
+# 把 config.ini 里的 hw.gpu.mode 解析成模拟器真正认的那个 -gpu 值。
+#
+# 规则：
+#   · auto / 空  → 宿主有 GPU 就 host，否则 swiftshader_indirect  ← 自适应
+#   · 其余取值    → 原样透传（想钉死某一档就写死，比如 swiftshader_indirect）
+resolve_gpu_mode() {   # resolve_gpu_mode [config.ini 里的值]
+    local want="${1:-auto}"
+    case "$want" in
+        auto|"") if host_gpu_available; then printf 'host'
+                 else printf 'swiftshader_indirect'; fi ;;
+        *)       printf '%s' "$want" ;;
+    esac
+}
+
+gpu_mode_reason() {   # 给日志用的一句话解释
+    if host_gpu_available; then
+        printf '宿主有 GPU 渲染节点（%s）' "$(ls /dev/dri/renderD* 2>/dev/null | head -1)"
+    else
+        printf '宿主没有可用的 GPU 渲染节点（/dev/dri/renderD*）'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 实例：名字 ↔ 端口。状态文件在 .run/instances/<名字>.env
+#
+# 端口从 5580 起偶数分配（模拟器要求偶数：console 口 = port+1）。
+# 工作目录沿用 run-linux.sh 的按端口派生规则，两边可以混用：
+#   .run/sysdir-<port>/  .run/datadir-<port>/  .run/emulator-<port>.log
+INSTANCES_DIR="$RUN_DIR/instances"
+EMULATOR_PORT_BASE="${EMULATOR_PORT_BASE:-5580}"
+
+instance_file() { printf '%s/%s.env' "$INSTANCES_DIR" "$1"; }
+
+instance_exists() { [ -s "$(instance_file "$1")" ]; }
+
+instance_port() {   # 没登记就返回空
+    local f; f="$(instance_file "$1")"
+    [ -s "$f" ] || return 0
+    sed -n 's/^PORT=//p' "$f" | tail -1
+}
+
+instance_names() {
+    [ -d "$INSTANCES_DIR" ] || return 0
+    local f
+    for f in "$INSTANCES_DIR"/*.env; do
+        [ -s "$f" ] || continue
+        basename "$f" .env
+    done
+}
+
+port_taken() {   # 已被登记的实例占用？
+    local p="$1" n
+    for n in $(instance_names); do
+        [ "$(instance_port "$n")" = "$p" ] && return 0
+    done
+    return 1
+}
+
+port_listening() {   # 真有进程在用（含没登记的野实例）
+    [ -n "$(emu_pid_for_port "$1")" ]
+}
+
+alloc_port() {
+    local p="$EMULATOR_PORT_BASE"
+    while [ "$p" -lt 5700 ]; do
+        if ! port_taken "$p" && ! port_listening "$p"; then printf '%s' "$p"; return 0; fi
+        p=$((p + 2))
+    done
+    die "找不到空闲端口（$EMULATOR_PORT_BASE..5700 都占着）"
+}
+
+instance_register() {   # instance_register <名字> <端口>
+    mkdir -p "$INSTANCES_DIR"
+    cat > "$(instance_file "$1")" <<EOF
+# 由 scripts/emulator.sh 维护，手改也行（PORT 一行就够）
+PORT=$2
+EOF
+}
+
+instance_unregister() { rm -f "$(instance_file "$1")"; }
+
+# 找某个端口上的模拟器主进程。
+#
+# ⚠️ 不能用 `pgrep -f "qemu-system.* -port N"` —— **它会把调用者自己匹配上**：
+#    外层 `bash -c '... pgrep -f "qemu-system.* -port 5582" ...'` 的命令行里
+#    就含这段文字，正则照样匹配。实测踩到：stop 明明成功了，
+#    pgrep 却报"还有进程"；反过来 instance_running 会假阳性，
+#    而 kill 有可能**去杀一个无辜的进程**。
+#
+#    所以这里逐个读 /proc：先看 comm（进程名）必须是 qemu-system-*，
+#    再看命令行里有没有 " -port <端口> "。名字这一关调用者过不了。
+emu_pid_for_port() {
+    local port="$1" p comm
+    for p in /proc/[0-9]*; do
+        [ -r "$p/comm" ] || continue
+        read -r comm < "$p/comm" 2>/dev/null || continue
+        case "$comm" in qemu-system-*) ;; *) continue ;; esac
+        # ⚠️ 端口两边要有空格：不加的话 "-port 558" 会匹配到 "-port 5580"
+        if tr '\0' ' ' < "$p/cmdline" 2>/dev/null | grep -q " -port $port "; then
+            printf '%s\n' "${p#/proc/}"
+        fi
+    done
+}
+
+instance_running() { [ -n "$(emu_pid_for_port "$(instance_port "$1")")" ]; }
+

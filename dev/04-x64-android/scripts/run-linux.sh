@@ -12,6 +12,10 @@
 #   ./run-linux.sh --port 5584 --reuse         # 保留工作目录：装的应用、快照都留着
 #   ./run-linux.sh --snapshot my-snap          # 从快照恢复（隐含 --reuse；实测约 7 秒进系统）
 #
+# 硬件参数（内存/核数/GPU）默认从 emulator/config.ini 读，命令行可临时覆盖：
+#   ./run-linux.sh --memory 8192 --cores 4 --gpu host
+#   --gpu auto（默认）= 宿主有 GPU 就用，没有就退软件渲染；host 起不来也会自动退。
+#
 # 快照：存 `adb -s emulator-<port> emu avd snapshot save <名>`，列 `... emu avd snapshot list`。
 #   三个前提（缺一不可）：① config.ini 的 fastboot.forceColdBoot 必须是 no（--snapshot 自动改）
 #                        ② hardware-qemu.ini 与存档时逐项一致，改过配置旧快照即作废
@@ -23,6 +27,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 WAIT=1; VERIFY_ONLY=0; APK=""; FORCE_PRODUCT_OUT=0; SHOW_KERNEL=0
 REUSE=0; SNAPSHOT=""
+# 空 = 从 config.ini 读（见下面 resolve 那段）
+GPU_MODE=""; MEM_MB=""; CORES=""
 DEFAULT_APK_URL="https://mirrors.tuna.tsinghua.edu.cn/fdroid/repo/com.oF2pks.kalturadeviceinfos_24.apk"
 DEFAULT_APK_SHA256="218e213d1014a5ae981160274173bcd5f259defa3805e3465f1c10e4f8ea73d9"
 
@@ -35,6 +41,10 @@ while [ $# -gt 0 ]; do
         --from-product-out) FORCE_PRODUCT_OUT=1 ;;
         --show-kernel) SHOW_KERNEL=1 ;;
         --port)        EMULATOR_PORT="${2:?}"; shift ;;
+        # 硬件参数：不传就从 emulator/config.ini 读（那份才是真源）
+        --gpu)         GPU_MODE="${2:?}"; shift ;;
+        --memory)      MEM_MB="${2:?}"; shift ;;
+        --cores)       CORES="${2:?}"; shift ;;
         # 保留工作目录（不 rm -rf）：装了的东西、快照都留着。默认是每次全新冷启动。
         --reuse)       REUSE=1 ;;
         # 从快照秒起（隐含 --reuse）。见文件末尾"快照"一节的三个前提。
@@ -55,6 +65,29 @@ EMULATOR_DATADIR="${EMULATOR_DATADIR:-$RUN_DIR/datadir-$EMULATOR_PORT}"
 SERIAL="emulator-$EMULATOR_PORT"
 mkdir -p "$RUN_DIR" "$EMULATOR_DATADIR"
 
+# ---------------------------------------------------------------------------
+# 硬件参数：默认全部来自 emulator/config.ini
+#
+# ⚠️ 不要在命令行上写死这些值 —— 命令行**优先于** config.ini，
+#    写死了 config.ini 里改什么都没用（以前 -memory 4096 就是这么把
+#    hw.ramSize 架空的）。这里只在**显式传参**时才覆盖。
+CFG_NCORE="$(config_get hw.cpu.ncore 4)"
+CFG_RAM="$(config_get hw.ramSize 4096)"
+CFG_GPU="$(config_get hw.gpu.mode auto)"
+[ -n "$MEM_MB" ] || MEM_MB="$CFG_RAM"
+[ -n "$CORES" ]  || CORES="$CFG_NCORE"
+# 内存写 8192 还是 8G 都认
+case "$MEM_MB" in *[Gg]) MEM_MB=$(( ${MEM_MB%[Gg]} * 1024 ));; esac
+if [ -z "$GPU_MODE" ]; then
+    GPU_MODE="$(resolve_gpu_mode "$CFG_GPU")"
+    GPU_AUTO=1
+else
+    GPU_AUTO=0
+fi
+# host 起不来时自动退软件渲染（见下面候选循环）。显式指定 --gpu 时不退。
+GPU_FALLBACK=""
+[ "$GPU_AUTO" = 1 ] && [ "$GPU_MODE" = host ] && GPU_FALLBACK="swiftshader_indirect"
+
 # 模拟器选择：默认用 SDK 版 37.x（与 Windows 侧同源，便于提前暴露版本问题）
 if [ -z "$EMULATOR_BIN" ]; then
     for c in /opt/android/emulator-new/emulator/emulator \
@@ -62,6 +95,13 @@ if [ -z "$EMULATOR_BIN" ]; then
         [ -x "$c" ] && { EMULATOR_BIN="$c"; break; }
     done
 fi
+
+if [ "$GPU_AUTO" = 1 ]; then
+    log "硬件参数： -memory $MEM_MB  -cores $CORES  -gpu $GPU_MODE（自适应：$(gpu_mode_reason)）"
+else
+    log "硬件参数： -memory $MEM_MB  -cores $CORES  -gpu $GPU_MODE（命令行指定）"
+fi
+log "参数来源： ${EMULATOR_CONFIG#"$PROJECT_ROOT"/}"
 
 # ---------------------------------------------------------------------------
 if [ "$VERIFY_ONLY" = 0 ]; then
@@ -132,7 +172,7 @@ if [ "$VERIFY_ONLY" = 0 ]; then
     AOSP_EMU="$AOSP_DIR/prebuilts/android-emulator/linux-x86_64/emulator"
     [ -x "$AOSP_EMU" ] && [ "$AOSP_EMU" != "$EMULATOR_BIN" ] && CANDIDATES+=("$AOSP_EMU")
 
-    launch() {   # $1 = emulator
+    launch() {   # $1 = emulator, $2 = -gpu 取值
         # 桥接模式：宿主侧那座桥就绪时（tools/net-bridge.sh up），给模拟器挂 TAP 网卡，
         # guest 的 eth0 就直接落在局域网的二层域里、从真实 DHCP 拿 IP。
         # 桥没起时**不加**参数 —— 指向不存在的桥会让模拟器直接起不来，
@@ -159,9 +199,9 @@ if [ "$VERIFY_ONLY" = 0 ]; then
         #                          （彩排时踩到，见 docs/02-build-traps.md §7）
         ANDROID_PRODUCT_OUT="$PRODUCT_OUT" ANDROID_BUILD_TOP="$AOSP_DIR" setsid nohup "$1" \
             -sysdir "$PRODUCT_OUT" -datadir "$EMULATOR_DATADIR" -port "$EMULATOR_PORT" \
-            -no-window -gpu swiftshader_indirect -no-boot-anim -no-audio \
+            -no-window -gpu "$2" -no-boot-anim -no-audio \
             "${snap_args[@]}" \
-            -accel on -memory 4096 -cores 4 \
+            -accel on -memory "$MEM_MB" -cores "$CORES" \
             "${tap_args[@]}" \
             $([ "$SHOW_KERNEL" = 1 ] && printf '%s' "-show-kernel") \
             >> "$RUN_DIR/emulator-$EMULATOR_PORT.log" 2>&1 < /dev/null &
@@ -176,17 +216,31 @@ if [ "$VERIFY_ONLY" = 0 ]; then
         return 1
     }
 
+    # GPU 候选：默认那一档起不来就退软件渲染。
+    #
+    # ⚠️ 为什么需要回退：-gpu auto 选 host 只看"有没有渲染节点"，
+    #    而**有节点 ≠ 驱动能用**（VMware/VirtualBox 的虚拟 GPU、
+    #    容器里挂进来的 renderD、驱动版本不匹配……都会让 host 起来就崩）。
+    #    这时画面全黑或进程直接退出，而软件渲染一定能用 —— 所以自适应
+    #    要落到"真的起来了"为止，而不是"探测到了就算数"。
+    GPU_CANDIDATES=("$GPU_MODE")
+    [ -n "$GPU_FALLBACK" ] && GPU_CANDIDATES+=("$GPU_FALLBACK")
+
     started=0
     for c in "${CANDIDATES[@]}"; do
-        log "启动自编 ROM（KVM）：$c"
-        launch "$c"
-        if adb_appears; then started=1; EMULATOR_BIN="$c"; break; fi
-        warn "这个模拟器没起来（$(tail -2 "$RUN_DIR/emulator-$EMULATOR_PORT.log" | tr '\n' ' ')）"
-        kill "$EMU_PID" 2>/dev/null || true
-        "$ADB" -s "$SERIAL" emu kill >/dev/null 2>&1 || true
-        sleep 3
+        for g in "${GPU_CANDIDATES[@]}"; do
+            log "启动自编 ROM（KVM）：$c  -gpu $g  -memory $MEM_MB -cores $CORES"
+            [ "$g" = "$GPU_MODE" ] || warn "上一档（$GPU_MODE）没起来，退到 $g"
+            launch "$c" "$g"
+            if adb_appears; then started=1; EMULATOR_BIN="$c"; GPU_MODE="$g"; break 2; fi
+            warn "这个组合没起来（$(tail -2 "$RUN_DIR/emulator-$EMULATOR_PORT.log" | tr '\n' ' ')）"
+            kill "$EMU_PID" 2>/dev/null || true
+            "$ADB" -s "$SERIAL" emu kill >/dev/null 2>&1 || true
+            sleep 3
+        done
     done
-    [ "$started" = 1 ] || die "所有模拟器都没能启动设备；看 $RUN_DIR/emulator-$EMULATOR_PORT.log"
+    [ "$started" = 1 ] || die "所有模拟器/GPU 组合都没能启动设备；看 $RUN_DIR/emulator-$EMULATOR_PORT.log"
+    log "实际使用：-gpu $GPU_MODE -memory $MEM_MB -cores $CORES"
 
     if [ "$WAIT" = 1 ]; then
         log "等开机完成"

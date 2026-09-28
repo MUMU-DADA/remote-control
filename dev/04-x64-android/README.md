@@ -78,11 +78,13 @@ dev/04-x64-android/
 │   ├── build-rom.sh                ← 容器内 lunch + m（后台 + 日志 + --status）
 │   ├── package-rom.sh              ← 打包可交付 ROM 目录（SHA256SUMS + MANIFEST.txt）
 │   ├── run-linux.sh                ← Linux/KVM 启动 + 验收（含 arm64 应用）
+│   ├── emulator.sh                 ← 实例生命周期：建/起/停/强杀/重启/重置/删除/复制
 │   └── status.sh                   ← 一眼看清 载荷/注入/构建/产物/设备
 ├── tools/
 │   ├── build-probe-apk.sh          ← 自建 arm64 探针 APK（纯 arm64-v8a，16 KB）
 │   ├── arm64-probe/                ← 探针源码（manifest / Activity / JNI）
 │   ├── check-bridge-symbols.sh     ← 翻译层动态依赖自检（启动前发现版本错配）
+│   ├── verify-clone-independent.sh ← 证明 clone 出来的实例和原实例数据互不影响
 │   ├── net-bridge.sh               ← 桥接模式：建 br0 把上行网卡桥进去（带自动回滚）
 │   └── net-bridge-ifup.sh          ← 模拟器拉起 TAP 时的回调，把它挂进桥
 ├── windows/                        ← Windows 侧（同一份镜像）
@@ -91,15 +93,29 @@ dev/04-x64-android/
 └── .run/                           ← 运行期（datadir、日志、截图）
 ```
 
-> **屏幕分辨率 / 密度**：模拟器不读 `build.prop` 里的密度，只认自己的 `config.ini` ——
-> 首次启动时由它生成 `<sysdir>/hardware-qemu.ini` 的 `hw.lcd.width/height/density`。
+> **"硬件"参数（屏幕 / 内存 / 核数 / GPU / 数据分区）全部来自
+> [`emulator/config.ini`](emulator/config.ini)—— 本项目唯一真源。**
+>
 > ROM 构建装进去的是 goldfish 的 `data/etc/config.ini.xl`（**1440x2960 @560dpi**，
-> Pixel 3 XL 尺寸）；`emulator/config.ini` 把它统一覆盖成 **720x1280 @320dpi**
-> —— 配 `-gpu swiftshader_indirect`（纯 CPU 软件光栅化）时像素量约降到 1/4.6，
-> 是这套配置里最省的一项。三个生效点都取同一份文件：
-> `run-linux.sh`（写进 `.run/sysdir-<port>/`）、`package-rom.sh`（写进交付目录）、
+> Pixel 3 XL 尺寸）；这份 config.ini 把它统一覆盖成：
+>
+> | 项 | 值 | 为什么 |
+> |---|---|---|
+> | 屏幕 | **1280x720 横屏 @320dpi** | 720p 是标准 16:9；比 1440x2960 省 4.6 倍像素。横屏是把**面板本身**做成 1280x720，`/info` 报的显示尺寸和触控范围开机就一致 |
+> | CPU / 内存 | **4 核 / 8 GB** | 宿主 16 核 32G，单实例留足余量 |
+> | 数据分区 | **32 GB** | 一次安装的磁盘峰值约是 APK 的 3 倍（900MB 的包峰值 2.7GB），32G 装得下 3GB 级大应用和游戏数据 |
+> | GPU | **auto（自适应）** | 宿主有可用渲染节点就走真 GPU，没有就退 `swiftshader_indirect`；启动时那一档起不来还会再退一次 |
+>
+> ⚠️ 这些值**不要在命令行上写死** —— 命令行优先于 config.ini。以前
+> `run-linux.sh` 写死了 `-memory 4096`，于是 config.ini 里的 `hw.ramSize`
+> 改什么都没用（`hardware-qemu.ini` 里永远是 4096）。现在统一从 config.ini 读。
+>
+> 生效点都取同一份文件：`run-linux.sh` / `emulator.sh`（写进
+> `.run/sysdir-<port>/config.ini`）、`package-rom.sh`（写进交付目录）、
 > `windows/run-windows.ps1`（写进 `windows/images/`）。
-> **不参与 AOSP 构建，改完不需要重编 ROM。**
+> **不参与 AOSP 构建，改完不需要重编 ROM** —— 但改
+> `disk.dataPartition.size` 要清掉 `userdata-qemu.img*` 才生效
+> （`./scripts/emulator.sh reset <实例>` 会一起做掉）。
 
 ---
 
@@ -121,6 +137,21 @@ cd dev/04-x64-android
 ./scripts/run-linux.sh              #    只做启动验收
 ./scripts/package-rom.sh            #    只做打包（含 sha256 清单）
 ```
+
+**日常开机关机用 `emulator.sh`**（`run-linux.sh` 是"启动 + 验收"的一次性流程，
+`emulator.sh` 管的是实例的整个生命周期）：
+
+```bash
+./scripts/emulator.sh list                    # 有哪些实例、在不在跑、占多大
+./scripts/emulator.sh start  default          # 起（不存在会自动创建）
+./scripts/emulator.sh stop   default          # 优雅关机（等进程真的退出）
+./scripts/emulator.sh kill   default          # 卡住了才用：强杀
+./scripts/emulator.sh clone  default  dev2    # 复制一台（连已装应用一起）
+./scripts/emulator.sh delete dev2             # 停掉并删光
+```
+
+完整命令表和每个命令的注意事项见
+[`docs/12-emulator-control.md`](docs/12-emulator-control.md)。
 
 Windows 侧：同一份打包产物 + `emulator.exe` + WHPX，见 [`windows/README.md`](windows/README.md)。
 
@@ -173,4 +204,5 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 - **为什么不做"跨架构全系统模拟 arm64"**（实测结论 + 可复用发现） → [`docs/09-why-not-full-arm64-sim.md`](docs/09-why-not-full-arm64-sim.md)
 - **网络桥接模式**（让模拟器落到物理局域网，`-net-tap`） → [`docs/10-network-bridge.md`](docs/10-network-bridge.md)
 - **快照与多实例**（7 秒从快照恢复、一键再开一台机器、MAC 硬限制） → [`docs/11-snapshots-and-multi.md`](docs/11-snapshots-and-multi.md)
+- **实例生命周期控制**（建/起/停/强杀/重启/重置/删除/复制，GPU 自适应） → [`docs/12-emulator-control.md`](docs/12-emulator-control.md)
 - 进度与阶段 → [`PLAN.md`](PLAN.md)
