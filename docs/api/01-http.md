@@ -230,17 +230,28 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
   "free": false,
   "width": 1280,
   "height": 720,
+  "logicalWidth": 1280,
+  "logicalHeight": 720,
   "note": "这台设备不支持旋转（mRotation 不变），已改用 wm size 把显示尺寸设成 1280x720，应用会按横屏重新布局"
 }
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `applied` | **真的转过去了吗**。false 时看 `note` |
+| `applied` | **真的转过去了吗**。false 时 `note` 说明为什么 |
 | `method` | `user-rotation`（正规入口）/ `wm-size`（退路）/ `none` |
 | `rotation` | 方向**设置项**。写什么读出来就是什么 |
 | `actualRotation` | 系统**实际**的 `mRotation`（0-3）。跟 `rotation` 不一致 = 这台设备转不动 |
-| `width/height` | 切完之后实际的显示尺寸 |
+| `width/height` | 切完之后**抓帧拿到的真实尺寸** —— 客户端就是按它算坐标 |
+| `logicalWidth/Height` | `wm size` 报的**逻辑**尺寸（有覆盖时读 `Override size`） |
+| `requested` | 归一化后的角度。`-1` = 这次没请求方向（`status` / `free`） |
+
+> ⚠️ **`width/height` 和 `logicalWidth/Height` 会不一样，信前者。**
+>
+> 在**面板原生横屏**的设备上实测：`wm size 720x1280` 只写进
+> `mOverrideDisplayInfo`（应用可见区域），**真实 framebuffer 还是
+> 1280x720**，抓帧一点没变。`wm size` 的读数这时会骗人，
+> 所以判定成败、报给客户端的尺寸、重建触控空间，一律以真实尺寸为准。
 
 > ⚠️ **两条路不等价，所以要走哪条是运行时决定的。**
 >
@@ -256,12 +267,27 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 > 只判方向的话，在不支持旋转的设备上转 0° 时 `mRotation` 本来就是 0，
 > 会被误判成成功，而上一轮退路设的横屏尺寸**永远不会被还原**。
 
+> ⚠️ **`applied:false` 是正常结果，不是服务坏了。**
+> 面板的原生方向由硬件（或模拟器皮肤）决定，`portrait` / `landscape`
+> 是相对它说的：`portrait` = 转 0°。
+>
+> 本项目的模拟器皮肤原生就是 1280x720 横屏，所以：
+>
+> | 请求 | 结果 |
+> |---|---|
+> | `90` / `landscape` | `applied:true` —— 本来就是横屏 |
+> | `0` / `portrait` | `applied:false` —— 面板压不出竖屏，`note` 里说清楚 |
+>
+> 换句话说 `applied:true` 只承诺"你要的方向现在真的成立"，
+> 不承诺"画面被你转了一下"。
+
 > ⚠️ 这个端点在 v7 之前是坏的：它直接转发 `Cmd::Info`，
 > 而那条命令把结果填在 `Reply` **结构体的字段**里（socket 协议的表达
 > 方式），HTTP 层只看 JSON 正文 —— 于是返回 `{"ok":true,"status":0,
 > "error":"ok"}`，看着成功，一个有用字段都没有。
 
-写客户端时**先调这个拿分辨率**，再据此算坐标 —— 不要假设屏幕尺寸。
+写客户端时**先调这个（或 `GET /info`）拿分辨率**，再据此算坐标 ——
+不要假设屏幕尺寸，转屏后要重取。
 
 ### GET /params
 

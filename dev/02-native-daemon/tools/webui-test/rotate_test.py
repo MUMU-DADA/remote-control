@@ -61,24 +61,49 @@ with sync_playwright() as p:
         f"画布 {s0['sw']}x{s0['sh']} vs 触控 {s0['tw']}x{s0['th']}")
 
     # ── 转到另一个方向 ──
+    #
+    # ⚠️ 这里**不能**断言"一定转成功"。面板原生横竖由模拟器皮肤决定，
+    #    而有些面板（比如本项目这个 1280x720 横屏皮肤）根本转不到竖屏：
+    #      · `cmd window user-rotation lock 1` 能写进设置项，但 mRotation 不动
+    #      · `wm size 720x1280` 只改 mOverrideDisplayInfo（应用可见区域），
+    #        真实 framebuffer 还是 1280x720，抓帧一点没变
+    #
+    #    所以真正该守的不变量是：**applied=true 就必须真的变了**。
+    #    这条以前是漏的 —— `to=portrait` 走 wm size 分支时无条件回
+    #    applied=true，而画面纹丝不动。用户看到"转了"的按钮配一张没转的图。
     target = "portrait" if start_landscape else "landscape"
     r = rotate(target)
     print(f"  转到 {target}: applied={r['applied']} method={r['method']}"
           f" → {r['width']}x{r['height']}")
+    print(f"    note: {r['note']}")
+    changed = (r["width"] > r["height"]) != start_landscape
+    chk("applied=true 时几何必须真的变了（不许假成功）",
+        (not r["applied"]) or changed,
+        f"applied={r['applied']} 但服务端说 {r['width']}x{r['height']}"
+        f"（起始 {'横' if start_landscape else '竖'}屏）")
+
     time.sleep(4)
     s1 = state()
     print(f"  转后: 画布 {s1['sw']}x{s1['sh']}  触控空间 {s1['tw']}x{s1['th']}")
-    chk("服务端显示尺寸真的换了方向",
-        (r["width"] > r["height"]) != start_landscape,
-        f"{r['width']}x{r['height']}")
-    chk("客户端画布跟着换（size 消息重发生效）",
-        (s1["sw"] > s1["sh"]) != start_landscape, f"{s1['sw']}x{s1['sh']}")
+    if r["applied"]:
+        chk("客户端画布跟着换（size 消息重发生效）",
+            (s1["sw"] > s1["sh"]) != start_landscape, f"{s1['sw']}x{s1['sh']}")
+    else:
+        # 转不过去时画面**必须原地不动** —— 这也是一条实质断言：
+        # 假成功的实现会在这里露出"接口说转了、画面没转"或反过来的马脚。
+        chk("applied=false 时画面原地不动",
+            (s1["sw"] > s1["sh"]) == start_landscape,
+            f"画布 {s1['sw']}x{s1['sh']}")
     # ⚠️ 行为在某一轮改过：以前坐标范围是启动时定死的、转屏不变；
     #    现在**跟着显示走** —— 因为固定不变会让客户端按屏幕像素发的坐标
     #    超出范围被内核钳住，落点全错（实测过）。页面必须在旋转后重取。
-    chk("触控坐标空间跟着换，且与画布一致",
+    chk("触控坐标空间始终跟着画布",
         s1["tw"] == s1["sw"] and s1["th"] == s1["sh"],
         f"画布 {s1['sw']}x{s1['sh']} vs 触控 {s1['tw']}x{s1['th']}")
+    # 客户端读到的尺寸要和服务端报的一致
+    chk("客户端画布尺寸 == 服务端报的 width/height",
+        s1["sw"] == r["width"] and s1["sh"] == r["height"],
+        f"画布 {s1['sw']}x{s1['sh']} vs 接口 {r['width']}x{r['height']}")
 
     # ── 转回来 ──
     back = "landscape" if start_landscape else "portrait"

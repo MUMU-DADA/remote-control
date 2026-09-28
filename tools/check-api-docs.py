@@ -131,10 +131,24 @@ def api_post(path, body):
 rot = api_post("/rotate", {"to": "status"})
 chk(rot.get("ok") is True, "Rotate 可用（POST /rotate）")
 for f in ("requested", "applied", "method", "rotation", "actualRotation",
-          "width", "height", "note"):
+          "width", "height", "logicalWidth", "logicalHeight", "note"):
     chk(f in rot, f"rotate.{f} 存在", f"实际字段 {sorted(rot)}")
 chk(rot.get("method") in ("user-rotation", "wm-size", "none"),
     "rotate.method 是三选一", f"实际 {rot.get('method')!r}")
+
+# applied=true 必须意味着**几何真的成立**。
+#
+# ⚠️ 这条以前是漏的：`to=portrait` 走 wm size 退路时无条件回 applied=true，
+#    而在面板原生横屏的模拟器上 reset 回去还是横屏 —— 接口说转了、
+#    画面纹丝不动。转到**当前已经是**的方向来验，所以不会真的动屏幕。
+_cur_land = rot.get("width", 0) >= rot.get("height", 0)
+_tgt = "landscape" if _cur_land else "portrait"
+_r = api_post("/rotate", {"to": _tgt})
+chk(_r.get("applied") is True, f"转到当前方向（{_tgt}）必须报 applied=true",
+    f"applied={_r.get('applied')} note={str(_r.get('note'))[:60]}")
+chk((_r.get("width", 0) > _r.get("height", 0)) == _cur_land,
+    "applied=true 时几何必须和请求的方向一致（不许假成功）",
+    f"{_r.get('width')}x{_r.get('height')}（请求 {_tgt}）")
 t01 = open(os.path.join(DOCS, "01-http.md"), encoding="utf-8").read()
 for f in ("applied", "actualRotation", "wm-size"):
     chk(f in t01, f"01-http.md 里写了 rotate 的 {f}")

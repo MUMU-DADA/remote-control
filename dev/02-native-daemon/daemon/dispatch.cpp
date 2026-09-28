@@ -1411,8 +1411,17 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
     // lock 1` 返回成功、设置项也写进去了，但 mRotation 死活不动 ——
     // 那台设备根本没有旋转支持。假装成功的话，用户会看到一个
     // 转了 90° 的按钮和一张没转的画面，然后怀疑是服务坏了。
+    // ⚠️ 两套尺寸，别混：
+    //
+    //    w/h        `wm size` 报的**逻辑**尺寸（有覆盖时读 Override size）
+    //    realW/realH 抓帧拿到的**真实**显示尺寸，也就是客户端在画面上看到的
+    //
+    //    在面板原生横屏的模拟器上实测过：`wm size 720x1280` 只改了
+    //    `mOverrideDisplayInfo`（应用可见区域），**真实 framebuffer 还是
+    //    1280x720**。拿 w/h 判成败会得出"转成竖屏了"的错误结论 ——
+    //    判成败、报给客户端的尺寸、重建注入器的依据，一律用 realW/realH。
     auto snapshot = [&](int* rot, bool* isFree, uint32_t* w, uint32_t* h,
-                        int* actual) {
+                        int* actual, uint32_t* realW, uint32_t* realH) {
         std::string e;
         std::string out;
         if (RunWindowCmd({"user-rotation"}, &out, &e)) {
@@ -1428,13 +1437,23 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
                        &r, &e) && r.exitCode == 0) {
             *actual = ParseRealRotation(r.out);
         }
+        std::vector<DisplayInfo> displays;
+        std::string de;
+        if (capture_ != nullptr && capture_->ListDisplays(&displays, &de) &&
+            !displays.empty()) {
+            *realW = displays.front().width;
+            *realH = displays.front().height;
+        }
     };
 
     int      rot = 0;
     bool     isFree = true;
     uint32_t w = 0, h = 0;
     int      actual = -1;
-    snapshot(&rot, &isFree, &w, &h, &actual);
+    uint32_t realW = 0, realH = 0;
+    snapshot(&rot, &isFree, &w, &h, &actual, &realW, &realH);
+    // 读不到就退回逻辑尺寸，至少不是 0
+    if (realW == 0 || realH == 0) { realW = w; realH = h; }
 
     // 显示几何变了之后，把注入器的坐标范围跟过去。
     //
@@ -1448,7 +1467,8 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
         // 用户用 --touch-range / touch-width 显式指定过就不动它
         const bool explicitRange = st.GetConfig().touchWidth > 0;
         std::string e;
-        if (!ServiceState::Instance().RebuildInjectorForDisplay(w, h,
+        // 按**真实**尺寸重建 —— 触控空间必须和客户端看到的画面一致
+        if (!ServiceState::Instance().RebuildInjectorForDisplay(realW, realH,
                                                                 explicitRange,
                                                                 &e)) {
             ALOGW("重建注入设备失败（触控范围可能和显示尺寸不一致）: %s",
@@ -1469,8 +1489,13 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
             .Field("rotation", static_cast<int64_t>(rot))
             .Field("actualRotation", static_cast<int64_t>(actual))
             .Field("free", isFree)
-            .Field("width", static_cast<int64_t>(w))
-            .Field("height", static_cast<int64_t>(h))
+            // 报**真实**（抓帧拿到的）尺寸，不是 wm size 的逻辑尺寸 ——
+            // 两者在面板原生横屏 + wm size 覆盖的设备上会分叉，
+            // 而客户端关心的是画面到底多大。
+            .Field("width", static_cast<int64_t>(realW))
+            .Field("height", static_cast<int64_t>(realH))
+            .Field("logicalWidth", static_cast<int64_t>(w))
+            .Field("logicalHeight", static_cast<int64_t>(h))
             .Field("note", note)
          .EndObj();
         return MakeJsonReply(req.cmd, jw.str());
@@ -1487,7 +1512,8 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
             return MakeJsonError(req.cmd, kErrInternal, e);
         }
         usleep(600 * 1000);
-        snapshot(&rot, &isFree, &w, &h, &actual);
+        snapshot(&rot, &isFree, &w, &h, &actual, &realW, &realH);
+        if (realW == 0 || realH == 0) { realW = w; realH = h; }
         return reply(isFree, "user-rotation", -1,
                      isFree ? "已解除方向锁定，跟随传感器"
                             : "user-rotation free 没有生效，方向仍被锁定");
@@ -1513,7 +1539,8 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
     if (RunWindowCmd({"user-rotation", "lock", std::to_string(n)}, nullptr,
                      &err)) {
         usleep(600 * 1000);          // 等窗口管理器把配置变更发下去
-        snapshot(&rot, &isFree, &w, &h, &actual);
+        snapshot(&rot, &isFree, &w, &h, &actual, &realW, &realH);
+        if (realW == 0 || realH == 0) { realW = w; realH = h; }
 
         // 两个条件都满足才算真的切过去了：
         //   · 系统实际方向 == 目标（不是设置项 —— 见 ParseRealRotation）
@@ -1524,7 +1551,7 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
         //    退路设的横屏尺寸**永远不会被还原**。
         //    实测踩到：to=0 之后显示还停在 1280x720。
         const bool wantLandscape = (n == 1 || n == 3);
-        const bool geomOk = wantLandscape ? (w > h) : (h >= w);
+        const bool geomOk = wantLandscape ? (realW > realH) : (realH >= realW);
         if (actual == n && geomOk) {
             syncInjector();
             return reply(true, "user-rotation", deg,
@@ -1539,6 +1566,13 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
     //
     // ⚠️ 它和真旋转**不等价**：mRotation 不变，所以按方向（而不是按尺寸）
     //    判断横竖的应用看不出来；180° 也没法表达。
+    //
+    // ⚠️ 而且**不是所有设备都吃这一套**。本项目横屏皮肤的模拟器上实测：
+    //    `wm size 720x1280` 只写进了 `mOverrideDisplayInfo`（应用可见区域），
+    //    真实 framebuffer 仍是 1280x720，抓帧完全没变 —— 面板的 base mode
+    //    就是 1280x720，覆盖尺寸要求 1280 高，超出了它。
+    //    所以下面判成败一律看**真实**尺寸（realW/realH），
+    //    不看 wm size 的读数：后者会被这层覆盖骗过去。
     if (n == 2) {
         return reply(false, "none", deg,
                      "这台设备不支持旋转，而 180° 没法用显示尺寸模拟"
@@ -1561,16 +1595,63 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
     }
 
     if (n == 0) {
+        // ⚠️ 这里原来直接 `wm size reset` 然后**无条件** applied=true。
+        //
+        //    只在**面板原生竖屏**的设备上是对的：reset 回物理尺寸 = 竖屏。
+        //    面板原生横屏时（本项目的模拟器皮肤就是 1280x720），
+        //    reset 回去**还是横屏** —— 接口报"成功"，画面纹丝不动。
+        //    实测：rotate_test 转到 portrait，画布/触控一直是 1280x720，
+        //    而 applied=true。这正是本函数开头那段注释里骂过的
+        //    "转了 90° 的按钮配一张没转的画面"。
+        //
+        //    修法：和横屏那条分支对称 —— 先 reset 清掉可能存在的覆盖，
+        //    几何不对再显式要一次竖屏尺寸，最后**按几何判定**成功与否。
         std::string e;
         if (!RunWindowCmd({"size", "reset"}, nullptr, &e)) {
             return MakeJsonError(req.cmd, kErrInternal, e);
         }
         usleep(400 * 1000);
-        snapshot(&rot, &isFree, &w, &h, &actual);
-        syncInjector();
-        return reply(true, "wm-size", deg,
-                     "这台设备不支持旋转（mRotation 不动），"
-                     "已用 wm size 还原原始显示尺寸");
+        snapshot(&rot, &isFree, &w, &h, &actual, &realW, &realH);
+        if (realW == 0 || realH == 0) { realW = w; realH = h; }
+
+        std::string triedSize;   // 试过的覆盖尺寸，失败时写进 note
+        if (realW > realH) {   // 面板原生就是横的，reset 解决不了
+            const std::string psz = std::to_string(realH) + "x" +
+                                    std::to_string(realW);
+            if (RunWindowCmd({"size", psz}, nullptr, &e)) {
+                triedSize = psz;
+                usleep(400 * 1000);
+                snapshot(&rot, &isFree, &w, &h, &actual, &realW, &realH);
+                if (realW == 0 || realH == 0) { realW = w; realH = h; }
+            }
+        }
+
+        // 竖屏几何：高 >= 宽。**看真实尺寸**，不看 wm size ——
+        // wm size 那层覆盖在本项目的横屏模拟器上不改变 framebuffer。
+        const bool ok = (realH >= realW);
+        if (ok) {
+            syncInjector();
+        } else if (!triedSize.empty()) {
+            // 覆盖压不出竖屏，别把没用的覆盖留在设备上 ——
+            // 留着会让 wm size / dumpsys 的读数跟真实画面长期不一致，
+            // 下次来查的人会被它带偏。
+            std::string e2;
+            RunWindowCmd({"size", "reset"}, nullptr, &e2);
+            usleep(300 * 1000);
+            snapshot(&rot, &isFree, &w, &h, &actual, &realW, &realH);
+            if (realW == 0 || realH == 0) { realW = w; realH = h; }
+        }
+        return reply(ok, "wm-size", deg,
+                     ok ? "这台设备不支持旋转（mRotation 不动），"
+                          "已用 wm size 还原成竖屏尺寸"
+                        : ("这台设备不光转不了（mRotation 不动），"
+                           "wm size 也压不出竖屏 —— 试过 " +
+                           (triedSize.empty() ? std::string("（尺寸没设进去）")
+                                              : triedSize) +
+                           "，面板物理尺寸 " + std::to_string(realW) + "x" +
+                           std::to_string(realH) + " 没变：覆盖尺寸改的只是"
+                           "应用可见区域，抓帧拿到的还是这个方向。"
+                           "要竖屏只能换竖屏的模拟器皮肤"));
     }
 
     // 横屏：从**物理**尺寸算，别用当前（可能已经被覆盖过的）尺寸
@@ -1595,15 +1676,16 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
         return MakeJsonError(req.cmd, kErrInternal, e);
     }
     usleep(400 * 1000);
-    snapshot(&rot, &isFree, &w, &h, &actual);
+    snapshot(&rot, &isFree, &w, &h, &actual, &realW, &realH);
+    if (realW == 0 || realH == 0) { realW = w; realH = h; }
 
-    const bool ok = (w == lw && h == lh);
+    const bool ok = (realW == lw && realH == lh);
     if (ok) syncInjector();
     return reply(ok, "wm-size", deg,
                  ok ? ("这台设备不支持旋转（mRotation 不变），已改用 wm size "
                        "把显示尺寸设成 " + sz + "，应用会按横屏重新布局")
-                    : ("wm size " + sz + " 没有生效，当前仍是 " +
-                       std::to_string(w) + "x" + std::to_string(h)));
+                    : ("wm size " + sz + " 没有生效，画面仍是 " +
+                       std::to_string(realW) + "x" + std::to_string(realH)));
 }
 
 // ── v6：服务开关 / 运行状态 / 历史日志 ─────────────────────────────────────
