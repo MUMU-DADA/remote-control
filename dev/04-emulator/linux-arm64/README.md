@@ -884,3 +884,56 @@ init: InitFatalReboot: signal 6        → 启动循环（7 次）
    在 ramdisk（`initrd`＝`ramdisk.img`）里，改完重新打包即可，这样根本不走 AVB。
 
 任一条做完，就能启动带 161 个 arm64 框架库的系统，直接跑 `autod` 收尾。
+
+---
+
+## 第 16 轮：追查 fstab 来源 + 定位到 AVB 哈希不匹配
+
+### 一、线索链
+
+启动后内核日志给出完整因果：
+
+```
+init: [libfs_avb]Device path not found: /dev/block/by-name/system
+init: [libfs_avb]Fallback to use logical device path: /dev/block/dm-0
+init: [libfs_avb]avb_slot_verify failed, result: 6        ← 6 = 校验失败（哈希不匹配）
+init: Failed to open AvbHandle: No such file or directory
+init: Failed to setup verity for '/system': ...
+init: Failed to mount /system: ...  → InitFatalReboot: signal 6 → 启动循环
+```
+
+即：**guest 读到的 fstab 里 `system` 那行仍带 `avb=vbmeta`**，于是去做 AVB 校验，
+而校验对象是我改过的 system，**哈希必然不匹配**（result 6）。
+
+### 二、fstab 到底从哪来（逐个排除）
+
+| 候选来源 | 检查结果 |
+|---|---|
+| DT（`ReadFstabFromDt`） | **失败**（日志明确 fail）|
+| ramdisk（`initrd`）| Google 的 ramdisk 里**只有** `debug_ramdisk dev init mnt proc sys`，本来就没有 fstab；我另外放进去的 `first_stage_ramdisk/fstab.ranchu` **也没被采用** |
+| **super 里的 vendor 分区** | 有 `/etc/fstab.ranchu`，**已补丁并回读确认 avb=0** ✓ |
+| **独立的 `vendor.img`** | **也有一份 fstab 且仍带 avb=vbmeta** —— 已补丁并回读确认 avb=0 ✓（补丁后 AVB 报错次数从 4 降到 2）|
+| system 分区 | 无独立 fstab |
+| 模拟器/QEMU 二进制、kernel-ranchu | 都没有 `avb=vbmeta` 字面量（说明是运行时合成）|
+
+（注意：**`/dev/block/by-name/system` 找不到 → 回退到逻辑设备 `/dev/block/dm-0`** 是正常回退，
+真正的失败在 `avb_slot_verify failed, result: 6`。）
+
+### 三、本轮已验证的成果
+
+- **镜像手术全流程稳定可用**：`resize2fs` 扩容 system ext4 → `debugfs` 注入 161 个 arm64 库 →
+  `lpmake` 重建 super → 写回 `system.img`。**回读 live 镜像确认**：
+  `/lib64/arm64` 有库、super 内 vendor 的 fstab 无 avb ✓；
+- **两处 vendor fstab 都已去掉 `avb=vbmeta`** ✓；
+- 工具齐备：**`out/host/linux-x86/bin/avbtool`** ✓ + **`external/avb/test/data/*.pem` 测试密钥** ✓ +
+  **`vbmeta` 分区是标准 AVB blob**（`AVB0` 魔数、2842 非零字节）✓。
+
+### 四、下一轮：直接重建 vbmeta（确定解法）
+
+既然改不动"guest 从哪读 fstab"，就**让 AVB 校验通过**：
+
+1. `avbtool info_image --image <vbmeta 分区>` 看清原有描述符（哪些分区、什么算法/salt）；
+2. 对改过的分区用 `avbtool add_hashtree_footer`（`--partition_size` 用实际大小、
+   `--key external/avb/test/data/testkey_rsa2048.pem` 之类）生成新的哈希树；
+3. `avbtool make_vbmeta_image` 生成新的 vbmeta，写回 `system.img` 的 1MB 处（LBA 2048）；
+4. 启动验证 AVB 通过、`/system` 挂载成功，然后跑 `autod` 收尾。
