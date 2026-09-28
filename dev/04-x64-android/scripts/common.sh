@@ -52,8 +52,14 @@ EMULATOR_CONFIG="${EMULATOR_CONFIG:-$X64_DIR/emulator/config.ini}"
 
 # 桥接（-net-tap）：宿主机上已就绪的桥接口名。留空 = 用模拟器默认的用户态 NAT。
 #   ./tools/net-bridge.sh up   建 br0（把 ens33 桥进去）→ 之后启动即自动走桥接
-NET_BRIDGE_IF="${NET_BRIDGE_IF:-br0}"
-NET_TAP_IF="${NET_TAP_IF:-tap0}"
+# ⚠️ 这里用 ${VAR-default} 而**不是** ${VAR:-default}：`:-` 对"已设置但为空"也替换成默认值，
+#    那样 `NET_BRIDGE_IF= ./run-linux.sh` 就关不掉桥接了（实测踩过：想关桥却照样加了
+#    -net-tap，第二台实例去抢同一个 tap0 → "could not configure /dev/net/tun (tap0):
+#    Device or resource busy"）。
+NET_BRIDGE_IF="${NET_BRIDGE_IF-br0}"
+# 注意：NET_TAP_IF 与 EMULATOR_DATADIR 都**按端口派生**，在 run-linux.sh 解析完 --port
+# 之后才算（见那里）。放在这里会因为端口还没被覆盖而算成 5580 的值 —— 多实例时
+# 一个抢 tap、一个共用不存在的 datadir。
 JOBS="${JOBS:-12}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }

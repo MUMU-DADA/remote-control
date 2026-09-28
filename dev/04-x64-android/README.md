@@ -171,4 +171,6 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 - 往 ROM 里加自制组件（如 `autod`） → [`docs/05-adding-components.md`](docs/05-adding-components.md)
 - **arm32 下放预案**（目标里的"如果 arm64 不行"） → [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md)
 - **为什么不做"跨架构全系统模拟 arm64"**（实测结论 + 可复用发现） → [`docs/09-why-not-full-arm64-sim.md`](docs/09-why-not-full-arm64-sim.md)
+- **网络桥接模式**（让模拟器落到物理局域网，`-net-tap`） → [`docs/10-network-bridge.md`](docs/10-network-bridge.md)
+- **快照与多实例**（7 秒从快照恢复、一键再开一台机器、MAC 硬限制） → [`docs/11-snapshots-and-multi.md`](docs/11-snapshots-and-multi.md)
 - 进度与阶段 → [`PLAN.md`](PLAN.md)

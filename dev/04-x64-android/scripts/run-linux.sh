@@ -1,16 +1,28 @@
 #!/usr/bin/env bash
 # Linux/x86_64 侧：启动自编 ROM（KVM 加速）并做 arm64 应用验收。
 #
-#   ./run-linux.sh                 # 启动 + 等开机 + 验收
+#   ./run-linux.sh                 # 启动 + 等开机 + 验收（默认：全新冷启动）
 #   ./run-linux.sh --no-wait       # 起了就返回
 #   ./run-linux.sh --verify        # 对已在跑的实例只做验收
 #   ./run-linux.sh --stop          # 停掉
 #   ./run-linux.sh --apk <path>    # 用指定的 arm64 APK 做验收（默认用固定的 F-Droid 包）
 #
+# 多开一台机器 / 保留状态 / 从快照秒起：
+#   ./run-linux.sh --port 5584                 # 再开一台（独立 sysdir / datadir / tap，互不干扰）
+#   ./run-linux.sh --port 5584 --reuse         # 保留工作目录：装的应用、快照都留着
+#   ./run-linux.sh --snapshot my-snap          # 从快照恢复（隐含 --reuse；实测约 7 秒进系统）
+#
+# 快照：存 `adb -s emulator-<port> emu avd snapshot save <名>`，列 `... emu avd snapshot list`。
+#   三个前提（缺一不可）：① config.ini 的 fastboot.forceColdBoot 必须是 no（--snapshot 自动改）
+#                        ② hardware-qemu.ini 与存档时逐项一致，改过配置旧快照即作废
+#                        ③ 工作目录不能删（--reuse / --snapshot 保证）
+# ⚠️ 桥接（-net-tap）时 guest 的 MAC 是 QEMU 默认值，所有实例相同 —— 同时只让一台上物理 LAN。
+#
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 WAIT=1; VERIFY_ONLY=0; APK=""; FORCE_PRODUCT_OUT=0; SHOW_KERNEL=0
+REUSE=0; SNAPSHOT=""
 DEFAULT_APK_URL="https://mirrors.tuna.tsinghua.edu.cn/fdroid/repo/com.oF2pks.kalturadeviceinfos_24.apk"
 DEFAULT_APK_SHA256="218e213d1014a5ae981160274173bcd5f259defa3805e3465f1c10e4f8ea73d9"
 
@@ -23,14 +35,25 @@ while [ $# -gt 0 ]; do
         --from-product-out) FORCE_PRODUCT_OUT=1 ;;
         --show-kernel) SHOW_KERNEL=1 ;;
         --port)        EMULATOR_PORT="${2:?}"; shift ;;
-        -h|--help)     sed -n '2,12p' "$0"; exit 0 ;;
+        # 保留工作目录（不 rm -rf）：装了的东西、快照都留着。默认是每次全新冷启动。
+        --reuse)       REUSE=1 ;;
+        # 从快照秒起（隐含 --reuse）。见文件末尾"快照"一节的三个前提。
+        --snapshot)    SNAPSHOT="${2:?}"; REUSE=1; shift ;;
+        -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
         *) die "未知参数：$1" ;;
     esac
     shift
 done
 
+# 按**最终**端口派生（--port 在上面才生效，所以不能放到 common.sh 里算）：
+#   NET_TAP_IF        每实例一个 tap，否则多实例抢同一个 tap0
+#   EMULATOR_DATADIR  每实例一个 datadir；共用时 AOSP 自带模拟器会因为目录不存在
+#                     直接报 "ERROR: Invalid -datadir directory" 退出（SDK 版容忍，所以一直没暴露）
+NET_TAP_IF="${NET_TAP_IF:-tap$EMULATOR_PORT}"
+EMULATOR_DATADIR="${EMULATOR_DATADIR:-$RUN_DIR/datadir-$EMULATOR_PORT}"
+
 SERIAL="emulator-$EMULATOR_PORT"
-mkdir -p "$RUN_DIR"
+mkdir -p "$RUN_DIR" "$EMULATOR_DATADIR"
 
 # 模拟器选择：默认用 SDK 版 37.x（与 Windows 侧同源，便于提前暴露版本问题）
 if [ -z "$EMULATOR_BIN" ]; then
@@ -55,7 +78,14 @@ if [ "$VERIFY_ONLY" = 0 ]; then
         #    把"要交付的那份"弄脏。这里用**符号链接**搭一个工作目录，
         #    镜像仍是同一份（只读），状态文件落在 .run/ 下。
         SCRATCH="$RUN_DIR/sysdir-$EMULATOR_PORT"
-        rm -rf "$SCRATCH"; mkdir -p "$SCRATCH"
+        # 实例状态全在 sysdir 里（build.avd/、*.qcow2、snapshots/），所以默认的
+        # "每次 rm -rf" 等价于"每次都是一台全新机器"。--reuse / --snapshot 时不删。
+        if [ "$REUSE" = 1 ] && [ -d "$SCRATCH" ]; then
+            log "复用工作目录（保留已装应用与快照）：.run/sysdir-$EMULATOR_PORT"
+        else
+            rm -rf "$SCRATCH"
+        fi
+        mkdir -p "$SCRATCH"
         for f in "$PACKAGED"/*; do
             b="$(basename "$f")"
             # initrd 不链接：模拟器会**重写**它（把自己的 ramdisk-qemu + dtb 写进去），
@@ -84,6 +114,15 @@ if [ "$VERIFY_ONLY" = 0 ]; then
     else
         warn "没有 $EMULATOR_CONFIG，沿用 ROM 自带的显示配置"
     fi
+
+    # 快照的前提之一：ROM 上游 config.ini 里的 `fastboot.forceColdBoot = yes` 含义是
+    # "永远冷启动、忽略快照"。不改它，-snapshot 会被模拟器直接丢掉
+    # （实测日志：ignoring -snapshot option due to the use of -no-snapshot）。
+    if [ -n "$SNAPSHOT" ] && [ -s "$PRODUCT_OUT/config.ini" ]; then
+        sed -i 's/^fastboot\.forceColdBoot.*/fastboot.forceColdBoot = no/' "$PRODUCT_OUT/config.ini"
+        log "快照模式：config.ini 的 fastboot.forceColdBoot → no"
+        warn "快照要求 hardware-qemu.ini 与存档时**逐项一致**：改过 config.ini/hw.* 之后再加载旧快照会被拒（The emulator hardware cannot load snapshot）"
+    fi
     for img in system.img vendor.img ramdisk.img kernel-ranchu; do
         [ -s "$PRODUCT_OUT/$img" ] || die "产物缺失：$PRODUCT_OUT/$img
     先构建： ./build-rom.sh   （--status 看进度）"
@@ -98,11 +137,19 @@ if [ "$VERIFY_ONLY" = 0 ]; then
         # guest 的 eth0 就直接落在局域网的二层域里、从真实 DHCP 拿 IP。
         # 桥没起时**不加**参数 —— 指向不存在的桥会让模拟器直接起不来，
         # 所以这里按"桥在不在"自动决定，而不是靠开关。
-        local tap_args=()
+        local tap_args=() snap_args=()
         if [ -n "$NET_BRIDGE_IF" ] && [ -d "/sys/class/net/$NET_BRIDGE_IF/bridge" ]; then
             tap_args=(-net-tap "$NET_TAP_IF"
                       -net-tap-script-up "$X64_DIR/tools/net-bridge-ifup.sh")
             log "桥接模式：$NET_TAP_IF → $NET_BRIDGE_IF（guest 的 eth0 走物理局域网）"
+        fi
+        # --snapshot <名> 从快照秒起；否则明确 -no-snapshot（每次真冷启动，
+        # 验收要的是确定性，不能被上一次的状态污染）。
+        if [ -n "$SNAPSHOT" ]; then
+            snap_args=(-snapshot "$SNAPSHOT")
+            log "快照模式：从 '$SNAPSHOT' 恢复（工作目录复用：.run/sysdir-$EMULATOR_PORT）"
+        else
+            snap_args=(-no-snapshot)
         fi
         : > "$RUN_DIR/emulator-$EMULATOR_PORT.log"
         # ⚠️ 两个变量都要给：
@@ -111,8 +158,9 @@ if [ "$VERIFY_ONLY" = 0 ]; then
         #                          "Your system directory is missing the 'kernel-qemu' image file"
         #                          （彩排时踩到，见 docs/02-build-traps.md §7）
         ANDROID_PRODUCT_OUT="$PRODUCT_OUT" ANDROID_BUILD_TOP="$AOSP_DIR" setsid nohup "$1" \
-            -sysdir "$PRODUCT_OUT" -datadir "$RUN_DIR/datadir" -port "$EMULATOR_PORT" \
-            -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -no-audio \
+            -sysdir "$PRODUCT_OUT" -datadir "$EMULATOR_DATADIR" -port "$EMULATOR_PORT" \
+            -no-window -gpu swiftshader_indirect -no-boot-anim -no-audio \
+            "${snap_args[@]}" \
             -accel on -memory 4096 -cores 4 \
             "${tap_args[@]}" \
             $([ "$SHOW_KERNEL" = 1 ] && printf '%s' "-show-kernel") \
