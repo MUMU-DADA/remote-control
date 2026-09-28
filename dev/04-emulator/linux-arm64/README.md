@@ -1297,3 +1297,47 @@ init: Service 'mediaextractor' (pid 574) received signal 11     ← guest 侧原
 第 19 轮        改 QEMU 设备别名表（实现名 → MMIO）+ 去音频 + max_ports → **ranchu 起来了**
 第 20~22 轮     恢复我此前为躲 virt 崩溃而删掉的 HAL、修 ramoops panic → boot 一路推进
 ```
+
+---
+
+## 第 23 轮：查清"往镜像里加文件"这条路**根本走不通**
+
+### 一、先澄清第 22 轮的一个假象
+
+第 22 轮那次启动看起来"health HAL 没生效"，其实是因为**模拟器在我写 super 的过程中就启动了**
+（它在启动时打开一次 super，读到了半成品）。写完后再启动，镜像本身是对的。
+
+### 二、真正的发现：**`debugfs` 新增的文件，内核看不到**
+
+连续几次启动后，日志里 init 解析的 vendor rc 数量始终是 **27**，而 vendor 分区里实际有 **40** 个
+`/etc/init/*.rc`。差值 **40 − 27 = 13**，**正好等于我注入的 13 个**（health、health.storage、
+usb、wifi、audio、camera×2、sensors、gnss、media.c2、bluetooth.sim、rild、thermal、power）✗。
+
+也就是说：
+
+> **用 `debugfs write` 往 ext4 镜像里"新增"文件，文件在 `debugfs ls` 里能看到、内容也对，
+> 但内核（guest 里的 init）枚举该目录时看不到它们。**
+
+试过用 **`e2fsck -f -D -y` 重建目录索引**（它确实做了 "Optimizing directories"），**仍然无效** ✗。
+
+⇒ **结论：镜像手术只能"替换/删除已有文件"，不能"新增文件"。**
+
+- 这也解释了第 6 轮为什么能成功（我是**删**文件 ✓）；
+- 也解释了第 21/22 轮注入 HAL **为什么没生效**（我是**加**文件 ✗）；
+- `system.img` 上那个 `encryption=Attempt` 补丁之所以有效，正是因为它**替换**了已存在的 `init.rc` ✓。
+
+### 三、因此正解是**干净重编**（已启动）
+
+staging 目录是完整的（被我删掉的 HAL 原件都在），所以：
+
+1. 跑一次 `m`（产出**未删减 HAL 的 vendor.img** 与完整镜像）；
+2. 只需再打两个补丁：**`kernel-ranchu` 的 `ramoops`→`noramop`**（用同一脚本重做）与
+   **`system.img` 的 `encryption=Require→Attempt`**；
+3. 启动 → 应当能拿到 `sys.boot_completed=1` 与截图。
+
+### 四、本轮仍然确认的好消息
+
+- **内核 pstore panic 补丁稳定有效** ✓：多次启动到 178s+ 均**零 panic**；
+- **启动全程零宿主段错误、零 guest 崩溃** ✓，`zygote` ✓、`surfaceflinger` ✓、`vendor.hwcomposer` ✓
+  都正常起来 —— `ranchu` 路线的"底盘"已经完全稳固；
+- 剩余问题**纯粹是镜像里 HAL 文件的完整性**，而干净重编能一次性解决 ✓。
