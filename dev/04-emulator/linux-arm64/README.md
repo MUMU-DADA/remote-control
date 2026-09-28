@@ -566,3 +566,49 @@ AVD 模式理论上会**以 AVD 的 config.ini 为准**，所以值得一试（�
 **唯一能"明确支持 arm64"的组合是 arm64 宿主**（Google 的设计目标就是 arm64 宿主 + KVM），
 或真机 arm64。x86_64 上最多做到 API 25 这一档"开机到一半"（adb 可用、SurfaceFlinger 起来、
 但 Java 框架起不来）。日常 x86_64 开发请用 KVM 通道。
+
+---
+
+## 第 8 轮：**关键突破 —— 换 CPU 型号即可消除 guest 段错误**
+
+### 发现：模拟器默认的 `-cpu cortex-a57` 会触发 QEMU TCG 的 bug
+
+用 `adb root` 拿到 guest 的真实 tombstone 后看到崩溃形态：
+
+```
+F libc : Fatal signal 11 (SIGSEGV), fault addr 0x5067001 in tid 898 (main)  >>> zygote64 <<<
+        x24  0000000005067001     ← 故障地址就在 x24
+        x25  00000073557f7ed8     ← 同区域其它指针都是完整 48 位
+```
+
+**指针的高 32 位被丢了** —— 典型的"TCG 把 64 位运算当 32 位执行"的症状。
+既然是按 CPU 特性走代码路径，就试了换 CPU 型号：
+
+**`-qemu -machine type=virt -cpu cortex-a53`**（就是加一个 `-cpu cortex-a53`）：
+
+| 镜像 | 换 a53 之前 | 换 a53 之后 |
+|---|---|---|
+| 自制 A12（sdk_phone64_arm64） | keystore2 反复 `signal 11`（12 次）→ 20 秒内必崩 | **keystore2 崩溃 0 次 ✓、guest 零崩溃 ✓** |
+| 成品 API 25 arm64 | zygote 在 `boot-framework.oat` 里段错误并循环重启 | **`Fatal signal` 0 次 ✓、zygote 健康（RSS 85MB）✓、`System server process has been created` ✓** |
+
+⇒ **这是七轮以来真正的转折点**：之前所有 guest 侧崩溃（A12 的 keystore2、API 25 的 ART/AOT）
+都是同一个 TCG 执行 bug，**换 CPU 型号即可绕过**，与 Android 版本无关。
+
+### 换 a53 之后 A12 能走到哪
+
+`win` 那次（a53 + super vendor 补丁 + RKP 补丁 + `encryption=Attempt`）：
+guest 一路到 `post-fs-data` → `zygote` ✓ → HAL 阶段（**guest 零崩溃、无 recovery** ✓✓），
+90 秒时**宿主 QEMU 段错误**退出 ✗，崩前最后几行是 `healthd` 读 goldfish 电池 + `vendor.usb-hal`。
+
+### 仍未解决：宿主侧崩溃 + vendor 补丁"打不到 guest"
+
+- 宿主崩溃的触发器是 guest 访问 ranchu 专有 MMIO（电池/USB/wifi…），`virt` 板上没有这些设备；
+- 诡异的是：`vendor.img`、`vendor-qemu.img`、**以及 super.img 里的 vendor 分区**（用
+  dumpe2fs 的 UUID 在 super 里精确定位到偏移 1186988032，回读确认 0 个相关 rc）
+  **三处都已补丁**，guest 却仍然启动 `vendor.usb-hal-1.0` / `sensors-hal` / `thermal-hal` ✗；
+- 为此写入了 `/vendor/marker-from-host.txt` 做判定（开机后 `cat` 看得到就说明 guest 用的
+  就是这份 vendor），本次运行 adb 未上线，判定待续。
+- 已排除的来源：system.img / system_ext / product / initrd / init.ranchu.rc（都不含这些 rc）。
+
+**下一步**：① 完成 marker 判定，找到 guest 真正的 vendor 来源；② 把剩下几个"碰设备"的服务
+摘掉（battery/USB/wifi 类），配合 `-cpu cortex-a53`，A12 arm64 **完整启动已是触手可及**。
