@@ -222,6 +222,7 @@ cd dev/02-native-daemon/tests && sudo make run
 | `docs/api/03-socket.md` | Unix socket 二进制协议（32 条命令） |
 | `docs/api/04-config.md` | 配置文件、命令行、鉴权、supervisor、部署 |
 | `docs/api/05-errors.md` | 状态码与错误处理 |
+| `docs/api/06-debugging.md` | 环境变量、强制回退路径、验证方法 |
 
 ### 设计文档
 
