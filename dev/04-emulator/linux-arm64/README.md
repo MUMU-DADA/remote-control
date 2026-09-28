@@ -461,3 +461,30 @@ AVD 模式理论上会**以 AVD 的 config.ini 为准**，所以值得一试（�
 
 清理：AOSP 树里临时加的 `system-images` 链接已移除；AVD 尝试物保留在
 `dev/04-emulator/linux-arm64/.run/asdk` 与 `/root/avd`（`.run/` 已 gitignore）供复现。
+
+### 第 5 轮补充：又有三种绕法被实测排除（含一条决定性证据）
+
+在 AVD 模式之外，本轮还试了两种"直击要害"的绕法，都被实测排除：
+
+1. **用包装脚本替换 QEMU 二进制**（想过滤掉所有 PCI 设备参数）——失败 ✗。
+   教训：模拟器打印的那条 QEMU 命令行是它**内部构造**的，它并不是用 QEMU 参数去 exec
+   `qemu-system-*`；而 `qemu-system-*` 本身就是**模拟器二进制**，靠 `argv[0]` 判断自己
+   该当"模拟器前端"还是"QEMU"。所以从外面拦不到设备列表。（包装已还原，无残留。）
+
+2. **把 `hardware-qemu.ini` 设成不可写**（`chattr +i`）并写入 `hw.audioOutput = false`
+   / `hw.audioInput = false`，逼模拟器读我的配置 —— **`-soundhw hda` 照样出现** ✗。
+   ⇒ **决定性结论：音频设备是模拟器代码里无条件创建的，与任何配置/开关无关**
+   （`hw.audioOutput`、`hw.audioInput`、`-no-audio` 全部无效）。
+   而 30.8.3/31.x 的 QEMU 只提供 ac97/es1370/hda 三张声卡（全为 PCI），`-soundhw none` 不被接受。
+   ⇒ ranchu（无 PCI 总线）在这套二进制下**不可能启动**。
+
+3. AVD 模式（见上）——被模拟器"只认标准 SDK 安装"的 sysdir 校验拦住 ✗。
+
+### 剩下唯一一条没走的路
+
+**从源码构建模拟器并打一个小补丁**（把音频设备改成条件创建，或按 `hw.audioOutput` 判断）：
+- 本树是 `.repo` 检出，可以只同步 `platform/external/qemu`（android-12.0.0_r34 对应分支）；
+- 模拟器自带构建脚本与 prebuilts（`prebuilts/android-emulator/` 已在树里）；
+- 补丁生效后 `ranchu` 可启动，guest 拿到**真正的 goldfish 设备**，之前所有
+  "访问缺失 MMIO 导致 QEMU 崩"的问题一并消失，**有望一路启动到底**。
+- 代价：同步 + 构建，量级为小时级；有一定不确定性（模拟器构建链较老）。
