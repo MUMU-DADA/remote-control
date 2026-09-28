@@ -1001,3 +1001,59 @@ CANNOT LINK EXECUTABLE "./autod": cannot locate symbol
 
 无论哪条，**"x86_64 Linux 上跑 arm64 安卓"这条链路本身已经全程验证**：
 arm64 ELF 可直接执行 ✓、arm64 linker 正常解析 220 个库 ✓。
+
+---
+
+## 第 18 轮：把符号问题解决后，撞到转译层的**根本边界**
+
+### 一、修好了上一轮的符号问题
+
+上轮报 `cannot locate symbol "_ZNK7android7RefBase22incStrongRequireStrongEPKv"`。
+本轮查明：**我本地 A12 的 `system/lib64/libutils.so` 确实定义了它**
+（`382: 000000000000dd34 104 FUNC GLOBAL PROTECTED`）——
+但由于它的名字在 guest 自带的那 59 个库里，我上轮的推送集**把它排除了** ✗，
+于是 guest 用的是**缺该符号的 A11 版** ✗。
+
+把 A12 的 `libutils.so`/`libbase.so`/`libcutils.so` 一并覆盖后，**该符号解决了** ✓
+（bind 目录 = 220 个库）。
+
+### 二、随即撞到下一个、也是**根本性**的边界
+
+```
+CANNOT LINK EXECUTABLE "./autod": cannot locate symbol "thread_store_get"
+  referenced by "/system/lib64/arm64/libhidlbase.so"
+```
+
+`thread_store_get` 是 **A12 `libc` 的内部符号** ✗ —— 而转译层的 `libc` 是 **A11 的桥接实现** ✓，
+不可能提供它。也就是说：
+
+> **A12 编出来的平台 binder 栈（libbinder → libhidlbase → A12 libc 内部符号）
+> 无法跑在 A11 的 `ndk_translation` 上。**
+
+### 三、转译层的能力边界（本轮查清）
+
+guest 的 `/system/lib64/arm64/`（转译层自带 59 个）里是：
+`android.hardware.*` 各 HAL 的 arm64 stub、`libEGL/libGLES/libandroid/libaaudio/...` ——
+**有 HAL 与 NDK 层面**，但**没有平台的 `libbinder.so` / `libhidlbase.so`** ✗
+（我 bind 目录里那两个是我自己推的）。
+
+⇒ **`ndk_translation` 是给"应用/NDK 代码"用的**：arm64 的 app 原生库可以跑，
+通过转译层提供的 NDK 级 binder 与 x86_64 系统通信 ✓；
+而 **`autod` 是平台级 native daemon**（直接链平台 `libbinder`、调 SurfaceFlinger 的
+`captureDisplay`），属于转译层**不覆盖**的范围 ✗。
+
+### 四、结论与本轮净成果
+
+**净成果** ✓：转译链路本身已跑通到"220 个 arm64 库全部解析、只差平台层符号"；
+**边界** ✗：平台级 arm64 daemon 在 A11 转译层上无法完整运行。
+
+**剩下两条都明确**：
+1. **用 API 30（A11）的源码/环境重编 `autod`**，与转译层版本对齐（最直接）；
+2. **平台级 arm64 真机环境只能靠 arm64 宿主或真机**（转译层方案覆盖不到）。
+
+另外本轮确定的**可复用资产**（写进本文件，后续可直接用）：
+- **原版 `google_apis` API30 x86_64 镜像**（AVB 通过、`abilist` 含 `arm64-v8a`、
+  `libndk_translation.so`）；
+- **`adb root` + `mount --bind <dir> /system/lib64/arm64`** 这一招 ——
+  **不改镜像、不需要 `-writable-system`/remount/重启**就能给转译层加 arm64 库 ✓✓；
+- 计算 arm64 依赖闭包 + "只补 guest 缺失的、但该覆盖的要覆盖"的推送策略。
