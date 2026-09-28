@@ -175,10 +175,7 @@ AOSP 自带 `frameworks/base/cmds/screencap/`，命令 `/system/bin/screencap`�
 | `capture_screencap.cpp` | **直接 exec `/system/bin/screencap`**，解析它的 stdout 原始像素流 |
 | `capture_surfaceflinger.cpp` | **对照 `screencap.cpp` 实现**，走 `ScreenshotClient::captureDisplay` |
 
-为什么 SF 路径不直接复用 `screencap` 命令：
-
-- exec 一次 100–300 ms，SF 直连 20–35 ms（实测 120 ms vs 23 ms，见 `03-reference.md`）
-- 但 SF 路径必须编进 AOSP 树（依赖 `libgui`），所以 NDK 路径保留了 exec 方案
+为什么 SF 路径不直接复用 `screencap` 命令：exec 一次 100–300 ms，SF 直连 20–35 ms（实测 120 ms vs 23 ms，见 `03-reference.md`）；但 SF 路径必须编进 AOSP 树（依赖 `libgui`），所以 NDK 路径保留了 exec 方案。
 
 **两条路径都源自官方实现，没有自己发明抓屏方式。**
 
@@ -357,21 +354,12 @@ frameworks/native/services/inputflinger/Android.bp
 | 优点 | 改动最小，立即可用；不依赖 AOSP 树也能编 |
 | 缺点 | **会创建一个可枚举的输入设备** |
 
-**实现要点**（容易漏的）：
+**实现要点**（完整 ioctl 序列见 `03-reference.md` 第 5.1 节）——最容易漏的一条：
 
 ```cpp
 // 除了 ABS_MT_* 和 BTN_TOUCH，还要设 INPUT_PROP_DIRECT，
 // 否则 InputFlinger 不会把它识别成直接触摸屏
 ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
-
-// 必须实现的 ABS 轴
-UI_SET_ABSBIT, ABS_MT_SLOT
-UI_SET_ABSBIT, ABS_MT_TRACKING_ID
-UI_SET_ABSBIT, ABS_MT_POSITION_X
-UI_SET_ABSBIT, ABS_MT_POSITION_Y
-UI_SET_ABSBIT, ABS_MT_PRESSURE
-UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR
-UI_SET_KEYBIT, BTN_TOUCH
 ```
 
 事件注入按 **multitouch protocol B** 顺序写，最后 `input_sync()`。

@@ -12,8 +12,18 @@
 
 # --- 编译产物 ---
 # dev/02-native-daemon/tests 下 make 出来的测试程序（make clean 会删掉）
-/dev/**/tests/test_inject_uinput
-/dev/**/tests/test_integration
+#
+# ⚠️ 用模式而不是逐个列文件名。
+#    原来是 /dev/**/tests/test_inject_uinput 这样一行一个 —— 加一个测试
+#    就得记得加一行，而没人会记得。实测漏了 4 个（test_appops /
+#    test_json / test_keyboard / test_websocket），一共 3.3 MB 的 ELF
+#    被提交进了仓库。
+#
+#    同名 .cpp/.h 是源码，用 ! 排除掉。
+/dev/**/tests/test_*
+!/dev/**/tests/test_*.cpp
+!/dev/**/tests/test_*.h
+!/dev/**/tests/test_*.md
 *.o
 *.a
 *.d
@@ -25,7 +35,6 @@
 /dev/02-native-daemon/autod-host
 /dev/02-native-daemon/autodctl-host
 /dev/**/tests/fake_screencap
-/dev/**/tests/test_capture_screencap
 
 # --- dev/04-emulator：运行期文件与下载物，都不入库 ---
 # 开发机侧：userdata 覆盖层、模拟器控制台日志、冒烟测试截图
