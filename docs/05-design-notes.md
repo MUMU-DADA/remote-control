@@ -432,8 +432,10 @@ uinput 的 ABS 范围在设备创建时就固定了，客户端按它发坐标�
 - 几何真的变了之后**重建注入器**，让坐标范围跟着显示走
   （用户用 `--touch-range` 显式指定过就不动）
 
-现在 `/info` 的 `primaryWidth/Height` 和 `touchWidth/Height` **永远一致**，
-按屏幕像素发坐标就行 —— 这才是符合直觉的模型。
+改完之后 `/info` 的 `primaryWidth/Height` 和 `touchWidth/Height` **默认一致**
+（`--touch-range` 显式指定过的除外 —— 那时不动注入器，两者就是会分叉）。
+所以**别缓存 `/info`**：`POST /rotate` 之后要重新读一次。
+坐标空间的完整说明见 [`docs/api/01-http.md`](api/01-http.md) 的「坐标」。
 
 ### 文件管理的边界：从下载目录抬到共享存储根
 

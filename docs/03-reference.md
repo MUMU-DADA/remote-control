@@ -631,3 +631,55 @@ ALOGI("capture: 合成=%lldus 拷贝=%lldus",
 - **实测性能数据** → [`06-capture-performance.md`](06-capture-performance.md)
 - 设计与踩坑记录 → [`05-design-notes.md`](05-design-notes.md)
 - 接口的权威说明 → [`api/README.md`](api/README.md)
+
+## 附：`screencap` 的输出格式
+
+`screencap` 后端（NDK 构建走的那条）解析的就是这个格式，来自 AOSP 的
+`frameworks/base/cmds/screencap/screencap.cpp`（`saveImage()` 的分支）：
+
+```
+偏移 0    uint32  width
+偏移 4    uint32  height
+偏移 8    uint32  pixelFormat
+偏移 12   uint32  colorSpace
+偏移 16   像素数据，逐行紧密排列，每行 width * bytesPerPixel 字节
+```
+
+`pixelFormat` 取值（`android PixelFormat`）：
+
+| 值 | 格式 | 每像素字节 |
+|---|---|---|
+| 1 | RGBA_8888 | 4 |
+| 2 | RGBX_8888 | 4 |
+| 3 | RGB_888 | 3 |
+| 4 | RGB_565 | 2 |
+| 5 | BGRA_8888 | 4 |
+| 22 | RGBA_FP16 | 8 |
+| 43 | RGBA_1010102 | 4 |
+
+> 加 `-p` 会输出 PNG，但那样没法直接内存映射，而且编码很贵 —— 所以后端要的是原始格式。
+
+## 附：uinput 触控设备的初始化序列
+
+`inject_uinput.cpp` 用的（少一步 InputReader 就不认它是触摸屏）：
+
+```c
+ioctl(fd, UI_SET_EVBIT,  EV_KEY);
+ioctl(fd, UI_SET_EVBIT,  EV_ABS);
+ioctl(fd, UI_SET_EVBIT,  EV_SYN);
+ioctl(fd, UI_SET_ABSBIT, ABS_MT_SLOT);
+ioctl(fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
+ioctl(fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
+ioctl(fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
+ioctl(fd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
+ioctl(fd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR);
+ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH);
+// ⚠️ 最容易被忽略的一步：不设这个，InputReader 不会把它当触摸屏
+ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
+```
+
+事件按 **multitouch protocol B** 顺序写，最后 `input_sync()` / `SYN_REPORT`。
+
+> AOSP 官方也有等价实现（`frameworks/native/services/vr/virtual_touchpad/`），
+> 还带一份 `.idc` 声明 `touch.deviceType = touchScreen`。
+

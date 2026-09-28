@@ -10,6 +10,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <map>
@@ -18,6 +19,13 @@
 
 namespace autod {
 namespace {
+
+// 进程里是否已经建起虚拟键盘。见 keyboard.h 里 BackendName() 的说明 ——
+// 实例是延迟创建的，Runtime 上报只能看进程级状态。
+//
+// ⚠️ 用 atomic：写它的是注入线程（第一次按键盘时建设备），
+//    读它的是 HTTP 线程（GET /config 起报 Runtime）。两边没有共同的锁。
+std::atomic<bool> gKeyboardReady{false};
 
 // 设备创建后内核需要一点时间注册，太快发事件会丢
 constexpr int kSettleUs = 100 * 1000;
@@ -187,18 +195,31 @@ bool Keyboard::ResolveKeyCode(const std::string& name, uint32_t* out) {
 }
 
 const char* Keyboard::KnownKeyNames() {
-    return "home back menu appswitch search power volumeup volumedown mute "
-           "enter delete backspace space tab escape up down left right center "
-           "playpause nextsong previoussong stop camera a-z 0-9 f1-f12，"
-           "或直接给数字键码";
+    // ⚠️ 从 KeyTable() **生成**，不手写。
+    //
+    //    手写的那份漏过 `browser` 和 `focus` —— 两个键明明能解析，
+    //    报 4099 时给出的"可用键"里却没有它们。列表短了没人会察觉，
+    //    所以干脆让它没有机会腐烂：加一个键进表，列表自动跟上。
+    static const std::string kList = [] {
+        std::string s;
+        for (const auto& kv : KeyTable()) {
+            if (!s.empty()) s += ' ';
+            s += kv.first;
+        }
+        s += " a-z 0-9 f1-f12，或直接给数字键码";
+        return s;
+    }();
+    return kList.c_str();
 }
 
 // ── 生命周期 ────────────────────────────────────────────────────────────────
 Keyboard::~Keyboard() { Close(); }
 
-const char* Keyboard::BackendName() const {
-    return ready() ? "uinput(虚拟键盘)" : "未就绪";
+const char* Keyboard::BackendName() {
+    return AnyReady() ? "uinput(虚拟键盘)" : "未就绪（还没按过键）";
 }
+
+bool Keyboard::AnyReady() { return gKeyboardReady.load(); }
 
 bool Keyboard::Init(std::string* error) {
     Close();
@@ -269,6 +290,7 @@ bool Keyboard::Init(std::string* error) {
     usleep(kSettleUs);
 
     ALOGI("已创建虚拟键盘 \"%s\"", name);
+    gKeyboardReady.store(true);
     return true;
 }
 
@@ -278,6 +300,7 @@ void Keyboard::Close() {
         close(fd_);
         fd_ = -1;
     }
+    gKeyboardReady.store(false);
 }
 
 // ── 事件发送 ────────────────────────────────────────────────────────────────

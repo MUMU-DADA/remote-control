@@ -360,5 +360,5 @@ ARM 用户态翻译层**，同架构运行、KVM/WHPX 加速，能跑 arm64 应�
 
 - 硬件/源码树为什么躲不掉 → [`01-selection.md`](01-selection.md) 第 7 节
 - 源码同步后的下一步 → [`../dev/02-native-daemon/README.md`](../dev/02-native-daemon/README.md)
-- 纯 NDK 免源码树方案 → [`../dev/01-ndk-prototype/README.md`](../dev/01-ndk-prototype/README.md)
+- 纯 NDK 免源码树方案 → 见本文件「不需要全量编译」一节 + `tools/build-ndk.sh`
 - 抓帧性能实测 → [`06-capture-performance.md`](06-capture-performance.md)

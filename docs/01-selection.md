@@ -381,7 +381,7 @@ AutodInputService    →  注入（InputManager.injectInputEvent）✅
 | 不用创建额外的输入设备 | Java 服务要进 `priv-app` 或 system_server |
 | | 需要系统签名 |
 
-详见 `../dev/03-java-service/`。
+详见 [`08-input-injection.md`](08-input-injection.md)。
 
 #### 解法 C：改 AOSP 给 AIDL 加 cpp backend
 

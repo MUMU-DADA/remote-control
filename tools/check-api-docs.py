@@ -218,6 +218,52 @@ chk(nums <= {ncmd}, f"文档里的命令数都是 {ncmd}", f"出现 {sorted(nums
 # 删掉的文档不该再被提到
 chk("SUMMARY.md" not in t_all, "没有文档还在引用已删除的 SUMMARY.md")
 
+# 按键注入：虚拟键盘是**延迟创建**的（第一次 /key 才建），
+# 所以 /config 必须如实上报"还没就绪"，否则会被当成故障。
+cfg = api("/config")
+rt = cfg.get("runtime", {})
+chk("keyboard" in rt, "config.runtime 上报了 keyboard 后端",
+    f"实际字段 {sorted(rt)}")
+kb = rt.get("keyboard", {})
+chk(isinstance(kb.get("ready"), bool) and bool(kb.get("backend")),
+    "keyboard.backend / keyboard.ready 都在", repr(kb))
+chk("延迟创建" in t_all, "文档里说明了虚拟键盘延迟创建（ready:false 不是故障）")
+# 三个真实踩过的映射坑，文档里必须有 —— 都是"靠直觉写必错"的地方
+for pat in ("MOVE_HOME", "DPAD_CENTER", "EXPLORER"):
+    chk(pat in t_all, f"文档里写了 {pat} 这个关键映射")
+
+# 可用键名列表在 01-http.md 里抄了一份 —— 实现一改它就烂。
+# 直接逐字比：文档为了排版折了行，先把所有空白压平再比。
+_st, _j = code_of("/key", "POST", {"key": "__not_a_key__"})
+_m = re.search(r'可用: (.+)$', _j.get("error", ""), re.S)
+chk(_m is not None, "不认识的键名会报出可用列表", str(_j)[:80])
+if _m:
+    _doc = open(os.path.join(DOCS, "01-http.md"), encoding="utf-8").read()
+    _flat = re.sub(r'\s+', ' ', _doc)
+    chk(re.sub(r'\s+', ' ', _m.group(1)) in _flat,
+        "01-http.md 里的可用键名列表和实现一字不差",
+        f"实现给出 {_m.group(1)[:70]}…")
+
+# 协议版本表必须一直写到当前的 vN —— 停在哪一版就会漏掉那一版的接口
+_vers = {int(x) for x in re.findall(r'^\|\s*v(\d+)\s*\|', t_all, re.M)}
+chk(_vers == set(range(1, pv + 1)),
+    f"文档里的协议版本表覆盖 v1..v{pv}", f"实际只有 {sorted(_vers)}")
+
+# /capture 的默认格式：实测是 PNG。文档一度写成 JPEG（把画面流的默认
+# 张冠李戴到单次截图上），所以这里钉一个实测值。
+_ct = ""
+try:
+    with urllib.request.urlopen(B + "/capture", timeout=30) as _r:
+        _ct = _r.headers.get("Content-Type", "")
+except Exception as _e:
+    _ct = "err: " + str(_e)
+chk("png" in _ct.lower(), "/capture 默认返回 PNG", f"实际 Content-Type={_ct!r}")
+chk("默认返回 **PNG**" in t_all, "文档里写了 /capture 默认是 PNG")
+
+# 早期文档说「所有坐标都是屏幕像素」—— 那是错的（是注入器 ABS 空间）
+chk("所有坐标都是屏幕像素" not in t_all,
+    "没有文档还在说「坐标都是屏幕像素」")
+
 print("\n[13] 文件管理：边界与根目录（01-http.md）")
 roots = api("/files?op=roots")
 chk(roots.get("ok") is True, "files?op=roots 可用")

@@ -157,7 +157,7 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 | 5 | `TouchDown` | 1 | 无（用 pointerId/x/y） | 手动多点触控：按下 |
 | 6 | `TouchMove` | 1 | 同上 | 移动 |
 | 7 | `TouchUp` | 1 | 同上 | 抬起 |
-| 8 | `KeyEvent` | 4 | `<键名或键码>` | 按键注入 |
+| 8 | `KeyEvent` | 4 | `<键名或键码>` | 按键注入。键名表与三个映射坑见 [01-http.md](01-http.md) 的 `POST /key` |
 | 10 | `ListApps` | 2 | 无（用 flags） | 应用列表 |
 | 11 | `AppInfo` | 2 | `<包名>` | 应用详情 |
 | 12 | `LaunchApp` | 2 | `<包名>[,activity]` | 启动 |

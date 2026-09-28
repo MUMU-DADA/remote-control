@@ -54,7 +54,10 @@ curl http://<设备IP>:8088/api/v1/describe
 curl -o screen.png http://<设备IP>:8088/api/v1/capture
 ```
 
-默认返回 **JPEG**（小、快）；要无损加 `?format=png`，要原始像素加 `?format=raw`。
+默认返回 **PNG**（单次截图不在乎体积，要无损）。
+**注意画面流的默认不是它** —— `auto` 在 `/stream` 里是 **JPEG**
+（详见 [01-http.md](01-http.md) 的 `/capture`）。
+
 
 ### 3. 点一下
 
@@ -81,7 +84,7 @@ curl http://<设备IP>:8088/api/v1/params
 
 ## 坐标约定
 
-**所有坐标都是屏幕像素，原点在左上角。**
+**所有坐标都是 `GET /api/v1/info` 的 `touchWidth/Height` 空间，原点在左上角。**
 
 ```
 (0,0) ────────────► x
@@ -91,10 +94,16 @@ curl http://<设备IP>:8088/api/v1/params
   y
 ```
 
-- 分辨率从 `GET /api/v1/config` 的 `runtime.capture.primaryWidth/Height` 读
-- 超出范围的坐标会被设备侧钳制或拒绝，**不会**自动缩放
+- 坐标空间取 `info.touchWidth/Height`，**不是** `primaryWidth/Height` ——
+  两者通常相等，但用 `--touch-range` 手工指定过就会分叉
+- 服务端把 `x`/`y` 直接当 uinput 的 ABS 值写下去，**中间不做缩放**；
+  超出 `0..touchWidth-1` 由内核钳到边界
+- **`POST /rotate` 之后要重新读 `/info`** —— 转屏时注入器会被重建，
+  坐标空间跟着显示走
 - 网页控制台的画面会被 CSS 缩放，所以它按**渲染后的显示尺寸**换算 ——
   自己写客户端时如果也缩放了图片，别忘了这一步
+
+逐条说明见 [01-http.md](01-http.md) 的「坐标」一节。
 
 ---
 
@@ -103,7 +112,7 @@ curl http://<设备IP>:8088/api/v1/params
 | 我想…… | 用哪个 |
 |---|---|
 | 截一张图 | `GET /capture` |
-| 看实时画面 | `ws://.../stream`（或 `<img src=".../capture">` 轮询） |
+| 看实时画面 | `ws://.../stream`；零 JS 就用 `<img src=".../stream?fps=5">`（MJPEG） |
 | 点一下 / 滑一下 | `POST /tap` / `POST /swipe` |
 | 拖拽（要跟手） | `ws://.../touch` —— **别用一连串 POST** |
 | 输入文字 | `POST /key`（逐个键码），或配合输入法 |
@@ -178,6 +187,7 @@ curl -s http://host:8088/api/v1/describe | jq '.protocolVersion, (.commands|leng
 | v4 | 长按/拖拽/双击、按键注入、剪贴板 |
 | v5 | 设备电源（关机/重启） |
 | v6 | 服务软开关、运行中应用、历史日志、日志流 |
+| v7 | 屏幕方向 `Rotate`（`0/90/180/270/portrait/landscape/free/status`） |
 
 ---
 

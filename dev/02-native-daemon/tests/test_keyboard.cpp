@@ -61,6 +61,43 @@ void TestResolve() {
     Check(true, "已知键名列表非空: %.60s...", Keyboard::KnownKeyNames());
 }
 
+// KnownKeyNames() 的**完整性**。
+//
+// ⚠️ 这段是补出来的：`browser` 和 `focus` 明明能解析，却没被列进
+//    KnownKeyNames() —— 接口报 4099 时给出的"可用键"等于少报了两个。
+//    用户照着那份列表找，找不到就以为不支持。
+//
+//    列表短了不会报错、不会崩，只会让人少用两个能用的键，
+//    所以只能靠测试盯住。实现那边已经改成从表生成，这里是第二道锁。
+void TestKnownNamesComplete() {
+    printf("\n\033[1;34m[2] KnownKeyNames() 覆盖了表里所有具名键\033[0m\n");
+    static const char* kExpected[] = {
+        "home",       "back",         "menu",      "appswitch", "search",
+        "power",      "volumeup",     "volumedown","mute",      "enter",
+        "delete",     "backspace",    "space",     "tab",       "escape",
+        "up",         "down",         "left",      "right",     "center",
+        "playpause",  "nextsong",     "previoussong", "stop",   "camera",
+        "browser",    "focus",
+    };
+    const std::string all = Keyboard::KnownKeyNames();
+    std::string missing;
+    for (const char* n : kExpected) {
+        // 整词匹配 —— 否则 "back" 会命中 "backspace" 而假绿
+        const std::string word(n);
+        const bool found =
+            all.compare(0, word.size() + 1, word + " ") == 0 ||
+            all.find(" " + word + " ") != std::string::npos;
+        if (!found) missing += word + " ";
+    }
+    const std::string detail =
+        missing.empty() ? std::string("27 个具名键都在") : ("缺: " + missing);
+    Check(missing.empty(), "KnownKeyNames() 列出了全部具名键（%s）",
+          detail.c_str());
+    Check(all.find("a-z") != std::string::npos &&
+          all.find("f1-f12") != std::string::npos,
+          "列表里保留了 a-z / f1-f12 的简写说明");
+}
+
 // 具名键：断言**扫描码**和它经 Generic.kl 翻译后的 **Android keycode**。
 //
 // ⚠️ 光断言扫描码是不够的 —— 用户感知的是 Android 那边的行为。
@@ -101,6 +138,9 @@ void TestNamedKeysAgainstLayout() {
         {"stop",        166, "MEDIA_STOP"},
         {"camera",      212, "CAMERA"},
         {"browser",     150, "EXPLORER"},     // 不是 172（那会回桌面）
+        // 对焦键：模拟器的 /system/usr/keylayout 里**没有** 528 的映射，
+        // 所以这一条只钉住扫描码，Android 侧按下去确实没反应。
+        {"focus",       528, "（无映射，按下去没反应）"},
     };
     for (const auto& c : kCases) {
         uint32_t got = 0;
@@ -157,6 +197,7 @@ void TestLetters() {
 int main() {
     printf("\033[1m=== 按键注入测试 ===\033[0m\n");
     TestResolve();
+    TestKnownNamesComplete();
     TestNamedKeysAgainstLayout();
     TestLetters();
     return Summary("按键");

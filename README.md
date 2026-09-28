@@ -21,7 +21,7 @@
 | 画面流 | ✅ WebSocket + MJPEG，jpeg/webp/png/h264，可中途改帧率/画质/分辨率 |
 | 屏幕方向 | ✅ `0/90/180/270`（设备转不动时退到换显示尺寸，如实回报） |
 | 鉴权 / 服务开关 | ✅ 令牌鉴权、软开关（不真停进程） |
-| 验证 | 单元/集成 **295 项检查**、文档一致性 **77 项**、文档一致性 **77 项**、真浏览器端到端 6 组 |
+| 验证 | 单元/集成 **298 项检查**、文档一致性 **89 项**、真浏览器端到端 6 组 |
 
 > ⚠️ **性能结论要连着分辨率一起看。** 上面是 720p 的口径。
 > 完整实测、测量方法与测量纪律见 [`docs/06-capture-performance.md`](docs/06-capture-performance.md)。
@@ -72,6 +72,7 @@ AutoSnapshotAndroid/
 │   ├── 05-design-notes.md        设计取舍与踩过的坑（含速查表）
 │   ├── 06-capture-performance.md 抓帧与编码性能实测、调优、测量纪律
 │   ├── 07-dependencies.md        ⭐ 依赖清单：用了什么库、为什么不用手写
+│   ├── 08-input-injection.md     备选注入路径：Java 系统服务 / 特权 APK
 │   ├── evidence/                 实机验证证据（截图 + 自检输出）
 │   └── api/                      ⭐ **接口权威文档**（HTTP / WebSocket / socket / 配置 / 错误码 / 调试）
 │
@@ -85,9 +86,7 @@ AutoSnapshotAndroid/
 ├── aosp/                      ← AOSP 源码树
 │
 └── dev/                       ← 开发轨道
-    ├── 01-ndk-prototype/         已并入 02：截图/触控都做成了 autod 的可插拔后端
     ├── 02-native-daemon/         ⭐ 主体代码（autod + autodctl）
-    ├── 03-java-service/          长期形态：Android 12 上 Java 侧注入的备选
     ├── 04-x64-android/           验证环境：自编 x86_64 ROM + ARM 用户态翻译层（独立线）
     └── 05-controller-app/        上位应用（只做服务管理，不申请任何权限）
 ```

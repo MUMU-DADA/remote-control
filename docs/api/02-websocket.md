@@ -252,7 +252,7 @@ ws.send(JSON.stringify({t:'up',   x:110, y:210, id:0}));
 | 字段 | 说明 |
 |---|---|
 | `t` | `down` / `move` / `up` / `cancel` |
-| `x` `y` | 屏幕像素 |
+| `x` `y` | 坐标空间见 [01-http.md](01-http.md) 的「坐标」—— 是 `/info` 的 `touchWidth/Height`，**不是**屏幕像素 |
 | `id` | 触控槽位，0-9。多点触控时区分手指，默认 0 |
 | `pressure` | 可选，0.0-1.0 |
 | `ms` | 可选，手势时长 |

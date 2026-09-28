@@ -234,7 +234,7 @@ PNG / PPM 逐像素校验，与桩后端的渐变完全吻合：
 
 uinput 会创建一个**可枚举的输入设备**，出现在 `/proc/bus/input/devices` 和
 `/sys/class/input/`。如果需要规避这一点，得走
-[`../03-java-service/`](../03-java-service/README.md) 的 Java 系统服务方案。
+[`docs/08-input-injection.md`](../../docs/08-input-injection.md) 的 Java 系统服务方案。
 
 ---
 
@@ -388,5 +388,5 @@ ls $ANDROID_PRODUCT_OUT/system/bin/autod
 
 ## 如果暂时不想投入 AOSP
 
-先做 [`../01-ndk-prototype/`](../01-ndk-prototype/README.md)——当天就能验证思路，
+先跑 `tools/build-ndk.sh` 出 NDK 版（[`docs/04-environment.md`](../../docs/04-environment.md)）——当天就能验证思路，
 协议层可以原样复用。

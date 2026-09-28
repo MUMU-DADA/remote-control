@@ -1,14 +1,19 @@
-# 03 · Java 系统服务（长期形态）
+# 备选注入路径：Java 系统服务 / 特权 APK
 
 > 补上 Android 12 的触控缺口：native 负责截图，Java 负责注入。
 
+> 本文是**备选方案的设计**，不是正在开发的轨道。
+> 当前实现走 `/dev/uinput`（见 `dev/02-native-daemon/`），能用但有代价：
+> **会创建一个可枚举的输入设备**（`/proc/bus/input/devices` 里看得见）。
+> 本文这条路走 `injectInputEvent`，不创建设备 —— 代价是要平台签名、要进镜像。
+
 ---
 
-## 为什么需要这条轨道
+## 为什么会有这条路
 
 **Android 12 的 `injectInputEvent` 是 Java-only AIDL，native 进程调不了。**
 
-完整论证见 [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节「硬约束与风险」。
+完整论证见 [`01-selection.md`](01-selection.md) 第 7 节「硬约束与风险」。
 
 对比之下，截图用的 `ISurfaceComposer` 是 native AIDL，C++ 可以直连。
 
@@ -316,8 +321,8 @@ adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 
 
 ---
 
-## 相关文档
+## 相关
 
-- Android 12 的约束 → [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节的约束 1
+- Android 12 的约束 → [`01-selection.md`](01-selection.md) 第 7 节的约束 1
 - 主线方案 → `../02-native-daemon/README.md`
-- 架构总览 → `../../docs/02-architecture.md`
+- 架构总览 → [`02-architecture.md`](02-architecture.md)

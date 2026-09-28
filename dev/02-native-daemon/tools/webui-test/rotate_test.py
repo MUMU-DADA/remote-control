@@ -46,34 +46,52 @@ with sync_playwright() as p:
     def state():
         return pg.evaluate("()=>({sw:sw,sh:sh,tw:touchW,th:touchH})")
 
+    # ⚠️ 不写死起始方向。
+    #
+    #    这段原来断言"竖屏初始 720x1280" —— 那是在**竖屏皮肤**的模拟器上写的。
+    #    后来模拟器改成 1280x720 横屏启动，前两条断言当场就假了
+    #    （和 maxwidth_test 当初写死 720 是同一个毛病）。
+    #    面板原生是横是竖由皮肤决定，测试只该断言**相对变化**。
     s0 = state()
-    print(f"  竖屏: 画布 {s0['sw']}x{s0['sh']}  触控空间 {s0['tw']}x{s0['th']}")
-    chk("竖屏初始 720x1280", s0["sw"] == 720 and s0["sh"] == 1280)
-    chk("触控坐标空间 = 720x1280", s0["tw"] == 720 and s0["th"] == 1280)
+    start_landscape = s0["sw"] > s0["sh"]
+    print(f"  初始: 画布 {s0['sw']}x{s0['sh']}（{'横' if start_landscape else '竖'}屏）"
+          f"  触控空间 {s0['tw']}x{s0['th']}")
+    chk("初始画布和触控空间一致",
+        s0["tw"] == s0["sw"] and s0["th"] == s0["sh"],
+        f"画布 {s0['sw']}x{s0['sh']} vs 触控 {s0['tw']}x{s0['th']}")
 
-    # ── 转横屏 ──
-    r = rotate("90")
-    print(f"  旋转 90°: applied={r['applied']} method={r['method']} → {r['width']}x{r['height']}")
+    # ── 转到另一个方向 ──
+    target = "portrait" if start_landscape else "landscape"
+    r = rotate(target)
+    print(f"  转到 {target}: applied={r['applied']} method={r['method']}"
+          f" → {r['width']}x{r['height']}")
     time.sleep(4)
     s1 = state()
-    print(f"  横屏: 画布 {s1['sw']}x{s1['sh']}  触控空间 {s1['tw']}x{s1['th']}")
-    chk("服务端显示尺寸变横屏", r["width"] > r["height"], f"{r['width']}x{r['height']}")
-    chk("客户端画布跟着变横屏（size 消息重发生效）",
-        s1["sw"] > s1["sh"], f"{s1['sw']}x{s1['sh']}")
+    print(f"  转后: 画布 {s1['sw']}x{s1['sh']}  触控空间 {s1['tw']}x{s1['th']}")
+    chk("服务端显示尺寸真的换了方向",
+        (r["width"] > r["height"]) != start_landscape,
+        f"{r['width']}x{r['height']}")
+    chk("客户端画布跟着换（size 消息重发生效）",
+        (s1["sw"] > s1["sh"]) != start_landscape, f"{s1['sw']}x{s1['sh']}")
     # ⚠️ 行为在某一轮改过：以前坐标范围是启动时定死的、转屏不变；
     #    现在**跟着显示走** —— 因为固定不变会让客户端按屏幕像素发的坐标
     #    超出范围被内核钳住，落点全错（实测过）。页面必须在旋转后重取。
-    chk("触控坐标空间跟着变成横屏",
-        s1["tw"] == 1280 and s1["th"] == 720,
-        f"实际 {s1['tw']}x{s1['th']}（期望 1280x720）")
+    chk("触控坐标空间跟着换，且与画布一致",
+        s1["tw"] == s1["sw"] and s1["th"] == s1["sh"],
+        f"画布 {s1['sw']}x{s1['sh']} vs 触控 {s1['tw']}x{s1['th']}")
 
-    # ── 转回竖屏 ──
-    r2 = rotate("0")
+    # ── 转回来 ──
+    back = "landscape" if start_landscape else "portrait"
+    r2 = rotate(back)
     time.sleep(4)
     s2 = state()
-    print(f"  转回: 画布 {s2['sw']}x{s2['sh']}")
-    chk("转回竖屏后画布也回来", s2["sw"] == 720 and s2["sh"] == 1280,
-        f"{s2['sw']}x{s2['sh']}")
+    print(f"  转回 {back}: 画布 {s2['sw']}x{s2['sh']}  触控空间 {s2['tw']}x{s2['th']}")
+    chk("转回原方向后画布也回来",
+        s2["sw"] == s0["sw"] and s2["sh"] == s0["sh"],
+        f"{s2['sw']}x{s2['sh']}（期望 {s0['sw']}x{s0['sh']}）")
+    chk("转回后触控空间依然跟着画布",
+        s2["tw"] == s2["sw"] and s2["th"] == s2["sh"],
+        f"画布 {s2['sw']}x{s2['sh']} vs 触控 {s2['tw']}x{s2['th']}")
 
     chk("页面无 JS 报错", not errs, str(errs[:1]))
     b.close()

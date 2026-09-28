@@ -30,7 +30,15 @@ class Keyboard {
 
     void Close();
     bool ready() const { return fd_ >= 0; }
-    const char* BackendName() const;
+
+    // 后端名 / 进程里是否已经建起虚拟键盘。
+    //
+    // ⚠️ 是**静态**的，因为虚拟键盘由 Dispatcher **延迟创建**
+    //    （没按过键就不建，免得白多一个输入设备）—— Runtime 上报时
+    //    拿不到实例指针。进程里最多只有一个键盘实例，所以进程级状态
+    //    就是答案。
+    static const char* BackendName();
+    static bool AnyReady();
 
     // 按一次键。
     //

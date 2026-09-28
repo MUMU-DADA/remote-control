@@ -52,8 +52,22 @@ curl "http://host:8088/api/v1/config?token=<令牌>"      # 给 <img>/WebSocket 
 
 ### 坐标
 
-屏幕像素，原点左上角。分辨率见 `GET /config` 的
-`runtime.capture.primaryWidth/Height`。超出范围会被钳制或拒绝，**不会**自动缩放。
+原点左上角。**单位是 `GET /info` 的 `touchWidth/Height` 空间，不是屏幕像素。**
+
+| 字段 | 用途 |
+|---|---|
+| `touchWidth` / `touchHeight` | **发坐标就按这个算** —— 注入器 uinput 设备的实际 ABS 范围 |
+| `primaryWidth` / `primaryHeight` | 屏幕当前分辨率，只用来把画面上的位置换算过来 |
+
+两者**通常**相等（转屏 / 改分辨率时服务端会把注入器范围一起跟过去），
+但**不一定** —— 用 `--touch-range` 手工指定过就会分叉。
+
+服务端把请求里的 `x`/`y` **直接当 ABS 值**写下去，中间没有缩放，
+所以按 `primaryWidth/Height` 算坐标，在两者不一致时会整体点偏。
+超出 `0..touchWidth-1` 的值由内核钳到边界，**既不缩放也不报错**。
+
+> 实测踩过：显示宽 720 而 ABS 范围是 1279，于是点"正中央"只落在 56% 处。
+> 只看中心点还测不出来 —— 两个空间在中心是重合的，偏移越大错得越多。
 
 ---
 
@@ -97,12 +111,12 @@ curl http://host:8088/api/v1/describe
 ```json
 {
   "ok": true,
-  "protocolVersion": 6,
+  "protocolVersion": 7,
   "config": {
     "socketPath": "/data/local/tmp/autod.sock",
     "usingInitSocket": false,
     "initSocketName": "",
-    "socketMode": "438",
+    "socketMode": "432",
     "displayId": 0,
     "touchWidth": 0,
     "touchHeight": 0,
@@ -111,18 +125,21 @@ curl http://host:8088/api/v1/describe
     "dropGid": -1
   },
   "runtime": {
-    "pid": 21266, "uid": 0, "gid": 0,
-    "uptimeMs": 496569,
-    "protocolVersion": 6,
+    "pid": 6595, "uid": 0, "gid": 0,
+    "uptimeMs": 752080,
+    "protocolVersion": 7,
     "verbose": false,
     "capture": {
       "backend": "surfaceflinger",
-      "primaryWidth": 320,
-      "primaryHeight": 480,
       "displayCount": 1,
-      "displays": [ … ]
+      "displays": [
+        {"id": 4619827259835644672, "width": 1280, "height": 720, "refreshHz": 60}
+      ],
+      "primaryWidth": 1280,
+      "primaryHeight": 720
     },
-    "inject": { "backend": "uinput" }
+    "inject": { "backend": "uinput" },
+    "keyboard": { "backend": "uinput(虚拟键盘)", "ready": true }
   }
 }
 ```
@@ -130,8 +147,17 @@ curl http://host:8088/api/v1/describe
 | 字段 | 说明 |
 |---|---|
 | `capture.backend` | `surfaceflinger`（快，23ms/帧）或 `screencap(exec …)`（慢，120ms/帧） |
-| `config.socketMode` | 十进制。`438` = `0666`，`432` = `0660` |
+| `capture.displays[]` | 每块屏的 `id`/`width`/`height`/`refreshHz`。`id` 是 64 位，超出 JS 安全整数范围 |
+| `capture.primaryWidth/Height` | 主屏分辨率。**触控坐标范围以 `/info` 的 `touchWidth/Height` 为准** |
+| `inject.backend` | 触控注入后端 |
+| `keyboard.backend` | 按键注入后端。`未就绪（还没按过键）` 表示虚拟键盘**还没建** |
+| `keyboard.ready` | 是否已创建 uinput 虚拟键盘 |
+| `config.socketMode` | 十进制。`438` = `0666`，`432` = `0660`（默认） |
 | `dropUid/dropGid` | -1 表示没有降权 |
+
+> ⚠️ 虚拟键盘是**延迟创建**的 —— 第一次 `POST /key` 才 `UI_DEV_CREATE`，
+> 免得服务只是被起来截图就白多一个输入设备。
+> 所以 `keyboard.ready` 一开始是 `false`，这是正常的，不是故障。
 
 ### GET /stats
 
@@ -171,18 +197,15 @@ curl http://host:8088/api/v1/describe
 | `primaryWidth/Height` | 屏幕分辨率 |
 | `primaryStride` | 每行像素数（可能大于 width） |
 | `primaryFormat` | Android PixelFormat：1=RGBA_8888，2=RGBX，5=BGRA |
-| `touchWidth/Height` | **触控坐标空间**。客户端发坐标必须按这个空间算 |
+| `touchWidth/Height` | **触控坐标空间**。发坐标必须按这个算，见上文「坐标」 |
 
-> ⚠️ `touchWidth/Height` 是**注入器的实际 ABS 范围**，不一定等于
-> `primaryWidth/Height`。
+> ⚠️ `touchWidth/Height` 是注入器 uinput 设备的实际 ABS 范围。
+> 这个范围**一次创建定死**（ioctl 改不了），而**转屏 / 改分辨率时服务端会
+> 把设备重建一遍**（`syncInjector()`），让范围跟到新的显示上。
 >
-> 服务端把请求里的 `x`/`y` **直接当 ABS 值**写下去（`inject_uinput.cpp`
-> 里没有缩放），所以客户端必须按这个空间发坐标。而这个范围是
-> **设备创建时定死的**（ioctl 改不了），因此它天然是一个稳定的
-> 归一化空间 —— 转屏、改分辨率都不影响它，Android 会按比例映射到当前显示。
->
-> 两者不一致就会点偏。实测踩过：显示 720 宽而 ABS 范围是 1279，
-> 于是点画面正中央只落在 56% 处。
+> 结论：**`POST /rotate` 成功之后要重新读 `/info`**，别缓存。
+> 只是记录尺寸的话，转屏前后都是 `屏幕宽 x 屏幕高`，看着没变；
+> 但客户端如果拿着旧的宽高去算比例，落点就会偏。
 
 ### POST /rotate
 
@@ -395,16 +418,29 @@ curl -X POST http://host:8088/api/v1/service \
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `format` | `auto` | `auto`\|`png`\|`jpeg`\|`webp`\|`raw` |
-| `quality` | 见下 | PNG 1-9（zlib 级别）/ JPEG·WebP 1-100 |
+| `quality` | 按格式 | PNG 1-9（zlib 级别）/ JPEG·WebP 1-100 |
 
 **`auto` 在单次截图时是 PNG**（无损，一次调用不在乎大小），
 **在画面流里是 JPEG**（一路视频，带宽和编码耗时都重要）。
 两个默认值不同是**有意**的。
 
+`quality` 不传时的实际取值：
+
+| `format` | 默认 `quality` |
+|---|---|
+| `png`（含 `auto`） | **6** |
+| `jpeg` | **90** |
+| `webp` | **90** |
+
+> ⚠️ **和画面流的默认值不一样**，别混。
+> `/stream` 的默认取自 `GET /params` 的 `quality` 表 ——
+> PNG **1** / JPEG **75** / WebP **80**。
+> 单次截图只编一张，不值得抠体积；画面流是持续在编，默认要偏小。
+
 ```bash
-curl -o s.png  'http://host:8088/api/v1/capture'                # PNG 86 KB
-curl -o s.jpg  'http://host:8088/api/v1/capture?format=jpeg'    # JPEG 17 KB
-curl -o s.raw  'http://host:8088/api/v1/capture?format=raw'     # 614400 B
+curl -o s.png  'http://host:8088/api/v1/capture'                # 1280x720 → 1.5 MB
+curl -o s.jpg  'http://host:8088/api/v1/capture?format=jpeg'    # 同尺寸 → 约 200 KB
+curl -o s.raw  'http://host:8088/api/v1/capture?format=raw'     # = 宽 x 高 x 4 字节
 curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 ```
 
@@ -419,7 +455,8 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 | `X-Autod-PixelFormat` | Android PixelFormat（1=RGBA_8888，2=RGBX，5=BGRA） |
 | `X-Autod-Stride` | 仅 `raw`：每行像素数（可能大于 width） |
 
-`raw` 模式下：`614400 = 320 × 480 × 4`，字节序是 **RGBA**（BGRA 已在服务端转好）。
+`raw` 模式下字节数恒等于 `宽 × 高 × 4`（1280×720 → 3686400），
+字节序是 **RGBA** —— BGRA 已在服务端转好，不用自己转。
 
 ### GET /stream
 
@@ -437,13 +474,43 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 
 ## 四、触控
 
+### 五种手势一览
+
+| 端点 | 坐标字段 | `ms` 默认 | `ms` 的含义 | 响应 |
+|---|---|---|---|---|
+| `/tap` | `x` `y` | 50 | 按下保持多久 | `{ok,x,y}` |
+| `/longpress` | `x` `y` 或 `x1` `y1` | 800 | 按下保持多久 | `{ok,x,y}` |
+| `/doubletap` | 同上 | 120 | **两次点击之间的间隔** | `{ok,x,y}` |
+| `/drag` | `x1 y1 x2 y2` 或 `x y x2 y2` | 600 | 移动时长（**另有固定 120ms 起点停顿**） | `{ok,x,y,x2,y2}` |
+| `/swipe` | `x1 y1 x2 y2`（四个都必须给） | 300 | 移动时长 | `{ok}` |
+
+**五个都是 POST** —— 都有副作用。
+
+> ⚠️ 坐标一律是 `/info` 的 `touchWidth/Height` 空间，**不是屏幕像素**。
+> 详见上文「坐标」一节 —— 两者不一致会点偏。
+
+> ⚠️ **`ms: 0` 的语义是"用默认值"，不是"零时长"。**
+> 唯一例外是 `/tap`：它的 `ms` 默认 50，但显式写 `0` 就是按下后**立刻抬起**
+> （`Tap` 里 `durationMs > 0` 才等待）。极短的点击有些应用会当抖动丢掉，
+> 所以一般不写这个字段。
+>
+> `/swipe` 写 `0` 也会被还原成 300（注入器内部同样有兜底）。
+
+缺少坐标会 **400**，报错文案各不相同：
+`/tap` 要 `x`+`y`（`tap 需要 x 与 y`），
+`/swipe` 要 `x1`+`y1`+`x2`+`y2`，
+`/longpress`/`/drag`/`/doubletap` 要 `x`/`x1` 与 `y`/`y1`
+（`需要坐标（x/y 或 x1/y1）`），`/drag` 还要终点 `x2`+`y2`。
+
 ### POST /tap
 
 ```json
 {"x": 540, "y": 1200, "ms": 50}
 ```
 
-`ms` 可选，默认 50。返回 `{"ok":true,"x":540,"y":1200}`。
+`ms` 是按下到抬起之间的等待，默认 50。
+返回 `{"ok":true,"x":540,"y":1200}` —— **回显的是服务端实际用的坐标**，
+可以直接用来确认自己有没有算错坐标空间。
 
 ### POST /longpress
 
@@ -455,17 +522,7 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 
 > ⚠️ 长按期间**一个 MOVE 都不能发**，否则系统判成拖拽，长按菜单不弹。
 > 这就是为什么它是一个单独的接口，而不是"tap 加长 ms"。
-
-### POST /drag
-
-```json
-{"x1": 100, "y1": 1600, "x2": 800, "y2": 400, "ms": 600}
-```
-
-与 `swipe` 的区别：**起点先停顿 120ms，再慢速移动** ——
-这样才会被识别成"按住拖动"而不是"甩一下"。
-
-坐标字段两种写法都收：`x/y/x2/y2` 或 `x1/y1/x2/y2`。
+> 实测症状是"长按没反应，但拖拽正常"。
 
 ### POST /doubletap
 
@@ -473,7 +530,18 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 {"x": 540, "y": 1200, "ms": 120}
 ```
 
-`ms` 是两次点击的间隔，默认 120（系统双击阈值约 300ms）。
+`ms` 是两次点击的**间隔**（每次点击本身仍是 50ms），默认 120
+（系统双击阈值约 300ms）。
+
+### POST /drag
+
+```json
+{"x1": 100, "y1": 1600, "x2": 800, "y2": 400, "ms": 600}
+```
+
+与 `swipe` 的区别：**起点先停顿 120ms，再慢速移动**（24 步）——
+这样才会被识别成"按住拖动"而不是"甩一下"。
+所以总耗时约 `ms + 120`，`ms` 只管移动那一段。
 
 ### POST /swipe
 
@@ -481,6 +549,10 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 {"x1": 540, "y1": 1600, "x2": 540, "y2": 400, "ms": 300}
 ```
 
+步数按 `ms × 60 / 1000` 估（钳在 2..240），也就是尽量贴着 60Hz 发，
+太少会看着像"跳"过去。响应只有 `{"ok":true}`，不回显坐标。
+
+### POST /touch（WebSocket）
 ### POST /touch（WebSocket）
 
 流式触控。`down` / `move` / `up` 三个原语 ——
@@ -498,25 +570,126 @@ ws.send(JSON.stringify({t:'up',   x:110, y:210, id:0}));
 
 ### POST /key
 
+按键注入。实现走 `/dev/uinput` 虚拟键盘（系统里会多出一个 `autod-keyboard` 输入设备）
+—— Android 12 没有可用的 native 按键注入接口。
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `key` | string | — | **必填**，键名或 Linux 扫描码 |
+| `long` | bool | `false` | 长按 **1000ms**（普通按 50ms） |
+
+```bash
+curl -X POST http://host:8088/api/v1/key \
+     -H 'Content-Type: application/json' -d '{"key":"home"}'
+```
+
 ```json
-{"key": "home"}
-{"key": "172"}                    // Linux 键码
-{"key": "power", "long": true}    // 长按
+{"ok":true, "key":"home", "keyCode":172, "longPress":false}
 ```
 
-键名接受三种写法：`home`（助记名）/ `KEY_HOME`（内核文档写法）/ `172`（数字键码）。
-单字符 `a`-`z` `0`-`9` 直接当字符键，`f1`-`f12` 也支持。
+`keyCode` 回显的是解析出的 **Linux 扫描码**，**不是** Android 的
+`KeyEvent` 键码（`home` 回显 172，而 Android 拿到的 `KEYCODE_HOME` 是 3）。
 
-可用键名列表在错误信息里返回：
+> ⚠️ `long` 必须是 JSON 布尔值。`"long":1` 和 `"long":"true"` 都被
+> **静默当成 false** —— 不报错，只是没长按。实测确认。
 
+#### 键名的三种写法
+
+| 写法 | 例子 | 解析方式 |
+|---|---|---|
+| 助记名 | `home`、`browser`、`center` | 查内置表（大小写不敏感） |
+| 内核文档写法 | `KEY_HOMEPAGE`、`key_back` | 去掉 `key_` 前缀后查表 |
+| 数字扫描码 | `172`、`158` | 直接用，范围 `1..767`（`KEY_MAX`） |
+
+另外：单字符 `a`-`z` / `0`-`9` 当**字符键**，`f1`-`f12` 当功能键。
+
+> ⚠️ 数字写法的判定**排在字符解释之后**，而且要求**多于一位**：
+> `{"key":"1"}` 是数字键 `1`（扫描码 2），**不是**扫描码 1（那是 `ESC`）。
+> 要原始扫描码就写多位数字。
+>
+> ⚠️ **不支持十六进制**：`{"key":"0x210"}` 报 4099，得写 `528`。
+
+#### 可用键名
+
+| `key` | 扫描码 | Android 得到 | 备注 |
+|---|---|---|---|
+| `home` | 172 | `HOME` | ⚠️ **不是 102** —— 102 在 Generic.kl 里是 `MOVE_HOME`（光标移到行首） |
+| `back` | 158 | `BACK` |  |
+| `menu` | 139 | `MENU` |  |
+| `appswitch` | 580 | `APP_SWITCH` | 最近任务 |
+| `search` | 217 | `SEARCH` |  |
+| `power` | 116 | `POWER` |  |
+| `volumeup` | 115 | `VOLUME_UP` |  |
+| `volumedown` | 114 | `VOLUME_DOWN` |  |
+| `mute` | 113 | `VOLUME_MUTE` |  |
+| `enter` | 28 | `ENTER` |  |
+| `delete` | 111 | `FORWARD_DEL` | 通用键盘上这个位置是前向删除 |
+| `backspace` | 14 | `DEL` | 映射到 `DEL`，也就是 Android 的退格 |
+| `space` | 57 | `SPACE` |  |
+| `tab` | 15 | `TAB` |  |
+| `escape` | 1 | `ESCAPE` |  |
+| `up` | 103 | `DPAD_UP` | 方向键在 Android 上是 `DPAD_*` |
+| `down` | 108 | `DPAD_DOWN` |  |
+| `left` | 105 | `DPAD_LEFT` |  |
+| `right` | 106 | `DPAD_RIGHT` |  |
+| `center` | 353 | `DPAD_CENTER` | ⚠️ **不是 352** —— `KEY_OK` 在 Generic.kl 里没有映射，发出去等于没按 |
+| `playpause` | 164 | `MEDIA_PLAY_PAUSE` |  |
+| `nextsong` | 163 | `MEDIA_NEXT` |  |
+| `previoussong` | 165 | `MEDIA_PREVIOUS` |  |
+| `stop` | 166 | `MEDIA_STOP` |  |
+| `camera` | 212 | `CAMERA` |  |
+| `browser` | 150 | `EXPLORER` | ⚠️ **不是 172** —— 172 会翻译成 `HOME`，把人送回桌面 |
+| `focus` | 528 | *（无）* | `KEY_CAMERA_FOCUS`。**模拟器的 keylayout 里没有映射**，按下无反应 |
+
+不认识的键名会 4099，并把可用列表回在错误信息里
+（列表由服务端的键名表**自动生成**，不会跟实现脱节）：
+
+```json
+{"ok":false,"status":4099,"error":"不认识的键: xxx。可用: appswitch back
+ backspace browser camera center delete down enter escape focus home left
+ menu mute nextsong playpause power previoussong right search space stop
+ tab up volumedown volumeup a-z 0-9 f1-f12，或直接给数字键码"}
 ```
-{"ok":false,"status":4099,"error":"不认识的键: xxx。可用: home back menu
- appswitch search power volumeup volumedown mute enter delete backspace
- space tab escape up down left right center playpause nextsong
- previoussong stop camera a-z 0-9 f1-f12，或直接给数字键码"}
-```
 
-**实现走 `/dev/uinput` 虚拟键盘** —— Android 12 没有可用的 native 按键注入接口。
+#### ⚠️ 这里最容易踩的坑：Linux 扫描码 ≠ Android 键码
+
+上面「Android 得到」那一列查的是设备上的 `Generic.kl`，**不能靠猜**。
+三个真实踩过的例子：
+
+| 传 | 直觉写法 | 实际后果 | 正确写法 |
+|---|---|---|---|
+| `home` | `KEY_HOME` = 102 | 102 是 `MOVE_HOME`，只把光标移到行首，不回桌面 | `KEY_HOMEPAGE` = **172** |
+| `browser` | `KEY_HOMEPAGE` = 172 | 172 是 `HOME`，按了直接回桌面 | `KEY_WWW` = **150** |
+| `center` | `KEY_OK` = 352 | 352 在 Generic.kl 里**没有映射**，按下毫无反应 | `KEY_SELECT` = **353** |
+
+#### 字母键的扫描码不是连续的
+
+按 QWERTY **物理位置**编号，不是按字母表 ——
+所以 `KEY_A + (c - 'a')` 这种算法只有 `a` 碰巧对，其余 25 个全错
+（传 `d` 会算出 33，而 33 是 `f`）。
+
+| 字母 | 扫描码 | 字母 | 扫描码 | 字母 | 扫描码 | 字母 | 扫描码 |
+|---|---|---|---|---|---|---|---|
+| `a` | 30 | `b` | 48 | `c` | 46 | `d` | 32 |
+| `e` | 18 | `f` | 33 | `g` | 34 | `h` | 35 |
+| `i` | 23 | `j` | 36 | `k` | 37 | `l` | 38 |
+| `m` | 50 | `n` | 49 | `o` | 24 | `p` | 25 |
+| `q` | 16 | `r` | 19 | `s` | 31 | `t` | 20 |
+| `u` | 22 | `v` | 47 | `w` | 17 | `x` | 45 |
+| `y` | 21 | `z` | 44 |  |  |  |  |
+
+数字键 `1`-`9` = 2-10，`0` = 11。
+功能键 F1-F10 = 59-68，但 **F11/F12 跳到 87/88**（中间夹着别的功能键）。
+
+#### 两个静默失败
+
+- **未声明的键位会被内核直接丢掉，不报错。** 服务启动虚拟键盘时用
+  `UI_SET_KEYBIT` 声明了一批键位；超出这批的扫描码虽然能通过
+  `1..767` 的范围校验、接口照样回 `ok:true`，但设备侧毫无反应。
+- **`{"key":"1"}` 不等于扫描码 1。** 见上文「键名的三种写法」。
+
+可用键名列表以服务端实测为准：`GET /info` 看 `keyboard` 后端是否为
+`uinput(虚拟键盘)`。
 
 ---
 

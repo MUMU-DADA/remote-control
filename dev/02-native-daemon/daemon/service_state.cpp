@@ -15,6 +15,7 @@
 #include "capture.h"
 #include "inject.h"
 #include "json_writer.h"
+#include "keyboard.h"
 #include "log_buffer.h"
 #include "protocol.h"
 
@@ -243,6 +244,13 @@ std::string ServiceState::RuntimeJson() const {
     } else {
         w.Key("inject").Obj().Field("backend", "not initialized").EndObj();
     }
+
+    // 键盘是**延迟创建**的（第一次 POST /key 才建），所以这里报的是
+    // 进程级状态，跟 capture/inject 的实例后端名不完全是一回事。
+    w.Key("keyboard").Obj()
+        .Field("backend", Keyboard::BackendName())
+        .Field("ready", Keyboard::AnyReady())
+     .EndObj();
 
     w.EndObj();
     return w.str();
