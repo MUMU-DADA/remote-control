@@ -274,6 +274,16 @@ allow remote_control shell_exec:file {
     read open getattr map execute execute_no_trans
 };
 
+# ── 跑 Java 命令行工具（pm / am / svc 都靠 app_process）──────────────────
+#
+# 补齐 exec sh + zygote_exec 之后，app_process 能起来了（denial 的 comm
+# 从 remote-control 变成 app_process），但启动 Java VM 还要读几个属性：
+#     avc: denied { read } ... device_config_runtime_native_boot_prop
+#     avc: denied { read } ... odsign_prop
+# 这两类属性 AOSP 本来是给"会跑 app_process 的域"的，我们的域得自己声明。
+allow remote_control device_config_runtime_native_boot_prop:file r_file_perms;
+allow remote_control odsign_prop:file r_file_perms;
+
 # ── /sdcard（文件管理功能要用）─────────────────────────────────────────────
 #
 # 实测现象：文件管理「列出 /sdcard」返回 **0 项**，dmesg 里是
