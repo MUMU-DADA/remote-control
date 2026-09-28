@@ -252,3 +252,45 @@ m -j12 systemimage
 - `autod` 主线与阶段划分 → [`../02-native-daemon/README.md`](../02-native-daemon/README.md)
 - 本机环境（依赖、磁盘、镜像源） → [`../../docs/07-environment.md`](../../docs/07-environment.md)
 - Android 12 触控约束 → [`../../docs/06-constraints.md`](../../docs/06-constraints.md)
+
+---
+
+## 结论（2026-09-28）：目标已由 `dev/06-x64-android` 达成
+
+用户用**另一条路线**把"Linux 上跑 arm64 安卓"跑通了，实测证据见
+[`../../06-x64-android/docs/07-verification-report.md`](../../06-x64-android/docs/07-verification-report.md)：
+
+| 目标 | 结果 |
+|---|---|
+| 自编 **x86_64** Android 12 ROM | ✅ EXIT=0，62083 个编译目标 |
+| **x86_64 Linux（KVM）** 同架构运行 | ✅ **`sys.boot_completed=1`**，开机 **23.8 s** |
+| **arm64 应用能跑** | ✅ 自建纯 arm64-v8a 探针 APK：装成功、进程活、**16 条 `/system/lib64/arm64/*` 映射**、`primaryCpuAbi=arm64-v8a`、JNI 返回 `kernel=x86_64` |
+
+### 两条路线的对比（为什么 06 的方案对、04 这条路走不通）
+
+| | **04（本目录，全 arm64 系统模拟）** | **06（x86_64 ROM + 官方翻译层）** |
+|---|---|---|
+| 思路 | 让模拟器跑一个**真正的 arm64 系统** | 编一份 **x86_64 系统**，用 Google 官方的 **`libndk_translation`** 翻译 arm64 **用户态** |
+| 硬件加速 | 只能 **TCG**（x86_64 宿主上没有 arm64 KVM） | **KVM**（同架构虚拟化） |
+| 速度 | guest 时间≈实时，开机要 5~10 分钟 | **开机 23.8 秒** |
+| 依赖 | 模拟器的 `ranchu` 机器必须能起（见下） | 官方镜像里的翻译层载荷 |
+| 结果 | ranchu 打通了、boot 推进到 zygote+SurfaceFlinger，但**卡在图形栈** ✗ | **完整启动 + arm64 应用实测通过** ✅ |
+
+**06 方案的关键**：翻译层不是运行时打补丁塞进去的，而是靠 **`TARGET_NATIVE_BRIDGE_ABI=arm64-v8a`**
+让**编译系统**把 `/system/lib64/arm64/*`（59 个库）、`ndk_translation.rc`、`ld.config.arm{,64}.txt`、
+`binfmt_misc` 注册项**直接写进 ROM** —— 这正是 04 在第 18 轮撞墙的地方：
+运行时用 `adb push` / `mount --bind` / `debugfs` 塞库，
+要么被 namespace 挡住 ✗、要么新增文件对 guest 不可见 ✗（见第 23、27 轮）。
+
+### 04 这条路线的完整收获（仍有价值，已全部记录在本目录）
+
+1. **`-cpu cortex-a53`**（第 8 轮）：模拟器默认 `cortex-a57` 会触发 TCG 执行 guest 原生代码的段错误
+   （A12 的 keystore2、API 25 的 ART/AOT 崩溃都是它）✓
+2. **`ranchu` 可以打通**（第 19 轮）：改 QEMU 二进制里的**设备别名表**
+   （把 `virtio-serial` 的实现从 PCI 版换成 MMIO 版 `virtio-serial-device`）、
+   字符串补丁 `-soundhw`→`-name` 去掉无条件的 PCI 音频设备、`ioeventfd=off`→`max_ports=511` ✓
+3. **内核补丁 `ramoops`→`noramop`**（第 22 轮）：消除 guest 内核在 pstore 上的 panic ✓
+4. **镜像手术的边界**（第 23、27 轮）：`debugfs` 只能"替换/删除已有文件"，
+   **新增文件对 guest 不可见**（带 `shared_blocks` 的 e2fsdroid 镜像尤其如此）✓
+5. 结论：**x86_64 宿主上想跑 arm64 安卓，正确的做法是"同架构 + 用户态翻译"（06 路线），
+   而不是"跨架构全系统模拟"（04 路线）** ✓

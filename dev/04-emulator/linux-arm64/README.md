@@ -1571,3 +1571,19 @@ HAL rc 解析总数:    42         ← 仍是"原有文件数"，新增的那个
 
 这样两个库就是**编译系统写进镜像**的，不是 debugfs 新增的，guest 一定看得到 ✓；
 hwcomposer 不再 abort，boot 就应能走到 `sys.boot_completed=1`。
+
+---
+
+## ⭐ 最终结论（2026-09-28）
+
+**"Linux 上跑 arm64 安卓"已由 [`../../06-x64-android/`](../../06-x64-android/) 实现并验收通过**：
+自编 **x86_64 Android 12 ROM** + 官方 `libndk_translation` 载荷，
+在 **x86_64 Linux（KVM）** 上 **`sys.boot_completed=1`（开机 23.8 秒）**，
+且**arm64 应用实测能装能跑**（16 条 `/system/lib64/arm64/*` 映射、`primaryCpuAbi=arm64-v8a`）。
+
+证据：[`../../06-x64-android/docs/07-verification-report.md`](../../06-x64-android/docs/07-verification-report.md)。
+
+本目录 `linux-arm64/` 记录的是**另一条路线**（让模拟器跑真正的 arm64 系统）从第 1 轮到第 28 轮的
+完整实测过程与结论 —— 它**走通了大半**（`ranchu` 机器打通、boot 推进到 zygote + SurfaceFlinger），
+但最终卡在图形栈，且暴露了这一路线的本质代价：**x86_64 宿主上没有 arm64 KVM，只能 TCG**，
+开机要 5~10 分钟。**正确路线是"同架构 + 用户态翻译"（06），不是"跨架构全系统模拟"（04）**。
