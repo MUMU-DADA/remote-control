@@ -1519,3 +1519,55 @@ cuttlefish/shared/device.mk）✗，结果：
 或**用 `e2fsck`/`debugfs` 把某个现有大文件截断再复用其块** ✗ 复杂，优先用"覆盖同名文件"。
 
 替换完再 `lpmake` 重建 super → 写回 → 用 `assemble-and-boot.sh` 启动即可。
+
+---
+
+## 第 27 轮：**彻底查清"debugfs 新增文件对 guest 不可见"的机制**
+
+### 一、用标志文件做了决定性实验
+
+往 vendor 的 `/etc/init/` **新增**一个 `zz-marker-test.rc`（内容是一个好认的 service），
+然后启动观察 init 的日志：
+
+```
+标志 rc 是否被解析: 0          ← 完全没出现
+HAL rc 解析总数:    42         ← 仍是"原有文件数"，新增的那个不算
+```
+
+**在 super 里的 vendor 上试、在独立的 `vendor.img` 上也试，结果一样** ✗ —— 即：
+**`debugfs` 新增的文件，`debugfs ls` 看得到、`cat` 读得出、md5 与源文件一致，
+但 guest 里的 init/linker 枚举目录时看不到它们。**
+
+### 二、逐一排除可能原因
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| 目录 htree 索引未更新 | `e2fsck -f -D -y`（确实做了 "Optimizing directories"）| **无效** ✗ |
+| ext4 journal 在挂载时被 replay，把 debugfs 的改动回滚 | `tune2fs -O ^has_journal`（确认 features 里已无 `has_journal`）后重测 | **无效** ✗ |
+| **`shared_blocks`（e2fsdroid 的块去重特性）** | `tune2fs -O ^shared_blocks` → **"not supported"** ✗；`e2fsck -f -y -E unshare_blocks` → 跑完仍留着 `shared_blocks`，并报 **"Filesystem still has errors"**、磁盘 100% 占满 ✗ | **很可能就是它** ✓（debugfs 新分配的数据块与该特性冲突）|
+
+### 三、结论与下一轮做法
+
+**结论**：这类由 `e2fsdroid` 生成、带 `shared_blocks` 的 vendor 镜像，
+**无法用 `debugfs` 可靠地"新增"文件** ✗（只能"替换/删除已有文件"）；
+而 `PRODUCT_PACKAGES` 加模块在本 build 配置下又**不生效** ✗（`ninja: no work to do`）。
+
+**下一轮改用 `PRODUCT_COPY_FILES`** ✓ —— 这是最可靠的"把文件放进镜像"的机制：
+
+1. 把 `libgralloctypes.so` 与 `android.hardware.graphics.mapper@4.0.so`
+   从 `out/target/product/emulator64_arm64/system/lib64/` 复制到**源码树**里
+   （例如 `device/generic/goldfish/prebuilt/`，作为 prebuilt 入库）；
+2. 在 `device/generic/goldfish/64bitonly/product/vendor.mk` 中加：
+
+   ```make
+   PRODUCT_COPY_FILES += \
+       device/generic/goldfish/prebuilt/libgralloctypes.so:$(TARGET_COPY_OUT_VENDOR)/lib64/libgralloctypes.so \
+       device/generic/goldfish/prebuilt/android.hardware.graphics.mapper@4.0.so:$(TARGET_COPY_OUT_VENDOR)/lib64/android.hardware.graphics.mapper@4.0.so
+   ```
+
+3. `m -j12 vendorimage`（必要时先 `m installclean` 或删掉 `vendor.img` 强制重建）；
+4. 验证 `out/target/product/emulator64_arm64/vendor/lib64/` 里出现这两个库 →
+   用 `assemble-and-boot.sh` 组装启动。
+
+这样两个库就是**编译系统写进镜像**的，不是 debugfs 新增的，guest 一定看得到 ✓；
+hwcomposer 不再 abort，boot 就应能走到 `sys.boot_completed=1`。
