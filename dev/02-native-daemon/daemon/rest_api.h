@@ -52,6 +52,7 @@ struct StreamState {
     // 第一个订阅者启动抓帧线程，最后一个离开时停掉它 ——
     // **没人在看的时候完全不抓帧**。
     std::unique_ptr<FrameHub::Sub> hubSub;
+    bool described = false;   // 是否已经把"我是谁"告诉过 FrameHub
 
     // ── H.264（只有 format=h264 时才建）──
     //

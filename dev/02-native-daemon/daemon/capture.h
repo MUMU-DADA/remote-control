@@ -50,6 +50,23 @@ class Capture {
     // 显式指定显示 ID（0 表示自动选主显示）。
     void SetDisplayId(uint64_t id);
 
+    // 目标宽度（0 = 原始分辨率）。
+    //
+    // ⚠️ 这是**源头降采样**，不是事后缩放 —— SurfaceFlinger 的
+    //    DisplayCaptureArgs.width/height 直接决定合成时的渲染尺寸
+    //    （`reqSize = ui::Size(args.width, args.height)`，见
+    //    SurfaceFlinger.cpp:5986）。所以设了它，抓帧本身就只处理
+    //    目标尺寸的像素，memfd、mmap、后续编码全都跟着变小。
+    //
+    //    对 1440x2960 的屏幕传 720，数据量直接少 4 倍。
+    //
+    // 只有 SurfaceFlinger 后端认这个。screencap(exec) 后端没有尺寸
+    // 参数，会忽略它（那台路上只能在事后降采样）。
+    // 内联实现：这是个平凡 setter，而 Capture 的方法是按后端各实现
+    // 一份的（SetDisplayId 就有三份）—— 为三行代码改三个文件不划算。
+    void SetTargetWidth(uint32_t width) { targetWidth_ = width; }
+    uint32_t TargetWidth() const { return targetWidth_; }
+
     // 立刻解析当前 displayId 并缓存。
     //
     // 公开出来是给 API 用的：客户端热改 display 之后要能**当场**知道
@@ -74,6 +91,9 @@ class Capture {
     // 声明成了 const，但需要读缓存。
     mutable uint32_t lastWidth_  = 0;
     mutable uint32_t lastHeight_ = 0;
+
+    // 目标抓帧宽度（0 = 原始分辨率）。见 SetTargetWidth。
+    uint32_t targetWidth_ = 0;
 };
 
 }  // namespace autod

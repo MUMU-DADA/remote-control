@@ -247,6 +247,15 @@ ReplyPacket Dispatcher::HandleCapture(const Request& req) {
     ReplyPacket packet;
     packet.reply = MakeReply(kOk, req.cmd);
 
+    // req.x 复用成"目标抓帧宽度"（Capture 用不到 x 字段）。
+    //
+    // 让 SurfaceFlinger **在合成阶段就按这个尺寸渲染**，而不是全分辨率
+    // 抓下来再软件缩放 —— 后者在 1440x2960 上是 4.3M 像素，白干 4 倍。
+    // 详见 capture.h 的 SetTargetWidth。
+    //
+    // 0 = 原始分辨率。screencap 后端会忽略它。
+    capture_->SetTargetWidth(req.x > 0 ? static_cast<uint32_t>(req.x) : 0);
+
     Frame frame;
     std::string error;
     if (!capture_->Grab(&frame, &error)) {

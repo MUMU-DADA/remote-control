@@ -182,8 +182,7 @@ curl http://host:8088/api/v1/describe
 
 ### GET /params
 
-
-画面流的可调参数。**别去翻文档猜默认值，问它。**
+画面流的可调参数 + **当前抓帧节奏**。**别去翻文档猜默认值，问它。**
 
 ```json
 {
@@ -195,20 +194,92 @@ curl http://host:8088/api/v1/describe
   "defaultSkipUnchanged": true,
   "defaultFormat": "jpeg",
   "nativeCodecs": true,
-  "codecs": {"png": true, "jpeg": true, "webp": true, "raw": true,
-             "backend": "AndroidBitmap_compress"},
-  "params": [
-    {"name":"fps","range":"1-60","desc":"帧率"},
-    {"name":"quality","range":"PNG 1-9 / JPEG,WebP 1-100","desc":"画质"},
-    {"name":"format","range":"auto|jpeg|webp|png","desc":"编码格式"},
-    {"name":"maxWidth","range":"0-8192（0=不缩放）","desc":"降采样宽度"},
-    {"name":"skipUnchanged","range":"0|1","desc":"画面没变时跳过编码（停检）"}
-  ],
+
+  "capture": {
+    "activeFps": 30,
+    "subscribers": 1,
+    "frames": 4419,
+    "lastCaptureMs": 10,
+    "captureWidth": 720,
+    "served": 5707,
+    "misses": 0,
+    "running": true,
+    "subscriberList": [
+      {"id":1, "fps":30, "maxWidth":480, "ageMs":4002,
+       "peer":"192.168.0.108:49366", "format":"webp",
+       "transport":"mjpeg", "isMaxFps":true}
+    ]
+  },
+
+  "quality": {
+    "jpeg": {"min":1, "max":100, "default":75},
+    "webp": {"min":1, "max":100, "default":80},
+    "png":  {"min":1, "max":9,   "default":1,
+             "note":"zlib 压缩级别，不是图像质量"},
+    "h264": {"min":1, "max":100, "default":75,
+             "note":"换算成码率，不是图像质量"}
+  },
+
+  "codecs": {"png":true, "jpeg":true, "webp":true, "raw":true,
+             "h264":true, "h264Max":2, "h264Used":0,
+             "backend":"AndroidBitmap_compress", "forced":false},
+
+  "params": [ … ],
   "wsCommands": [ … ]
 }
 ```
 
+#### `capture` —— 服务端**实际**在按什么节奏抓
+
+抓帧线程按**所有订阅者的最高需求**跑，所以客户端只知道自己要了多少帧，
+不知道设备实际被拉到了多快 —— 那会让「我明明只要 5fps，为什么设备这么烫」
+变成一个查不出来的问题。这里如实报出来。
+
+| 字段 | 说明 |
+|---|---|
+| `activeFps` | 当前抓帧节奏。**0 = 没有任何订阅者，一次都没在抓** |
+| `subscribers` | 订阅者数量 |
+| `frames` | 累计抓帧次数（不管有没有人收） |
+| `lastCaptureMs` | 最近一次抓帧耗时 |
+| `captureWidth` | 当前按多少宽抓。0 = 原始分辨率 |
+| `served` | 取帧时「最新帧已备好」的次数 |
+| `misses` | 没等到新帧的次数。**这个高 = 抓帧跟不上需求，客户端在等** |
+| `running` | 抓帧线程活着吗 |
+| `subscriberList` | 每个订阅者的明细，见下 |
+
+`subscriberList` 的每一项：
+
+| 字段 | 说明 |
+|---|---|
+| `id` | 订阅序号，递增 |
+| `fps` | 这个客户端要的帧率 |
+| `maxWidth` | 这个客户端要的降采样宽度（0 = 原始） |
+| `ageMs` | 这个订阅挂了多久 |
+| `peer` | 客户端地址 `ip:port`。socket 那条传输为空串 |
+| `format` | 它拉的格式 |
+| `transport` | `ws` 或 `mjpeg` |
+| `isMaxFps` | **是不是它把抓帧节奏顶上来的** |
+
+> `isMaxFps` 是排查时唯一真正要看的那条。抓帧节奏由最高需求决定，
+> 所以只要有一个客户端挂着 60fps，整个进程就一直在满速抓 ——
+> 没有这个字段的话，你只能挨个关客户端去试。
+
+#### `quality` —— 每种格式的取值范围
+
+各格式量纲完全不同，**界面上的拖动条必须按当前格式取这个范围**，
+不能写死。写死了就会出现「拖到 75，但 PNG 只认 1-9」。
+
+#### `codecs` —— 这台设备到底能编什么
+
+| 字段 | 说明 |
+|---|---|
+| `png/jpeg/webp/raw` | 各格式可用吗 |
+| `h264` / `h264Max` / `h264Used` | H.264 可用性、并发上限、当前占用 |
+| `backend` | `AndroidBitmap_compress`（快）或 `libjpeg/libpng`（回退） |
+| `forced` | 是否被 `AUTOD_IMAGE_BACKEND` 强制指定 |
+
 `nativeCodecs: false` 表示这台设备只有 PNG（没有 JPEG/WebP）。
+
 
 ---
 

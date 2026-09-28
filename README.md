@@ -37,20 +37,21 @@ AutoSnapshotAndroid/
 ├── SUMMARY.md                 ← 方案总结与决策记录（先读这个）
 │
 ├── docs/                      ← 专题文档
-│   ├── 01-selection.md           方案选型
-│   ├── 02-architecture.md        架构设计
-│   ├── 03-version-matrix.md      各版本 API 差异
-│   ├── 04-hardware.md            硬件与构建环境
-│   ├── 05-latency-and-touch.md   延迟与触控能力
-│   ├── 06-constraints.md         约束与风险
-│   ├── 07-environment.md         ⭐ 本机实际环境（磁盘/镜像源/容器）
-│   └── 08-official-implementations.md  官方/开源实现对照 ★
+│   ├── 01-selection.md           方案选型：为什么不用内核，三种落点对比
+│   ├── 02-architecture.md        架构设计：组件、协议、并发模型
+│   ├── 03-reference.md           API 与命令速查
+│   ├── 04-environment.md         ⭐ 本机实际环境（磁盘/镜像源/容器）
+│   ├── 05-design-notes.md        设计取舍与踩过的坑
+│   ├── 06-capture-performance.md 抓帧/编码性能实测与调优
+│   └── api/                      ⭐ **接口权威文档**（HTTP / WebSocket / socket）
 │
 ├── tools/                     ← 环境与构建脚本
 │   ├── setup-host.sh             环境初始化
-│   └── repo-sync.sh              AOSP 源码同步
+│   ├── integrate-aosp.sh         把 dev/ 源码接进 AOSP 树（rsync）
+│   ├── build-autod.sh            编 autod / autodctl（AOSP 平台后端）
+│   └── build-ndk.sh              编 NDK 版（screencap 后端，无需 AOSP 树）
 │
-├── aosp/                      ← AOSP 源码树（~85 GB，已同步中）
+├── aosp/                      ← AOSP 源码树
 │
 └── dev/                       ← 五条轨道（01–03 开发轨道，04 验证环境，05 上位应用）
     ├── 01-ndk-prototype/         阶段 0：纯 NDK 快速验证（当天可跑）

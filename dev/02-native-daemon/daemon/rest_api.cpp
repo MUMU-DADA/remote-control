@@ -23,6 +23,7 @@
 #include "encode_pool.h"
 #include "frame_hub.h"
 #include "image_encoder.h"
+#include "peer_util.h"
 #include "png_encoder.h"
 #include "protocol.h"
 #include "service_state.h"
@@ -577,6 +578,35 @@ HttpResponse RestApi::HandleTouchStream(const HttpRequest& req) {
     return resp;
 }
 
+namespace {
+
+// 订阅者明细，渲染成一段现成的 JSON 数组。
+//
+// 单独拿出来是因为主链是 `w.Obj().Field()...` 一条表达式，
+// 中间插不进 for 循环。先渲染好再 RawJson 嵌进去最干净。
+std::string SubscribersJson() {
+    json::Writer arr;
+    arr.Arr();
+    for (const auto& s : FrameHub::Instance().ListSubscribers()) {
+        json::Writer sw;
+        sw.Obj()
+            .Field("id", static_cast<int64_t>(s.id))
+            .Field("fps", static_cast<int64_t>(s.fps))
+            .Field("maxWidth", static_cast<int64_t>(s.maxWidth))
+            .Field("ageMs", s.ageMs)
+            .Field("peer", s.peer)
+            .Field("format", s.format)
+            .Field("transport", s.transport)
+            .Field("isMaxFps", s.isMaxFps)
+         .EndObj();
+        arr.RawJson(sw.str());
+    }
+    arr.EndArr();
+    return arr.str();
+}
+
+}  // namespace
+
 // ── 画面流的可调参数 ────────────────────────────────────────────────────────
 //
 // 让调用方能**查到**流支持哪些参数、当前默认值是什么，而不是去翻文档。
@@ -611,11 +641,28 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
             .Field("subscribers", static_cast<int64_t>(h.subscribers))
             .Field("frames", h.frames)
             .Field("lastCaptureMs", h.lastCaptureMs)
+            // 当前按多少宽抓（0 = 原始分辨率）。
+            // 抓帧按所有订阅者里**最大的 maxWidth** ——
+            // SurfaceFlinger 的 DisplayCaptureArgs.width 是源头降采样。
+            .Field("captureWidth", static_cast<int64_t>(h.captureWidth))
             // served/misses：取帧时"最新帧已备好"和"没等到"的次数。
             // misses 高 = 抓帧跟不上需求，客户端在等。
             .Field("served", h.served)
             .Field("misses", h.misses)
             .Field("running", h.running)
+            // 每个订阅者的明细。
+            //
+            // 光有 activeFps 不够用：抓帧节奏由**最高需求**决定，所以只要
+            // 有一个客户端挂着 60fps，整个进程就一直在满速抓 —— 而服务端
+            // 原来完全看不出那是谁，日志里也不记。实测就踩过：activeFps=60
+            // 挂了很久，只能挨个关客户端去试。
+            //
+            // isMaxFps 直接标出"就是它把节奏顶上来的"，这才是排查时
+            // 唯一真正要看的那一条。
+            // ⚠️ 必须 RawJson，不能用 Field —— Field 重载会走
+            //    Val(const std::string&)，把整个数组当成**字符串**再转义
+            //    一遍，客户端拿到的是 "[{\"id\":1,...}]" 而不是数组。
+            .Key("subscriberList").RawJson(SubscribersJson())
         .EndObj()
         // ── 每种格式的 quality 范围 ──
         //
@@ -928,7 +975,7 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
         std::string err;
         // 上报目标帧率 —— 抓帧线程按所有订阅者的**最高**需求跑。
         // 消费者来了直接拿最新帧，不用等一次抓帧（那是"变卡"的根源）。
-        st->hubSub = FrameHub::Instance().Subscribe(p.fps, &err);
+        st->hubSub = FrameHub::Instance().Subscribe(p.fps, p.maxWidth, &err);
         if (!st->hubSub) {
             ALOGW("订阅共享抓帧失败: %s", err.c_str());
             return {};
@@ -1166,6 +1213,15 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
 
             bool unchanged = false;
             std::string img = NextEncodedFrame(p, &st, &unchanged);
+            // 第一次拿到订阅就自报家门 —— 抓帧节奏由最高需求决定，
+            // /params 里必须能看出"是谁在拉、拉多快"，否则只能靠猜。
+            if (st.hubSub && !st.described) {
+                st.described = true;
+                st.hubSub->Describe(
+                        PeerName(fd),
+                        ImageEncoder::Name(static_cast<ImageFormat>(p.codec)),
+                        "mjpeg");
+            }
             if (img.empty()) {
                 // 画面没变就整帧跳过：MJPEG 客户端会继续显示上一帧，
                 // 这正是我们要的。出错也走这里，下一轮重试。
@@ -1351,6 +1407,15 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
 
             bool unchanged = false;
             std::string img = NextEncodedFrame(p, &st, &unchanged);
+            // 第一次拿到订阅就自报家门 —— 抓帧节奏由最高需求决定，
+            // /params 里必须能看出"是谁在拉、拉多快"，否则只能靠猜。
+            if (st.hubSub && !st.described) {
+                st.described = true;
+                st.hubSub->Describe(
+                        PeerName(fd),
+                        ImageEncoder::Name(static_cast<ImageFormat>(p.codec)),
+                        "ws");
+            }
             if (img.empty()) continue;      // 没变或出错，下一轮再看
 
             // 二进制帧。第一帧附带尺寸信息（之后客户端就不用再解析了）——

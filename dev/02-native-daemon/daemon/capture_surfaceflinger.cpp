@@ -27,6 +27,7 @@
 #include <gui/SurfaceComposerClient.h>   // SurfaceComposerClient / ScreenshotClient
 #include <gui/SyncScreenCaptureListener.h>
 #include <ui/DisplayId.h>                // PhysicalDisplayId
+#include <ui/DisplayState.h>             // ui::DisplayState（逻辑尺寸）
 #include <ui/GraphicBuffer.h>
 #include <ui/PixelFormat.h>
 
@@ -176,10 +177,17 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
             ui::DisplayMode mode;
             if (SurfaceComposerClient::getActiveDisplayMode(token, &mode) ==
                 NO_ERROR) {
-                info.width  = static_cast<uint32_t>(mode.resolution.getWidth());
-                info.height = static_cast<uint32_t>(mode.resolution.getHeight());
-                info.refreshHz =
-                        static_cast<uint32_t>(mode.refreshRate);
+                info.refreshHz = static_cast<uint32_t>(mode.refreshRate);
+            }
+            // 报**逻辑**尺寸，跟 Grab 真正抓到的一致；面板物理模式在
+            // wm size 覆盖生效时并不等于抓帧尺寸。
+            ui::DisplayState state;
+            if (SurfaceComposerClient::getDisplayState(token, &state) ==
+                NO_ERROR) {
+                info.width =
+                        static_cast<uint32_t>(state.layerStackSpaceRect.getWidth());
+                info.height =
+                        static_cast<uint32_t>(state.layerStackSpaceRect.getHeight());
             }
         }
         out->push_back(info);
@@ -201,8 +209,42 @@ bool Capture::Grab(Frame* out, std::string* error) {
     // Android 12：DisplayCaptureArgs 继承 CaptureArgs，定义在 gui/LayerState.h
     DisplayCaptureArgs args;
     args.displayToken = token;
-    args.width        = 0;    // 0 = 用显示原始分辨率
-    args.height       = 0;
+    // 源头降采样：SF 会按这个尺寸**合成**，而不是合成完再缩。
+    // 见 SurfaceFlinger.cpp:5986 `ui::Size reqSize(args.width, args.height)`。
+    //
+    // 先问出显示的**逻辑**尺寸：按宽高比算目标高度要用它，而且
+    // 只有"确实变小了"才值得让 SF 换渲染尺寸。
+    //
+    // ⚠️ 这里要的是 getDisplayState().layerStackSpaceRect，不是
+    // getActiveDisplayMode().resolution。前者才是 SF 在
+    // `args.width/height == 0` 时用的默认尺寸：
+    //
+    //     reqSize = display->getLayerStackSpaceRect().getSize();
+    //     —— SurfaceFlinger.cpp:5987
+    //
+    // 两者在 `wm size` / `wm density` 覆盖生效时会不一致（物理模式仍是
+    // 面板原生分辨率，layer stack 跟随覆盖后的逻辑尺寸）。用错的话
+    // 高宽比会算错，画面会被拉变形。
+    uint32_t srcW = 0, srcH = 0;
+    {
+        ui::DisplayState state;
+        if (SurfaceComposerClient::getDisplayState(token, &state) == NO_ERROR) {
+            srcW = static_cast<uint32_t>(state.layerStackSpaceRect.getWidth());
+            srcH = static_cast<uint32_t>(state.layerStackSpaceRect.getHeight());
+        }
+    }
+
+    // 宽度给了就按宽高比算高度（不能只给一个 —— SF 只在两个都为 0 时
+    // 才用原始分辨率，否则按给的来，只给 width 会让高度为 0）。
+    if (targetWidth_ > 0 && srcW > 0 && targetWidth_ < srcW) {
+        args.width  = targetWidth_;
+        args.height = static_cast<uint32_t>(
+                static_cast<uint64_t>(srcH) * targetWidth_ / srcW);
+        if (args.height == 0) args.height = 1;
+    } else {
+        args.width  = 0;      // 0 = 用显示原始分辨率
+        args.height = 0;
+    }
     args.pixelFormat      = ui::PixelFormat::RGBA_8888;
     args.captureSecureLayers = false;
     args.allowProtected   = false;

@@ -67,10 +67,23 @@ struct FrameHub::Impl {
     FramePtr latest;
     uint64_t nextSeq = 1;
 
-    // 每个订阅者的目标帧率。用 map 而不是计数，因为要取最大值。
-    std::map<uint64_t, int> subFps;
+    // 每个订阅者的目标帧率 / 降采样宽度。
+    // 用 map 而不是计数，因为要取最大值。
+    std::map<uint64_t, int>      subFps;
+    std::map<uint64_t, uint32_t> subMaxWidth;
+
+    // 订阅者的自述信息（谁/什么格式/挂了多久）。
+    struct SubMeta {
+        int64_t     startedAtMs = 0;
+        std::string peer;
+        std::string format;
+        std::string transport;
+    };
+    std::map<uint64_t, SubMeta> subMeta;
+
     uint64_t nextSubId = 1;
     int      maxFps    = 0;      // 0 = 没有任何需求
+    uint32_t captureWidth = 0;   // 0 = 原始分辨率
 
     bool threadRunning = false;
     bool stop          = false;
@@ -91,9 +104,18 @@ struct FrameHub::Impl {
             if (kv.second > m) m = kv.second;
         }
         if (m > kMaxFps) m = kMaxFps;
-        if (m != maxFps) {
+
+        // 抓帧宽度取所有订阅者里**最大的**（0 = 有人要原始分辨率）
+        uint32_t w = 0;
+        for (const auto& kv : subMaxWidth) {
+            if (kv.second == 0) { w = 0; break; }   // 有人要原始尺寸
+            if (kv.second > w) w = kv.second;
+        }
+
+        if (m != maxFps || w != captureWidth) {
             maxFps = m;
-            // 节奏变了，让抓帧线程立刻重新评估
+            captureWidth = w;
+            // 节奏/尺寸变了，让抓帧线程立刻重新评估
             nextCaptureAt = NowMs();
         }
     }
@@ -122,9 +144,16 @@ FrameHub::Sub::~Sub() {
     if (im == nullptr) return;
 
     std::thread toJoin;
+    std::string peer;
     {
         std::lock_guard<std::mutex> lk(im->mu);
         im->subFps.erase(id_);
+        im->subMaxWidth.erase(id_);
+        auto meta = im->subMeta.find(id_);
+        if (meta != im->subMeta.end()) {
+            peer = meta->second.peer;
+            im->subMeta.erase(meta);
+        }
         im->RecomputeMaxFps();
         im->stats.subscribers = static_cast<int>(im->subFps.size());
         im->stats.maxFps = im->maxFps;
@@ -143,13 +172,30 @@ FrameHub::Sub::~Sub() {
     }
     if (toJoin.joinable()) toJoin.join();
 
+    if (!peer.empty()) {
+        ALOGI("画面流断开 <- %s (id=%llu)", peer.c_str(),
+              static_cast<unsigned long long>(id_));
+    }
     active_ = false;
 }
 
 FrameHub::Sub::Sub(Sub&& other) noexcept
-      : id_(other.id_), fps_(other.fps_), active_(other.active_) {
+      : id_(other.id_), fps_(other.fps_), maxWidth_(other.maxWidth_),
+        active_(other.active_) {
     other.active_ = false;
     other.id_ = 0;
+}
+
+void FrameHub::Sub::SetMaxWidth(uint32_t w) {
+    if (w == maxWidth_) return;
+    Impl* im = Instance().impl_;
+    if (im == nullptr) return;
+    std::lock_guard<std::mutex> lk(im->mu);
+    maxWidth_ = w;
+    if (active_) im->subMaxWidth[id_] = w;
+    im->RecomputeMaxFps();
+    im->stats.captureWidth = im->captureWidth;
+    im->cv.notify_all();
 }
 
 void FrameHub::Sub::SetFps(int fps) {
@@ -164,8 +210,25 @@ void FrameHub::Sub::SetFps(int fps) {
     if (active_) im->subFps[id_] = fps;
     im->RecomputeMaxFps();
     im->stats.maxFps = im->maxFps;
+    im->stats.captureWidth = im->captureWidth;
     // 帧率降下来时，抓帧线程可能正等在一个很早的时刻上 —— 叫醒它重算
     im->cv.notify_all();
+}
+
+void FrameHub::Sub::Describe(std::string peer, std::string format,
+                             std::string transport) {
+    Impl* im = Instance().impl_;
+    if (im == nullptr) return;
+    std::lock_guard<std::mutex> lk(im->mu);
+    auto it = im->subMeta.find(id_);
+    if (it == im->subMeta.end()) return;
+    it->second.peer      = std::move(peer);
+    it->second.format    = std::move(format);
+    it->second.transport = std::move(transport);
+    ALOGI("画面流订阅 id=%llu <- %s (%s/%s), 共 %zu 个, 最高需求 %d fps",
+          static_cast<unsigned long long>(id_),
+          it->second.transport.c_str(), it->second.format.c_str(),
+          it->second.peer.c_str(), im->subFps.size(), im->maxFps);
 }
 
 FramePtr FrameHub::Sub::WaitNext(uint64_t afterSeq, int timeoutMs,
@@ -205,7 +268,8 @@ FramePtr FrameHub::Sub::WaitNext(uint64_t afterSeq, int timeoutMs,
     return nullptr;
 }
 
-std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, std::string* error) {
+std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, uint32_t maxWidth,
+                                                   std::string* error) {
     if (impl_ == nullptr) impl_ = new Impl();
     Impl* im = impl_;
 
@@ -219,14 +283,18 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, std::string* error) 
     if (fps > kMaxFps) fps = kMaxFps;
 
     auto sub = std::unique_ptr<Sub>(new Sub());
-    sub->id_     = im->nextSubId++;
-    sub->fps_    = fps;
-    sub->active_ = true;
+    sub->id_       = im->nextSubId++;
+    sub->fps_      = fps;
+    sub->maxWidth_ = maxWidth;
+    sub->active_   = true;
 
-    im->subFps[sub->id_] = fps;
+    im->subFps[sub->id_]      = fps;
+    im->subMaxWidth[sub->id_] = maxWidth;
+    im->subMeta[sub->id_].startedAtMs = NowMs();
     im->RecomputeMaxFps();
-    im->stats.subscribers = static_cast<int>(im->subFps.size());
-    im->stats.maxFps = im->maxFps;
+    im->stats.subscribers  = static_cast<int>(im->subFps.size());
+    im->stats.maxFps       = im->maxFps;
+    im->stats.captureWidth = im->captureWidth;
 
     if (!im->threadRunning) {
         im->stop = false;
@@ -268,8 +336,9 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, std::string* error) 
                 const uint64_t seq = im->nextSeq++;
                 lk2.unlock();
 
+                const uint32_t capW = im->captureWidth;
                 const int64_t t0 = NowMs();
-                FramePtr f = CaptureOnce(im->dispatcher, seq);
+                FramePtr f = CaptureOnce(im->dispatcher, seq, capW);
                 const int64_t dt = NowMs() - t0;
 
                 lk2.lock();
@@ -297,10 +366,15 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, std::string* error) 
 
 // ── 抓一帧 ───────────────────────────────────────────────────────────────────
 
-FramePtr FrameHub::CaptureOnce(Dispatcher* dispatcher, uint64_t seq) {
+FramePtr FrameHub::CaptureOnce(Dispatcher* dispatcher, uint64_t seq,
+                               uint32_t targetWidth) {
     Request r{};
     r.magic = kMagic;
     r.cmd   = static_cast<uint32_t>(Cmd::Capture);
+    // req.x 复用成目标抓帧宽度（见 capture.h 的 SetTargetWidth）：
+    // 让 SurfaceFlinger 在**合成阶段**就按这个尺寸渲染，
+    // 而不是全分辨率抓下来再软件缩放。
+    r.x     = static_cast<int32_t>(targetWidth);
 
     ReplyPacket rp = dispatcher->Handle(r, "", -1, 0);
     if (rp.reply.status != kOk || rp.fd < 0) {
@@ -357,8 +431,40 @@ FrameHub::Stats FrameHub::GetStats() const {
     s.running     = impl_->threadRunning;
     s.subscribers = static_cast<int>(impl_->subFps.size());
     s.maxFps      = impl_->maxFps;
+    s.captureWidth = impl_->captureWidth;
     s.lastSeq     = impl_->latest != nullptr ? impl_->latest->seq : 0;
     return s;
+}
+
+std::vector<FrameHub::SubscriberInfo> FrameHub::ListSubscribers() const {
+    std::vector<SubscriberInfo> out;
+    if (impl_ == nullptr) return out;
+
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    const int64_t now = NowMs();
+    out.reserve(impl_->subFps.size());
+
+    for (const auto& kv : impl_->subFps) {
+        SubscriberInfo si;
+        si.id       = kv.first;
+        si.fps      = kv.second;
+        si.maxWidth = impl_->subMaxWidth.count(kv.first)
+                              ? impl_->subMaxWidth.at(kv.first) : 0;
+        // 标记出"是谁把抓帧节奏顶上来的" —— 这是排查"为什么还在满速抓"
+        // 时唯一真正要看的那个。
+        si.isMaxFps = (kv.second == impl_->maxFps && impl_->maxFps > 0);
+
+        auto m = impl_->subMeta.find(kv.first);
+        if (m != impl_->subMeta.end()) {
+            si.ageMs = m->second.startedAtMs > 0
+                               ? now - m->second.startedAtMs : 0;
+            si.peer        = m->second.peer;
+            si.format      = m->second.format;
+            si.transport   = m->second.transport;
+        }
+        out.push_back(std::move(si));
+    }
+    return out;
 }
 
 }  // namespace autod

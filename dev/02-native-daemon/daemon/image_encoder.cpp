@@ -93,6 +93,37 @@ bool ForcedFallback() {
     return forced;
 }
 
+// 这种格式该用哪个编码器 —— **实测决定的，不是"哪个更原生"**。
+//
+// 直觉上 AndroidBitmap_compress（Skia）应该比内置的快。实测**相反**：
+//
+//   720p，60fps 目标     Skia                   内置              差
+//   ───────────────────────────────────────────────────────────────
+//   jpeg                60.3 fps / 43.9 KiB   61.0 fps / 43.4 KiB   持平
+//   webp                20.5 fps / 25.0 KiB   38.3 fps / 25.5 KiB  +87%
+//   png                 22.2 fps / 72.9 KiB   45.8 fps / 85.3 KiB +106%
+//
+//   （x86_64 模拟器，SurfaceFlinger 后端，宿主空闲时测的；
+//     复现命令见 docs/06-capture-performance.md 第七节）
+//
+// 原因大概率在参数上：Skia 的 WebP 用 method=3（跟 Chrome 对齐），
+// 我们内置的用 method=2 —— 按 webp_encoder.h 里的实测，正好差一倍。
+// PNG 那边 Skia 用了较高的 zlib 级别，我们默认 1（最快）。
+//
+// **代价是体积**：WebP 只大 2%（可忽略），PNG 大 17%（要自己权衡）。
+// 所以这不该是写死的结论，留了开关：
+//
+//   AUTOD_FORCE_FALLBACK=1   全走内置（验证老设备路径用）
+//   AUTOD_PREFER_NATIVE=1    全走 Skia（要最小体积时用）
+bool PreferBuiltin(ImageFormat f) {
+    if (ForcedFallback()) return true;
+    if (const char* v = getenv("AUTOD_PREFER_NATIVE");
+        v != nullptr && v[0] == '1') {
+        return false;
+    }
+    return f == ImageFormat::kWebp || f == ImageFormat::kPng;
+}
+
 #ifdef AUTOD_HAS_JNIGRAPHICS
 
 // ⚠️ 自己声明写回调的类型，**不用头文件里的 `AndroidBitmap_CompressWriteFunc`**。
@@ -302,20 +333,51 @@ bool ImageEncoder::Init(std::string* error) {
 bool ImageEncoder::FallbackForced() const { return ForcedFallback(); }
 
 std::string ImageEncoder::BackendSummary() const {
+    // 现在是**分格式**选的（WebP/PNG 走内置，JPEG 走 Skia —— 见 PreferBuiltin
+    // 上面的实测表），所以不能再笼统报一个后端名。逐个列出来，
+    // 否则排查"为什么 WebP 这个设备上快那个设备上慢"时没有依据。
     std::string s;
-    if (native_) s = "AndroidBitmap_compress";
-    else {
-        if (JpegEncoder::Instance().Available()) s += JpegEncoder::Instance().BackendName();
-        if (WebpEncoder::Instance().Available()) {
-            if (!s.empty()) s += " + ";
-            s += "libwebp（内置）";
+    auto add = [&s](const char* fmt, const std::string& who) {
+        if (!s.empty()) s += " + ";
+        s += fmt;
+        s += "=";
+        s += who;
+    };
+
+    const bool jniOk = native_;
+    auto forFormat = [&](ImageFormat f, const char* name) {
+        if (jniOk && !PreferBuiltin(f)) {
+            add(name, "AndroidBitmap_compress");
+            return;
         }
-        if (PngEncoder::Instance().Available()) {
-            if (!s.empty()) s += " + ";
-            s += "zlib PNG";
+        switch (f) {
+            case ImageFormat::kWebp:
+                if (WebpEncoder::Instance().Available()) {
+                    add(name, "libwebp（内置）");
+                    return;
+                }
+                break;
+            case ImageFormat::kPng:
+                if (PngEncoder::Instance().Available()) {
+                    add(name, "zlib PNG");
+                    return;
+                }
+                break;
+            default:
+                if (JpegEncoder::Instance().Available()) {
+                    add(name, JpegEncoder::Instance().BackendName());
+                    return;
+                }
+                break;
         }
-        if (s.empty()) s = "（无）";
-    }
+        if (jniOk) add(name, "AndroidBitmap_compress");
+    };
+
+    forFormat(ImageFormat::kJpeg, "jpeg");
+    forFormat(ImageFormat::kWebp, "webp");
+    forFormat(ImageFormat::kPng,  "png");
+
+    if (s.empty()) s = "（无）";
     return s;
 }
 
@@ -328,9 +390,12 @@ std::string ImageEncoder::Encode(const uint8_t* rgba, uint32_t width,
     }
     if (format == ImageFormat::kAuto) format = BestFormat();
 
-    // ── 优先：AndroidBitmap（API 30+，和改造前完全一致）──
+    // ── 走 Skia（AndroidBitmap_compress）──
+    //
+    // ⚠️ 不是"能用就用" —— WebP/PNG 上它比内置编码器慢一倍，
+    //    见 PreferBuiltin 上面的实测表。
 #ifdef AUTOD_HAS_JNIGRAPHICS
-    if (native_ && format != ImageFormat::kRaw) {
+    if (native_ && format != ImageFormat::kRaw && !PreferBuiltin(format)) {
         AndroidBitmapInfo info;
         memset(&info, 0, sizeof(info));
         info.width  = width;

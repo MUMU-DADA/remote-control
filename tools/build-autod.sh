@@ -22,6 +22,9 @@ CONTAINER=${CONTAINER:-autod-builder}
 TARGET=${TARGET:-aosp_arm64-userdebug}
 JOBS=${JOBS:-12}          # 31 GiB 内存，经验值约 2 GB/任务
 
+# 源树位置（用来和树内副本比新鲜度）
+SRC_DIR=${SRC_DIR:-"$(cd "$(dirname "$0")/.." && pwd)/dev/02-native-daemon"}
+
 MODULES="autod autodctl"
 if [ "${1:-}" = "--stub" ]; then
     MODULES="$MODULES autod_stub"
@@ -30,6 +33,7 @@ fi
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
 bad()  { printf '\033[1;31m  ✗ %s\033[0m\n' "$*" >&2; }
+warn() { printf '\033[1;33m  ! %s\033[0m\n' "$*"; }
 
 # -----------------------------------------------------------------------------
 step "检查前置条件"
@@ -40,7 +44,42 @@ ok "容器运行中"
 
 docker exec "$CONTAINER" test -f /aosp/frameworks/native/cmds/autod/daemon/Android.bp \
     || { bad "源码未接入，先跑 tools/integrate-aosp.sh"; exit 1; }
-ok "源码已接入"
+
+# ⚠️ 光"文件在"不够 —— integrate-aosp.sh 是 **rsync 复制**，不是软链。
+#    改了 dev/ 下的源码但没重新接入的话，这里会顺利通过，然后编译出
+#    一个**跟改动无关的旧二进制**，而且 ninja 一句 "No need to regenerate"
+#    就结束，看起来完全像是编译成功了。
+#
+#    实测被这个坑掉过两次完整构建：改完代码跑 build-autod.sh，
+#    产物时间戳纹丝不动，还以为是自己改错了。
+#
+#    所以这里比对源树和树内副本的最新修改时间，不新鲜就直接叫停。
+if [ "${SKIP_STALE_CHECK:-0}" != "1" ]; then
+    newest_src=$(find "$SRC_DIR" -type f \
+                     \( -name '*.cpp' -o -name '*.h' -o -name '*.bp' \
+                        -o -name '*.rc' -o -name '*.te' \) \
+                     -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+    # ⚠️ 比的是树内**最新文件的 mtime**，不是那个目录的 mtime。
+    #    rsync -a 会把源目录的 mtime 一并带过去，拿目录 mtime 来比
+    #    会得出"源比树新 10 小时"这种假警报。
+    tree_mtime=$(docker exec "$CONTAINER" sh -c \
+                     "find /aosp/frameworks/native/cmds/autod -type f \
+                          \\( -name '*.cpp' -o -name '*.h' -o -name '*.bp' \
+                             -o -name '*.rc' -o -name '*.te' \\) \
+                          -printf '%T@\\n' | sort -rn | head -1" 2>/dev/null \
+                 | cut -d. -f1)
+    tree_mtime=${tree_mtime:-0}
+    if [ -n "$newest_src" ]; then
+        newest_int=${newest_src%%.*}
+        if [ "$newest_int" -gt "$tree_mtime" ]; then
+            warn "树内源码比 dev/ 旧（差 $(( newest_int - tree_mtime )) 秒）"
+            bad  "先跑 tools/integrate-aosp.sh —— 否则编出来的是旧二进制"
+            echo "  急着编: SKIP_STALE_CHECK=1 bash tools/build-autod.sh"
+            exit 1
+        fi
+    fi
+fi
+ok "源码已接入且是最新的"
 
 docker exec "$CONTAINER" test -f /aosp/build/envsetup.sh \
     || { bad "AOSP 树不完整（缺 build/envsetup.sh）"; exit 1; }

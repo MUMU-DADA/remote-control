@@ -233,6 +233,7 @@ cd dev/02-native-daemon/tests && sudo make run
 | `docs/03-reference.md` | **技术参考**：各 Android 版本 API 差异、延迟拆解、触控能力矩阵 |
 | `docs/04-environment.md` | **环境与构建**：硬件预算、镜像源、构建流程、本机环境 |
 | `docs/05-design-notes.md` | **设计记录**：为什么这么做、踩过的坑（含 20 条速查表）、实测数据 |
+| `docs/06-capture-performance.md` | **抓帧与编码性能**：瓶颈定位、实测数据、调优过程 |
 
 ### 代码
 

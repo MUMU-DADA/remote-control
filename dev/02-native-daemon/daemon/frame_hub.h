@@ -101,6 +101,29 @@ class FrameHub {
         // 客户端改了帧率就调它（服务端会重算抓帧节奏）。
         void SetFps(int fps);
 
+        // 客户端改了降采样宽度就调它。
+        //
+        // 抓帧按**所有订阅者里最大的 maxWidth** 来 ——
+        // SurfaceFlinger 的 DisplayCaptureArgs.width 是**源头降采样**
+        // （合成阶段就只处理这么多像素），所以按最大的抓一次就能
+        // 服务所有人，各自再缩到自己要的尺寸。
+        //
+        // 按最小的抓会让要全尺寸的客户端拿到糊图；按最大的抓只是让
+        // 小尺寸客户端多缩一次 —— 缩放开销远小于多抓几倍像素。
+        // 0 = 不降采样（原始分辨率）。
+        void SetMaxWidth(uint32_t w);
+
+        // 自报家门：谁在拉、用什么格式、走哪条传输。
+        //
+        // 抓帧节奏由**最高需求**决定，所以只要有一个客户端挂着 60fps，
+        // 整个进程就一直在满速抓。光看 maxFps=60 没法知道是谁在拉 ——
+        // 只能去猜、去挨个关客户端。把来源列出来，"为什么还在抓帧"
+        // 就变成一眼的事。
+        //
+        // 参数都可以为空（比如从 socket 来的订阅没有 peer 地址）。
+        void Describe(std::string peer, std::string format,
+                      std::string transport);
+
         // 等到比 afterSeq 更新的一帧。
         //
         // 已经有更新的帧 → **立刻返回**（正常情况：抓帧线程已经备好了）
@@ -113,14 +136,16 @@ class FrameHub {
       private:
         friend class FrameHub;
         Sub() = default;
-        uint64_t id_     = 0;
-        int      fps_    = 0;
-        bool     active_ = false;
+        uint64_t id_       = 0;
+        int      fps_      = 0;
+        uint32_t maxWidth_ = 0;
+        bool     active_   = false;
     };
 
     // 返回 nullptr 表示抓帧不可用（没有 Dispatcher / 启动失败）。
     // error 里是原因。fps 是这个订阅者的目标帧率。
-    std::unique_ptr<Sub> Subscribe(int fps, std::string* error);
+    std::unique_ptr<Sub> Subscribe(int fps, uint32_t maxWidth,
+                                   std::string* error);
 
     // ── 取帧 ──
 
@@ -131,6 +156,7 @@ class FrameHub {
         bool     running       = false;   // 抓帧线程在跑吗
         int      subscribers   = 0;
         int      maxFps        = 0;       // 当前按多少 fps 在抓（0 = 没需求）
+        uint32_t captureWidth  = 0;       // 当前按多少宽抓（0 = 原始分辨率）
         uint64_t frames        = 0;       // 一共抓了多少帧
         uint64_t lastSeq       = 0;
         int64_t  lastCaptureMs = 0;       // 最近一次抓帧耗时
@@ -138,6 +164,21 @@ class FrameHub {
         uint64_t misses        = 0;       // 没等到新帧（超时）的次数
     };
     Stats GetStats() const;
+
+    // 一个订阅者的自述 —— 给 /params 用。
+    struct SubscriberInfo {
+        uint64_t    id       = 0;
+        int         fps      = 0;
+        uint32_t    maxWidth = 0;
+        int64_t     ageMs    = 0;   // 订阅了多久
+        std::string peer;           // "ip:port"，可能为空
+        std::string format;         // jpeg / webp / png / h264
+        std::string transport;      // "ws" / "mjpeg"
+        bool        isMaxFps = false;  // 是不是它把抓帧节奏顶上来的
+    };
+
+    // 当前所有订阅者。按 id 升序（即订阅先后）。
+    std::vector<SubscriberInfo> ListSubscribers() const;
 
   private:
     FrameHub() = default;
@@ -148,7 +189,8 @@ class FrameHub {
     // 抓一帧（会走 Dispatcher，即持那把操作锁）。
     // 静态成员是因为抓帧线程的 lambda 需要调它。
     // seq 由调用方分配后传进来 —— CaptureOnce 是静态的，拿不到 impl_。
-    static FramePtr CaptureOnce(Dispatcher* dispatcher, uint64_t seq);
+    static FramePtr CaptureOnce(Dispatcher* dispatcher, uint64_t seq,
+                                uint32_t targetWidth);
 
     struct Impl;
     Impl* impl_ = nullptr;   // 懒创建，避免静态初始化顺序问题
