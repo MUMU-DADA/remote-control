@@ -2,7 +2,7 @@
 //
 // json_writer.h 只解决"写"。HTTP API 要读请求体，所以这里补上"读"。
 //
-// 为什么自己写而不是引库：和 writer 同样的理由 —— autod 要同时编进
+// 为什么自己写而不是引库：和 writer 同样的理由 —— remote-control 要同时编进
 // AOSP（Soong）和 NDK，引第三方库意味着多一份依赖和多一份同步成本。
 //
 // 能力范围（够 HTTP 请求体用即可）：
@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 namespace json {
 
 class Value {
@@ -117,4 +117,4 @@ class Value {
 bool Parse(const std::string& text, Value* out, std::string* error);
 
 }  // namespace json
-}  // namespace autod
+}  // namespace remote_control

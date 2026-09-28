@@ -29,17 +29,17 @@
 
 namespace {
 
-using autodtest::BitmapHasBit;
-using autodtest::Check;
-using autodtest::CountOf;
-using autodtest::CountSyn;
-using autodtest::DrainEvents;
-using autodtest::DumpEvents;
-using autodtest::ExtractBitmapWords;
-using autodtest::FindEventNode;
-using autodtest::LastValueOf;
-using autodtest::ReadDeviceBlock;
-using autodtest::WaitEvents;
+using remote_control_test::BitmapHasBit;
+using remote_control_test::Check;
+using remote_control_test::CountOf;
+using remote_control_test::CountSyn;
+using remote_control_test::DrainEvents;
+using remote_control_test::DumpEvents;
+using remote_control_test::ExtractBitmapWords;
+using remote_control_test::FindEventNode;
+using remote_control_test::LastValueOf;
+using remote_control_test::ReadDeviceBlock;
+using remote_control_test::WaitEvents;
 
 // ---------------------------------------------------------------------------
 // 测试用例
@@ -49,12 +49,12 @@ using autodtest::WaitEvents;
 // 测试用例
 // ---------------------------------------------------------------------------
 
-void TestTap(autod::Injector& inj, int readFd) {
+void TestTap(remote_control::Injector& inj, int readFd) {
     printf("\n\033[1;34m[1] 单击\033[0m  (540, 960)，持续 30ms\n");
 
     DrainEvents(readFd);   // 清空
 
-    autod::TouchPoint p;
+    remote_control::TouchPoint p;
     p.id = 0;
     p.x  = 540;
     p.y  = 960;
@@ -98,14 +98,14 @@ void TestTap(autod::Injector& inj, int readFd) {
     Check(gotY && y == 960, "ABS_MT_POSITION_Y = 960，实际 %d", y);
 }
 
-void TestSwipe(autod::Injector& inj, int readFd) {
+void TestSwipe(remote_control::Injector& inj, int readFd) {
     printf("\n\033[1;34m[2] 滑动\033[0m  (200,1600) → (800,400)，200ms\n");
 
     DrainEvents(readFd);
 
-    autod::TouchPoint from;
+    remote_control::TouchPoint from;
     from.id = 0; from.x = 200; from.y = 1600;
-    autod::TouchPoint to;
+    remote_control::TouchPoint to;
     to.id = 0; to.x = 800; to.y = 400;
 
     std::string err;
@@ -136,14 +136,14 @@ void TestSwipe(autod::Injector& inj, int readFd) {
     Check(lastX == 800, "末个 X 坐标 = 800，实际 %d", lastX);
 }
 
-void TestMultiTouch(autod::Injector& inj, int readFd) {
+void TestMultiTouch(remote_control::Injector& inj, int readFd) {
     printf("\n\033[1;34m[3] 双指多点触控\033[0m  —— 验证协议 B 的槽位管理\n");
 
     DrainEvents(readFd);
 
-    autod::TouchPoint f1;
+    remote_control::TouchPoint f1;
     f1.id = 0; f1.x = 300; f1.y = 800;
-    autod::TouchPoint f2;
+    remote_control::TouchPoint f2;
     f2.id = 1; f2.x = 700; f2.y = 800;
 
     std::string err;
@@ -191,7 +191,7 @@ void TestMultiTouch(autod::Injector& inj, int readFd) {
 }
 
 // 槽位耗尽：设备声明了 10 个槽位，第 11 个指针必须干净失败而不是静默丢弃
-void TestSlotExhaustion(autod::Injector& inj, int readFd) {
+void TestSlotExhaustion(remote_control::Injector& inj, int readFd) {
     printf("\n\033[1;34m[4] 槽位耗尽\033[0m  超过 10 个指针时的行为\n");
 
     DrainEvents(readFd);
@@ -202,7 +202,7 @@ void TestSlotExhaustion(autod::Injector& inj, int readFd) {
 
     // 故意按下 12 个指针
     for (int i = 0; i < 12; ++i) {
-        autod::TouchPoint p;
+        remote_control::TouchPoint p;
         p.id = i;
         p.x  = 100 + i * 10;
         p.y  = 200;
@@ -223,7 +223,7 @@ void TestSlotExhaustion(autod::Injector& inj, int readFd) {
 
     // 收尾：全部抬起，避免影响后续用例
     for (int i = 0; i < succeeded; ++i) {
-        autod::TouchPoint p;
+        remote_control::TouchPoint p;
         p.id = i;
         p.x  = 100 + i * 10;
         p.y  = 200;
@@ -234,7 +234,7 @@ void TestSlotExhaustion(autod::Injector& inj, int readFd) {
     DrainEvents(readFd);
 
     // 槽位应已全部释放 —— 再按一个应该成功
-    autod::TouchPoint after;
+    remote_control::TouchPoint after;
     after.id = 99; after.x = 500; after.y = 500;
     err.clear();
     const bool ok = inj.TouchDown(after, false, &err);
@@ -243,10 +243,10 @@ void TestSlotExhaustion(autod::Injector& inj, int readFd) {
     inj.TouchUp(after, false, nullptr);
 }
 
-void TestUnpairedUp(autod::Injector& inj) {
+void TestUnpairedUp(remote_control::Injector& inj) {
     printf("\n\033[1;34m[5] 异常路径\033[0m  没有配对的 UP 不应崩溃\n");
 
-    autod::TouchPoint p;
+    remote_control::TouchPoint p;
     p.id = 42; p.x = 100; p.y = 100;
 
     std::string err;
@@ -313,17 +313,17 @@ int main() {
         return 2;
     }
 
-    const std::string kDeviceName = "autod-test-touch";
+    const std::string kDeviceName = "remote-control-test-touch";
     const uint32_t kWidth  = 1080;
     const uint32_t kHeight = 1920;
 
-    autod::InjectorConfig cfg;
+    remote_control::InjectorConfig cfg;
     cfg.touchWidth  = kWidth;
     cfg.touchHeight = kHeight;
     cfg.deviceName  = kDeviceName.c_str();
 
     printf("\n\033[1;34m[0] 初始化\033[0m\n");
-    autod::Injector injector;
+    remote_control::Injector injector;
     std::string err;
     if (!injector.Init(cfg, &err)) {
         fprintf(stderr, "  \033[1;31m✗\033[0m Init 失败: %s\n", err.c_str());
@@ -355,5 +355,5 @@ int main() {
 
     close(readFd);
 
-    return autodtest::Summary("结果");
+    return remote_control_test::Summary("结果");
 }

@@ -19,7 +19,7 @@
 
 #include "protocol.h"
 
-namespace autod {
+namespace remote_control {
 
 class Capture;
 class Injector;
@@ -106,4 +106,4 @@ class Dispatcher {
     std::unique_ptr<Keyboard> keyboard_;
 };
 
-}  // namespace autod
+}  // namespace remote_control

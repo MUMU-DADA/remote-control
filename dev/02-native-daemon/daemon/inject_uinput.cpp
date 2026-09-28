@@ -25,10 +25,10 @@
 #include <linux/input.h>
 #include <linux/uinput.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "inject_backend.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // 协议 B 的槽位上限。Android 的 MotionEvent 最多支持 16 个指针，
@@ -372,4 +372,4 @@ std::unique_ptr<InjectorBackend> CreateInjectorBackend() {
     return std::make_unique<UinputInjector>();
 }
 
-}  // namespace autod
+}  // namespace remote_control

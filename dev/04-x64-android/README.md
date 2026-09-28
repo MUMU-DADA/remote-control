@@ -1,7 +1,7 @@
 # dev/04-x64-android · 同架构 x86_64 Android ROM（可跑 arm64 应用）
 
 > **本目录即验证环境（轨 04）**：自编一份 x86_64 Android 12，让它在 **x86_64 Linux（KVM）** 与
-> **x86_64 Windows（WHPX）** 上**同架构**运行，并且能跑 **arm64 应用**，用来免真机验证 `autod`。
+> **x86_64 Windows（WHPX）** 上**同架构**运行，并且能跑 **arm64 应用**，用来免真机验证 `remote-control`。
 >
 > 目标一句话：**不要跨架构模拟，要同架构 + 用户态翻译层。**
 >
@@ -180,7 +180,7 @@ Windows 侧：同一份打包产物 + `emulator.exe` + WHPX，见 [`windows/READ
 | `ro.product.cpu.abilist` | `x86_64,arm64-v8a` | **相同**（由 `TARGET_NATIVE_BRIDGE_ABI` 自动生成） |
 | 翻译层 | `libndk_translation.so`（Google 专有） | **同一份载荷**（提取自官方镜像） |
 | 产品名 / 设备名 | `sdk_gphone64_x86_64` / `emulator64_x86_64_arm64` | `autosnap_x64_arm64` |
-| 可控性 | 不可改 | 可加 `autod`、改 framework、砍组件 |
+| 可控性 | 不可改 | 可加 `remote-control`、改 framework、砍组件 |
 
 **为什么值得自编**：官方镜像虽然能跑，但它是"别人的 ROM"——不能加系统服务、不能改
 framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之后这些都是自由的。
@@ -212,7 +212,7 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 - 交付与验收（Linux/Windows 两侧怎么跑、怎么证明是同一份） → [`docs/03-delivery.md`](docs/03-delivery.md)
 - 验收排错手册（症状 → 查什么 → 怎么修） → [`docs/04-acceptance-runbook.md`](docs/04-acceptance-runbook.md)
 - **验收报告（结论性证据记录）** → [`docs/07-verification-report.md`](docs/07-verification-report.md)
-- 往 ROM 里加自制组件（如 `autod`） → [`docs/05-adding-components.md`](docs/05-adding-components.md)
+- 往 ROM 里加自制组件（如 `remote-control`） → [`docs/05-adding-components.md`](docs/05-adding-components.md)
 - **arm32 下放预案**（目标里的"如果 arm64 不行"） → [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md)
 - **为什么不做"跨架构全系统模拟 arm64"**（实测结论 + 可复用发现） → [`docs/09-why-not-full-arm64-sim.md`](docs/09-why-not-full-arm64-sim.md)
 - **网络桥接模式**（让模拟器落到物理局域网，`-net-tap`） → [`docs/10-network-bridge.md`](docs/10-network-bridge.md)

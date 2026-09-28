@@ -30,10 +30,10 @@
 *.so
 *.so.*
 
-# 主机侧构建产物（tools/build-autod.sh、tests/Makefile 编出来的 ELF，不是源码）
+# 主机侧构建产物（tools/build-remote-control.sh、tests/Makefile 编出来的 ELF，不是源码）
 # 对应源码是 .c/.cpp，文件名不同，不会被误伤
-/dev/02-native-daemon/autod-host
-/dev/02-native-daemon/autodctl-host
+/dev/02-native-daemon/remote-control-host
+/dev/02-native-daemon/rcctl-host
 /dev/**/tests/fake_screencap
 
 # --- dev/04-x64-android：x86_64+ARM64 桥 ROM 项目 ---

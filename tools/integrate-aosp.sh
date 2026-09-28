@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# integrate-aosp.sh —— 把 autod 的源码接进 AOSP 树
+# integrate-aosp.sh —— 把 remote-control 的源码接进 AOSP 树
 #
 # 目标布局：
-#   aosp/frameworks/native/cmds/autod/
-#   ├── daemon/     （含 Android.bp，模块 autod / autod_binder / autod_stub）
-#   ├── client/     （含 Android.bp，模块 autodctl）
-#   ├── init/       （autod.rc，被 daemon/Android.bp 的 init_rc 引用）
+#   aosp/frameworks/native/cmds/remote-control/
+#   ├── daemon/     （含 Android.bp，模块 remote-control / remote_control_binder / remote_control_stub）
+#   ├── client/     （含 Android.bp，模块 rcctl）
+#   ├── init/       （remote-control.rc，被 daemon/Android.bp 的 init_rc 引用）
 #   └── sepolicy/   （后期待接入，见文末）
 #
 # 为什么 daemon/ 和 client/ 必须同级：
-#   client/autodctl.cpp 里是 #include "../daemon/protocol.h"
+#   client/rcctl.cpp 里是 #include "../daemon/protocol.h"
 #
 # 用法:
 #   bash tools/integrate-aosp.sh          # 接入 + 预检
@@ -21,7 +21,7 @@ set -euo pipefail
 PROJECT_DIR=/root/AutoSnapshotAndroid
 SRC="$PROJECT_DIR/dev/02-native-daemon"
 AOSP="$PROJECT_DIR/aosp"
-DST="$AOSP/frameworks/native/cmds/autod"
+DST="$AOSP/frameworks/native/cmds/remote-control"
 
 CHECK_ONLY=false
 FORCE=false
@@ -62,7 +62,7 @@ done
 step "预检 2/4  校验 Android.bp 引用的 Soong 模块确实存在"
 # -----------------------------------------------------------------------------
 # 这些名字在 Android 12 里核实过；换版本时这里会第一时间报出来，
-# 不用等 m autod 跑到一半才失败。
+# 不用等 m remote-control 跑到一半才失败。
 check_module() {
     local mod="$1"
     if grep -rq "name: \"$mod\"" "$AOSP/frameworks/native" "$AOSP/system" 2>/dev/null; then
@@ -156,7 +156,7 @@ for sub in daemon client sepolicy; do
     # 只拷源文件，排除主机侧的构建产物
     rsync -a --delete \
         --exclude='*.o' --exclude='*.d' --exclude='__pycache__' \
-        --exclude='test_*' --exclude='autod-host' --exclude='Makefile' \
+        --exclude='test_*' --exclude='remote-control-host' --exclude='Makefile' \
         "$SRC/$sub/" "$DST/$sub/"
     ok "$sub/"
 done
@@ -172,31 +172,31 @@ step "校验布局"
 # -----------------------------------------------------------------------------
 [ -f "$DST/daemon/Android.bp" ]        && ok "daemon/Android.bp"        || { bad "缺 daemon/Android.bp"; exit 1; }
 [ -f "$DST/client/Android.bp" ]        && ok "client/Android.bp"        || { bad "缺 client/Android.bp"; exit 1; }
-[ -f "$DST/client/autodctl.cpp" ]      && ok "client/autodctl.cpp"      || { bad "缺 client/autodctl.cpp"; exit 1; }
-[ -f "$DST/daemon/autod.rc" ]          && ok "daemon/autod.rc"          || { bad "缺 daemon/autod.rc"; exit 1; }
+[ -f "$DST/client/rcctl.cpp" ]      && ok "client/rcctl.cpp"      || { bad "缺 client/rcctl.cpp"; exit 1; }
+[ -f "$DST/daemon/remote-control.rc" ]          && ok "daemon/remote-control.rc"          || { bad "缺 daemon/remote-control.rc"; exit 1; }
 [ -f "$DST/daemon/capture_surfaceflinger.cpp" ] && ok "capture 后端"    || { bad "缺 capture 后端"; exit 1; }
 
 # client 依赖 ../daemon/protocol.h
-if [ -f "$DST/daemon/protocol.h" ] && [ -f "$DST/client/autodctl.cpp" ]; then
+if [ -f "$DST/daemon/protocol.h" ] && [ -f "$DST/client/rcctl.cpp" ]; then
     rel=$(dirname "$DST/client")/daemon/protocol.h
     [ -f "$rel" ] && ok "client/ 能通过 ../daemon/ 找到 protocol.h"
 fi
 
 echo
-echo "树内路径: frameworks/native/cmds/autod/"
+echo "树内路径: frameworks/native/cmds/remote-control/"
 find "$DST" -maxdepth 2 -type d | sed "s|$DST|  .|" | sort
 
 # -----------------------------------------------------------------------------
 step "下一步"
 # -----------------------------------------------------------------------------
 cat <<'EOF'
-  bash tools/build-autod.sh          # 编 autod + autodctl
-  bash tools/build-autod.sh --stub   # 额外编 autod_stub（桩截图，CI 用）
+  bash tools/build-remote-control.sh          # 编 remote-control + rcctl
+  bash tools/build-remote-control.sh --stub   # 额外编 remote_control_stub（桩截图，CI 用）
 
 SELinux 策略还没接入。`sepolicy/` 只是模板，且 Android 12 的
 system/sepolicy 尚未同步完。等它到位后再：
-  1. 把 autod.te 放进 system/sepolicy/private/
+  1. 把 remote-control.te 放进 system/sepolicy/private/
   2. file_contexts 追加到 system/sepolicy/private/file_contexts
-  3. 用 permissive autod; 先跑通，再逐条收 allow
+  3. 用 permissive remote-control; 先跑通，再逐条收 allow
 详见 dev/02-native-daemon/README.md 阶段 2。
 EOF

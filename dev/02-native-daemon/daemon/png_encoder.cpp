@@ -8,9 +8,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // ── zlib 的最小 ABI ─────────────────────────────────────────────────────────
@@ -229,4 +229,4 @@ std::string PngEncoder::EncodeRgba(const uint8_t* pixels, uint32_t width,
     return png;
 }
 
-}  // namespace autod
+}  // namespace remote_control

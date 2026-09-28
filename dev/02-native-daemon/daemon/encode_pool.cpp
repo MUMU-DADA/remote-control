@@ -8,9 +8,9 @@
 #include <chrono>
 #include <thread>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
-namespace autod {
+namespace remote_control {
 
 EncodePool::EncodePool() {
     // 默认 = CPU 核数。
@@ -24,12 +24,12 @@ EncodePool::EncodePool() {
     limit_ = static_cast<int>(n);
 
     // 覆盖开关。设成 0 表示不限 —— 用来对比"有/没有限制"的差别。
-    const char* v = getenv("AUTOD_ENCODE_CONCURRENCY");
+    const char* v = getenv("REMOTE_CONTROL_ENCODE_CONCURRENCY");
     if (v != nullptr) {
         const int x = atoi(v);
         if (x == 0) {
             limit_ = 0;
-            ALOGW("编码并发不限（AUTOD_ENCODE_CONCURRENCY=0）—— 仅用于对比测试");
+            ALOGW("编码并发不限（REMOTE_CONTROL_ENCODE_CONCURRENCY=0）—— 仅用于对比测试");
         } else if (x > 0 && x <= 64) {
             limit_ = x;
         }
@@ -91,4 +91,4 @@ EncodePool::Stats EncodePool::GetStats() const {
     return s;
 }
 
-}  // namespace autod
+}  // namespace remote_control

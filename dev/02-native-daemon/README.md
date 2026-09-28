@@ -1,6 +1,6 @@
 # 02 · AOSP Native Daemon（主线）
 
-> `autod`：Android 系统内的常驻 native 进程，对外提供截图与触控。
+> `remote-control`：Android 系统内的常驻 native 进程，对外提供截图与触控。
 > **这是本项目的长期主线。**
 
 ---
@@ -29,7 +29,7 @@
 │   ├── main.cpp                      入口 / 选项 / 信号（分发已抽出）
 │   ├── dispatch.{h,cpp}              请求分发 ← 集成测试直接复用
 │   ├── socket_server.{h,cpp}         socket + SCM_RIGHTS + SO_PEERCRED
-│   ├── autod_log.h                   日志兼容层（Android liblog / 主机 stderr）
+│   ├── remote_control_log.h                   日志兼容层（Android liblog / 主机 stderr）
 │   │
 │   ├── capture.h                     截图对外接口
 │   ├── capture_surfaceflinger.cpp    SurfaceFlinger 后端 ← 需要 AOSP 环境
@@ -51,12 +51,12 @@
 │
 ├── client/
 │   ├── Android.bp
-│   ├── autodctl.cpp                  设备端 C++ 客户端
-│   └── autod_client.py               Python 参考客户端 + mock 服务端
+│   ├── rcctl.cpp                  设备端 C++ 客户端
+│   └── rc_client.py               Python 参考客户端 + mock 服务端
 ├── init/
-│   └── autod.rc                      init 服务定义
+│   └── remote-control.rc                      init 服务定义
 ├── sepolicy/
-│   ├── autod.te                      SELinux domain 模板
+│   ├── remote-control.te                      SELinux domain 模板
 │   └── file_contexts
 └── tools/
     └── deploy_cuttlefish.sh          部署 + 冒烟测试
@@ -68,9 +68,9 @@
 
 | 二进制 | 截图后端 | 触控后端 | 用途 |
 |---|---|---|---|
-| `m autod` | SurfaceFlinger | uinput | ✅ 产品默认 |
-| `m autod_binder` | SurfaceFlinger | IInputManager | Android 13+ 或自改 AIDL |
-| `m autod_stub` | **桩** | uinput | 无显示设备的 CI 冒烟测试 |
+| `m remote-control` | SurfaceFlinger | uinput | ✅ 产品默认 |
+| `m remote_control_binder` | SurfaceFlinger | IInputManager | Android 13+ 或自改 AIDL |
+| `m remote_control_stub` | **桩** | uinput | 无显示设备的 CI 冒烟测试 |
 
 每个二进制只链一个后端——它们都定义同名工厂函数，链在一起会重复符号。
 
@@ -146,7 +146,7 @@ test_capture_screencap（18 项）
 禁用了拷贝构造但没提供移动构造，工厂函数 `FromPath()` / `FromInitSocket()` 里的
 `return s;` 编译不过。这段代码在 AOSP 构建时**也会失败**。
 
-**2. `autodctl` 的 `-o` 选项是坏的。**
+**2. `rcctl` 的 `-o` 选项是坏的。**
 usage 里写着 `-o 文件`，但 `getopt_long` 的短选项 `-o` 返回的是 `'o'`，
 而 switch 里只处理了长选项对应的 `kOptOut` —— 于是 `-o 路径` 落进 `default`
 被静默吞掉，输出永远落到默认的 `/data/local/tmp/shot.png`。
@@ -161,20 +161,20 @@ usage 里写着 `-o 文件`，但 `getopt_long` 的短选项 `-o` 返回的是 `
 
 ---
 
-## 🖥️ 在开发机上跑真正的 autod
+## 🖥️ 在开发机上跑真正的 remote-control
 
 平台相关的部分已经全部隔离（`ProcessState` 用 `#ifdef __ANDROID__` 包住、
-截图后端可替换、日志有兼容层），所以**真正的 `autod` 二进制可以在开发机上编译运行**：
+截图后端可替换、日志有兼容层），所以**真正的 `remote-control` 二进制可以在开发机上编译运行**：
 
 ```bash
 cd dev/02-native-daemon
-make                  # 编译 autod-host + autodctl-host
+make                  # 编译 remote-control-host + rcctl-host
 sudo make run         # 前台跑起来
 # 另开终端用真正的客户端连它
-python3 client/autod_client.py --socket /tmp/autod-host.sock info
-python3 client/autod_client.py --socket /tmp/autod-host.sock capture -o shot.png
-python3 client/autod_client.py --socket /tmp/autod-host.sock tap 540 960
-./autodctl-host --socket /tmp/autod-host.sock info     # 设备端 C++ 客户端
+python3 client/rc_client.py --socket /tmp/remote-control-host.sock info
+python3 client/rc_client.py --socket /tmp/remote-control-host.sock capture -o shot.png
+python3 client/rc_client.py --socket /tmp/remote-control-host.sock tap 540 960
+./rcctl-host --socket /tmp/remote-control-host.sock info     # 设备端 C++ 客户端
 
 sudo make smoke       # 或者一条命令跑完：起服务 + 两个客户端 + 收尾
 ```
@@ -184,19 +184,19 @@ sudo make smoke       # 或者一条命令跑完：起服务 + 两个客户端 +
 ```
 ── Python 客户端 ──
 分辨率: 1080 x 1920
-已写入 /tmp/autod-host-shot.png（PNG，1080x1920）
+已写入 /tmp/remote-control-host-shot.png（PNG，1080x1920）
 已点击 (540, 960)
 已滑动 (200,1600) -> (800,400)
 
-── C++ 客户端 (autodctl) ──
+── C++ 客户端 (rcctl) ──
 显示数量: 1
 分辨率:   1080 x 1920
-已写入 /tmp/autodctl-shot.ppm (PPM)
+已写入 /tmp/rcctl-shot.ppm (PPM)
 已点击 (100, 200)
 已滑动 (100,1700) -> (900,200)
 ```
 
-> 主机上 `autodctl` 的 capture 走 PPM 分支（没有 `AndroidBitmap_compress`），
+> 主机上 `rcctl` 的 capture 走 PPM 分支（没有 `AndroidBitmap_compress`），
 > 设备上走 PNG。两条路径的帧解析逻辑相同。
 
 PNG / PPM 逐像素校验，与桩后端的渐变完全吻合：
@@ -225,8 +225,8 @@ PNG / PPM 逐像素校验，与桩后端的渐变完全吻合：
 
 | 目标 | 后端 | 可用性 |
 |---|---|---|
-| `m autod` | uinput | ✅ Android 12 可用 |
-| `m autod_binder` | IInputManager | ⚠️ Android 12 上加载会失败 |
+| `m remote-control` | uinput | ✅ Android 12 可用 |
+| `m remote_control_binder` | IInputManager | ⚠️ Android 12 上加载会失败 |
 
 两者不能链进同一个二进制——都定义 `CreateInjectorBackend()`，会重复符号。
 
@@ -255,13 +255,13 @@ uinput 会创建一个**可枚举的输入设备**，出现在 `/proc/bus/input/
 cd client
 
 # 终端 1：起 mock 服务端
-python3 autod_client.py --mock /tmp/autod.sock --mock-size 1080x1920
+python3 rc_client.py --mock /tmp/remote-control.sock --mock-size 1080x1920
 
 # 终端 2：跑客户端
-python3 autod_client.py --socket /tmp/autod.sock info
-python3 autod_client.py --socket /tmp/autod.sock capture -o /tmp/shot.png
-python3 autod_client.py --socket /tmp/autod.sock tap 540 1200
-python3 autod_client.py --socket /tmp/autod.sock swipe 540 1600 540 400
+python3 rc_client.py --socket /tmp/remote-control.sock info
+python3 rc_client.py --socket /tmp/remote-control.sock capture -o /tmp/shot.png
+python3 rc_client.py --socket /tmp/remote-control.sock tap 540 1200
+python3 rc_client.py --socket /tmp/remote-control.sock swipe 540 1600 540 400
 ```
 
 ---
@@ -273,7 +273,7 @@ python3 autod_client.py --socket /tmp/autod.sock swipe 540 1600 540 400
 | 项 | 状态 | 依赖 |
 |---|---|---|
 | 截图（`capture_surfaceflinger.cpp`）编译验证 | ⏳ 等 AOSP 同步 | `frameworks/native/libs/gui` |
-| 在真机上跑 `autod`（`--inject-backend` 已就绪） | ⏳ 待开始 | 一台 root 的 ARM64 设备，**或** [`../04-x64-android/`](../04-x64-android/README.md)（x86_64 ROM + 翻译层，能跑 arm64 应用） |
+| 在真机上跑 `remote-control`（`--inject-backend` 已就绪） | ⏳ 待开始 | 一台 root 的 ARM64 设备，**或** [`../04-x64-android/`](../04-x64-android/README.md)（x86_64 ROM + 翻译层，能跑 arm64 应用） |
 | SELinux 规则调通 | ⏳ 待开始 | 上面两项 |
 | 真机端到端（真实截图 + 触控） | ⏳ 待开始 | 上面三项 |
 | `KeyEvent` / 文本输入 | ⏳ 未实现 | —— |
@@ -289,21 +289,21 @@ python3 autod_client.py --socket /tmp/autod.sock swipe 540 1600 540 400
 
 在 Magisk root 的真机、Cuttlefish（userdebug），或
 **[`../04-x64-android/`](../04-x64-android/README.md) 里起的模拟器**上
-（免真机路径；`ro.product.cpu.abilist` 含 `arm64-v8a`，arm64 的 `autod` 可直接跑）：
+（免真机路径；`ro.product.cpu.abilist` 含 `arm64-v8a`，arm64 的 `remote-control` 可直接跑）：
 
 ```bash
-# 1. 编好 autod 和 autodctl 后
-adb push $ANDROID_PRODUCT_OUT/system/bin/autod    /data/local/tmp/
-adb push $ANDROID_PRODUCT_OUT/system/bin/autodctl /data/local/tmp/
-adb shell chmod 755 /data/local/tmp/autod /data/local/tmp/autodctl
+# 1. 编好 remote-control 和 rcctl 后
+adb push $ANDROID_PRODUCT_OUT/system/bin/remote-control    /data/local/tmp/
+adb push $ANDROID_PRODUCT_OUT/system/bin/rcctl /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/remote-control /data/local/tmp/rcctl
 
-# 2. 以 root 身份前台跑（跳过 autod.rc 和整个 sepolicy/）
-adb shell "/data/local/tmp/autod --socket /data/local/tmp/autod.sock --foreground &"
+# 2. 以 root 身份前台跑（跳过 remote-control.rc 和整个 sepolicy/）
+adb shell "/data/local/tmp/remote-control --socket /data/local/tmp/remote-control.sock --foreground &"
 
 # 3. 冒烟测试
-adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock info"
-adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock capture -o /data/local/tmp/shot.png"
-adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 1200"
+adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock info"
+adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock capture -o /data/local/tmp/shot.png"
+adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock tap 540 1200"
 ```
 
 **目标只有一个**：确认 `captureDisplay()` 能拿到帧、触控能点中。
@@ -311,7 +311,7 @@ adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 
 也可以用脚本自动化（在 `dev/02-native-daemon/` 目录下执行）：
 
 ```bash
-./tools/deploy_cuttlefish.sh /path/to/autod /path/to/autodctl
+./tools/deploy_cuttlefish.sh /path/to/remote-control /path/to/rcctl
 ```
 
 > 注意：`deploy_cuttlefish.sh` 目前写的是新版 `cvd` 工具链的用法。
@@ -326,8 +326,8 @@ adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 
 
 原型通了之后再补：
 
-1. `init/autod.rc` → 编进 `/system/etc/init/`
-2. `sepolicy/autod.te` → 用 `permissive autod;` 定位，再逐条加 allow
+1. `init/remote-control.rc` → 编进 `/system/etc/init/`
+2. `sepolicy/remote-control.te` → 用 `permissive remote-control;` 定位，再逐条加 allow
 3. 改成 `system` UID 开机自启
 
 **这是工作量最大、最容易卡住的部分。**
@@ -353,14 +353,14 @@ repo sync -c --depth=1 --no-tags -j8
 # 每次改代码
 source build/envsetup.sh
 lunch aosp_arm64-userdebug     # 只编二进制，不需要 vendor blobs
-m autod autodctl
+m remote-control rcctl
 
 # 产物
-ls $ANDROID_PRODUCT_OUT/system/bin/autod
+ls $ANDROID_PRODUCT_OUT/system/bin/remote-control
 ```
 
-**放置位置**：把 `daemon/`、`client/` 拷进 AOSP 树的 `frameworks/native/cmds/autod/`，
-保持 `daemon/` 和 `client/` 同级（`autodctl.cpp` 里 `#include "../daemon/protocol.h"`）。
+**放置位置**：把 `daemon/`、`client/` 拷进 AOSP 树的 `frameworks/native/cmds/remote-control/`，
+保持 `daemon/` 和 `client/` 同级（`rcctl.cpp` 里 `#include "../daemon/protocol.h"`）。
 
 ---
 

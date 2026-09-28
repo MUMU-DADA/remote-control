@@ -27,7 +27,7 @@
 #include "image_encoder.h"      // AndroidBitmap 那条路
 #include "vendor-jpeg/jpeglib.h"  // dlopen 那条路（用 vendor 的头文件）
 
-using namespace autod;
+using namespace remote_control;
 
 namespace {
 

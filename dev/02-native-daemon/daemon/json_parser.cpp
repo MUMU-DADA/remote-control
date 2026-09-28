@@ -36,7 +36,7 @@
 
 #include <cstdio>
 
-namespace autod {
+namespace remote_control {
 namespace json {
 
 namespace {
@@ -131,4 +131,4 @@ bool Parse(const std::string& text, Value* out, std::string* error) {
 }
 
 }  // namespace json
-}  // namespace autod
+}  // namespace remote_control

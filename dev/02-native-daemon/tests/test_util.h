@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace autodtest {
+namespace remote_control_test {
 
 inline int gChecks = 0;
 inline int gFailed = 0;
@@ -208,4 +208,4 @@ inline bool LastValueOf(const std::vector<input_event>& evs, uint16_t type,
     return found;
 }
 
-}  // namespace autodtest
+}  // namespace remote_control_test

@@ -13,7 +13,7 @@
 #
 # 用法:
 #   python3 lan-forward.py            # 前台跑
-#   systemctl start autod-lan-forward # 作为服务跑（见 install-service.sh）
+#   systemctl start remote-control-lan-forward # 作为服务跑（见 install-service.sh）
 # =============================================================================
 
 import socket
@@ -27,9 +27,9 @@ import threading
 #    的 8088/5555，而 0.0.0.0:8088 与 127.0.0.1:8088 在 Linux 上**会冲突**
 #    （通配地址和具体地址重叠，SO_REUSEADDR 也救不了）。
 #    所以先把 adb forward 挪到 18088，转发的目标就是它。
-# HTTP 不再需要转发：autod 现在自己读 /sdcard/autod.conf 里的 bind/port，
+# HTTP 不再需要转发：remote-control 现在自己读 /sdcard/remote-control.conf 里的 bind/port，
 # 可以直接绑 0.0.0.0。多一层转发反而让"改端口"变成一个改完就失联的操作 ——
-# 上位机改了 autod 的端口，转发器还指着旧端口，两边对不上。
+# 上位机改了 remote-control 的端口，转发器还指着旧端口，两边对不上。
 FORWARDS = [
     (15555, 5555, "模拟器的 adb 端口（adb connect 接受任意端口）"),
 ]

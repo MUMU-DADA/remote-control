@@ -1,0 +1,26 @@
+# =============================================================================
+# remote-control-lan-forward —— 把模拟器的端口暴露到局域网
+#
+# 为什么不用真桥接（-net-tap + 网桥）：
+#   真桥接要把 ens33 加进网桥并迁移 IP，中间有一个"没有 IP"的窗口 ——
+#   远程 SSH 会当场断开，配错了只能到机器跟前救。
+#   端口转发能达到同样的访问效果，且不动网络配置、随时可停。
+#
+# 目标端口下线的处理：转发器会拒绝新连接并打日志，不会自己退出，
+# 所以模拟器重启期间这个服务不需要重启。
+# =============================================================================
+[Unit]
+Description=remote-control LAN forward (模拟器端口暴露到局域网)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/AutoSnapshotAndroid/tools/lan-forward.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/lan-forward.log
+StandardError=append:/var/log/lan-forward.log
+
+[Install]
+WantedBy=multi-user.target

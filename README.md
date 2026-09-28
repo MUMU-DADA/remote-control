@@ -1,7 +1,7 @@
 # AutoSnapshotAndroid
 
 在 Android 系统层对外提供**屏幕截图、触摸注入、设备管理**服务。
-产物是一个 native daemon（`autod`），通过 HTTP / WebSocket / Unix socket 三条传输对外。
+产物是一个 native daemon（`remote-control`），通过 HTTP / WebSocket / Unix socket 三条传输对外。
 
 **先读 [`docs/01-selection.md`](docs/01-selection.md)** —— 为什么不用内核方案、三种落点怎么比、硬约束在哪。
 
@@ -12,7 +12,7 @@
 | 项 | 状态 |
 |---|---|
 | 目标 Android | **12**（编译期 API 30；运行时下限 Android 8，见 [`docs/03-reference.md`](docs/03-reference.md)） |
-| 架构 | native daemon（`autod`） |
+| 架构 | native daemon（`remote-control`） |
 | 协议 | **v7，33 条命令**，三条传输走同一个 `Dispatcher` |
 | 截图 | ✅ SurfaceFlinger 直连（8–12 ms/帧）／screencap exec（~197 ms） |
 | 触控 | ✅ `/dev/uinput`（Android 12 的 `IInputManager` 是 Java-only，native 调不了） |
@@ -33,10 +33,10 @@
 不需要 AOSP 源码树也能编（NDK 版走 `screencap` 后端）：
 
 ```bash
-bash tools/build-ndk.sh                      # 出 out/ndk/autod
-adb push out/ndk/autod /data/local/tmp/
-adb shell chmod 755 /data/local/tmp/autod
-adb shell "setsid /data/local/tmp/autod --socket /data/local/tmp/autod.sock \
+bash tools/build-ndk.sh                      # 出 out/ndk/remote-control
+adb push out/ndk/remote-control /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/remote-control
+adb shell "setsid /data/local/tmp/remote-control --socket /data/local/tmp/remote-control.sock \
            --http-bind 0.0.0.0 --foreground >/dev/null 2>&1 &"
 ```
 
@@ -46,11 +46,11 @@ adb shell "setsid /data/local/tmp/autod --socket /data/local/tmp/autod.sock \
 
 ```bash
 bash tools/integrate-aosp.sh                 # 把 dev/ 源码 rsync 进 AOSP 树
-TARGET=sdk_phone64_x86_64-userdebug bash tools/build-autod.sh
+TARGET=sdk_phone64_x86_64-userdebug bash tools/build-remote-control.sh
 ```
 
 > ⚠️ `integrate-aosp.sh` 是 **rsync 复制**，不是软链。改了 `dev/` 下的代码
-> 却没重新接入的话，`build-autod.sh` 会顺利通过并产出一个**跟改动无关的
+> 却没重新接入的话，`build-remote-control.sh` 会顺利通过并产出一个**跟改动无关的
 > 旧二进制**。所以构建脚本里有源码新鲜度检查，不新鲜会直接叫停。
 >
 > 也**别拿 NDK 版测性能** —— 那跑的是 `screencap`。用
@@ -79,14 +79,14 @@ AutoSnapshotAndroid/
 ├── tools/                     ← 环境与构建脚本
 │   ├── setup-host.sh             环境初始化
 │   ├── integrate-aosp.sh         把 dev/ 源码接进 AOSP 树（rsync）
-│   ├── build-autod.sh            编 autod / autodctl（AOSP 平台后端）
+│   ├── build-remote-control.sh            编 remote-control / rcctl（AOSP 平台后端）
 │   ├── build-ndk.sh              编 NDK 版（screencap 后端，无需 AOSP 树）
 │   └── check-api-docs.py         核对文档与运行中的服务是否一致
 │
 ├── aosp/                      ← AOSP 源码树
 │
 └── dev/                       ← 开发轨道
-    ├── 02-native-daemon/         ⭐ 主体代码（autod + autodctl）
+    ├── 02-native-daemon/         ⭐ 主体代码（remote-control + rcctl）
     ├── 04-x64-android/           验证环境：自编 x86_64 ROM + ARM 用户态翻译层（独立线）
     └── 05-controller-app/        上位应用（只做服务管理，不申请任何权限）
 ```
@@ -95,14 +95,14 @@ AutoSnapshotAndroid/
 
 ## 必须先知道的三件事
 
-**1. 不需要全量编译系统镜像。** `m autod` 只编模块。只有要装进 `/system/bin/`
+**1. 不需要全量编译系统镜像。** `m remote-control` 只编模块。只有要装进 `/system/bin/`
 并开机自启时才涉及镜像，而那也能用 Magisk 绕开。
 
-**2. 唯一躲不掉的是 `repo sync`**（走 SF 后端的话）。`autod` 用了 `libgui`
+**2. 唯一躲不掉的是 `repo sync`**（走 SF 后端的话）。`remote-control` 用了 `libgui`
 这类平台私有库，头文件只存在于 AOSP 源码里。纯 NDK 轨道没这个约束。
 
 **3. Android 12 上 native 进程注入不了触摸。** `IInputManager` 在 12 上是
-Java-only AIDL。`autod` 用 `/dev/uinput` 绕开 —— 代价是会创建一个可枚举的
+Java-only AIDL。`remote-control` 用 `/dev/uinput` 绕开 —— 代价是会创建一个可枚举的
 输入设备。完整论证见 [`docs/01-selection.md`](docs/01-selection.md)。
 
 ---
@@ -113,7 +113,7 @@ Java-only AIDL。`autod` 用 `/dev/uinput` 绕开 —— 代价是会创建一�
 
 - **`FLAG_SECURE` 内容抓不到** —— 受保护图层不会被合成进 CPU 可读缓冲区，
   这是 SurfaceFlinger 的设计。要改必须打 framework 补丁。
-- **不提供隐蔽性** —— `autod` 会出现在 `dumpsys` / `service list`，
+- **不提供隐蔽性** —— `remote-control` 会出现在 `dumpsys` / `service list`，
   SELinux domain 和 socket 标签都可枚举。
 - **非 root 真机上触控受限** —— `/dev/uinput` 通常只对 `system` / root 开放。
 

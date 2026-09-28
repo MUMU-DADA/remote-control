@@ -14,10 +14,10 @@
 
 #include <algorithm>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "subprocess.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 constexpr int64_t kDefaultMaxDownload = 512LL << 20;   // 512 MB
@@ -566,4 +566,4 @@ bool FileOps::Rename(const std::string& fromRel, const std::string& toRel,
     return true;
 }
 
-}  // namespace autod
+}  // namespace remote_control

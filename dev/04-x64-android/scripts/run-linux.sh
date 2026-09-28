@@ -13,7 +13,7 @@
 #   ./run-linux.sh --snapshot my-snap          # 从快照恢复（隐含 --reuse；实测约 7 秒进系统）
 #
 # 硬件参数（内存/核数/GPU）默认从 emulator/config.ini 读，命令行可临时覆盖：
-#   ./run-linux.sh --memory 8192 --cores 4 --gpu host
+#   ./run-linux.sh --memory 6144 --cores 4 --gpu host
 #   --gpu auto（默认）= 宿主有 GPU 就用，没有就退软件渲染；host 起不来也会自动退。
 #
 # 快照：存 `adb -s emulator-<port> emu avd snapshot save <名>`，列 `... emu avd snapshot list`。
@@ -79,7 +79,7 @@ CFG_RAM="$(config_get hw.ramSize 4096)"
 CFG_GPU="$(config_get hw.gpu.mode auto)"
 [ -n "$MEM_MB" ] || MEM_MB="$CFG_RAM"
 [ -n "$CORES" ]  || CORES="$CFG_NCORE"
-# 内存写 8192 还是 8G 都认
+# 内存写 6144 还是 6G 都认
 case "$MEM_MB" in *[Gg]) MEM_MB=$(( ${MEM_MB%[Gg]} * 1024 ));; esac
 if [ -z "$GPU_MODE" ]; then
     GPU_MODE="$(resolve_gpu_mode "$CFG_GPU")"

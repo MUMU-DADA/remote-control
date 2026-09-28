@@ -72,7 +72,7 @@ Windows 侧对应 `-Port` / `-Gpu` / `-Memory` / `-Cores` / `-NoWait` / `-Gui` /
 | 项 | 默认 | 出处 |
 |---|---|---|
 | 屏幕 | 1280x720 横屏 @320dpi | `hw.lcd.*` / `skin.*` |
-| CPU / 内存 | 4 核 / 8192 MB | `hw.cpu.ncore` / `hw.ramSize` |
+| CPU / 内存 | 4 核 / 6144 MB | `hw.cpu.ncore` / `hw.ramSize` |
 | 数据分区 | 32G | `disk.dataPartition.size` |
 | GPU | `auto`（自适应） | `hw.gpu.mode` |
 
@@ -86,11 +86,11 @@ Windows 侧对应 `-Port` / `-Gpu` / `-Memory` / `-Cores` / `-NoWait` / `-Gui` /
 
 ```
 config.ini（唯一真源 dev/04-x64-android/emulator/config.ini）：
-  hw.ramSize               8192
+  hw.ramSize               6144
   disk.dataPartition.size  32G
 
 上次启动**实际生效**的（hardware-qemu.ini）：
-  hw.ramSize               8192
+  hw.ramSize               6144
   disk.dataPartition.size  32g
 ```
 

@@ -31,7 +31,7 @@
 #include <cstdint>
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 class WebpEncoder {
   public:
@@ -58,4 +58,4 @@ class WebpEncoder {
     WebpEncoder& operator=(const WebpEncoder&) = delete;
 };
 
-}  // namespace autod
+}  // namespace remote_control

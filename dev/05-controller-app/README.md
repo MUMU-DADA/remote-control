@@ -1,6 +1,6 @@
-# 05 · 上位应用（autod 控制台）
+# 05 · 上位应用（remote-control 控制台）
 
-> 一个只做**服务管理**的 Android 应用：连 `autod`、看状态、点屏幕、管应用和文件。
+> 一个只做**服务管理**的 Android 应用：连 `remote-control`、看状态、点屏幕、管应用和文件。
 > 它自己**不申请任何权限**，所有能力都由 daemon 执行。
 
 ---
@@ -24,15 +24,15 @@
 ## 截图
 
 实机截图在 [`docs/evidence/`](../../docs/evidence/)。
-**这些截图是 autod 自己拍的** —— 服务在拍那个控制它的应用，完整闭环。
+**这些截图是 remote-control 自己拍的** —— 服务在拍那个控制它的应用，完整闭环。
 
 | 文件 | 内容 |
 |---|---|
 | `controller-app-1.png` | 首次启动，未连接 |
-| `controller-app-3.png` | 已连接并查询到状态（含 autod 报出的前台应用 = 它自己） |
+| `controller-app-3.png` | 已连接并查询到状态（含 remote-control 报出的前台应用 = 它自己） |
 | `controller-app-4.png` | 应用标签页 |
 | `controller-app-7.png` | 修复前的应用列表（显示成 APK 路径 —— 那个 bug 的现场） |
-| `controller-app-8.png` | 修复后：显示应用标签「autod 控制台」 |
+| `controller-app-8.png` | 修复后：显示应用标签「remote-control 控制台」 |
 
 ## 分工：为什么标签不在 daemon 里解析
 
@@ -60,17 +60,17 @@ JDK 直接用 AOSP 树自带的 `prebuilts/jdk/jdk11`。
 
 ## ⚠️ 部署时的 SELinux 问题
 
-应用以自己的 UID（`untrusted_app` 域）连不上 `/data/local/tmp/autod.sock`
+应用以自己的 UID（`untrusted_app` 域）连不上 `/data/local/tmp/remote-control.sock`
 （标签 `shell_data_file`）：
 
 ```
-avc: denied { write } for name="autod.sock"
+avc: denied { write } for name="remote-control.sock"
   scontext=u:r:untrusted_app:s0:c105,c256,c512,c768
   tcontext=u:object_r:shell_data_file:s0  tclass=sock_file
 ```
 
 **不能**用 `allow untrusted_app shell_data_file:sock_file write` 敷衍 ——
 那是把口子开给所有第三方应用。正确做法是给上位应用一个专属域，
-见 `dev/02-native-daemon/sepolicy/autod_controller.te`。
+见 `dev/02-native-daemon/sepolicy/remote_control_controller.te`。
 
 本次功能验证临时用了 `setenforce 0`，**这不是可交付的方案**。

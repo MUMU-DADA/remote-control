@@ -16,7 +16,7 @@
 #include <cstdint>
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 class HttpClient {
   public:
@@ -58,4 +58,4 @@ class HttpClient {
     // easy handle 是每次下载临时建、用完即毁的，不需要成员。
 };
 
-}  // namespace autod
+}  // namespace remote_control

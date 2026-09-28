@@ -10,10 +10,10 @@
 #include <algorithm>
 #include <sstream>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "subprocess.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // ── 文本工具 ────────────────────────────────────────────────────────────────
@@ -590,4 +590,4 @@ bool AppOps::Install(const std::string& apkPath, bool replace,
     return true;
 }
 
-}  // namespace autod
+}  // namespace remote_control

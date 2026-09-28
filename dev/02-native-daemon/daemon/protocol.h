@@ -1,4 +1,4 @@
-// protocol.h — autod 对外协议定义
+// protocol.h — remote-control 对外协议定义
 //
 // 客户端与服务端共用。设计约束：
 //   1. 定长结构体，走 SOCK_SEQPACKET，天然保留消息边界
@@ -11,7 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace autod {
+namespace remote_control {
 
 // 'AUTD' — 用于快速识别串流错位
 constexpr uint32_t kMagic = 0x44545541;
@@ -102,7 +102,7 @@ enum class Cmd : uint32_t {
     // （见下面 kFlagForce 的说明）。
     ServiceSwitch = 35,  // payload: "on" | "off" | "status"
     RunningApps   = 36,  // 列出正在运行的应用（含进程状态）
-    LogFile       = 37,  // 落盘的历史日志（/sdcard/autod.log，只留最近 10KB）
+    LogFile       = 37,  // 落盘的历史日志（/sdcard/remote-control.log，只留最近 10KB）
 
     // ── 屏幕方向（v7）────────────────────────────────────────────────────
     //
@@ -153,7 +153,7 @@ enum class Cmd : uint32_t {
                          // → {"lines":[{"seq","level","text"}]}
     Shutdown      = 26,  // 优雅退出（清理 socket 文件、关闭 uinput 设备）
                          // → {"ok":true}
-    Restart       = 27,  // 退出并由 init 重新拉起（需要 autod.rc 的 oneshot/restart）
+    Restart       = 27,  // 退出并由 init 重新拉起（需要 remote-control.rc 的 oneshot/restart）
                          // → {"ok":true}
 };
 
@@ -203,7 +203,7 @@ struct Request {
 //    编译器会在它前面插入 4 字节隐式填充（把它对齐到 8 字节），
 //    导致 C++ 侧 40 字节、Python 侧 36 字节的经典错位。
 //    这里显式写出 reserved 字段，让布局在两边都是确定的 40 字节。
-//    改动本结构体后，务必同步 client/autod_client.py 里的 REPLY_FMT 和断言。
+//    改动本结构体后，务必同步 client/rc_client.py 里的 REPLY_FMT 和断言。
 struct Reply {
     uint32_t magic;        // 回填 kMagic
     uint32_t status;       // 0 = 成功，否则为 errno 风格错误码
@@ -284,4 +284,4 @@ constexpr uint32_t kDefaultSwipeMs = 300;
 constexpr float    kDefaultPressure = 1.0f;
 constexpr float    kDefaultSize     = 0.02f;  // 相对屏幕短边
 
-}  // namespace autod
+}  // namespace remote_control

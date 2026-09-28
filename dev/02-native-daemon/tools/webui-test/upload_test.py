@@ -10,7 +10,7 @@ _ap.add_argument("--port", type=int, default=8088)
 _a = _ap.parse_args()
 BASE = f"http://{_a.host}:{_a.port}"
 CASES = [
-    ("小 APK", "/root/AutoSnapshotAndroid/dev/05-controller-app/build/autod-controller.apk"),
+    ("小 APK", "/root/AutoSnapshotAndroid/dev/05-controller-app/build/remote-control-controller.apk"),
     ("300MB", "/tmp/mid.apk"),
 ]
 

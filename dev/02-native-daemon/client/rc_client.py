@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""autod 的 Python 参考客户端。
+"""remote-control 的 Python 参考客户端。
 
 用途：
   1. 协议文档 —— 比 C++ 版本更容易读懂字节布局
@@ -11,10 +11,10 @@
 
 用法：
     # 主机上起 mock 服务端，验证客户端逻辑
-    python3 autod_client.py --mock /tmp/autod.sock info
+    python3 rc_client.py --mock /tmp/remote-control.sock info
 
     # 连真设备（脚本需在设备上）
-    python3 autod_client.py --socket /data/local/tmp/autod.sock capture -o shot.png
+    python3 rc_client.py --socket /data/local/tmp/remote-control.sock capture -o shot.png
 """
 
 import argparse
@@ -535,10 +535,10 @@ def run_mock(path, width, height):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="autod 参考客户端",
+        description="remote-control 参考客户端",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--socket", help="autod 的 Unix socket 路径")
+    parser.add_argument("--socket", help="remote-control 的 Unix socket 路径")
     parser.add_argument("--mock", metavar="PATH",
                         help="以 mock 服务端模式运行并监听该路径")
     parser.add_argument("--mock-size", default="1080x1920",

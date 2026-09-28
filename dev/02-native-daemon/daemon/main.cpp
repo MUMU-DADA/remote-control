@@ -1,4 +1,4 @@
-// main.cpp — autod 入口
+// main.cpp — remote-control 入口
 //
 // 职责：
 //   1. 初始化 Binder 线程池（截图必需）
@@ -19,10 +19,10 @@
 
 #include "config_file.h"
 #include "thread_util.h"
-#include "autod_log.h"
-#include "autod_platform.h"
+#include "remote_control_log.h"
+#include "remote_control_platform.h"
 
-#if AUTOD_HAS_BINDER_PLATFORM
+#if REMOTE_CONTROL_HAS_BINDER_PLATFORM
 #include <binder/ProcessState.h>
 #endif
 #include "capture.h"
@@ -37,7 +37,7 @@
 #include "service_state.h"
 #include "socket_server.h"
 
-using namespace autod;
+using namespace remote_control;
 
 namespace {
 
@@ -49,21 +49,21 @@ void OnSignal(int /*sig*/) {
 }
 
 void PrintUsage(const char* argv0) {
-    fprintf(stderr, R"(autod — Android 系统级截图 / 触控服务
+    fprintf(stderr, R"(remote-control — Android 系统级截图 / 触控服务
 
 用法: %s [选项]
 
 选项:
   --socket <路径>      手动 bind 一个 Unix socket（开发期用）
-  --init-socket <名字> 接管 init 创建的 socket（生产用，见 autod.rc）
+  --init-socket <名字> 接管 init 创建的 socket（生产用，见 remote-control.rc）
   --display <id>       指定显示 ID，0 表示自动选主显示
   --touch-range <WxH>  触控坐标范围，默认取显示分辨率
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
   --gid <gid>          配套的 GID，省略则用与 uid 相同的值
   --selftest           检查运行环境后退出（首次部署时先跑这个）
-  --config <路径>       配置文件，默认 /sdcard/autod.conf（首启无鉴权）
+  --config <路径>       配置文件，默认 /sdcard/remote-control.conf（首启无鉴权）
   --http-bind <地址>    启用 HTTP/JSON API 并绑定该地址（如 0.0.0.0 对外）
-                        不指定则由配置文件决定。默认的 /sdcard/autod.conf
+                        不指定则由配置文件决定。默认的 /sdcard/remote-control.conf
                         首启是 0.0.0.0:8088 且**无鉴权**
   --http-port <端口>    HTTP 端口，默认 8088
   --http-token <令牌>   访问令牌。给了就等于开启鉴权；
@@ -77,13 +77,13 @@ void PrintUsage(const char* argv0) {
 
 示例:
   # 开发期：前台跑，自己 bind socket
-  autod --socket /data/local/tmp/autod.sock --foreground --verbose
+  remote-control --socket /data/local/tmp/remote-control.sock --foreground --verbose
 
   # 常用：让配置文件决定监听地址/端口/鉴权（上位应用就是这么管的）
-  autod --socket /data/local/tmp/autod.sock
+  remote-control --socket /data/local/tmp/remote-control.sock
 
   # 生产：由 init 拉起，socket 由 init 创建并打好 SELinux 标签
-  autod --init-socket autod
+  remote-control --init-socket remote-control
 )",
             argv0);
 }
@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
     // 显式给了 CLI 标志就以 CLI 为准（见下面配置合并那段）
     std::string configPath = ConfigFile::DefaultPath();
     // 日志落盘路径。与配置文件同目录 —— 上位应用（无 root）也要能读它。
-    std::string logPath = "/sdcard/autod.log";
+    std::string logPath = "/sdcard/remote-control.log";
     bool cliBind = false, cliPort = false, cliToken = false;
 
     enum LongOpt {
@@ -276,7 +276,7 @@ int main(int argc, char** argv) {
     LogBuffer::Instance().SetMinLevel(verbose ? LogLevel::kDebug : LogLevel::kInfo);
 
     // 自检不需要 socket，放在必填检查之前
-#if AUTOD_HAS_BINDER_PLATFORM
+#if REMOTE_CONTROL_HAS_BINDER_PLATFORM
     // 必须在任何截图动作之前启动 Binder 线程池，自检也不例外。
     //
     // 截图走的是异步回调：captureDisplay() 提交请求后，
@@ -303,7 +303,7 @@ int main(int argc, char** argv) {
     std::string error;
     if (displayId != 0) capture.SetDisplayId(displayId);
     if (!capture.Init(&error)) {
-        ALOGE("autod: 截图子系统初始化失败: %s", error.c_str());
+        ALOGE("remote-control: 截图子系统初始化失败: %s", error.c_str());
         fprintf(stderr, "截图初始化失败: %s\n", error.c_str());
         return 1;
     }
@@ -317,7 +317,7 @@ int main(int argc, char** argv) {
             touchW = displays.front().width;
             touchH = displays.front().height;
         } else {
-            ALOGW("autod: 拿不到显示分辨率，触控范围回退到 32767x32767；"
+            ALOGW("remote-control: 拿不到显示分辨率，触控范围回退到 32767x32767；"
                   "此时调用方传的坐标不再是屏幕像素，请用 --touch-range 指定");
         }
     }
@@ -329,14 +329,14 @@ int main(int argc, char** argv) {
 
     Injector injector;
     if (!injector.Init(injectConfig, &error)) {
-        ALOGE("autod: 注入子系统初始化失败: %s", error.c_str());
+        ALOGE("remote-control: 注入子系统初始化失败: %s", error.c_str());
         fprintf(stderr, "注入初始化失败: %s\n", error.c_str());
         fprintf(stderr,
                 "提示: Android 12 上 IInputManager 是 Java-only AIDL，"
                 "请使用 uinput 后端\n");
         return 1;
     }
-    fprintf(stderr, "autod: 触控后端 = %s，坐标范围 %ux%u\n",
+    fprintf(stderr, "remote-control: 触控后端 = %s，坐标范围 %ux%u\n",
             injector.BackendName(), touchW, touchH);
 
     SocketServer server = initSocketName.empty()
@@ -372,7 +372,7 @@ int main(int argc, char** argv) {
     }
 
     if (!server.Start(&error)) {
-        ALOGE("autod: socket 启动失败: %s", error.c_str());
+        ALOGE("remote-control: socket 启动失败: %s", error.c_str());
         fprintf(stderr, "socket 启动失败: %s\n", error.c_str());
         return 1;
     }
@@ -385,11 +385,11 @@ int main(int argc, char** argv) {
     if (dropPrivileges) {
         if (targetGid == 0) targetGid = static_cast<gid_t>(targetUid);
         if (!DropPrivileges(targetUid, targetGid, &error)) {
-            ALOGE("autod: 降权失败: %s", error.c_str());
+            ALOGE("remote-control: 降权失败: %s", error.c_str());
             fprintf(stderr, "降权失败: %s\n", error.c_str());
             return 1;
         }
-        fprintf(stderr, "autod: 已降到 uid=%u gid=%u\n", targetUid, targetGid);
+        fprintf(stderr, "remote-control: 已降到 uid=%u gid=%u\n", targetUid, targetGid);
     }
 
     // 优雅退出
@@ -411,9 +411,9 @@ int main(int argc, char** argv) {
           LogBuffer::kHistoryMaxBytes);
 
     if (verbose) {
-        ALOGI("autod: 就绪, socket=%s", server.path().c_str());
+        ALOGI("remote-control: 就绪, socket=%s", server.path().c_str());
     }
-    fprintf(stderr, "autod: 就绪, 监听 %s\n", server.path().c_str());
+    fprintf(stderr, "remote-control: 就绪, 监听 %s\n", server.path().c_str());
 
     Dispatcher dispatcher(&capture, &injector);
 
@@ -451,7 +451,7 @@ int main(int argc, char** argv) {
     bool      httpThreadStarted = false;
     // ── 合并持久化配置 ──
     //
-    // 优先级：CLI 显式给的 > /sdcard/autod.conf > 内置默认。
+    // 优先级：CLI 显式给的 > /sdcard/remote-control.conf > 内置默认。
     //
     // 这个顺序是有讲究的：上位应用写配置文件、不传 CLI 参数，
     // 所以它能生效；而调试时 `--http-port 9999` 这种一次性覆盖
@@ -552,7 +552,7 @@ int main(int argc, char** argv) {
         opts.port     = httpPort;
         opts.token    = httpToken;
         if (!httpServer.Start(opts, &error)) {
-            fprintf(stderr, "autod: HTTP API 启动失败: %s\n", error.c_str());
+            fprintf(stderr, "remote-control: HTTP API 启动失败: %s\n", error.c_str());
             return 1;
         }
     }
@@ -581,7 +581,7 @@ int main(int argc, char** argv) {
             },
             &httpCtx);
         if (rc != 0) {
-            fprintf(stderr, "autod: 起 HTTP 线程失败(%d)，HTTP API 不可用\n", rc);
+            fprintf(stderr, "remote-control: 起 HTTP 线程失败(%d)，HTTP API 不可用\n", rc);
             httpServer.Stop();
         } else {
             httpThreadStarted = true;
@@ -635,12 +635,12 @@ int main(int argc, char** argv) {
     // "正常关闭"和"要求重启"。自己不明说，监督方就只能一律重启，
     // 那 Shutdown 就没意义了。
     if (ServiceState::Instance().RestartRequested()) {
-        ALOGI("autod: 按请求重启（退出码 1）");
-        fprintf(stderr, "autod: 按请求重启（退出码 1）\n");
+        ALOGI("remote-control: 按请求重启（退出码 1）");
+        fprintf(stderr, "remote-control: 按请求重启（退出码 1）\n");
         return 1;
     }
 
-    ALOGI("autod: 已退出");
-    fprintf(stderr, "autod: 已退出\n");
+    ALOGI("remote-control: 已退出");
+    fprintf(stderr, "remote-control: 已退出\n");
     return 0;
 }

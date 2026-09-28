@@ -39,7 +39,7 @@ SDK_MIRROR="${SDK_MIRROR:-https://mirrors.cloud.tencent.com/AndroidSDK}"
 SDK_REPO="${SDK_REPO:-https://dl.google.com/android/repository}"
 
 # 工具
-BUILDER_CONTAINER="${BUILDER_CONTAINER:-autod-builder}"
+BUILDER_CONTAINER="${BUILDER_CONTAINER:-remote-control-builder}"
 BUILDER_AOSP_PATH="${BUILDER_AOSP_PATH:-/aosp}"
 ADB="${ADB:-$AOSP_DIR/out/host/linux-x86/bin/adb}"
 EMULATOR_BIN="${EMULATOR_BIN:-}"

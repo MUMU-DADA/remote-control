@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 
 enum class LogLevel : int {
     kDebug = 0,
@@ -106,8 +106,8 @@ class LogBuffer {
     LogLevel minLevel_ = LogLevel::kInfo;
 };
 
-// 供 autod_log.h 使用的便捷入口
+// 供 remote_control_log.h 使用的便捷入口
 void LogBufferAppend(LogLevel level, const char* tag, const char* fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
-}  // namespace autod
+}  // namespace remote_control

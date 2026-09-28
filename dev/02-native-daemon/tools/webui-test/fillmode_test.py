@@ -262,7 +262,7 @@ def main():
         chk("setFill(true) 之后 fillmode 生效",
             pg.evaluate("() => document.body.classList.contains('fillmode')"))
         chk("选择记进了 localStorage",
-            pg.evaluate("() => localStorage.getItem('autod.fill')") == "1")
+            pg.evaluate("() => localStorage.getItem('remote-control.fill')") == "1")
         pg.reload(wait_until="domcontentloaded")
         time.sleep(3)
         chk("刷新后仍然是铺满",

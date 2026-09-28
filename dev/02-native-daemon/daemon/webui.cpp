@@ -2,7 +2,7 @@
 
 #include "webui.h"
 
-namespace autod {
+namespace remote_control {
 
 const std::string& WebUiHtml() {
     // 用原始字符串字面量：HTML 里有大量引号和反斜杠，
@@ -12,7 +12,7 @@ const std::string& WebUiHtml() {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>autod 控制台</title>
+<title>remote-control 控制台</title>
 <style>
   :root { --bg:#111; --fg:#eee; --dim:#888; --accent:#4a9; --warn:#c55; }
   * { box-sizing: border-box; }
@@ -115,7 +115,7 @@ const std::string& WebUiHtml() {
 </head>
 <body>
 <header>
-  <h1>autod 控制台</h1>
+  <h1>remote-control 控制台</h1>
   <span class="dim" id="meta">连接中…</span>
   <!-- 服务对外开关。放在最显眼的位置：它是"这台设备还能不能被控制"
        的总闸，而不是某个功能的设置。 -->
@@ -661,7 +661,7 @@ function refresh() {
 // 存在 localStorage 里：开启鉴权后每次打开页面都要重新粘贴令牌的话
 // 没人受得了。服务端只对 /api/ 下的请求校验，网页本身不校验 ——
 // 所以页面能打开、再由脚本补上令牌。
-let token = localStorage.getItem('autod_token') || '';
+let token = localStorage.getItem('remote_control_token') || '';
 
 function authHeaders(extra) {
   const h = Object.assign({}, extra || {});
@@ -692,7 +692,7 @@ function api(path, opts) {
       // 什么都点不动的页面猜
       $('authbar').style.display = 'flex';
       token = '';
-      localStorage.removeItem('autod_token');
+      localStorage.removeItem('remote_control_token');
       throw new Error('需要访问令牌');
     }
     return r.json();
@@ -701,7 +701,7 @@ function api(path, opts) {
 
 function saveToken() {
   token = $('tokeninput').value.trim();
-  localStorage.setItem('autod_token', token);
+  localStorage.setItem('remote_control_token', token);
   $('authbar').style.display = token ? 'none' : 'flex';
   setStatus(token ? '令牌已保存' : '令牌已清除');
   // 两条长连接要重连才会带上新令牌
@@ -1491,11 +1491,11 @@ function toggleCard(id) {
   el.classList.toggle('collapsed');
   const st = readCollapsed();
   if (el.classList.contains('collapsed')) st[id] = 1; else delete st[id];
-  try { localStorage.setItem('autod_collapsed', JSON.stringify(st)); } catch (e) {}
+  try { localStorage.setItem('remote_control_collapsed', JSON.stringify(st)); } catch (e) {}
 }
 
 function readCollapsed() {
-  try { return JSON.parse(localStorage.getItem('autod_collapsed') || '{}'); }
+  try { return JSON.parse(localStorage.getItem('remote_control_collapsed') || '{}'); }
   catch (e) { return {}; }
 }
 
@@ -1516,10 +1516,10 @@ function applyCollapsed() {
 // 所以：横屏流**默认收起**面板，把宽度全让给画面；竖屏流默认展开。
 // 用户手动切过一次之后就按他的选择走（记在 localStorage）。
 function readPanelPref() {
-  try { return localStorage.getItem('autod.panel'); } catch (e) { return null; }
+  try { return localStorage.getItem('remote-control.panel'); } catch (e) { return null; }
 }
 function writePanelPref(v) {
-  try { localStorage.setItem('autod.panel', v); } catch (e) {}
+  try { localStorage.setItem('remote-control.panel', v); } catch (e) {}
 }
 
 function setPanel(open, remember) {
@@ -1548,7 +1548,7 @@ function togglePanel() {
 //    坐标又从同一个 canvas 的 getBoundingClientRect() 读回来，
 //    渲染和换算永远同源。改这里不需要动触控那条路。
 function readFillPref() {
-  try { return localStorage.getItem('autod.fill'); } catch (e) { return null; }
+  try { return localStorage.getItem('remote-control.fill'); } catch (e) { return null; }
 }
 function setFill(on, remember) {
   document.body.classList.toggle('fillmode', on);
@@ -1559,7 +1559,7 @@ function setFill(on, remember) {
                  : '当前：按原始像素显示，过大才缩小（可能有黑边）';
   }
   if (remember) {
-    try { localStorage.setItem('autod.fill', on ? '1' : '0'); } catch (e) {}
+    try { localStorage.setItem('remote-control.fill', on ? '1' : '0'); } catch (e) {}
   }
 }
 function toggleFill() {
@@ -1924,4 +1924,4 @@ setInterval(refresh, 10000);   // 定期刷状态，页面放着不动也不会�
     return kHtml;
 }
 
-}  // namespace autod
+}  // namespace remote_control

@@ -19,10 +19,10 @@
 
 #include "thread_util.h"
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "json_writer.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 constexpr int kReadTimeoutSec = 30;
@@ -190,12 +190,12 @@ static int ToProtocolStatus(int code) {
     // 已经给了协议码（≥ 0x1000）就原样用
     if (code >= 0x1000) return code;
     switch (code) {
-        case 400: return autod::kErrBadArg;
-        case 403: return autod::kErrPermission;
-        case 404: return autod::kErrNotFound;
-        case 500: return autod::kErrInternal;
-        case 501: return autod::kErrUnsupported;
-        case 504: return autod::kErrTimeout;
+        case 400: return remote_control::kErrBadArg;
+        case 403: return remote_control::kErrPermission;
+        case 404: return remote_control::kErrNotFound;
+        case 500: return remote_control::kErrInternal;
+        case 501: return remote_control::kErrUnsupported;
+        case 504: return remote_control::kErrTimeout;
         default:  return code;   // 401 / 503 等 HTTP 层专属，保留原值
     }
 }
@@ -203,14 +203,14 @@ static int ToProtocolStatus(int code) {
 // 反向：协议码 → HTTP 状态码。调用方直接传协议码时用。
 static int ToHttpStatus(int proto) {
     switch (proto) {
-        case autod::kErrBadMagic:
-        case autod::kErrBadCmd:
-        case autod::kErrBadArg:
-        case autod::kErrPayload:     return 400;
-        case autod::kErrPermission:  return 403;
-        case autod::kErrNotFound:    return 404;
-        case autod::kErrUnsupported: return 501;
-        case autod::kErrTimeout:     return 504;
+        case remote_control::kErrBadMagic:
+        case remote_control::kErrBadCmd:
+        case remote_control::kErrBadArg:
+        case remote_control::kErrPayload:     return 400;
+        case remote_control::kErrPermission:  return 403;
+        case remote_control::kErrNotFound:    return 404;
+        case remote_control::kErrUnsupported: return 501;
+        case remote_control::kErrTimeout:     return 504;
         default:                     return 500;
     }
 }
@@ -256,7 +256,7 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     if (!loopbackOnly && opts.token.empty()) {
         ALOGW("⚠️  HTTP API 绑定到 %s 且**未开启鉴权** —— 同网络的任何人都能"
               "完全控制本设备（截图、触控、装应用、删文件）。"
-              "要收紧请在 /sdcard/autod.conf 里设 auth=1",
+              "要收紧请在 /sdcard/remote-control.conf 里设 auth=1",
               opts.bindAddr.c_str());
     }
 
@@ -331,8 +331,8 @@ bool HttpServer::CheckAuth(const HttpRequest& req) const {
         ConstantTimeEquals(auth.substr(7), tok)) {
         return true;
     }
-    // 2) X-Autod-Token: <token>  —— 给不方便设 Authorization 的客户端
-    if (ConstantTimeEquals(req.header("x-autod-token"), tok)) return true;
+    // 2) X-Remote-Control-Token: <token>  —— 给不方便设 Authorization 的客户端
+    if (ConstantTimeEquals(req.header("x-remote-control-token"), tok)) return true;
     // 3) ?token=<token>  —— 给 <img src="/api/v1/stream?..."> 这种
     //    没法自定义请求头的场景。
     //    ⚠️ 令牌会出现在 URL 里，可能被日志和浏览器历史记录留下。
@@ -624,7 +624,7 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
     if (spool) {
         const std::string dir = spoolDir_.empty() ? "/data/local/tmp"
                                                   : spoolDir_;
-        spoolPath = dir + "/autod-body-" + std::to_string(getpid()) + "-" +
+        spoolPath = dir + "/remote-control-body-" + std::to_string(getpid()) + "-" +
                     std::to_string(reinterpret_cast<uintptr_t>(out)) + ".tmp";
         spoolFd = open(spoolPath.c_str(),
                        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
@@ -731,7 +731,7 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
                 denied = true;
                 earlyDeny = HttpResponse::Error(
                         401, "需要访问令牌。请在页面顶部填入，或用 "
-                             "Authorization: Bearer <token> / X-Autod-Token: <token>");
+                             "Authorization: Bearer <token> / X-Remote-Control-Token: <token>");
                 return false;
             });
     if (denied) {
@@ -740,7 +740,7 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
         std::string head =
                 "HTTP/1.1 401 Unauthorized\r\n"
                 "Content-Type: application/json; charset=utf-8\r\n"
-                "WWW-Authenticate: Bearer realm=\"autod\"\r\n"
+                "WWW-Authenticate: Bearer realm=\"remote-control\"\r\n"
                 "Content-Length: " + std::to_string(earlyDeny.body.size()) +
                 "\r\nConnection: close\r\n\r\n";
         if (write(connFd, head.data(), head.size()) > 0) {
@@ -906,4 +906,4 @@ HttpResponse MakeBinaryResponse(int status, const char* contentType,
     return r;
 }
 
-}  // namespace autod
+}  // namespace remote_control

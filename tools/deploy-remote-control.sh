@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-autod.sh —— 模拟器每次重启后重新部署 autod
+# deploy-remote-control.sh —— 模拟器每次重启后重新部署 remote-control
 #
 # 为什么需要它：当前模拟器的 /data **每次重启都是出厂状态**，
-# 所以 /data/local/tmp/autod 每次都得重推一遍。
+# 所以 /data/local/tmp/remote-control 每次都得重推一遍。
 # 这不是"应该这样"，是绕过 —— 根因还没查到，见脚本末尾的「已知问题」。
 #
 # 用法:
-#   bash tools/deploy-autod.sh                 # 默认 emulator-5580
-#   bash tools/deploy-autod.sh emulator-5584
+#   bash tools/deploy-remote-control.sh                 # 默认 emulator-5580
+#   bash tools/deploy-remote-control.sh emulator-5584
 # =============================================================================
 set -uo pipefail
 
@@ -29,8 +29,8 @@ warn() { printf '\033[1;33m  ! %s\033[0m\n' "$*"; }
 sh_()  { timeout "$TMO" "$ADB" -s "$SERIAL" shell "$@"; }
 
 step "检查前置"
-[ -x "$BIN/autod" ] || { bad "找不到 $BIN/autod，先跑 tools/build-autod.sh"; exit 1; }
-ok "二进制存在: $(stat -c%s "$BIN/autod") 字节"
+[ -x "$BIN/remote-control" ] || { bad "找不到 $BIN/remote-control，先跑 tools/build-remote-control.sh"; exit 1; }
+ok "二进制存在: $(stat -c%s "$BIN/remote-control") 字节"
 timeout "$TMO" "$ADB" -s "$SERIAL" get-state >/dev/null 2>&1 \
     || { bad "$SERIAL 未连接"; exit 1; }
 ok "$SERIAL 已连接"
@@ -45,7 +45,7 @@ done
 [ "$booted" = "1" ] || { bad "等不到开机完成"; exit 1; }
 
 step "提权 + 关 SELinux"
-# ⚠️ 关 SELinux 只是开发期方便 —— 生产形态必须走 init 起的 autod.rc
+# ⚠️ 关 SELinux 只是开发期方便 —— 生产形态必须走 init 起的 remote-control.rc
 #    加专属 SELinux domain，见 dev/02-native-daemon/sepolicy/。
 timeout "$TMO" "$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
 sleep 4
@@ -53,35 +53,62 @@ sh_ setenforce 0 2>/dev/null || true
 ok "已 root / SELinux permissive"
 
 step "推送"
-timeout "$TMO" "$ADB" -s "$SERIAL" push "$BIN/autod"    /data/local/tmp/autod    >/dev/null \
-    || { bad "推送 autod 失败"; exit 1; }
-timeout "$TMO" "$ADB" -s "$SERIAL" push "$BIN/autodctl" /data/local/tmp/autodctl >/dev/null \
-    || warn "推送 autodctl 失败（不影响服务）"
-sh_ "chmod 755 /data/local/tmp/autod /data/local/tmp/autodctl" >/dev/null 2>&1
+timeout "$TMO" "$ADB" -s "$SERIAL" push "$BIN/remote-control"    /data/local/tmp/remote-control    >/dev/null \
+    || { bad "推送 remote-control 失败"; exit 1; }
+timeout "$TMO" "$ADB" -s "$SERIAL" push "$BIN/rcctl" /data/local/tmp/rcctl >/dev/null \
+    || warn "推送 rcctl 失败（不影响服务）"
+sh_ "chmod 755 /data/local/tmp/remote-control /data/local/tmp/rcctl" >/dev/null 2>&1
 ok "已推送"
 
 step "启动"
-sh_ "pkill -f 'autod --socket'" >/dev/null 2>&1 || true
+# ⚠️ 按**参数形状**杀，不要按二进制名杀。
+#
+#    改名那次实测踩到：这里原来写的是 pkill -f 'remote-control --socket'，
+#    而当时还在跑的老进程叫 autod —— 匹配不到，它继续占着 8088；
+#    新进程绑不上端口就退了。而"验证"只看端口有没有人应答，
+#    于是老进程让验证**假通过**，看起来一切正常。
+#
+#    守护进程永远带 `socket /data/local/tmp/xxx.sock`，这个形状和它叫什么无关，
+#    所以升级/改名都不会再漏杀。
+#
+#    ⚠️ 模式**不能以 `-` 开头**：Android 上是 toybox 的 pkill，它不认 `--`
+#       这个选项终止符，写成 `pkill -f -- '--socket ...'` 会静默不匹配
+#       （实测：旧进程照样活着占着 8088，新进程绑不上端口就退了）。
+#       所以从中间一段开始匹配。
+sh_ "pkill -f 'socket /data/local/tmp/'" >/dev/null 2>&1 || true
 sleep 2
 
 # 启动脚本在**本地**生成再 push —— 不在 adb shell 里拼多行命令，
 # 引号层数一多 remote shell 就会等输入，把整条 adb 挂死。
 TMPD=$(mktemp -d)
-cat > "$TMPD/start-autod.sh" <<'SH'
+cat > "$TMPD/start-remote-control.sh" <<'SH'
 #!/system/bin/sh
-exec /data/local/tmp/autod --socket /data/local/tmp/autod.sock --http-bind 0.0.0.0 --foreground
+exec /data/local/tmp/remote-control --socket /data/local/tmp/remote-control.sock --http-bind 0.0.0.0 --foreground
 SH
-timeout "$TMO" "$ADB" -s "$SERIAL" push "$TMPD/start-autod.sh" \
-        /data/local/tmp/start-autod.sh >/dev/null
+timeout "$TMO" "$ADB" -s "$SERIAL" push "$TMPD/start-remote-control.sh" \
+        /data/local/tmp/start-remote-control.sh >/dev/null
 rm -rf "$TMPD"
-sh_ "chmod 755 /data/local/tmp/start-autod.sh" >/dev/null 2>&1
+sh_ "chmod 755 /data/local/tmp/start-remote-control.sh" >/dev/null 2>&1
 
 # 这条**预期**会超时（见 sh_ 上面的说明），加 || true 别让它中断脚本
 timeout 12 "$ADB" -s "$SERIAL" shell \
-    "setsid /data/local/tmp/start-autod.sh </dev/null >/dev/null 2>&1 &" >/dev/null 2>&1 || true
+    "setsid /data/local/tmp/start-remote-control.sh </dev/null >/dev/null 2>&1 &" >/dev/null 2>&1 || true
 sleep 7
 
 step "验证"
+# ⚠️ 先确认**跑的是刚推上去的那个进程**，再看接口。
+#    只看端口有没有应答是不够的 —— 任何还活着的老进程都能让它"通过"。
+pid=$(sh_ "pidof remote-control" 2>/dev/null | tr -d '\r')
+if [ -z "$pid" ]; then
+    bad "remote-control 没在跑（八成没绑上端口 —— 端口被占？）"
+    echo "  日志尾部："
+    sh_ "tail -5 /sdcard/remote-control.log 2>/dev/null" 2>/dev/null | sed 's/^/    /' || true
+    echo "  还占着 8088 的进程："
+    sh_ "netstat -tlnp 2>/dev/null | grep 8088" 2>/dev/null | sed 's/^/    /' || true
+    exit 1
+fi
+ok "进程在跑（pid $pid）"
+
 ip=$(sh_ "ip -4 addr show eth0 2>/dev/null | grep -oE 'inet [0-9.]+' | cut -d' ' -f2" 2>/dev/null | tr -d '\r')
 ip=${ip:-127.0.0.1}
 info=$(curl -s --max-time 8 "http://$ip:8088/api/v1/info" 2>/dev/null || true)
@@ -99,7 +126,7 @@ print('  ✓ 显示尺寸和触控范围一致' if (tw,th)==(pw,ph)
 else
     warn "拿不到 /api/v1/info"
     echo "  设备 IP: $ip"
-    echo "  手动看一下: adb -s $SERIAL shell logcat -d -s autod | tail"
+    echo "  手动看一下: adb -s $SERIAL shell logcat -d -s remote-control | tail"
 fi
 
 cat <<'EOF'

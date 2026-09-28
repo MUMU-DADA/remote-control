@@ -1,6 +1,6 @@
 // capture_screencap.cpp —— 截图后端：调用设备自带的 screencap
 //
-// 用途：让 autod 可以在**没有 AOSP 源码树**的情况下编译运行。
+// 用途：让 remote-control 可以在**没有 AOSP 源码树**的情况下编译运行。
 // 只需要 NDK + 一台 root 的安卓设备。
 //
 // 原理：exec /system/bin/screencap（不带 -p 参数），解析它写到 stdout 的
@@ -28,16 +28,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // 测试用：可以让它指向一个假的 screencap 脚本，在开发机上验证解析逻辑
 constexpr const char* kDefaultScreencapPath = "/system/bin/screencap";
 
 const char* ScreencapPath() {
-    const char* env = getenv("AUTOD_SCREENCAP_PATH");
+    const char* env = getenv("REMOTE_CONTROL_SCREENCAP_PATH");
     return (env && *env) ? env : kDefaultScreencapPath;
 }
 
@@ -286,7 +286,7 @@ bool Capture::Grab(Frame* out, std::string* error) {
     }
 
     // --- 2. 建 memfd 并直接把像素读进 mmap（省一次拷贝）---
-    frame.fd = MakeMemfd("autod-frame");
+    frame.fd = MakeMemfd("remote-control-frame");
     if (frame.fd < 0) {
         if (error) *error = ErrnoString("memfd 创建");
         cleanup();
@@ -354,4 +354,4 @@ bool Capture::Grab(Frame* out, std::string* error) {
 
 const char* Capture::BackendName() { return "screencap(exec 设备自带命令)"; }
 
-}  // namespace autod
+}  // namespace remote_control

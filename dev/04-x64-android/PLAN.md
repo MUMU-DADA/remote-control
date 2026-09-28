@@ -15,7 +15,7 @@
 | **P2 · Linux 侧验收** | KVM 启动 + arm64 应用实跑（abilist / 装 / 起 / maps） | ✅ **全部通过**（多轮复跑：23.8 s / 28.5 s / 30.2 s / 41.2 s 开机；结论性证据见 `docs/07-verification-report.md`） |
 | **P3 · Windows 侧验收** | 同一份镜像 + SDK emulator + WHPX | ⊘ **明确不由 agent 验证**（用户决定）；工程部分已交付：脚本 + 镜像 + `preflight.ps1` + 期望输出对照表 + 同 build id 等价性 |
 | **P4 · arm32 下放（可选）** | 若需要 32 位 ARM：切 API 30 基座 + 四 ABI 板级配置 | ⬜ 备选 |
-| **P5 · ROM 定制** | 把 `autod` 等自制组件编进 `/system`（本项目的下一步价值所在） | ⬜ 待 P2 |
+| **P5 · ROM 定制** | 把 `remote-control` 等自制组件编进 `/system`（本项目的下一步价值所在） | ⬜ 待 P2 |
 
 ---
 
@@ -51,8 +51,8 @@
 | 本轮 | `lunch autosnap_x64_arm64-userdebug` | ✅ `TARGET_ARCH=x86_64`、`abilist=x86_64,arm64-v8a` |
 | 本轮 | 第 1 次 `m`：artifact path 检查拦下载荷 | ❌ → 加 `PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST`（坑 1） |
 | 本轮 | 第 2 次 `m`：残留 `out/.lock` | ❌ → 清锁（坑 2） |
-| 本轮 | 第 3 次 `m`：AOSP 树里 `autod` 模块 `libwebp_vendored` 变体不匹配 | ❌ → 本侧开 `ALLOW_MISSING_DEPENDENCIES`（坑 3，属别人在途改动） |
-| 本轮 | 第 4 次 `m` 全量构建（`-j12`，容器 `autod-builder`） | ⏳ 编译中（`[2% 1544/62183]`，0 error）日志 `aosp/out/autosnap-build.log` |
+| 本轮 | 第 3 次 `m`：AOSP 树里 `remote-control` 模块 `libwebp_vendored` 变体不匹配 | ❌ → 本侧开 `ALLOW_MISSING_DEPENDENCIES`（坑 3，属别人在途改动） |
+| 本轮 | 第 4 次 `m` 全量构建（`-j12`，容器 `remote-control-builder`） | ⏳ 编译中（`[2% 1544/62183]`，0 error）日志 `aosp/out/autosnap-build.log` |
 | 本轮 | 自建 arm64 探针 APK（`tools/build-probe-apk.sh`） | ✅ `artifacts/arm64-probe.apk`（16 KB，纯 arm64-v8a，已签名） |
 
 ## 第 2 轮（本轮）
@@ -115,7 +115,7 @@
 | **启动路径彩排**（`PRODUCT_OUT=<官方 sysdir> ./scripts/run-linux.sh`） | ✅ 抓出并修掉 1 个会挡住验收的真 bug：**缺 `ANDROID_BUILD_TOP`** 时 SDK 模拟器报 `missing the 'kernel-qemu' image file`（已移除的跨架构路线脚本导出了它，本项目脚本没导）→ 已补，坑 7 入档 |
 | `PRODUCT_OUT` 可覆盖 | ✅ `common.sh` 支持 `PRODUCT_OUT=` 覆盖，便于用官方镜像做彩排 |
 | 开机耗时日志匹配 | ✅ 37.x 说 `Boot completed in`、30.x 说 `boot time`，正则两者都认 |
-| `docs/05-adding-components.md` | ✅ P5 路线文档：把自己的系统组件（如 `autod`）编进 ROM 的三种方式、落点、SELinux 验证、以及两个现状约束（`ALLOW_MISSING_DEPENDENCIES` / 载荷瘦身） |
+| `docs/05-adding-components.md` | ✅ P5 路线文档：把自己的系统组件（如 `remote-control`）编进 ROM 的三种方式、落点、SELinux 验证、以及两个现状约束（`ALLOW_MISSING_DEPENDENCIES` / 载荷瘦身） |
 | 彩排终态 | ✅ 启动→等开机→4 组验收全流程跑通，仅"设备名"按预期失败（官方镜像） |
 
 ## 第 6 轮（本轮）
@@ -125,7 +125,7 @@
 | 抗 `/tmp` 挤爆 | ✅ 宿主 `/tmp`（16G tmpfs）被外部写入占满 → `docker exec` 失败；实测容器进程在宿主 PID 命名空间可见，于是 `build-rom.sh`/`status.sh` 的状态判断与停止信号**改用宿主 `pgrep`/`pkill`**，不再依赖 docker exec |
 | `scripts/accept.sh` | ✅ 一条龙脚本：构建结束判定（`EXIT=0`）→ ROM 自检 → 翻译层依赖检查 → 打包 → 启动验收；`--skip-boot` 可只做前三步 |
 | README | ✅ 快速开始改为以 `accept.sh` 为主入口 |
-| 旁注 | 你们的 `frameworks/native/cmds/autod/daemon/Android.bp` 在 10:37 又改过一次，`libwebp_vendored` **只剩模块定义、已无消费者引用** → 那个变体不匹配问题应该没了，下次可以用严格模式验证：`ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh` |
+| 旁注 | 你们的 `frameworks/native/cmds/remote-control/daemon/Android.bp` 在 10:37 又改过一次，`libwebp_vendored` **只剩模块定义、已无消费者引用** → 那个变体不匹配问题应该没了，下次可以用严格模式验证：`ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh` |
 
 ## 第 7 轮（本轮）
 

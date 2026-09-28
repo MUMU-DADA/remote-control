@@ -5,13 +5,13 @@
 # 依次做：
 #   1. 起 Android 模拟器（没在跑的话）并等开机
 #   2. 把 adb forward 指到 127.0.0.1:18088
-#   3. 推 autod 并在模拟器里起它（绑 127.0.0.1:8088 + 0666 socket）
+#   3. 推 remote-control 并在模拟器里起它（绑 127.0.0.1:8088 + 0666 socket）
 #   4. 确保 lan-forward 服务在跑（把端口暴露到 0.0.0.0）
 #
 # 用法:
 #   bash tools/lan-up.sh              # 全部拉起来
 #   bash tools/lan-up.sh --status     # 只看状态
-#   bash tools/lan-up.sh --stop       # 停掉 autod（模拟器留着）
+#   bash tools/lan-up.sh --stop       # 停掉 remote-control（模拟器留着）
 #
 # 拉到什么程度：
 #   局域网里打开   http://<本机IP>:8088/            网页控制台
@@ -49,16 +49,16 @@ if [ "${1:-}" = "--status" ]; then
         bad "模拟器：未运行"
     fi
     "$ADB" -s "$SERIAL" shell true >/dev/null 2>&1 && ok "adb：已连接" || bad "adb：未连接"
-    "$ADB" -s "$SERIAL" shell "pidof autod" >/dev/null 2>&1 \
-        && ok "autod：运行中" || bad "autod：未运行"
-    systemctl is-active --quiet autod-lan-forward \
+    "$ADB" -s "$SERIAL" shell "pidof remote-control" >/dev/null 2>&1 \
+        && ok "remote-control：运行中" || bad "remote-control：未运行"
+    systemctl is-active --quiet remote-control-lan-forward \
         && ok "lan-forward：运行中" || bad "lan-forward：未运行"
     echo
     echo "  局域网地址："
-    PORT=$("$ADB" -s "$SERIAL" shell "grep '^port=' /sdcard/autod.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
-    BIND=$("$ADB" -s "$SERIAL" shell "grep '^bind=' /sdcard/autod.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
-    AUTH=$("$ADB" -s "$SERIAL" shell "grep '^auth=' /sdcard/autod.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
-    RUN=$("$ADB" -s "$SERIAL" shell "grep '^running=' /sdcard/autod.status | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+    PORT=$("$ADB" -s "$SERIAL" shell "grep '^port=' /sdcard/remote-control.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+    BIND=$("$ADB" -s "$SERIAL" shell "grep '^bind=' /sdcard/remote-control.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+    AUTH=$("$ADB" -s "$SERIAL" shell "grep '^auth=' /sdcard/remote-control.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+    RUN=$("$ADB" -s "$SERIAL" shell "grep '^running=' /sdcard/remote-control.status | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
     echo "    服务状态    running=$RUN  bind=$BIND  port=$PORT  auth=$AUTH"
     HOST=$LAN_IP
     [ "$BIND" = "127.0.0.1" ] && HOST=127.0.0.1
@@ -66,15 +66,15 @@ if [ "${1:-}" = "--status" ]; then
     echo "    HTTP API    http://$HOST:$PORT/api/v1/describe"
     echo "    adb         $ADB connect $LAN_IP:$ADB_LAN_PORT"
     if [ "$AUTH" = "1" ]; then
-        T=$("$ADB" -s "$SERIAL" shell "grep '^token=' /sdcard/autod.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
+        T=$("$ADB" -s "$SERIAL" shell "grep '^token=' /sdcard/remote-control.conf | cut -d= -f2" 2>/dev/null | tr -d '\r\n')
         echo "    访问令牌    $T"
     fi
     exit 0
 fi
 
 if [ "${1:-}" = "--stop" ]; then
-    step "停掉 autod"
-    "$ADB" -s "$SERIAL" shell "pkill -f 'autod --socket' 2>/dev/null; rm -f $DEV/autod.sock" || true
+    step "停掉 remote-control"
+    "$ADB" -s "$SERIAL" shell "pkill -f 'remote-control --socket' 2>/dev/null; rm -f $DEV/remote-control.sock" || true
     ok "已停"
     exit 0
 fi
@@ -108,9 +108,9 @@ ok "已开机"
 step "2/5  adb 连接"
 "$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
 sleep 1
-# 不再给 8088 做 adb forward：autod 自己绑对外地址，这样
+# 不再给 8088 做 adb forward：remote-control 自己绑对外地址，这样
 # 上位机改端口能真正生效（转发器不会跟着改，两边会失联）。
-ok "HTTP 由 autod 直接监听，无需转发"
+ok "HTTP 由 remote-control 直接监听，无需转发"
 
 # -----------------------------------------------------------------------------
 step "3/5  部署文件"
@@ -119,10 +119,10 @@ step "3/5  部署文件"
 #   实测 NDK/screencap 后端 120ms/帧 → 9.6 fps
 #        AOSP/SF 后端       23ms/帧 → 29.9 fps
 # NDK 版作为退路 —— 它不依赖平台私有库，任何 root 设备都能跑。
-AOSP_BIN="$PROJECT_DIR/aosp/out/target/product/emulator64_x86_64/system/bin/autod"
-AOSP_CTL="$PROJECT_DIR/aosp/out/target/product/emulator64_x86_64/system/bin/autodctl"
-NDK_BIN="$PROJECT_DIR/dev/02-native-daemon/out/ndk/x86_64/autod"
-NDK_CTL="$PROJECT_DIR/dev/02-native-daemon/out/ndk/x86_64/autodctl"
+AOSP_BIN="$PROJECT_DIR/aosp/out/target/product/emulator64_x86_64/system/bin/remote-control"
+AOSP_CTL="$PROJECT_DIR/aosp/out/target/product/emulator64_x86_64/system/bin/rcctl"
+NDK_BIN="$PROJECT_DIR/dev/02-native-daemon/out/ndk/x86_64/remote-control"
+NDK_CTL="$PROJECT_DIR/dev/02-native-daemon/out/ndk/x86_64/rcctl"
 
 if [ -f "$AOSP_BIN" ]; then
     BIN="$AOSP_BIN"; CTL="$AOSP_CTL"
@@ -131,19 +131,19 @@ else
     BIN="$NDK_BIN"; CTL="$NDK_CTL"
     warn "没有 AOSP 产物，退回 NDK 构建（screencap 后端，慢约 3 倍）"
 fi
-[ -f "$BIN" ] || { bad "没编出 autod"; exit 1; }
+[ -f "$BIN" ] || { bad "没编出 remote-control"; exit 1; }
 
-SUP="$PROJECT_DIR/tools/autod-supervisord.sh"
+SUP="$PROJECT_DIR/tools/remote-control-supervisord.sh"
 
 # 停掉旧的（手工起的和 supervisor 起的都要停，否则会抢同一个端口）
 "$ADB" -s "$SERIAL" shell "pkill -f supervisord 2>/dev/null; \
-    pkill -f 'autod --socket' 2>/dev/null; rm -f $DEV/autod.sock" || true
+    pkill -f 'remote-control --socket' 2>/dev/null; rm -f $DEV/remote-control.sock" || true
 sleep 1
 
-"$ADB" -s "$SERIAL" push "$BIN" "$DEV/autod" >/dev/null
-"$ADB" -s "$SERIAL" push "$CTL" "$DEV/autodctl" >/dev/null
-"$ADB" -s "$SERIAL" push "$SUP" "$DEV/autod-supervisord.sh" >/dev/null
-"$ADB" -s "$SERIAL" shell "chmod 755 $DEV/autod $DEV/autodctl $DEV/autod-supervisord.sh"
+"$ADB" -s "$SERIAL" push "$BIN" "$DEV/remote-control" >/dev/null
+"$ADB" -s "$SERIAL" push "$CTL" "$DEV/rcctl" >/dev/null
+"$ADB" -s "$SERIAL" push "$SUP" "$DEV/remote-control-supervisord.sh" >/dev/null
+"$ADB" -s "$SERIAL" shell "chmod 755 $DEV/remote-control $DEV/rcctl $DEV/remote-control-supervisord.sh"
 
 # 剪贴板辅助工具
 if [ ! -f "$PROJECT_DIR/dev/02-native-daemon/tools/cliptool/build/cliptool.jar" ]; then
@@ -159,24 +159,24 @@ ok "文件已推送"
 step "4/5  写入配置并启动 supervisor"
 # -----------------------------------------------------------------------------
 # 只在配置文件不存在时写默认值 —— 不覆盖用户（或上位应用）已经设好的。
-if ! "$ADB" -s "$SERIAL" shell "test -f /sdcard/autod.conf" 2>/dev/null; then
-    "$ADB" -s "$SERIAL" shell "printf 'enabled=1\nbind=0.0.0.0\nport=8088\nauth=0\ntoken=\n' > /sdcard/autod.conf"
+if ! "$ADB" -s "$SERIAL" shell "test -f /sdcard/remote-control.conf" 2>/dev/null; then
+    "$ADB" -s "$SERIAL" shell "printf 'enabled=1\nbind=0.0.0.0\nport=8088\nauth=0\ntoken=\n' > /sdcard/remote-control.conf"
     ok "已写入默认配置（对外监听 8088，无鉴权）"
 else
-    ok "沿用已有 /sdcard/autod.conf"
+    ok "沿用已有 /sdcard/remote-control.conf"
 fi
 
 # supervisor 管理真正的启停。**必须 setsid** —— adb shell 一退出，
 # 普通后台进程会被一起带走（实测踩过：以为起来了，其实早没了）。
 "$ADB" -s "$SERIAL" shell \
-    "setsid nohup $DEV/autod-supervisord.sh > $DEV/sup.log 2>&1 < /dev/null &"
+    "setsid nohup $DEV/remote-control-supervisord.sh > $DEV/sup.log 2>&1 < /dev/null &"
 sleep 4
 
 # -----------------------------------------------------------------------------
 step "5/5  局域网转发"
-systemctl is-active --quiet autod-lan-forward \
+systemctl is-active --quiet remote-control-lan-forward \
     && ok "lan-forward 已在运行" \
-    || { systemctl start autod-lan-forward && ok "已启动"; }
+    || { systemctl start remote-control-lan-forward && ok "已启动"; }
 sleep 1
 
 # -----------------------------------------------------------------------------
@@ -192,4 +192,4 @@ echo "  自检： bash tools/lan-up.sh --status"
 echo
 echo "  ⚠️ 这些端口没有鉴权 —— 同一局域网内任何设备都能控制模拟器。"
 echo "     只在可信网络里用；要暴露到不可信网络的话，"
-echo "     先给 autod 加 --http-token（见 docs/api/04-config.md 的鉴权一节）。"
+echo "     先给 remote-control 加 --http-token（见 docs/api/04-config.md 的鉴权一节）。"

@@ -1,8 +1,8 @@
 // selftest.cpp —— 部署自检
 //
-// 逐项检查 autod 运行所需的环境，每项给出可操作的结论。
+// 逐项检查 remote-control 运行所需的环境，每项给出可操作的结论。
 //
-// 为什么需要它：autod 依赖四件容易出问题的事——
+// 为什么需要它：remote-control 依赖四件容易出问题的事——
 //   1. /dev/uinput 的 POSIX 权限（0660 uhid:uhid）和 SELinux 标签（uhid_device）
 //   2. screencap 命令存在且可执行（NDK 构建的截图后端）
 //   3. SurfaceFlinger Binder 可达（AOSP 构建的截图后端）
@@ -27,12 +27,12 @@
 #include "json_writer.h"
 #include <vector>
 
-#include "autod_log.h"
-#include "autod_platform.h"
+#include "remote_control_log.h"
+#include "remote_control_platform.h"
 #include "capture.h"
 #include "inject.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // 检查结果同时满足两种消费方式：
@@ -152,7 +152,7 @@ void CheckRunEnvironment(bool /*verbose*/) {
     Pass("/dev/uinput 可写（权限 %04o, uid=%u gid=%u）",
          st.st_mode & 07777, st.st_uid, st.st_gid);
 
-#if AUTOD_HAS_BINDER_PLATFORM
+#if REMOTE_CONTROL_HAS_BINDER_PLATFORM
     Pass("平台构建：可访问 Binder / SurfaceFlinger");
 #else
     Info("非平台构建：截图走 exec 外部命令");
@@ -270,7 +270,7 @@ void CheckInject(bool verbose, uint32_t cliW, uint32_t cliH) {
     std::string error;
     if (!injector.Init(cfg, &error)) {
         Fail("Injector::Init 失败: %s", error.c_str());
-#if AUTOD_HAS_BINDER_PLATFORM
+#if REMOTE_CONTROL_HAS_BINDER_PLATFORM
         Info("→ 平台构建：确认 SELinux 允许 uhid_device 或 binder_call 到 virtual_touchpad");
 #else
         Info("→ 确认 /dev/uinput 可写（见 [1]）");
@@ -330,7 +330,7 @@ void RunChecks(bool verbose, uint32_t touchWidth, uint32_t touchHeight) {
 int RunSelfTest(bool verbose, uint32_t touchWidth, uint32_t touchHeight) {
     ResetResults(/*print=*/true);
 
-    printf("\033[1mautod 部署自检\033[0m\n");
+    printf("\033[1mremote-control 部署自检\033[0m\n");
     printf("逐项检查运行所需的环境。\n");
 
     RunChecks(verbose, touchWidth, touchHeight);
@@ -339,8 +339,8 @@ int RunSelfTest(bool verbose, uint32_t touchWidth, uint32_t touchHeight) {
     if (gFailed == 0) {
         printf("\033[1;32m全部通过\033[0m（%d 项）\n", gPassed);
         printf("\n下一步：\n");
-        printf("  autod --socket /data/local/tmp/autod.sock --foreground &\n");
-        printf("  autodctl --socket /data/local/tmp/autod.sock tap 540 1200\n");
+        printf("  remote-control --socket /data/local/tmp/remote-control.sock --foreground &\n");
+        printf("  rcctl --socket /data/local/tmp/remote-control.sock tap 540 1200\n");
         return 0;
     }
     printf("\033[1;31m%d 项失败\033[0m（%d 项通过）\n", gFailed, gPassed);
@@ -384,4 +384,4 @@ std::string RunSelfTestJson(bool verbose, uint32_t touchWidth,
     return w.str();
 }
 
-}  // namespace autod
+}  // namespace remote_control

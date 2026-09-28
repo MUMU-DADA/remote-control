@@ -27,9 +27,9 @@
 
 #include "inject.h"   // InjectorConfig
 
-namespace autod {
+namespace remote_control {
 
-// 前向声明：StatsJson 的回调要用。json 是 autod 里的 namespace。
+// 前向声明：StatsJson 的回调要用。json 是 remote-control 里的 namespace。
 namespace json { class Writer; }
 
 class Capture;
@@ -172,4 +172,4 @@ class ServiceState {
     uint64_t byCommand_[64] = {};
 };
 
-}  // namespace autod
+}  // namespace remote_control

@@ -115,7 +115,7 @@ if (-not $Verify) {
     } else {
         Write-Host "==> 未找到 ..\emulator\config.ini，沿用 ROM 自带显示配置" -ForegroundColor Yellow
     }
-    if ($MemoryMB -le 0) { $MemoryMB = [int](Get-ConfigValue "hw.ramSize" "8192") }
+    if ($MemoryMB -le 0) { $MemoryMB = [int](Get-ConfigValue "hw.ramSize" "6144") }
     if ($Cores    -le 0) { $Cores    = [int](Get-ConfigValue "hw.cpu.ncore" "4") }
     $gpuAuto = [string]::IsNullOrWhiteSpace($Gpu)
     $Gpu = Resolve-GpuMode $Gpu

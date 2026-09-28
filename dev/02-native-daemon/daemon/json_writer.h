@@ -1,6 +1,6 @@
 // json_writer.h — 极简 JSON 输出器
 //
-// 为什么自己写而不是引库：autod 要能编进 AOSP（Soong）和 NDK 两种环境，
+// 为什么自己写而不是引库：remote-control 要能编进 AOSP（Soong）和 NDK 两种环境，
 // 引第三方 JSON 库意味着多一份依赖、多一份同步成本。
 //
 // 为什么只写不读：请求 payload 用的是 NUL 分隔字符串（参数少而固定，
@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 namespace json {
 
 class Writer {
@@ -199,4 +199,4 @@ private:
 };
 
 }  // namespace json
-}  // namespace autod
+}  // namespace remote_control

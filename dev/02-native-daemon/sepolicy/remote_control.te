@@ -1,7 +1,7 @@
-# autod 的 SELinux domain
+# remote-control 的 SELinux domain
 #
-# 安装位置：system/sepolicy/private/autod.te
-#          （type 声明也可以放这里，因为只有 autod 自己用）
+# 安装位置：system/sepolicy/private/remote-control.te
+#          （type 声明也可以放这里，因为只有 remote-control 自己用）
 #
 # =============================================================================
 # 本文件的所有类型名和宏都已对照 android-12.0.0_r34 实际源码核实，不是猜的：
@@ -25,24 +25,24 @@
 # 类型声明
 # -----------------------------------------------------------------------------
 
-type autod, domain;
-type autod_exec, system_file_type, exec_type, file_type;
+type remote_control, domain;
+type remote_control_exec, system_file_type, exec_type, file_type;
 
 # 自建的 socket。coredomain_socket 属性让它能被 init 正确处理。
 # 参考 public/file.te 里 statsdw_socket 的声明方式。
-type autod_socket, file_type, coredomain_socket;
+type remote_control_socket, file_type, coredomain_socket;
 
-typeattribute autod coredomain;
+typeattribute remote_control coredomain;
 
 # 由 init 启动并做域转换。
-# 宏展开就是 domain_auto_trans(init, autod_exec, autod)
-init_daemon_domain(autod)
+# 宏展开就是 domain_auto_trans(init, remote_control_exec, remote-control)
+init_daemon_domain(remote_control)
 
 # -----------------------------------------------------------------------------
 # Binder 基础设施
 # -----------------------------------------------------------------------------
 
-binder_use(autod)
+binder_use(remote_control)
 
 # -----------------------------------------------------------------------------
 # 截图：调 SurfaceFlinger
@@ -51,11 +51,11 @@ binder_use(autod)
 # 对照 private/surfaceflinger.te：它自己 rw_file_perms 访问 gpu_device；
 # 我们作为客户端只需要能映射它给的 GraphicBuffer。
 
-binder_call(autod, surfaceflinger)
-allow autod surfaceflinger_service:service_manager find;
+binder_call(remote_control, surfaceflinger)
+allow remote_control surfaceflinger_service:service_manager find;
 
 # GraphicBuffer 底层是 gralloc 分配的 dma-buf，需要访问 GPU 设备节点
-allow autod gpu_device:chr_file rw_file_perms;
+allow remote_control gpu_device:chr_file rw_file_perms;
 
 # -----------------------------------------------------------------------------
 # 触控：写 /dev/uinput
@@ -68,7 +68,7 @@ allow autod gpu_device:chr_file rw_file_perms;
 #    POSIX 权限是 0660 uhid:uhid，所以进程的 UID/GID 也要对
 #    （init.rc 里用 `user system` + `group system uhid`）。
 
-allow autod uhid_device:chr_file { w_file_perms ioctl };
+allow remote_control uhid_device:chr_file { w_file_perms ioctl };
 
 # -----------------------------------------------------------------------------
 # 对外 socket：AF_UNIX SOCK_SEQPACKET
@@ -77,27 +77,27 @@ allow autod uhid_device:chr_file { w_file_perms ioctl };
 # ⚠️ SELinux 里**没有** unix_seqpacket_socket 这个类 ——
 #    内核把 SOCK_SEQPACKET 映射到 unix_stream_socket，别去找 seqpacket 类。
 #
-# socket 由 init 创建（autod.rc 里的 `socket autod seqpacket 0660 system system`），
-# 所以 init 负责 create/bind/listen，autod 只负责 accept/读写。
+# socket 由 init 创建（remote-control.rc 里的 `socket remote-control seqpacket 0660 system system`），
+# 所以 init 负责 create/bind/listen，remote-control 只负责 accept/读写。
 
-allow init autod_socket:{ sock_file create setattr unlink };
+allow init remote_control_socket:{ sock_file create setattr unlink };
 
-allow autod autod_socket:sock_file rw_file_perms;
-allow autod self:unix_stream_socket { create bind listen accept read write getattr shutdown };
+allow remote_control remote_control_socket:sock_file rw_file_perms;
+allow remote_control self:unix_stream_socket { create bind listen accept read write getattr shutdown };
 
 # 客户端要连这个 socket。
 # 如果调用方是 app，把下面两行的注释去掉并把 untrusted_app 换成实际 domain；
 # 如果调用方是 adb shell，用 shell；如果是自己的 native 进程，用它的 domain。
 #
-# allow untrusted_app autod_socket:sock_file write;
-# allow untrusted_app autod:unix_stream_socket connectto;
+# allow untrusted_app remote_control_socket:sock_file write;
+# allow untrusted_app remote-control:unix_stream_socket connectto;
 
 # -----------------------------------------------------------------------------
 # 日志
 # -----------------------------------------------------------------------------
 
-allow autod self:capability { sys_admin };
-allow autod autod_exec:file { read open execute execute_no_trans map };
+allow remote_control self:capability { sys_admin };
+allow remote_control remote_control_exec:file { read open execute execute_no_trans map };
 
 # -----------------------------------------------------------------------------
 # 第一阶段：先用 permissive 定位
@@ -108,48 +108,48 @@ allow autod autod_exec:file { read open execute execute_no_trans map };
 #
 # 正确工作流：
 #   1. 放开 permissive
-#   2. adb shell dmesg | grep 'avc:.*autod' > avc.log
+#   2. adb shell dmesg | grep 'avc:.*remote-control' > avc.log
 #   3. ./prebuilts/build-tools/linux-x86/bin/audit2allow -i avc.log
 #   4. 把生成的 allow 逐条加进来
 #   5. 注释掉 permissive，重编
 #
 # ⚠️ 进生产前必须删掉 —— permissive domain 会导致 CTS 失败。
 #
-# permissive autod;
+# permissive remote-control;
 
 # -----------------------------------------------------------------------------
 # 配套改动清单（别漏）
 # -----------------------------------------------------------------------------
 #
 # 1. system/sepolicy/private/file_contexts 追加：
-#       /system/bin/autod              u:object_r:autod_exec:s0
-#       /dev/socket/autod              u:object_r:autod_socket:s0
+#       /system/bin/remote-control              u:object_r:remote_control_exec:s0
+#       /dev/socket/remote-control              u:object_r:remote_control_socket:s0
 #
-# 2. autod.rc（已随 Android.bp 的 init_rc 自动装到 /system/etc/init/）：
-#       service autod /system/bin/autod --init-socket autod
+# 2. remote-control.rc（已随 Android.bp 的 init_rc 自动装到 /system/etc/init/）：
+#       service remote-control /system/bin/remote-control --init-socket remote-control
 #           class core
 #           user system
 #           group system uhid          ← uhid 组是 /dev/uinput 的属组，别漏
-#           seclabel u:r:autod:s0
-#           socket autod seqpacket 0660 system system
+#           seclabel u:r:remote-control:s0
+#           socket remote-control seqpacket 0660 system system
 #
-# 3. 确认 init 能访问 autod_exec：
+# 3. 确认 init 能访问 remote_control_exec：
 #       init 通过 init_daemon_domain 宏拿到执行权，通常无需额外规则。
 
 # =============================================================================
-# 变体：启用 autod_vtp（走 AOSP 官方 virtual_touchpad 服务）
+# 变体：启用 remote_control_vtp（走 AOSP 官方 virtual_touchpad 服务）
 # =============================================================================
 #
-# 如果 autod 用 inject_vtp.cpp（而不是 inject_uinput.cpp），
-# 触控那部分权限可以整段替换掉 —— autod 不再碰 /dev/uinput。
+# 如果 remote-control 用 inject_vtp.cpp（而不是 inject_uinput.cpp），
+# 触控那部分权限可以整段替换掉 —— remote-control 不再碰 /dev/uinput。
 #
 # ── 删掉这两条 ──
-#   allow autod uhid_device:chr_file { w_file_perms ioctl };
-#   （autod.rc 里的 `group system uhid` 也不再需要，但留着无害）
+#   allow remote-control uhid_device:chr_file { w_file_perms ioctl };
+#   （remote-control.rc 里的 `group system uhid` 也不再需要，但留着无害）
 #
 # ── 换成这两条 ──
-#   binder_call(autod, virtual_touchpad)
-#   allow autod virtual_touchpad_service:service_manager find;
+#   binder_call(remote-control, virtual_touchpad)
+#   allow remote-control virtual_touchpad_service:service_manager find;
 #
 # 对比：
 #   自己写 uinput  → 需要 uhid 组 + uhid_device 访问权
@@ -159,7 +159,7 @@ allow autod autod_exec:file { read open execute execute_no_trans map };
 #   PRODUCT_PACKAGES += virtual_touchpad
 #
 #   virtual_touchpad 默认**不**编进 aosp_arm64 产品包（它是 VR 专用）。
-#   不加这一行的话，autod_vtp 启动后会 attach 失败：
+#   不加这一行的话，remote_control_vtp 启动后会 attach 失败：
 #     "attach() 失败 (status=-2) —— 确认 virtual_touchpad 服务在跑"
 #
 # ── 已知限制 ──
@@ -170,7 +170,7 @@ allow autod autod_exec:file { read open execute execute_no_trans map };
 # UID 选择：system(1000) 还是 shell(2000)
 # =============================================================================
 #
-# autod 需要同时满足三件事，而它们的来源不同：
+# remote-control 需要同时满足三件事，而它们的来源不同：
 #
 #   1. 能调 SurfaceFlinger::captureDisplay（截图）
 #   2. 能写 /dev/uinput（触控）
@@ -226,13 +226,13 @@ allow autod autod_exec:file { read open execute execute_no_trans map };
 #   先按 `user system` + `group system uhid graphics` 试。
 #   推上去第一步就跑：
 #
-#       autod --selftest
+#       remote-control --selftest
 #
 #   它会做一次真实抓帧。[2] 截图一节若报
 #
 #       Capture::Init 失败 / 抓帧失败: ... PERMISSION_DENIED
 #
-#   就把 autod.rc 改成：
+#   就把 remote-control.rc 改成：
 #
 #       user shell
 #       group shell uhid graphics

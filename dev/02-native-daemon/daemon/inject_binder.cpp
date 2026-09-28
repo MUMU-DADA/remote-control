@@ -33,7 +33,7 @@
 //
 // 后者的优越之处：不创建额外的输入设备，不会出现在 /proc/bus/input/devices。
 //
-// 启用方法：删掉下面的 #error 行，并把 Android.bp 里 autod_binder 的 srcs 指过来。
+// 启用方法：删掉下面的 #error 行，并把 Android.bp 里 remote_control_binder 的 srcs 指过来。
 //
 // -----------------------------------------------------------------------------
 // Android 12 的 MotionEvent::initialize 签名（供将来参考）
@@ -79,12 +79,12 @@
 
 #include <android/hardware/input/IInputManager.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "inject_backend.h"
 
 using namespace android;
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 int32_t ToPlatformAction(int32_t action) {
@@ -218,4 +218,4 @@ std::unique_ptr<InjectorBackend> CreateInjectorBackend() {
     return std::make_unique<BinderInjector>();
 }
 
-}  // namespace autod
+}  // namespace remote_control

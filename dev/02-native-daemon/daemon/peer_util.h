@@ -15,7 +15,7 @@
 
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 // 返回 "ip:port"；拿不到地址（AF_UNIX / 已断开）时返回空串。
 //
@@ -50,4 +50,4 @@ inline std::string PeerName(int fd) {
     return std::string(host) + ":" + std::to_string(port);
 }
 
-}  // namespace autod
+}  // namespace remote_control

@@ -30,13 +30,13 @@
 #include "../daemon/socket_server.h"
 #include "test_util.h"
 
-using namespace autod;
-using namespace autodtest;
+using namespace remote_control;
+using namespace remote_control_test;
 
 namespace {
 
-constexpr const char* kSocketPath = "/tmp/autod-itest.sock";
-constexpr const char* kDeviceName = "autod-itest-touch";
+constexpr const char* kSocketPath = "/tmp/remote-control-itest.sock";
+constexpr const char* kDeviceName = "remote-control-itest-touch";
 constexpr uint32_t    kWidth  = 1080;
 constexpr uint32_t    kHeight = 1920;
 
@@ -385,9 +385,9 @@ void TestNoFdLeak() {
 
 int main() {
     // 把空闲超时压到 1 秒，否则 [6] 用例要等 30 秒
-    setenv("AUTOD_IDLE_TIMEOUT_SEC", "1", 1);
+    setenv("REMOTE_CONTROL_IDLE_TIMEOUT_SEC", "1", 1);
 
-    printf("\033[1m=== autod 端到端集成测试 ===\033[0m\n");
+    printf("\033[1m=== remote-control 端到端集成测试 ===\033[0m\n");
     printf("使用真实 Dispatcher / SocketServer / Injector，截图后端为桩。\n");
 
     if (geteuid() != 0) {

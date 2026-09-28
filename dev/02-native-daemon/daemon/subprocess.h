@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 
 struct CommandResult {
     int         exitCode = -1;   // -1 表示没跑起来（exec 失败/超时被杀）
@@ -56,4 +56,4 @@ bool RunCommandAs(const std::vector<std::string>& argv, int uid, int gid,
 // 命令是否存在（查 PATH）
 bool CommandExists(const char* name);
 
-}  // namespace autod
+}  // namespace remote_control

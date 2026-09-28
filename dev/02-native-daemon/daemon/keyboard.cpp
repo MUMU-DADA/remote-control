@@ -15,9 +15,9 @@
 #include <cstdlib>
 #include <map>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // 进程里是否已经建起虚拟键盘。见 keyboard.h 里 BackendName() 的说明 ——
@@ -272,7 +272,7 @@ bool Keyboard::Init(std::string* error) {
     }
 
     uinput_setup us{};
-    const char* name = "autod-keyboard";
+    const char* name = "remote-control-keyboard";
     strncpy(us.name, name, UINPUT_MAX_NAME_SIZE - 1);
     us.id.bustype = BUS_VIRTUAL;
     us.id.vendor  = 0x18d1;   // Google
@@ -361,4 +361,4 @@ bool Keyboard::Key(uint32_t linuxKeyCode, bool longPress, std::string* error) {
     return true;
 }
 
-}  // namespace autod
+}  // namespace remote_control

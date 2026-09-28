@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 
 struct ClipInfo {
     bool        has = false;
@@ -61,7 +61,7 @@ class ClipOps {
 
     bool        available_ = false;
     std::string toolPath_;      // 设备上的 jar 路径
-    std::string toolClass_ = "com.autod.clip.ClipTool";
+    std::string toolClass_ = "com.remotecontrol.clip.ClipTool";
 };
 
-}  // namespace autod
+}  // namespace remote_control

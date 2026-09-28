@@ -18,9 +18,9 @@
 
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 // 返回网页控制台的 HTML（UTF-8）
 const std::string& WebUiHtml();
 
-}  // namespace autod
+}  // namespace remote_control

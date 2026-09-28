@@ -2,7 +2,7 @@
 # =============================================================================
 # build.sh —— 构建剪贴板辅助工具（cliptool.jar）
 #
-# 产物是一个只含 classes.dex 的 zip，由 autod **以 shell 身份**通过
+# 产物是一个只含 classes.dex 的 zip，由 remote-control **以 shell 身份**通过
 # app_process 运行。为什么需要它、为什么是 shell 身份，见
 # ../../daemon/clipops.h 的文件头。
 #
@@ -63,7 +63,7 @@ mkdir -p "$OUT/classes"
     "$HERE/ClipTool.java" 2>&1 | grep -v "^注:" || true
 ok "javac 完成"
 
-"$BT/d8" --min-api 31 --output "$OUT" "$OUT/classes/com/autod/clip/ClipTool.class"
+"$BT/d8" --min-api 31 --output "$OUT" "$OUT/classes/com/remote-control/clip/ClipTool.class"
 [ -f "$OUT/classes.dex" ] || { bad "d8 没产出 classes.dex"; exit 1; }
 ok "classes.dex $(stat -c%s "$OUT/classes.dex") 字节"
 
@@ -82,10 +82,10 @@ cat <<EOF
 
 验证（注意：**必须以 shell 身份**，root 会被 ClipboardService 拒绝）：
   adb shell 'CLASSPATH=/data/local/tmp/cliptool.jar \\
-      app_process /system/bin com.autod.clip.ClipTool info'
+      app_process /system/bin com.remotecontrol.clip.ClipTool info'
 
-autod 会自动在 /data/local/tmp/cliptool.jar 找到它；
-放在别处就设 AUTOD_CLIPTOOL 环境变量。
+remote-control 会自动在 /data/local/tmp/cliptool.jar 找到它；
+放在别处就设 REMOTE_CONTROL_CLIPTOOL 环境变量。
 EOF
 
 if [ "${1:-}" = "--install" ]; then

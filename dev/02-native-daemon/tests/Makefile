@@ -1,4 +1,4 @@
-# autod 的验证测试
+# remote-control 的验证测试
 #
 # 所有测试都在开发机上**真实运行**，走完整的系统路径，不是 mock：
 #   - 触控：真的创建虚拟触摸屏、注入事件、从 /dev/input/eventN 读回
@@ -43,7 +43,7 @@ DAEMON    = ../daemon
 COMMON_SRCS = $(DAEMON)/inject.cpp $(DAEMON)/inject_uinput.cpp \
               $(DAEMON)/log_buffer.cpp
 COMMON_HDRS = $(DAEMON)/inject.h $(DAEMON)/inject_backend.h \
-              $(DAEMON)/autod_log.h $(DAEMON)/autod_platform.h \
+              $(DAEMON)/remote_control_log.h $(DAEMON)/remote_control_platform.h \
               $(DAEMON)/protocol.h test_util.h
 
 # 内置的 libwebp（vendor/webp）。dispatch 现在会调到 ImageEncoder，

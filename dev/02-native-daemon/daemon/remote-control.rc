@@ -1,17 +1,17 @@
-# autod 的 init 服务定义
+# remote-control 的 init 服务定义
 #
-# 安装位置：/system/etc/init/autod.rc
-# Android.bp 里 `init_rc: ["autod.rc"]` 会自动装过去。
+# 安装位置：/system/etc/init/remote-control.rc
+# Android.bp 里 `init_rc: ["remote-control.rc"]` 会自动装过去。
 #
-# ⚠️ autod.rc 必须与 Android.bp 同目录 —— Soong 的 init_rc 不允许 ".." 路径，
+# ⚠️ remote-control.rc 必须与 Android.bp 同目录 —— Soong 的 init_rc 不允许 ".." 路径，
 #    否则报 "Path is outside directory"。
 
-service autod /system/bin/autod --init-socket autod
+service remote-control /system/bin/remote-control --init-socket remote-control
     class core
 
     # system UID 才能写 /dev/uinput 并访问 SurfaceFlinger。
     #
-    # ⚠️ 这一行有未验证的风险，见 sepolicy/autod.te 的「UID 选择」一节：
+    # ⚠️ 这一行有未验证的风险，见 sepolicy/remote-control.te 的「UID 选择」一节：
     #    SurfaceFlinger::captureDisplay 的权限检查是
     #        uid == AID_GRAPHICS(1003) || checkPermission(READ_FRAME_BUFFER)
     #    比的是 **UID** 不是 GID，所以"在 graphics 组里"并不满足。
@@ -23,7 +23,7 @@ service autod /system/bin/autod --init-socket autod
     #        group shell uhid graphics
     #    shell 同时满足三个条件：READ_FRAME_BUFFER、uhid 组、INJECT_EVENTS。
     #
-    #    怎么确认：推上去先跑 `autod --selftest`，[2] 截图一节会直接报出来。
+    #    怎么确认：推上去先跑 `remote-control --selftest`，[2] 截图一节会直接报出来。
     user system
 
     # ⚠️ uhid 组不能漏 —— /dev/uinput 的 POSIX 权限是 0660 uhid:uhid
@@ -32,34 +32,34 @@ service autod /system/bin/autod --init-socket autod
     group system uhid graphics
 
     # 独立 SELinux domain。没有这一行 init 会拒绝启动。
-    seclabel u:r:autod:s0
+    seclabel u:r:remote-control:s0
 
-    # init 创建 /dev/socket/autod，把 fd 通过 ANDROID_SOCKET_autod 传给 autod。
+    # init 创建 /dev/socket/remote-control，把 fd 通过 ANDROID_SOCKET_remote-control 传给 remote-control。
     #
     # 0660 + system:system 意味着只有 system UID/组能连。
     # seqpacket 对应 AF_UNIX SOCK_SEQPACKET。
-    socket autod seqpacket 0660 system system
+    socket remote-control seqpacket 0660 system system
 
     # 崩了自动重启，但不循环重启
     oneshot
     disabled
 
-# 开机完成后再起 —— autod 要调 SurfaceFlinger 和 system_server，
+# 开机完成后再起 —— remote-control 要调 SurfaceFlinger 和 system_server，
 # 起太早会失败。
 on property:sys.boot_completed=1
-    start autod
+    start remote-control
 
 # -----------------------------------------------------------------------------
 # 调试用：跳过 seclabel 和 socket，以 root 身份前台跑
 # -----------------------------------------------------------------------------
 # 阶段 1 原型用，不要进生产镜像。
 #
-# service autod_debug /system/bin/autod --socket /data/local/tmp/autod.sock --foreground
+# service remote-control-debug /system/bin/remote-control --socket /data/local/tmp/remote-control.sock --foreground
 #     class main
 #     user root
 #     group root system uhid
 #     oneshot
 #     disabled
 #
-# 然后：adb shell start autod_debug
-#       或直接 adb shell /system/bin/autod --socket /data/local/tmp/autod.sock
+# 然后：adb shell start remote-control-debug
+#       或直接 adb shell /system/bin/remote-control --socket /data/local/tmp/remote-control.sock

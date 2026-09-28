@@ -32,7 +32,7 @@
 #include "image_encoder.h"
 #include "png_encoder.h"
 
-using namespace autod;
+using namespace remote_control;
 
 namespace {
 

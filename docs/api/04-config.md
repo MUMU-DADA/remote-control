@@ -2,12 +2,12 @@
 
 ---
 
-## 一、配置文件 `/sdcard/autod.conf`
+## 一、配置文件 `/sdcard/remote-control.conf`
 
 守护进程启动时读一次；`enabled` 会被**持续监视**（每 2s），改了立刻生效。
 
 ```ini
-# autod 配置 —— 由上位应用或手工编辑，守护进程启动时读取。
+# remote-control 配置 —— 由上位应用或手工编辑，守护进程启动时读取。
 # 改完之后需要重启服务才生效（enabled 除外）。
 
 # 服务是否应当运行
@@ -70,7 +70,7 @@ bind=127.0.0.1  port=8088  auth=0  enabled=1
 这个顺序是有讲究的：上位应用写配置文件、不传命令行参数，所以它能生效；
 而调试时 `--http-port 9999` 这种一次性覆盖也不会被文件悄悄改掉。
 
-配置文件路径可以用 `--config` 或环境变量 `AUTOD_CONFIG` 覆盖。
+配置文件路径可以用 `--config` 或环境变量 `REMOTE_CONTROL_CONFIG` 覆盖。
 
 ---
 
@@ -80,11 +80,11 @@ bind=127.0.0.1  port=8088  auth=0  enabled=1
 
 ```bash
 # 方式一：改配置文件（推荐 —— 上位应用就是这么做的）
-sed -i 's/^auth=0/auth=1/' /sdcard/autod.conf
+sed -i 's/^auth=0/auth=1/' /sdcard/remote-control.conf
 # 重启服务后，token 会被随机生成并写回文件
 
 # 方式二：命令行
-autod --socket /data/local/tmp/autod.sock --http-token <令牌>
+remote-control --socket /data/local/tmp/remote-control.sock --http-token <令牌>
 ```
 
 ### 令牌从哪来
@@ -96,7 +96,7 @@ autod --socket /data/local/tmp/autod.sock --http-token <令牌>
 3. **写回配置文件**
 
 ```bash
-grep '^token=' /sdcard/autod.conf
+grep '^token=' /sdcard/remote-control.conf
 # token=nonKbvyus_2bkj9e849gWgleEDjp_UYP
 ```
 
@@ -111,12 +111,12 @@ grep '^token=' /sdcard/autod.conf
 | 方式 | 用途 |
 |---|---|
 | `Authorization: Bearer <t>` | 标准做法 |
-| `X-Autod-Token: <t>` | 不方便设 Authorization 的客户端 |
+| `X-Remote-Control-Token: <t>` | 不方便设 Authorization 的客户端 |
 | `?token=<t>` | `<img src>` / WebSocket 这类**没法设请求头**的场景 |
 
 ```bash
 curl -H "Authorization: Bearer $T" http://host:8088/api/v1/config
-curl -H "X-Autod-Token: $T"        http://host:8088/api/v1/config
+curl -H "X-Remote-Control-Token: $T"        http://host:8088/api/v1/config
 curl "http://host:8088/api/v1/config?token=$T"
 ```
 
@@ -146,16 +146,16 @@ curl "http://host:8088/api/v1/config?token=$T"
 ## 四、命令行
 
 ```
-autod [选项]
+remote-control [选项]
 
   --socket <路径>      手动 bind 一个 Unix socket（开发期用）
-  --init-socket <名字> 接管 init 创建的 socket（生产用，见 autod.rc）
+  --init-socket <名字> 接管 init 创建的 socket（生产用，见 remote-control.rc）
   --display <id>       指定显示 ID，0 表示自动选主显示
   --touch-range <WxH>  触控坐标范围，默认取显示分辨率
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
   --gid <gid>          配套的 GID，省略则用与 uid 相同的值
   --selftest           检查运行环境后退出（首次部署时先跑这个）
-  --config <路径>      配置文件，默认 /sdcard/autod.conf
+  --config <路径>      配置文件，默认 /sdcard/remote-control.conf
   --http-bind <地址>   启用 HTTP/JSON API 并绑定该地址（如 0.0.0.0 对外）
                        不指定则由配置文件决定
   --http-port <端口>   HTTP 端口，默认 8088
@@ -167,13 +167,13 @@ autod [选项]
 
 示例:
   # 开发期：前台跑，自己 bind socket
-  autod --socket /data/local/tmp/autod.sock --foreground --verbose
+  remote-control --socket /data/local/tmp/remote-control.sock --foreground --verbose
 
   # 常用：让配置文件决定监听地址/端口/鉴权（上位应用就是这么管的）
-  autod --socket /data/local/tmp/autod.sock
+  remote-control --socket /data/local/tmp/remote-control.sock
 
   # 生产：由 init 拉起，socket 由 init 创建并打好 SELinux 标签
-  autod --init-socket autod
+  remote-control --init-socket remote-control
 ```
 
 ### `--socket-mode` 的权衡
@@ -229,9 +229,9 @@ curl -X POST http://host:8088/api/v1/config \
 但它能写共享存储。所以：
 
 ```
-上位应用 → 写 /sdcard/autod.conf
-autod-supervisord（常驻 root 脚本）→ 监视文件 → 启停/重启 autod
-                                  → 写 /sdcard/autod.status 供应用显示
+上位应用 → 写 /sdcard/remote-control.conf
+remote-control-supervisord（常驻 root 脚本）→ 监视文件 → 启停/重启 remote-control
+                                  → 写 /sdcard/remote-control.status 供应用显示
 ```
 
 应用侧因此只依赖"文件能写"这一件事，**不需要任何特权**。
@@ -240,7 +240,7 @@ autod-supervisord（常驻 root 脚本）→ 监视文件 → 启停/重启 auto
 
 ```bash
 # 启动（必须 setsid —— adb shell 一退出，普通后台进程会被一起带走）
-adb shell "setsid nohup /data/local/tmp/autod-supervisord.sh \
+adb shell "setsid nohup /data/local/tmp/remote-control-supervisord.sh \
            > /data/local/tmp/sup.log 2>&1 < /dev/null &"
 ```
 
@@ -253,7 +253,7 @@ adb shell "setsid nohup /data/local/tmp/autod-supervisord.sh \
 `enabled` 不进重启指纹是有意的：拨开关不该重启服务，
 那会打断所有正在看的画面流和触控连接。
 
-### 状态文件 `/sdcard/autod.status`
+### 状态文件 `/sdcard/remote-control.status`
 
 ```ini
 running=1
@@ -271,13 +271,13 @@ serving=1
 ### 生产部署：做成 init 服务
 
 ```bash
-# 见 dev/02-native-daemon/autod.rc
-service autod /system/bin/autod --init-socket autod
+# 见 dev/02-native-daemon/remote-control.rc
+service remote-control /system/bin/remote-control --init-socket remote-control
     class main
     user root
     group root
-    socket autod seqpacket 0660 root system
-    seclabel u:r:autod:s0
+    socket remote-control seqpacket 0660 root system
+    seclabel u:r:remote-control:s0
     disabled        # 由 ctl.start 拉起，或改成 oneshot 常驻
 ```
 
@@ -297,7 +297,7 @@ bash tools/lan-up.sh --stop     # 停服务
 它会：
 
 1. 起模拟器（没在跑的话）并等开机
-2. 推 autod / autodctl / cliptool.jar / supervisord
+2. 推 remote-control / rcctl / cliptool.jar / supervisord
 3. 写默认配置（**只在文件不存在时** —— 不覆盖你已设好的）
 4. `setsid` 启动 supervisor
 
@@ -324,4 +324,4 @@ bash tools/lan-up.sh --stop     # 停服务
 
 - [04-config.md 的鉴权部分](#三鉴权) 与 [01-http.md](01-http.md) 的通用约定
 - `dev/02-native-daemon/sepolicy/` —— SELinux 策略（生产环境用这个，不要靠放宽权限）
-- `tools/autod-supervisord.sh` —— supervisor 实现
+- `tools/remote-control-supervisord.sh` —— supervisor 实现

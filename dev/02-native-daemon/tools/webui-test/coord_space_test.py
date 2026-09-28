@@ -38,14 +38,14 @@ def sh(serial, cmd):
 
 
 def find_touch_device(serial):
-    """找 autod 建的那个虚拟触控屏（名字叫 autod-touch）。"""
+    """找 remote-control 建的那个虚拟触控屏（名字叫 remote-control-touch）。"""
     out = sh(serial, "getevent -pl 2>/dev/null")
     dev = name = None
     for line in out.splitlines():
         m = re.match(r"\s*add device \d+:\s+(\S+)", line)
         if m:
             dev = m.group(1)
-        if "name:" in line and "autod-touch" in line:
+        if "name:" in line and "remote-control-touch" in line:
             name = dev
             break
     return name
@@ -71,7 +71,7 @@ def main():
     origin = f"http://{a.host}:{a.port}"
     dev = find_touch_device(a.serial)
     if dev is None:
-        print("  ✗ 找不到 autod-touch 设备", file=sys.stderr)
+        print("  ✗ 找不到 remote-control-touch 设备", file=sys.stderr)
         return 1
     rng = abs_range(a.serial, dev)
     print(f"  触控设备 {dev}  ABS 范围 {rng[0]}x{rng[1]}")

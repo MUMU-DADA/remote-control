@@ -31,11 +31,11 @@
 #include <ui/GraphicBuffer.h>
 #include <ui/PixelFormat.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
 using namespace android;
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 std::string ErrnoString(const char* what) {
@@ -302,7 +302,7 @@ bool Capture::Grab(Frame* out, std::string* error) {
     const uint64_t totalSize = rowBytes * height;
 
     Frame frame;
-    frame.fd = CreateMemFd("autod-frame", totalSize);
+    frame.fd = CreateMemFd("remote-control-frame", totalSize);
     if (frame.fd < 0) {
         // lock 之后必须 unlock，否则 SurfaceFlinger 的缓冲区会被耗尽
         buffer->unlock();
@@ -350,4 +350,4 @@ bool Capture::Grab(Frame* out, std::string* error) {
 
 const char* Capture::BackendName() { return "surfaceflinger"; }
 
-}  // namespace autod
+}  // namespace remote_control

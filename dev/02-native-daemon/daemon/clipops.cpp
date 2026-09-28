@@ -6,11 +6,11 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "json_parser.h"
 #include "subprocess.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // 以 **shell** 身份运行是刻意的，不是随便选的。
@@ -23,8 +23,8 @@ constexpr int kShellGid = 2000;
 // 辅助工具的可能位置，按优先级
 const char* kToolCandidates[] = {
     "/data/local/tmp/cliptool.jar",
-    "/system/etc/autod/cliptool.jar",
-    "/data/misc/autod/cliptool.jar",
+    "/system/etc/remote-control/cliptool.jar",
+    "/data/misc/remote-control/cliptool.jar",
     nullptr,
 };
 
@@ -54,7 +54,7 @@ bool ClipOps::Init(std::string* error) {
     if (available_) return true;
 
     // 环境变量优先：测试和非常规部署都用得上
-    const char* envTool = getenv("AUTOD_CLIPTOOL");
+    const char* envTool = getenv("REMOTE_CONTROL_CLIPTOOL");
     if (envTool != nullptr && *envTool != '\0' && access(envTool, R_OK) == 0) {
         toolPath_ = envTool;
     } else {
@@ -63,7 +63,7 @@ bool ClipOps::Init(std::string* error) {
     if (toolPath_.empty()) {
         if (error) {
             *error = "找不到 cliptool.jar（试过 /data/local/tmp/cliptool.jar 等）。"
-                     "把它推上去，或设 AUTOD_CLIPTOOL 指向它";
+                     "把它推上去，或设 REMOTE_CONTROL_CLIPTOOL 指向它";
         }
         return false;
     }
@@ -175,4 +175,4 @@ bool ClipOps::Set(const std::string& text, std::string* error) {
     return true;
 }
 
-}  // namespace autod
+}  // namespace remote_control

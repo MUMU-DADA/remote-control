@@ -13,7 +13,7 @@
 
 #include "protocol.h"
 
-namespace autod {
+namespace remote_control {
 
 // ReplyPacket 定义在 protocol.h（dispatch 层也要构造它）
 
@@ -25,7 +25,7 @@ using RequestHandler = std::function<ReplyPacket(
 
 class SocketServer {
   public:
-    // init socket activation 模式：name 对应 autod.rc 里 `socket autod ...`
+    // init socket activation 模式：name 对应 remote-control.rc 里 `socket remote-control ...`
     static SocketServer FromInitSocket(const std::string& name);
 
     // 手动 bind 模式（开发期用）
@@ -93,4 +93,4 @@ class SocketServer {
     bool ownsPath_ = false;         // true 表示退出时要 unlink path_
 };
 
-}  // namespace autod
+}  // namespace remote_control

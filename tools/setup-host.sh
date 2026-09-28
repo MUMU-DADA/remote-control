@@ -13,7 +13,7 @@
 #   repo 工具         → 清华 TUNA git-repo（git 协议，非 HTTP 直链）
 #   AOSP 源码         → 清华 TUNA AOSP
 #
-# 用法:  bash tools/setup-host.sh 2>&1 | tee /var/log/autod-setup.log
+# 用法:  bash tools/setup-host.sh 2>&1 | tee /var/log/remote-control-setup.log
 # =============================================================================
 set -euo pipefail
 
@@ -25,8 +25,8 @@ REPO_MIRROR="$TUNA/git/git-repo"
 DOCKER_MIRROR=https://docker.m.daocloud.io
 
 PROJECT_DIR=/root/AutoSnapshotAndroid
-IMAGE_TAG=autod-aosp12-builder
-CONTAINER=autod-builder
+IMAGE_TAG=remote-control-aosp12-builder
+CONTAINER=remote-control-builder
 
 log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }

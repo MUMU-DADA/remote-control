@@ -36,11 +36,11 @@
 #include <mutex>
 #include <thread>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "dispatch.h"
 #include "protocol.h"
 
-namespace autod {
+namespace remote_control {
 
 namespace {
 
@@ -515,4 +515,4 @@ std::vector<FrameHub::SubscriberInfo> FrameHub::ListSubscribers() const {
     return out;
 }
 
-}  // namespace autod
+}  // namespace remote_control

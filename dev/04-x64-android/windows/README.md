@@ -61,7 +61,7 @@ cd windows
 | 项 | 默认 |
 |---|---|
 | 屏幕 | 1280x720 横屏 @320dpi |
-| CPU / 内存 | 4 核 / 8192 MB |
+| CPU / 内存 | 4 核 / 6144 MB |
 | 数据分区 | 32G |
 | GPU | `auto`（自适应：有真显卡就 `host`，否则 `swiftshader_indirect`；`host` 起不来还会再退一次） |
 

@@ -1,4 +1,4 @@
-# autod API 文档
+# remote-control API 文档
 
 > Android 系统级截图 + 触控 + 设备管理服务。
 > 本文档是**唯一权威**的接口说明 —— 代码里的 `/api/v1/describe` 是它的机器可读版本。
@@ -25,7 +25,7 @@
 |---|---|---|---|
 | **HTTP/JSON** | `http://host:8088/api/v1/...` | 任何语言、任何工具（curl、浏览器、脚本） | 高频事件（每次都要 TCP 往返 + HTTP 解析） |
 | **WebSocket** | `ws://host:8088/api/v1/{stream,touch,logstream}` | 实时双向：画面、触控、日志 | 一次性调用 |
-| **Unix socket** | `/data/local/tmp/autod.sock`（SEQPACKET） | 本机、零拷贝传大块数据（截图/APK） | 跨机器 |
+| **Unix socket** | `/data/local/tmp/remote-control.sock`（SEQPACKET） | 本机、零拷贝传大块数据（截图/APK） | 跨机器 |
 
 **能力完全一致**：HTTP 能做的 Unix socket 都能做，反之亦然。
 两条路都走同一个 `Dispatcher`，不存在"某个功能只有一种传输支持"。

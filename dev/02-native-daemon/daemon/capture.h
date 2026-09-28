@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 
 // 一帧截图。像素数据放在 memfd 里，可以直接把 fd 传给客户端做零拷贝读取。
 struct Frame {
@@ -96,4 +96,4 @@ class Capture {
     uint32_t targetWidth_ = 0;
 };
 
-}  // namespace autod
+}  // namespace remote_control

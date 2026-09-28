@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# build-ndk.sh —— 用 NDK 编译 autod（**不需要 AOSP 源码树**）
+# build-ndk.sh —— 用 NDK 编译 remote-control（**不需要 AOSP 源码树**）
 #
 # 这条路径的价值：AOSP 同步要 ~110 GB、首次编译要 1 小时；NDK 只要 2.5 GB
 # 和几十秒。用它可以在**任意一台 root 的安卓设备**上把服务跑起来，
@@ -14,7 +14,7 @@
 #   API=29 bash tools/build-ndk.sh           # 换 API level
 #   ABI=x86_64 bash tools/build-ndk.sh       # 换架构（模拟器用）
 #
-# 产物: dev/02-native-daemon/out/ndk/<ABI>/{autod,autodctl}
+# 产物: dev/02-native-daemon/out/ndk/<ABI>/{remote-control,rcctl}
 # =============================================================================
 set -euo pipefail
 
@@ -124,13 +124,13 @@ fi
 ok "libwebp: $webp_n 个源文件 → $(ls "$WEBP_OBJ"/*.o 2>/dev/null | wc -l) 个 .o"
 
 # -----------------------------------------------------------------------------
-step "编译 autod"
+step "编译 remote-control"
 # -----------------------------------------------------------------------------
 mkdir -p "$OUT/$ABI"
 
 # 关键编译参数：
-#   -DAUTOD_NDK_BUILD    走 NDK 形态（无 Binder / 无 init socket）
-#   不定义 AUTOD_FULL_PLATFORM
+#   -DREMOTE_CONTROL_NDK_BUILD    走 NDK 形态（无 Binder / 无 init socket）
+#   不定义 REMOTE_CONTROL_FULL_PLATFORM
 #
 # 注意不要用 __ANDROID__ 判断平台形态 —— NDK 构建时它同样是定义的。
 COMMON_FLAGS=(
@@ -138,12 +138,12 @@ COMMON_FLAGS=(
     -O2
     -Wall -Wextra -Wno-unused-parameter
     -fPIE -pie
-    -DAUTOD_NDK_BUILD=1
+    -DREMOTE_CONTROL_NDK_BUILD=1
     -I"$DAEMON"
 )
 
 "$CXX" "${COMMON_FLAGS[@]}" -I"$WEBP_DIR" \
-    -o "$OUT/$ABI/autod" \
+    -o "$OUT/$ABI/remote-control" \
     "$DAEMON/main.cpp" \
     "$DAEMON/socket_server.cpp" \
     "$DAEMON/dispatch.cpp" \
@@ -175,25 +175,25 @@ COMMON_FLAGS=(
     "$DAEMON/config_file.cpp" \
     -llog -lmediandk -static-libstdc++ -lm -pthread
 
-ok "autod → $OUT/$ABI/autod"
+ok "remote-control → $OUT/$ABI/remote-control"
 
 # -----------------------------------------------------------------------------
-step "编译 autodctl"
+step "编译 rcctl"
 # -----------------------------------------------------------------------------
 # 设备端客户端。用 AndroidBitmap_compress 编码 PNG。
-# autodctl 仍然直接链 libjnigraphics —— 它是调试工具，只在开发机上跑，
-# 不需要照顾老设备（autod 本体已经改成 dlopen 了）。
+# rcctl 仍然直接链 libjnigraphics —— 它是调试工具，只在开发机上跑，
+# 不需要照顾老设备（remote-control 本体已经改成 dlopen 了）。
 "$CXX" "${COMMON_FLAGS[@]}" \
-    -o "$OUT/$ABI/autodctl" \
-    "$SRC/client/autodctl.cpp" \
+    -o "$OUT/$ABI/rcctl" \
+    "$SRC/client/rcctl.cpp" \
     -ljnigraphics -llog -static-libstdc++
 
-ok "autodctl → $OUT/$ABI/autodctl"
+ok "rcctl → $OUT/$ABI/rcctl"
 
 # -----------------------------------------------------------------------------
 step "产物"
 # -----------------------------------------------------------------------------
-for f in autod autodctl; do
+for f in remote-control rcctl; do
     p="$OUT/$ABI/$f"
     printf "  %-10s %9s 字节  %s\n" "$f" "$(stat -c%s "$p")" \
         "$(file -b "$p" | cut -c1-60)"
@@ -205,19 +205,19 @@ step "部署（推到设备）"
 cat <<EOF
   ABI=$ABI  API=$API
 
-  adb push $OUT/$ABI/autod    /data/local/tmp/
-  adb push $OUT/$ABI/autodctl /data/local/tmp/
-  adb shell chmod 755 /data/local/tmp/autod /data/local/tmp/autodctl
+  adb push $OUT/$ABI/remote-control    /data/local/tmp/
+  adb push $OUT/$ABI/rcctl /data/local/tmp/
+  adb shell chmod 755 /data/local/tmp/remote-control /data/local/tmp/rcctl
 
   # 需要 root（/dev/uinput 默认 0600）
-  adb shell su -c '/data/local/tmp/autod --socket /data/local/tmp/autod.sock --foreground &'
+  adb shell su -c '/data/local/tmp/remote-control --socket /data/local/tmp/remote-control.sock --foreground &'
   # 触控范围要显式给（screencap 后端拿不到显示尺寸）
   adb shell 'wm size'      # 先看分辨率
-  adb shell su -c '/data/local/tmp/autod --socket /data/local/tmp/autod.sock --touch-range 1080x2400'
+  adb shell su -c '/data/local/tmp/remote-control --socket /data/local/tmp/remote-control.sock --touch-range 1080x2400'
 
-  adb shell /data/local/tmp/autodctl --socket /data/local/tmp/autod.sock info
-  adb shell /data/local/tmp/autodctl --socket /data/local/tmp/autod.sock capture -o /data/local/tmp/shot.png
-  adb shell /data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 1200
+  adb shell /data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock info
+  adb shell /data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock capture -o /data/local/tmp/shot.png
+  adb shell /data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock tap 540 1200
 
 注意:
   • screencap 后端每次抓帧 fork+exec 一个进程，约 100-300 ms

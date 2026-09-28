@@ -44,16 +44,16 @@
 #ifdef __ANDROID__
 #include <android/bitmap.h>
 #include <android/data_space.h>
-#define AUTOD_HAS_JNIGRAPHICS 1
+#define REMOTE_CONTROL_HAS_JNIGRAPHICS 1
 #endif
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "jpeg_encoder.h"
 #include "h264_encoder.h"
 #include "png_encoder.h"
 #include "webp_encoder.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // WebP 的默认 method。
@@ -74,19 +74,19 @@ constexpr int kDefaultWebpMethod = 2;
 // 探测得到 AndroidBitmap，所以 libjpeg / 内置 libwebp 那条路在开发机上
 // 根本跑不到 —— 而"没跑过的代码"和"没有的代码"在出故障时是一样的。
 //
-//   AUTOD_FORCE_FALLBACK=1 autod --socket ...
+//   REMOTE_CONTROL_FORCE_FALLBACK=1 remote-control --socket ...
 //
 // supervisor 启动的话变量会继承下去：
-//   adb shell "AUTOD_FORCE_FALLBACK=1 setsid nohup
-//              /data/local/tmp/autod-supervisord.sh > /dev/null 2>&1 &"
+//   adb shell "REMOTE_CONTROL_FORCE_FALLBACK=1 setsid nohup
+//              /data/local/tmp/remote-control-supervisord.sh > /dev/null 2>&1 &"
 //
 // ⚠️ 它只影响**编码器选择**，不改协议、不改截图后端。
 //    /config 的 codecs.forced 会如实标出来 —— 别把强制的结果当设备真相。
 bool ForcedFallback() {
     static const bool forced = []() {
-        const char* v = getenv("AUTOD_FORCE_FALLBACK");
+        const char* v = getenv("REMOTE_CONTROL_FORCE_FALLBACK");
         if (v == nullptr || v[0] != '1') return false;
-        ALOGW("AUTOD_FORCE_FALLBACK=1 —— 跳过 AndroidBitmap_compress，"
+        ALOGW("REMOTE_CONTROL_FORCE_FALLBACK=1 —— 跳过 AndroidBitmap_compress，"
               "强制走回退编码器（仅用于验证老设备路径）");
         return true;
     }();
@@ -113,18 +113,18 @@ bool ForcedFallback() {
 // **代价是体积**：WebP 只大 2%（可忽略），PNG 大 17%（要自己权衡）。
 // 所以这不该是写死的结论，留了开关：
 //
-//   AUTOD_FORCE_FALLBACK=1   全走内置（验证老设备路径用）
-//   AUTOD_PREFER_NATIVE=1    全走 Skia（要最小体积时用）
+//   REMOTE_CONTROL_FORCE_FALLBACK=1   全走内置（验证老设备路径用）
+//   REMOTE_CONTROL_PREFER_NATIVE=1    全走 Skia（要最小体积时用）
 bool PreferBuiltin(ImageFormat f) {
     if (ForcedFallback()) return true;
-    if (const char* v = getenv("AUTOD_PREFER_NATIVE");
+    if (const char* v = getenv("REMOTE_CONTROL_PREFER_NATIVE");
         v != nullptr && v[0] == '1') {
         return false;
     }
     return f == ImageFormat::kWebp || f == ImageFormat::kPng;
 }
 
-#ifdef AUTOD_HAS_JNIGRAPHICS
+#ifdef REMOTE_CONTROL_HAS_JNIGRAPHICS
 
 // ⚠️ 自己声明写回调的类型，**不用头文件里的 `AndroidBitmap_CompressWriteFunc`**。
 //
@@ -212,11 +212,11 @@ int ToAndroidQuality(ImageFormat f, int q) {
     if (q <= 0 || q > 100) return (f == ImageFormat::kWebp) ? 80 : 75;
     return q;
 }
-#endif  // AUTOD_HAS_JNIGRAPHICS
+#endif  // REMOTE_CONTROL_HAS_JNIGRAPHICS
 
 // 宿主机（编测试用）没有 libjnigraphics，也没有那些头文件。
 // 给一个同名函数，让 Init() 的调用点不用再包一层 #ifdef。
-#ifndef AUTOD_HAS_JNIGRAPHICS
+#ifndef REMOTE_CONTROL_HAS_JNIGRAPHICS
 bool ProbeJniGraphics() { return false; }
 #endif
 
@@ -394,7 +394,7 @@ std::string ImageEncoder::Encode(const uint8_t* rgba, uint32_t width,
     //
     // ⚠️ 不是"能用就用" —— WebP/PNG 上它比内置编码器慢一倍，
     //    见 PreferBuiltin 上面的实测表。
-#ifdef AUTOD_HAS_JNIGRAPHICS
+#ifdef REMOTE_CONTROL_HAS_JNIGRAPHICS
     if (native_ && format != ImageFormat::kRaw && !PreferBuiltin(format)) {
         AndroidBitmapInfo info;
         memset(&info, 0, sizeof(info));
@@ -420,7 +420,7 @@ std::string ImageEncoder::Encode(const uint8_t* rgba, uint32_t width,
             return out;
         }
     }
-#endif  // AUTOD_HAS_JNIGRAPHICS
+#endif  // REMOTE_CONTROL_HAS_JNIGRAPHICS
 
     // ── 回退：JPEG 走 libjpeg ──
     if (format == ImageFormat::kJpeg) {
@@ -453,4 +453,4 @@ std::string ImageEncoder::Encode(const uint8_t* rgba, uint32_t width,
     return PngEncoder::Instance().EncodeRgba(rgba, width, height, level, error);
 }
 
-}  // namespace autod
+}  // namespace remote_control

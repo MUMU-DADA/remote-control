@@ -16,7 +16,7 @@
 
 #include <vector>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "dispatch.h"
 #include "json_parser.h"
 #include "json_writer.h"
@@ -30,7 +30,7 @@
 #include "websocket.h"
 #include "webui.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // 从 memfd 读回内容。fd 的所有权在本函数内结束（读完就关）。
@@ -238,14 +238,14 @@ HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
     } guard{base, size, packet.fd};
 
     HttpResponse resp;
-    resp.extraHeaders.push_back({"X-Autod-Width", std::to_string(w)});
-    resp.extraHeaders.push_back({"X-Autod-Height", std::to_string(h)});
-    resp.extraHeaders.push_back({"X-Autod-PixelFormat", std::to_string(fmt)});
+    resp.extraHeaders.push_back({"X-RemoteControl-Width", std::to_string(w)});
+    resp.extraHeaders.push_back({"X-RemoteControl-Height", std::to_string(h)});
+    resp.extraHeaders.push_back({"X-RemoteControl-PixelFormat", std::to_string(fmt)});
 
     if (codec == ImageFormat::kRaw) {
         resp.status = 200;
         resp.contentType = "application/octet-stream";
-        resp.extraHeaders.push_back({"X-Autod-Stride",
+        resp.extraHeaders.push_back({"X-RemoteControl-Stride",
                                      std::to_string(packet.reply.stride)});
         resp.body.assign(static_cast<const char*>(base), size);
         return resp;
@@ -327,7 +327,7 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
         } else {
         // 放 /sdcard 而不是 /data/local/tmp：installer 对两者都能读，
         // 但 /sdcard 上的文件用户自己也能看见 —— 出问题时好排查。
-        path = "/sdcard/autod-upload-" + std::to_string(getpid()) + ".apk";
+        path = "/sdcard/remote-control-upload-" + std::to_string(getpid()) + ".apk";
 
         const int wfd = open(path.c_str(),
                              O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0660);
@@ -725,7 +725,7 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
             .Field("h264Max",  static_cast<int64_t>(H264Encoder::MaxConcurrent()))
             .Field("h264Used", static_cast<int64_t>(H264Encoder::ActiveCount()))
             .Field("backend", ImageEncoder::Instance().BackendSummary())
-            // 开着 AUTOD_FORCE_FALLBACK 时如实标出来 ——
+            // 开着 REMOTE_CONTROL_FORCE_FALLBACK 时如实标出来 ——
             // 一个强制走回退的实例，它的 codecs 不代表这台设备的真实能力。
             .Field("forced", ImageEncoder::Instance().FallbackForced())
         .EndObj()
@@ -1267,9 +1267,9 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             part += ImageEncoder::MimeType(static_cast<ImageFormat>(p.codec));
             part += "\r\n";
             part += "Content-Length: " + std::to_string(img.size()) + "\r\n";
-            part += "X-Autod-Frame: " + std::to_string(st.frameNo) + "\r\n";
-            part += "X-Autod-Width: " + std::to_string(st.outW) + "\r\n";
-            part += "X-Autod-Height: " + std::to_string(st.outH) + "\r\n";
+            part += "X-RemoteControl-Frame: " + std::to_string(st.frameNo) + "\r\n";
+            part += "X-RemoteControl-Width: " + std::to_string(st.outW) + "\r\n";
+            part += "X-RemoteControl-Height: " + std::to_string(st.outH) + "\r\n";
             part += "\r\n";
             part += img;
             part += "\r\n";
@@ -1549,7 +1549,7 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         if (path == "/api" || path == "/api/v1") {
             // 给个索引，浏览器打开根路径时不至于 404 得莫名其妙
             json::Writer w;
-            w.Obj().Field("service", "autod")
+            w.Obj().Field("service", "remote-control")
                    .Field("protocolVersion", ServiceState::ProtocolVersion())
                    .Field("hint", "所有接口在 /api/v1/ 下；GET /api/v1/describe 看完整清单")
              .EndObj();
@@ -1896,4 +1896,4 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
                                "未知资源: " + res);
 }
 
-}  // namespace autod
+}  // namespace remote_control

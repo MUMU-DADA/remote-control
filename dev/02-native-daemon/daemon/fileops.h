@@ -1,6 +1,6 @@
 // fileops.h — 下载目录与文件操作
 //
-// ⚠️ 安全边界：本模块的所有路径参数都来自客户端，而 autod 以 root 运行。
+// ⚠️ 安全边界：本模块的所有路径参数都来自客户端，而 remote-control 以 root 运行。
 //    一个 "../.." 就能删掉 /data。所以每个入口都强制走 ResolveInside()，
 //    把路径约束在下载目录内 —— 这是硬性约束，不是"最好也做一下"。
 //
@@ -15,7 +15,7 @@
 
 #include "http_client.h"
 
-namespace autod {
+namespace remote_control {
 
 struct FileEntry {
     std::string name;
@@ -105,4 +105,4 @@ class FileOps {
     bool        loggedOnce_ = false;   // Init 会被反复调用，日志只打一次
 };
 
-}  // namespace autod
+}  // namespace remote_control

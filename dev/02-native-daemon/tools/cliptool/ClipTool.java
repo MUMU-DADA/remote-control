@@ -26,15 +26,15 @@
 // ⚠️ 必须以 **shell UID** 运行（daemon 是 root，要 setuid(2000) 后再 exec）。
 //
 // 用法：
-//   app_process /system/bin com.autod.clip.ClipTool get
-//   app_process /system/bin com.autod.clip.ClipTool info
+//   app_process /system/bin com.remotecontrol.clip.ClipTool get
+//   app_process /system/bin com.remotecontrol.clip.ClipTool info
 //
 // 约定：**结果走 stdout，诊断走 stderr**，退出码区分"空"和"失败"：
 //   0 = 有内容（已写到 stdout）
 //   4 = 剪贴板为空（不是错误）
 //   2/3/5 = 失败
 
-package com.autod.clip;
+package com.remotecontrol.clip;
 
 import android.content.ClipData;
 import android.content.ClipDescription;
@@ -126,7 +126,7 @@ public final class ClipTool {
             // ClipData 是公开类型，可以直接构造 —— 只有 IClipboard 是隐藏的。
             Method set = iclip.getClass().getMethod("setPrimaryClip",
                     ClipData.class, String.class, int.class);
-            set.invoke(iclip, ClipData.newPlainText("autod", args[1]), PKG, USER_ID);
+            set.invoke(iclip, ClipData.newPlainText("remote-control", args[1]), PKG, USER_ID);
             // ⚠️ ClipboardService 在权限不足时是**静默 return 不抛异常**的，
             //    所以这里不能凭"没抛异常"就报成功 —— 回读一次确认。
             Object has = mHas.invoke(iclip, PKG, USER_ID);

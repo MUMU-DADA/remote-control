@@ -21,11 +21,11 @@
 // 用它的两个实质好处
 // -----------------------------------------------------------------------------
 //
-// 1. **autod 不再需要 /dev/uinput 权限**
-//    自己写 uinput 时，autod 需要 uhid 组 + SELinux 的 uhid_device 访问权。
-//    走官方服务的话，autod 只需要能 find 到 virtual_touchpad 服务：
-//        binder_call(autod, virtual_touchpad)
-//        allow autod virtual_touchpad_service:service_manager find
+// 1. **remote-control 不再需要 /dev/uinput 权限**
+//    自己写 uinput 时，remote-control 需要 uhid 组 + SELinux 的 uhid_device 访问权。
+//    走官方服务的话，remote-control 只需要能 find 到 virtual_touchpad 服务：
+//        binder_call(remote-control, virtual_touchpad)
+//        allow remote-control virtual_touchpad_service:service_manager find
 //
 // 2. **少维护 ~350 行 uinput 代码**（设备配置、槽位管理、协议 B 时序）
 //
@@ -46,10 +46,10 @@
 // -----------------------------------------------------------------------------
 //
 // 本文件默认不参与编译。要启用：
-//   1. daemon/Android.bp 里把 autod 的 inject_uinput.cpp 换成 inject_vtp.cpp
+//   1. daemon/Android.bp 里把 remote-control 的 inject_uinput.cpp 换成 inject_vtp.cpp
 //   2. shared_libs 加 "libvirtualtouchpadclient"，去掉不需要的
 //   3. 产品配置里加 PRODUCT_PACKAGES += virtual_touchpad
-//   4. sepolicy 按上面第 1 条改（autod.te 里有说明）
+//   4. sepolicy 按上面第 1 条改（remote-control.te 里有说明）
 //
 // =============================================================================
 
@@ -62,13 +62,13 @@
 
 #include <utils/Errors.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "inject_backend.h"
 
 using android::dvr::VirtualTouchpad;
 using android::dvr::VirtualTouchpadClient;
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // 官方实现固定 2 个 touchpad（VirtualTouchpadEvdev::kTouchpads）
@@ -244,4 +244,4 @@ std::unique_ptr<InjectorBackend> CreateInjectorBackend() {
     return std::make_unique<VirtualTouchpadInjector>();
 }
 
-}  // namespace autod
+}  // namespace remote_control

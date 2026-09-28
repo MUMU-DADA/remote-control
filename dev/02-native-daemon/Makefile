@@ -3,12 +3,12 @@
 # 平台相关的部分已经隔离：
 #   - ProcessState 用 #ifdef __ANDROID__ 包住
 #   - 截图后端可替换，主机用 capture_stub.cpp（合成图像）
-#   - 日志走 autod_log.h（主机回退到 stderr）
+#   - 日志走 remote_control_log.h（主机回退到 stderr）
 #
-# 于是可以在开发机上编译并运行**真正的 autod**，用真正的客户端连它，
+# 于是可以在开发机上编译并运行**真正的 remote-control**，用真正的客户端连它，
 # 验证除了 SurfaceFlinger / SELinux 之外的整条链路。
 #
-#   make            编译 autod-host
+#   make            编译 remote-control-host
 #   sudo make run   以 root 跑起来（需要 /dev/uinput）
 #   make test       跑全部单元 + 集成测试
 #   make clean
@@ -44,9 +44,9 @@ HOST_SRCS = $(DAEMON)/main.cpp \
 
 HOST_HDRS = $(wildcard $(DAEMON)/*.h)
 
-BIN       = autod-host
-CTL       = autodctl-host
-SOCKET    = /tmp/autod-host.sock
+BIN       = remote-control-host
+CTL       = rcctl-host
+SOCKET    = /tmp/remote-control-host.sock
 
 all: $(BIN) $(CTL)
 
@@ -57,8 +57,8 @@ $(BIN): $(HOST_SRCS) $(HOST_HDRS)
 # 设备端客户端的自检版本。
 # 主机上没有 AndroidBitmap_compress，capture 会退回到写 PPM —— 只为让这份
 # 从未在设备上跑过的代码在开发机上先过一遍编译和基础逻辑。
-$(CTL): client/autodctl.cpp daemon/protocol.h
-	$(CXX) $(CXXFLAGS) -o $@ client/autodctl.cpp
+$(CTL): client/rcctl.cpp daemon/protocol.h
+	$(CXX) $(CXXFLAGS) -o $@ client/rcctl.cpp
 	@echo "编译完成: ./$(CTL)"
 
 # 前台跑起来，方便另开终端用客户端连
@@ -81,22 +81,22 @@ smoke: $(BIN)
 
 _smoke: $(BIN)
 	@rm -f $(SOCKET)
-	@./$(BIN) --socket $(SOCKET) --foreground > /tmp/autod-host.log 2>&1 & \
+	@./$(BIN) --socket $(SOCKET) --foreground > /tmp/remote-control-host.log 2>&1 & \
 	 pid=$$!; \
 	 sleep 1; \
 	 echo "── Python 客户端 ──"; \
-	 python3 client/autod_client.py --socket $(SOCKET) info; \
-	 python3 client/autod_client.py --socket $(SOCKET) capture -o /tmp/autod-host-shot.png; \
-	 python3 client/autod_client.py --socket $(SOCKET) tap 540 960; \
-	 python3 client/autod_client.py --socket $(SOCKET) swipe 200 1600 800 400 --ms 150; \
-	 echo; echo "── C++ 客户端 (autodctl) ──"; \
+	 python3 client/rc_client.py --socket $(SOCKET) info; \
+	 python3 client/rc_client.py --socket $(SOCKET) capture -o /tmp/remote-control-host-shot.png; \
+	 python3 client/rc_client.py --socket $(SOCKET) tap 540 960; \
+	 python3 client/rc_client.py --socket $(SOCKET) swipe 200 1600 800 400 --ms 150; \
+	 echo; echo "── C++ 客户端 (rcctl) ──"; \
 	 ./$(CTL) --socket $(SOCKET) info; \
-	 ./$(CTL) --socket $(SOCKET) capture -o /tmp/autodctl-shot.ppm; \
+	 ./$(CTL) --socket $(SOCKET) capture -o /tmp/rcctl-shot.ppm; \
 	 ./$(CTL) --socket $(SOCKET) tap 100 200; \
 	 ./$(CTL) --socket $(SOCKET) swipe 100 1700 900 200 --ms 200; \
 	 kill $$pid 2>/dev/null; wait $$pid 2>/dev/null; \
 	 rm -f $(SOCKET); \
-	 echo; echo "── 服务端日志 ──"; cat /tmp/autod-host.log
+	 echo; echo "── 服务端日志 ──"; cat /tmp/remote-control-host.log
 
 test:
 	@$(MAKE) -C tests run

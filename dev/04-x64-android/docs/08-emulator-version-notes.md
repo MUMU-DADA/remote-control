@@ -116,7 +116,7 @@ while pgrep -f 'soong_[u]i' >/dev/null; do sleep 20; done
 ```
 
 `[u]` 的写法能避免匹配到自己，但**匹配到了另一个等待脚本的命令行** ——
-那个脚本里含 `pgrep -f "soong_ui.*autod autodctl"`，于是它自匹配，永远等自己。
+那个脚本里含 `pgrep -f "soong_ui.*remote-control rcctl"`，于是它自匹配，永远等自己。
 两个脚本互相等，永久死锁。
 
 **等待编译结束要用状态判断，不要用 `pgrep -f`。** 现成的工具：

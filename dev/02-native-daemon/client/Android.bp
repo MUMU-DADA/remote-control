@@ -1,11 +1,11 @@
-// autodctl（参考客户端）的构建描述
+// rcctl（参考客户端）的构建描述
 //
-// 放置位置：frameworks/native/cmds/autod/client/Android.bp
-// 编译：m autodctl
+// 放置位置：frameworks/native/cmds/remote-control/client/Android.bp
+// 编译：m rcctl
 
 cc_binary {
-    name: "autodctl",
-    srcs: ["autodctl.cpp"],
+    name: "rcctl",
+    srcs: ["rcctl.cpp"],
 
     shared_libs: [
         "libbase",
@@ -31,7 +31,7 @@ cc_binary {
         "libnativewindow_headers",
     ],
 
-    // autodctl.cpp 里 #include "../daemon/protocol.h"，
+    // rcctl.cpp 里 #include "../daemon/protocol.h"，
     // 所以 client/ 和 daemon/ 必须保持同级目录。
     // 注意这只影响 #include 解析，Soong 的 srcs/init_rc 不允许 ".."。
 

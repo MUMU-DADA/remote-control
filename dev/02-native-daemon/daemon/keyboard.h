@@ -15,7 +15,7 @@
 #include <cstdint>
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 class Keyboard {
   public:
@@ -62,4 +62,4 @@ class Keyboard {
     int fd_ = -1;
 };
 
-}  // namespace autod
+}  // namespace remote_control

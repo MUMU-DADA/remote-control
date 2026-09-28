@@ -68,7 +68,7 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
 ```json
 // 401 —— 需要令牌
 {"ok":false,"status":401,"error":"需要访问令牌。请在页面顶部填入，
- 或用 Authorization: Bearer <token> / X-Autod-Token: <token>"}
+ 或用 Authorization: Bearer <token> / X-Remote-Control-Token: <token>"}
 
 // 503 —— 服务已关闭对外能力
 {"ok":false,"status":503,"error":"服务已关闭对外能力。

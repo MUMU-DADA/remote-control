@@ -13,7 +13,7 @@
 
 #include <mutex>
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 int64_t MonotonicMs() {
@@ -246,7 +246,7 @@ void LogBuffer::Clear() {
     // 清空后它只会拉到空结果，而不会因为序号回绕而重复拉到旧日志。
 }
 
-// 供 autod_log.h 使用
+// 供 remote_control_log.h 使用
 void LogBufferAppend(LogLevel level, const char* tag, const char* fmt, ...) {
     char buf[1024];
     va_list ap;
@@ -256,4 +256,4 @@ void LogBufferAppend(LogLevel level, const char* tag, const char* fmt, ...) {
     LogBuffer::Instance().Append(level, tag, buf);
 }
 
-}  // namespace autod
+}  // namespace remote_control

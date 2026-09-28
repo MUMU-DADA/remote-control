@@ -21,7 +21,7 @@
 #include <cstdint>
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 // WebSocket 帧的操作码
 enum WsOpcode : uint8_t {
@@ -69,4 +69,4 @@ std::string Sha1(const std::string& data);      // 返回 20 字节原始摘要
 std::string Base64Encode(const std::string& data);
 bool        Base64Decode(const std::string& in, std::string* out);
 
-}  // namespace autod
+}  // namespace remote_control

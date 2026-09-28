@@ -10,10 +10,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "websocket.h"   // Base64Encode
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 std::string Trim(const std::string& s) {
@@ -33,9 +33,9 @@ bool ParseBool(const std::string& v, bool def) {
 }  // namespace
 
 std::string ConfigFile::DefaultPath() {
-    const char* env = getenv("AUTOD_CONFIG");
+    const char* env = getenv("REMOTE_CONTROL_CONFIG");
     if (env != nullptr && *env != '\0') return env;
-    return "/sdcard/autod.conf";
+    return "/sdcard/remote-control.conf";
 }
 
 bool ConfigFile::Load(const std::string& path, PersistedConfig* out,
@@ -96,7 +96,7 @@ bool ConfigFile::Load(const std::string& path, PersistedConfig* out,
 
 std::string ConfigFile::Serialize(const PersistedConfig& cfg) {
     std::string s;
-    s += "# autod 配置 —— 由上位应用或手工编辑，守护进程启动时读取。\n";
+    s += "# remote-control 配置 —— 由上位应用或手工编辑，守护进程启动时读取。\n";
     s += "# 改完之后需要重启服务才生效。\n";
     s += "\n";
     s += "# 服务是否应当运行\n";
@@ -191,4 +191,4 @@ std::string ConfigFile::GenerateToken(size_t bytes) {
     return out;
 }
 
-}  // namespace autod
+}  // namespace remote_control

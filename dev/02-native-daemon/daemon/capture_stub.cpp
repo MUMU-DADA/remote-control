@@ -18,9 +18,9 @@
 
 #include <cstdio>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 constexpr uint32_t kStubWidth  = 1080;
@@ -103,7 +103,7 @@ bool Capture::Grab(Frame* out, std::string* error) {
     const uint64_t size   = static_cast<uint64_t>(width) * height * 4;
 
     Frame frame;
-    frame.fd = MakeMemfd("autod-stub-frame");
+    frame.fd = MakeMemfd("remote-control-stub-frame");
     if (frame.fd < 0) {
         if (error) {
             *error = std::string("memfd 创建失败: ") + strerror(errno);
@@ -155,4 +155,4 @@ bool Capture::Grab(Frame* out, std::string* error) {
 
 const char* Capture::BackendName() { return "stub(测试用，非真实屏幕)"; }
 
-}  // namespace autod
+}  // namespace remote_control

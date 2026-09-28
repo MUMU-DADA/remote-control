@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # =============================================================================
-# verify-cuttlefish.sh —— 在 Cuttlefish 上真实验证 autod
+# verify-cuttlefish.sh —— 在 Cuttlefish 上真实验证 remote-control
 #
 # 前置：先跑 tools/build-cuttlefish.sh 编出镜像
 #
 # 做什么：
 #   1. 确认容器有 /dev/kvm（没有就重建容器 —— 这是 Cuttlefish 的硬前提）
 #   2. 启动 Cuttlefish 并等它开机
-#   3. 推 autod / autodctl 到设备
-#   4. 跑 autod --selftest（逐项检查环境）
+#   3. 推 remote-control / rcctl 到设备
+#   4. 跑 remote-control --selftest（逐项检查环境）
 #   5. 端到端冒烟：截图 + 点击 + 滑动
 #
-# 这是**唯一能在没有实体设备时真正验证 autod 的途径** ——
+# 这是**唯一能在没有实体设备时真正验证 remote-control 的途径** ——
 # 前面的主机测试都只覆盖了平台无关的逻辑，SurfaceFlinger 抓屏、
 # 真实 /dev/uinput、SELinux 都只有在真实 Android 上才能验证。
 #
@@ -21,13 +21,13 @@
 # =============================================================================
 set -euo pipefail
 
-CONTAINER=${CONTAINER:-autod-builder}
+CONTAINER=${CONTAINER:-remote-control-builder}
 TARGET=${TARGET:-aosp_cf_x86_64_phone-userdebug}
 PROJECT_DIR=/root/AutoSnapshotAndroid
 RESTART_CONTAINER=true
 [ "${1:-}" = "--no-restart" ] && RESTART_CONTAINER=false
 
-SOCKET=/data/local/tmp/autod.sock
+SOCKET=/data/local/tmp/remote-control.sock
 DEV=/data/local/tmp
 
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
@@ -84,7 +84,7 @@ else
         --privileged \
         -v "$PROJECT_DIR/aosp":/aosp \
         -w /aosp \
-        autod-aosp12-builder \
+        remote-control-aosp12-builder \
         sleep infinity >/dev/null
     sleep 3
     for d in $NEED_DEVS; do
@@ -136,22 +136,22 @@ sleep 2
 eval $ADB wait-for-device
 
 # -----------------------------------------------------------------------------
-step "5/6  部署 autod"
+step "5/6  部署 remote-control"
 # -----------------------------------------------------------------------------
-eval $ADB push "$IMG_DIR/system/bin/autod"    $DEV/ >/dev/null
-eval $ADB push "$IMG_DIR/system/bin/autodctl" $DEV/ >/dev/null
-eval $ADB shell chmod 755 $DEV/autod $DEV/autodctl
-ok "已推送 autod / autodctl"
+eval $ADB push "$IMG_DIR/system/bin/remote-control"    $DEV/ >/dev/null
+eval $ADB push "$IMG_DIR/system/bin/rcctl" $DEV/ >/dev/null
+eval $ADB shell chmod 755 $DEV/remote-control $DEV/rcctl
+ok "已推送 remote-control / rcctl"
 
 echo
-echo "════════════════ autod --selftest ════════════════"
-eval $ADB shell $DEV/autod --selftest 2>&1 || true
+echo "════════════════ remote-control --selftest ════════════════"
+eval $ADB shell $DEV/remote-control --selftest 2>&1 || true
 echo "═══════════════════════════════════════════════════"
 
 # -----------------------------------------------------------------------------
 step "6/6  端到端冒烟"
 # -----------------------------------------------------------------------------
-eval $ADB shell "pkill -f 'autod --socket' 2>/dev/null || true"
+eval $ADB shell "pkill -f 'remote-control --socket' 2>/dev/null || true"
 eval $ADB shell "rm -f $SOCKET"
 
 WxH=$(eval $ADB shell wm size 2>/dev/null | tr -d '\r' | sed 's/.*: //')
@@ -159,38 +159,38 @@ echo "  屏幕尺寸: $WxH"
 W=${WxH%x*}
 H=${WxH#*x}
 
-eval $ADB shell "nohup $DEV/autod --socket $SOCKET --touch-range ${W}x${H} --foreground >/data/local/tmp/autod.log 2>&1 &"
+eval $ADB shell "nohup $DEV/remote-control --socket $SOCKET --touch-range ${W}x${H} --foreground >/data/local/tmp/remote-control.log 2>&1 &"
 sleep 2
 
 if ! eval $ADB shell "test -S $SOCKET"; then
     bad "socket 没建起来，看服务日志："
-    eval $ADB shell "cat /data/local/tmp/autod.log" 2>&1 | head -20 || true
+    eval $ADB shell "cat /data/local/tmp/remote-control.log" 2>&1 | head -20 || true
     exit 1
 fi
 ok "服务已就绪"
 
 echo
 echo "── info ──"
-eval $ADB shell "$DEV/autodctl --socket $SOCKET info" 2>&1 || true
+eval $ADB shell "$DEV/rcctl --socket $SOCKET info" 2>&1 || true
 
 echo
 echo "── capture ──"
-eval $ADB shell "$DEV/autodctl --socket $SOCKET capture -o $DEV/shot.png" 2>&1 || true
+eval $ADB shell "$DEV/rcctl --socket $SOCKET capture -o $DEV/shot.png" 2>&1 || true
 eval $ADB pull $DEV/shot.png ./cuttlefish-shot.png >/dev/null 2>&1 \
     && ok "截图已拉回 ./cuttlefish-shot.png（用图片查看器打开确认不是黑屏）" \
     || warn "截图拉取失败"
 
 echo
 echo "── tap 屏幕中心 ──"
-eval $ADB shell "$DEV/autodctl --socket $SOCKET tap $((W/2)) $((H/2))" 2>&1 || true
+eval $ADB shell "$DEV/rcctl --socket $SOCKET tap $((W/2)) $((H/2))" 2>&1 || true
 
 echo
 echo "── swipe ──"
-eval $ADB shell "$DEV/autodctl --socket $SOCKET swipe $((W/2)) $((H*3/4)) $((W/2)) $((H/4)) --ms 300" 2>&1 || true
+eval $ADB shell "$DEV/rcctl --socket $SOCKET swipe $((W/2)) $((H*3/4)) $((W/2)) $((H/4)) --ms 300" 2>&1 || true
 
 echo
 echo "── 服务端日志 ──"
-eval $ADB shell "cat /data/local/tmp/autod.log" 2>&1 | head -20 || true
+eval $ADB shell "cat /data/local/tmp/remote-control.log" 2>&1 | head -20 || true
 
 cat <<EOF
 
@@ -203,7 +203,7 @@ cat <<EOF
   [ ] swipe 是否被应用响应
 
 排查：
-  docker exec $CONTAINER bash -lc 'cd /aosp && source build/envsetup.sh && lunch $TARGET && adb logcat -s autod:*'
+  docker exec $CONTAINER bash -lc 'cd /aosp && source build/envsetup.sh && lunch $TARGET && adb logcat -s remote-control:*'
   docker exec $CONTAINER bash -lc 'cd /aosp && source build/envsetup.sh && lunch $TARGET && adb shell dmesg | grep avc'
 
 停止 Cuttlefish:

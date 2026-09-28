@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 
 struct AppEntry {
     std::string package;
@@ -106,4 +106,4 @@ public:
     bool loggedOnce_ = false;
 };
 
-}  // namespace autod
+}  // namespace remote_control

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 编译 AutoSnap x86_64 + ARM64 桥 ROM（在 autod-builder 容器里跑 AOSP 构建）。
+# 编译 AutoSnap x86_64 + ARM64 桥 ROM（在 remote-control-builder 容器里跑 AOSP 构建）。
 #
 #   ./build-rom.sh              # 全量构建（droid），后台跑，日志 aosp/out/autosnap-build.log
 #   ./build-rom.sh --wait       # 前台等它结束（几十分钟~几小时）
-#   ./build-rom.sh --modules autod   # 只编模块（分钟级）
+#   ./build-rom.sh --modules remote-control   # 只编模块（分钟级）
 #   ./build-rom.sh --status     # 看进度
 #   ./build-rom.sh --stop       # 停掉
 #
@@ -39,7 +39,7 @@ case "${1:-}" in
         exit 0 ;;
     --modules)
         shift
-        [ $# -gt 0 ] || die "--modules 需要目标，例如： --modules autod"
+        [ $# -gt 0 ] || die "--modules 需要目标，例如： --modules remote-control"
         log "编模块：$*"
         in_container "cd $BUILDER_AOSP_PATH && source build/envsetup.sh >/dev/null && lunch $LUNCH_TARGET >/dev/null && m -j$JOBS $*"
         exit 0 ;;
@@ -73,9 +73,9 @@ fi
 # 加了之后用 fstab.ranchu.noavb + dummy vbmeta，镜像也更快出。
 CMD="cd $BUILDER_AOSP_PATH && source build/envsetup.sh >/dev/null && lunch $LUNCH_TARGET && m -j$JOBS QEMU_DISABLE_AVB=${QEMU_DISABLE_AVB:-true}"
 
-# AOSP 树里可能同时有别人在编辑的模块（例如 frameworks/native/cmds/autod 正处于改动中，
+# AOSP 树里可能同时有别人在编辑的模块（例如 frameworks/native/cmds/remote-control 正处于改动中，
 # 其 libwebp_vendored 变体暂时对不上）。ALLOW_MISSING_DEPENDENCIES=true 让 Soong
-# **跳过**这类模块而不是让整棵树编不过——本项目不需要 autod，跳过它没有任何影响。
+# **跳过**这类模块而不是让整棵树编不过——本项目不需要 remote-control，跳过它没有任何影响。
 # 想严格模式： ALLOW_MISSING_DEPS=0 ./build-rom.sh
 ALLOW_MISSING_DEPS="${ALLOW_MISSING_DEPS:-1}"
 if [ "$ALLOW_MISSING_DEPS" = 1 ]; then

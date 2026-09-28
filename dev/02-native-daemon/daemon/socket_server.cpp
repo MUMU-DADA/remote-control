@@ -18,14 +18,14 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "autod_log.h"
-#include "autod_platform.h"
+#include "remote_control_log.h"
+#include "remote_control_platform.h"
 
-#if AUTOD_HAS_INIT_SOCKET
+#if REMOTE_CONTROL_HAS_INIT_SOCKET
 #include <cutils/sockets.h>
 #endif
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 constexpr size_t kMaxFdsPerMessage = 1;
@@ -44,7 +44,7 @@ constexpr int kDefaultIdleTimeoutSec = 30;
 // 允许用环境变量覆盖，方便测试（不然一个用例要等 30 秒）
 // 和运维调优。非法值忽略，回退到默认。
 int IdleTimeoutSec() {
-    const char* env = getenv("AUTOD_IDLE_TIMEOUT_SEC");
+    const char* env = getenv("REMOTE_CONTROL_IDLE_TIMEOUT_SEC");
     if (env && *env) {
         const int v = atoi(env);
         if (v > 0 && v <= 3600) return v;
@@ -113,20 +113,20 @@ SocketServer::~SocketServer() {
 bool SocketServer::Start(std::string* error) {
     // --- 模式 1：init 已创建好 socket，通过环境变量传 fd ---
     if (!initSocketName_.empty()) {
-#if AUTOD_HAS_INIT_SOCKET
+#if REMOTE_CONTROL_HAS_INIT_SOCKET
         // android_get_control_socket 读 ANDROID_SOCKET_<name>
         listenFd_ = android_get_control_socket(initSocketName_.c_str());
         if (listenFd_ < 0) {
             if (error) {
                 *error = "android_get_control_socket(" + initSocketName_ +
-                         ") failed; 检查 autod.rc 里是否有 'socket " +
+                         ") failed; 检查 remote-control.rc 里是否有 'socket " +
                          initSocketName_ + " ...'";
             }
             return false;
         }
         // init 已经 listen 过了，这里不要再 listen
         path_ = std::string("/dev/socket/") + initSocketName_;
-        ALOGI("autod: 接管 init socket fd=%d (%s)", listenFd_, path_.c_str());
+        ALOGI("remote-control: 接管 init socket fd=%d (%s)", listenFd_, path_.c_str());
         return true;
 #else
         // init socket activation 是 Android 专有机制（libcutils）。
@@ -174,7 +174,7 @@ bool SocketServer::Start(std::string* error) {
     // 以自己的 UID 连进来）。放宽的代价是同一台设备上任何进程都能控制服务，
     // 所以默认保守，由部署方显式决定。
     if (chmod(path_.c_str(), socketMode_) < 0) {
-        ALOGW("autod: chmod(%s, %04o) 失败: %s", path_.c_str(),
+        ALOGW("remote-control: chmod(%s, %04o) 失败: %s", path_.c_str(),
               static_cast<unsigned>(socketMode_), strerror(errno));
     }
 
@@ -187,7 +187,7 @@ bool SocketServer::Start(std::string* error) {
     }
 
     ownsPath_ = true;
-    ALOGI("autod: 监听 %s (fd=%d)", path_.c_str(), listenFd_);
+    ALOGI("remote-control: 监听 %s (fd=%d)", path_.c_str(), listenFd_);
     return true;
 }
 
@@ -201,7 +201,7 @@ void SocketServer::Stop() {
 
 void SocketServer::Run(const RequestHandler& handler) {
     if (listenFd_ < 0) {
-        ALOGE("autod: Run() 在 Start() 之前被调用");
+        ALOGE("remote-control: Run() 在 Start() 之前被调用");
         return;
     }
 
@@ -210,7 +210,7 @@ void SocketServer::Run(const RequestHandler& handler) {
         if (connFd < 0) {
             if (errno == EINTR) continue;
             if (stop_) break;
-            ALOGE("autod: accept 失败: %s", strerror(errno));
+            ALOGE("remote-control: accept 失败: %s", strerror(errno));
             continue;
         }
 
@@ -239,12 +239,12 @@ void SocketServer::Run(const RequestHandler& handler) {
                 ServeConnection(connFd, handler);
                 close(connFd);
             })) {
-            ALOGW("autod: 起线程失败，本连接串行处理");
+            ALOGW("remote-control: 起线程失败，本连接串行处理");
             ServeConnection(connFd, handler);
             close(connFd);
         }
     }
-    ALOGI("autod: accept 循环退出");
+    ALOGI("remote-control: accept 循环退出");
 }
 
 void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
@@ -252,11 +252,11 @@ void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
     ucred cred{};
     socklen_t len = sizeof(cred);
     if (getsockopt(connFd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0) {
-        ALOGI("autod: 新连接 pid=%d uid=%d gid=%d", cred.pid, cred.uid, cred.gid);
+        ALOGI("remote-control: 新连接 pid=%d uid=%d gid=%d", cred.pid, cred.uid, cred.gid);
         // TODO(鉴权): 在这里按 cred.uid / cred.pid 做白名单。
         //   当前仅依赖 socket 文件权限 (0660) 做粗粒度控制。
         //   生产环境建议：
-        //     - 建一个专用的 AID（如 AID_AUTOD），客户端进程加入该组
+        //     - 建一个专用的 AID（如 AID_REMOTE_CONTROL），客户端进程加入该组
         //     - 或校验 cred.uid 是否在允许列表内，否则直接拒绝
     }
 
@@ -267,7 +267,7 @@ void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
         const int rc = RecvRequest(connFd, &req, &payload, &reqFd);
         if (rc < 0) break;          // 对端正常关闭
         if (rc > 0) {
-            ALOGW("autod: 读请求失败: %s", strerror(rc));
+            ALOGW("remote-control: 读请求失败: %s", strerror(rc));
             break;
         }
 
@@ -275,7 +275,7 @@ void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
         if (reqFd >= 0) close(reqFd);   // handler 若需要保留会自己 dup
 
         if (!SendReply(connFd, packet)) {
-            ALOGW("autod: 发应答失败: %s", strerror(errno));
+            ALOGW("remote-control: 发应答失败: %s", strerror(errno));
             if (packet.fd >= 0) close(packet.fd);
             break;
         }
@@ -317,7 +317,7 @@ int SocketServer::RecvRequest(int connFd, Request* out, std::string* payload,
     // SO_RCVTIMEO 到期会返回 EAGAIN/EWOULDBLOCK —— 对端连上但不发数据。
     // 单独报出来，否则日志里只会看到一句含糊的"读请求失败"。
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        ALOGW("autod: 连接空闲超过 %d 秒，主动断开", IdleTimeoutSec());
+        ALOGW("remote-control: 连接空闲超过 %d 秒，主动断开", IdleTimeoutSec());
         return -1;
     }
 
@@ -334,7 +334,7 @@ int SocketServer::RecvRequest(int connFd, Request* out, std::string* payload,
             if (*outFd < 0) {
                 *outFd = fds[i];
             } else {
-                ALOGW("autod: 一次只接受一个 fd，丢弃 fd=%d", fds[i]);
+                ALOGW("remote-control: 一次只接受一个 fd，丢弃 fd=%d", fds[i]);
                 close(fds[i]);
             }
         }
@@ -377,4 +377,4 @@ bool SocketServer::SendReply(int connFd, const ReplyPacket& packet) {
     return n == static_cast<ssize_t>(sizeof(Reply));
 }
 
-}  // namespace autod
+}  // namespace remote_control

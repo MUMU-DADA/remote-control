@@ -4,7 +4,7 @@
 
 #include <vector>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
 // 内置的 libwebp（源码在 vendor/webp/，来源与取舍见那个目录的 README）。
 //
@@ -12,7 +12,7 @@
 // 和 AOSP 的 local_include_dirs: ["."] 一致。
 #include "src/webp/encode.h"
 
-namespace autod {
+namespace remote_control {
 
 WebpEncoder& WebpEncoder::Instance() {
     static WebpEncoder enc;
@@ -101,4 +101,4 @@ std::string WebpEncoder::EncodeRgba(const uint8_t* rgba, uint32_t width,
     return out;
 }
 
-}  // namespace autod
+}  // namespace remote_control

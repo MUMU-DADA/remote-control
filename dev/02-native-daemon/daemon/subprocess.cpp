@@ -12,9 +12,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 int64_t NowMs() {
@@ -232,4 +232,4 @@ bool RunCommand(const std::vector<std::string>& argv, CommandResult* result,
     return RunCommandAs(argv, -1, -1, 10000, 1u << 20, result, error);
 }
 
-}  // namespace autod
+}  // namespace remote_control

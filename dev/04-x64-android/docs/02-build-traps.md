@@ -49,28 +49,28 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
 **解法**：
 
 ```bash
-docker exec autod-builder bash -lc 'pkill -f soong_ui; rm -f /aosp/out/.lock'
+docker exec remote-control-builder bash -lc 'pkill -f soong_ui; rm -f /aosp/out/.lock'
 ```
 
 然后重跑 `./scripts/build-rom.sh`。**注意别被日志的 `EXIT=1` 骗了——这不是编译错误。**
 
 ---
 
-## 3. `dependency "libwebp_vendored" of "autod" missing variant`
+## 3. `dependency "libwebp_vendored" of "remote-control" missing variant`
 
 **现象**（kati 之后、soong 生成 ninja 时失败）：
 
 ```
-error: frameworks/native/cmds/autod/daemon/Android.bp:206:1:
-  dependency "libwebp_vendored" of "autod_vtp" missing variant:
+error: frameworks/native/cmds/remote-control/daemon/Android.bp:206:1:
+  dependency "libwebp_vendored" of "remote_control_vtp" missing variant:
     os:android,image:,arch:x86_64,sdk:,link:shared
   available variants:
     os:android,image:,arch:x86_64,sdk:,link:static
 ```
 
-**原因**：`frameworks/native/cmds/autod/daemon/Android.bp` 里把 `libwebp_vendored` 放进了
+**原因**：`frameworks/native/cmds/remote-control/daemon/Android.bp` 里把 `libwebp_vendored` 放进了
 `shared_libs`，但该模块声明的是 `cc_library_static`（只提供 `link:static` 变体）。
-**这是 AOSP 树里 `autod` 自身的问题，与本项目的 ROM 无关**——而且该文件当时正在被同时编辑
+**这是 AOSP 树里 `remote-control` 自身的问题，与本项目的 ROM 无关**——而且该文件当时正在被同时编辑
 （文件 mtime 与构建时间只差 1 分钟）。
 
 **解法**（本项目侧，避免和别人的在途改动打架）：
@@ -80,9 +80,9 @@ ALLOW_MISSING_DEPENDENCIES=true m -j12
 ```
 
 `build-rom.sh` 默认开启（`ALLOW_MISSING_DEPS=0` 可关）。Soong 会**跳过**有依赖问题的模块，
-而不是让整棵树编不过（`build/soong/ui/build/soong.go:226`）。本项目不需要 `autod`，跳过无影响。
+而不是让整棵树编不过（`build/soong/ui/build/soong.go:226`）。本项目不需要 `remote-control`，跳过无影响。
 
-**待办**：等 `autod` 那边的编辑稳定后，建议把 `libwebp_vendored` 从 `shared_libs` 移到
+**待办**：等 `remote-control` 那边的编辑稳定后，建议把 `libwebp_vendored` 从 `shared_libs` 移到
 `static_libs`（或把模块改成 `cc_library_shared`）——两种改法都能让严格模式编过。
 
 ---
@@ -105,7 +105,7 @@ ALLOW_MISSING_DEPENDENCIES=true m -j12
 
 ```
 clang: fatal error: error in backend: IO failure on output stream: No space left on device
-docker exec autod-builder ...  →  OCI runtime exec failed:
+docker exec remote-control-builder ...  →  OCI runtime exec failed:
     write /tmp/runc-process2691731756: no space left on device
 df -h /                        →  还有 7 G 可用（所以一开始没往这儿想）
 ```

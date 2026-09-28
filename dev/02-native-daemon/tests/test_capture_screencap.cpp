@@ -22,8 +22,8 @@
 #include "../daemon/capture.h"
 #include "test_util.h"
 
-using namespace autod;
-using namespace autodtest;
+using namespace remote_control;
+using namespace remote_control_test;
 
 namespace {
 
@@ -39,7 +39,7 @@ void ResetEnv() {
     unsetenv("FAKE_SCREENCAP_BAD_FORMAT");
     unsetenv("FAKE_SCREENCAP_TRUNCATE");
     unsetenv("FAKE_SCREENCAP_FAIL");
-    setenv("AUTOD_SCREENCAP_PATH", gFakePath, 1);
+    setenv("REMOTE_CONTROL_SCREENCAP_PATH", gFakePath, 1);
 }
 
 // 每次调用都从干净状态开始，可一次设两组键值。
@@ -218,7 +218,7 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     printf("\n\033[1;34m[7] 异常路径：screencap 不存在\033[0m\n");
     // -----------------------------------------------------------------------
-    setenv("AUTOD_SCREENCAP_PATH", "/nonexistent/screencap", 1);
+    setenv("REMOTE_CONTROL_SCREENCAP_PATH", "/nonexistent/screencap", 1);
     {
         Capture cap;
         std::string err;
@@ -261,10 +261,10 @@ int main(int argc, char** argv) {
     printf("\n\033[1;34m[9] 缺少 screencap 时 Grab 也应安全失败\033[0m\n");
     // -----------------------------------------------------------------------
     // ⚠️ 必须显式设置，不能依赖上一个用例留下的环境 ——
-    //    SetupEnv() 会把 AUTOD_SCREENCAP_PATH 重置回假命令，
+    //    SetupEnv() 会把 REMOTE_CONTROL_SCREENCAP_PATH 重置回假命令，
     //    靠状态传递会得到"测了个寂寞"的假通过。
     ResetEnv();
-    setenv("AUTOD_SCREENCAP_PATH", "/nonexistent/screencap", 1);
+    setenv("REMOTE_CONTROL_SCREENCAP_PATH", "/nonexistent/screencap", 1);
     {
         Capture cap;
         std::string err;

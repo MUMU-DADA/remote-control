@@ -28,20 +28,20 @@
              │ Unix domain socket
              ▼
    ┌──────────────────────────┐
-   │  autod (native daemon)   │  ← 对外统一入口
+   │  remote-control (native daemon)   │  ← 对外统一入口
    │  截图：SurfaceFlinger ✅  │
    │  触控：转发给 Java 服务  │
    └────────────┬─────────────┘
                 │ 内部 Unix socket（或 Binder）
                 ▼
    ┌──────────────────────────┐
-   │  AutodInputService (Java)│
+   │  RemoteControlInputService (Java)│
    │  InputManager            │
    │    .injectInputEvent() ✅│
    └──────────────────────────┘
 ```
 
-**对外接口不变。** 调用方仍然只连 `autod`，不需要知道触控是转发的。
+**对外接口不变。** 调用方仍然只连 `remote-control`，不需要知道触控是转发的。
 
 ---
 
@@ -72,7 +72,7 @@
 
 ## 通信方式
 
-`autod`（C++）→ `AutodInputService`（Java），两种选择：
+`remote-control`（C++）→ `RemoteControlInputService`（Java），两种选择：
 
 | 方式 | 优点 | 缺点 |
 |---|---|---|
@@ -94,10 +94,10 @@
 ### Java 服务
 
 ```java
-package com.autod.input;
+package com.remote-control.input;
 
-public class AutodInputService extends Service {
-    private static final String SOCKET_NAME = "autod_input";
+public class RemoteControlInputService extends Service {
+    private static final String SOCKET_NAME = "remote_control_input";
 
     private InputManager mInputManager;
     private LocalServerSocket mServer;
@@ -113,7 +113,7 @@ public class AutodInputService extends Service {
         mInputManager = InputManager.getInstance();
 
         mRunning = true;
-        mThread = new Thread(this::serveLoop, "autod-input");
+        mThread = new Thread(this::serveLoop, "remote-control-input");
         mThread.start();
     }
 
@@ -196,13 +196,13 @@ public class AutodInputService extends Service {
 
 ```xml
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.autod.input">
+    package="com.remote-control.input">
 
     <uses-permission android:name="android.permission.INJECT_EVENTS" />
 
     <application android:persistent="true">
         <service
-            android:name=".AutodInputService"
+            android:name=".RemoteControlInputService"
             android:exported="false"
             android:directBootAware="true" />
     </application>
@@ -215,7 +215,7 @@ public class AutodInputService extends Service {
 
 ```
 android_app {
-    name: "AutodInputService",
+    name: "RemoteControlInputService",
 
     srcs: ["src/**/*.java"],
     manifest: "AndroidManifest.xml",
@@ -238,16 +238,16 @@ android_app {
 }
 ```
 
-### `autod` 侧的转发
+### `remote-control` 侧的转发
 
-`inject.cpp` 里加一个后端，把触控请求转发到 `autod_input` socket：
+`inject.cpp` 里加一个后端，把触控请求转发到 `remote_control_input` socket：
 
 ```cpp
 // inject_socket.cpp（替代 inject_binder.cpp）
 int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
 sockaddr_un addr{};
 addr.sun_family = AF_UNIX;
-strncpy(addr.sun_path + 1, "autod_input", sizeof(addr.sun_path) - 1);
+strncpy(addr.sun_path + 1, "remote_control_input", sizeof(addr.sun_path) - 1);
 // 注意：Android 的 LocalServerSocket 用的是抽象命名空间（sun_path[0] = '\0'）
 connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
 
@@ -264,16 +264,16 @@ connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
 
 ```bash
 # 1. 编进镜像（或者用 Magisk 塞进 /system/priv-app/）
-m AutodInputService autod autodctl
+m RemoteControlInputService remote-control rcctl
 
 # 2. 确认服务起来了
-adb shell dumpsys activity services com.autod.input
+adb shell dumpsys activity services com.remote-control.input
 
 # 3. 确认有 INJECT_EVENTS 权限
-adb shell dumpsys package com.autod.input | grep -i inject
+adb shell dumpsys package com.remote-control.input | grep -i inject
 
 # 4. 冒烟测试
-adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 1200"
+adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock tap 540 1200"
 ```
 
 ---
@@ -284,7 +284,7 @@ adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 
 |---|---|
 | 各用各自能用的 API，不打架 | 多一个进程 |
 | 不创建额外输入设备（对比 uinput） | Java 服务需要平台签名 |
-| 对外接口不变（`autod` 仍是唯一入口） | 多一次进程间通信 |
+| 对外接口不变（`remote-control` 仍是唯一入口） | 多一次进程间通信 |
 | 支持完整的多点触控和压力曲线 | 需要编进镜像（或用 Magisk 绕） |
 | 是真正的「系统级」实现 | |
 

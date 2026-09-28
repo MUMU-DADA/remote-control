@@ -43,7 +43,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 
 class Dispatcher;
 
@@ -212,4 +212,4 @@ class FrameHub {
     Impl* impl_ = nullptr;   // 懒创建，避免静态初始化顺序问题
 };
 
-}  // namespace autod
+}  // namespace remote_control

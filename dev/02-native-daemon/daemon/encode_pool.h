@@ -35,7 +35,7 @@
 #include <cstdint>
 #include <mutex>
 
-namespace autod {
+namespace remote_control {
 
 class EncodePool {
   public:
@@ -43,7 +43,7 @@ class EncodePool {
 
     // 同时能编几路。默认 = CPU 核数（下限 2）。
     //
-    // AUTOD_ENCODE_CONCURRENCY 可以覆盖（0 = 不限，调试对比用）。
+    // REMOTE_CONTROL_ENCODE_CONCURRENCY 可以覆盖（0 = 不限，调试对比用）。
     int Limit() const { return limit_; }
 
     // 拿一个名额。拿不到就等，最多 timeoutMs；超时返回 false。
@@ -92,4 +92,4 @@ class EncodePool {
     uint64_t timeouts_ = 0;
 };
 
-}  // namespace autod
+}  // namespace remote_control

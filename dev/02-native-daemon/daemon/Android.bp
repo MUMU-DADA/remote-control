@@ -1,14 +1,14 @@
-// autod 的 AOSP 构建描述
+// remote-control 的 AOSP 构建描述
 //
 // 放置位置：把 dev/02-native-daemon/ 整个目录拷进 AOSP 树的
-//           frameworks/native/cmds/autod/（保持 daemon/ client/ 同级）
+//           frameworks/native/cmds/remote-control/（保持 daemon/ client/ 同级）
 //
 // 编译：
 //   source build/envsetup.sh
 //   lunch aosp_arm64-userdebug
-//   m autod            # 默认：SurfaceFlinger 截图 + uinput 触控
-//   m autod_binder     # 可选：IInputManager 触控（Android 12 上不可用）
-//   m autod_stub       # 测试用：桩截图（不要装进产品镜像）
+//   m remote-control            # 默认：SurfaceFlinger 截图 + uinput 触控
+//   m remote_control_binder     # 可选：IInputManager 触控（Android 12 上不可用）
+//   m remote_control_stub       # 测试用：桩截图（不要装进产品镜像）
 //
 // 每个二进制只链一个截图后端 + 一个注入后端 —— 它们都定义同名工厂函数，
 // 链在一起会重复符号。
@@ -17,7 +17,7 @@
 // 共享配置
 // ---------------------------------------------------------------------------
 cc_defaults {
-    name: "autod_defaults",
+    name: "remote_control_defaults",
 
     srcs: [
         "main.cpp",
@@ -51,7 +51,7 @@ cc_defaults {
     // ⚠️ 必须排除静态库的符号导出，否则会与系统的 libc++.so 打架。
     //
     //    实测崩溃（启动即 SIGABRT）：
-    //      #06 autod             std::__1::locale::use_facet(...)
+    //      #06 remote-control             std::__1::locale::use_facet(...)
     //      #07 /system/lib64/libc++.so  __stdinbuf<char>::imbue
     //      #08 /system/lib64/libc++.so  ios_base::Init::Init
     //      #09 /system/lib64/libc++.so  _GLOBAL__sub_I_iostream.cpp
@@ -123,7 +123,7 @@ cc_defaults {
 
         // 平台构建：能调系统服务、能接管 init socket。
         // 不要用 __ANDROID__ 判断 —— NDK 构建时它同样是定义的。
-        "-DAUTOD_FULL_PLATFORM=1",
+        "-DREMOTE_CONTROL_FULL_PLATFORM=1",
     ],
 
     cppflags: ["-std=c++20"],
@@ -131,7 +131,7 @@ cc_defaults {
     // webp_encoder.cpp 里写的是 #include "src/webp/encode.h" ——
     // 源码布局决定了 -I 要指到 vendor/webp/，不是 vendor/webp/src。
     //
-    // ⚠️ 这个必须给**消费者**（autod_defaults）。libwebp_vendored 里那份
+    // ⚠️ 这个必须给**消费者**（remote_control_defaults）。libwebp_vendored 里那份
     //    是给它自己的源码用的，不会传给谁 —— 是 webp_encoder.cpp 在
     //    include，不是 libwebp 自己在 include。
     //    NDK 构建那边是显式加 -I"$WEBP_DIR" 的，所以一直没事；
@@ -171,7 +171,7 @@ cc_library_static {
     name: "libwebp_vendored",
     // ⚠️ 必须和消费者一致。
     //
-    //    autod_defaults 里有 `sdk_version: ""`（标记为非 NDK 的平台构建）。
+    //    remote_control_defaults 里有 `sdk_version: ""`（标记为非 NDK 的平台构建）。
     //    这个库不写的话变体对不上，Soong 直接报
     //    "dependency ... missing variant"。
     sdk_version: "",
@@ -195,19 +195,19 @@ cc_library_static {
 }
 
 cc_binary {
-    name: "autod",
-    defaults: ["autod_defaults"],
+    name: "remote-control",
+    defaults: ["remote_control_defaults"],
     srcs: [
         "capture_surfaceflinger.cpp",
         "inject_uinput.cpp",
     ],
 
-    // 自动安装到 /system/etc/init/autod.rc
+    // 自动安装到 /system/etc/init/remote-control.rc
     //
     // ⚠️ 路径里不能用 ".." —— Soong 会报
-    //    "Path is outside directory: ../init/autod.rc"
-    //    所以 autod.rc 必须与 Android.bp 同目录。
-    init_rc: ["autod.rc"],
+    //    "Path is outside directory: ../init/remote-control.rc"
+    //    所以 remote-control.rc 必须与 Android.bp 同目录。
+    init_rc: ["remote-control.rc"],
 
     vendor: false,
     proprietary: false,
@@ -222,8 +222,8 @@ cc_binary {
 //
 // 优越之处：不创建额外的输入设备，不可被枚举。
 cc_binary {
-    name: "autod_binder",
-    defaults: ["autod_defaults"],
+    name: "remote_control_binder",
+    defaults: ["remote_control_defaults"],
     srcs: [
         "capture_surfaceflinger.cpp",
         "inject_binder.cpp",
@@ -238,18 +238,18 @@ cc_binary {
 // ---------------------------------------------------------------------------
 //
 // 触控不再自己写 uinput，而是调 AOSP 官方的 virtual_touchpad Binder 服务。
-// 好处：autod **不需要 /dev/uinput 权限**（SELinux 大幅简化），
+// 好处：remote-control **不需要 /dev/uinput 权限**（SELinux 大幅简化），
 //       少维护 ~350 行 uinput 代码。
 //
 // 前置条件（两个都要做，否则跑不起来）：
 //   1. 产品配置里加：PRODUCT_PACKAGES += virtual_touchpad
 //      它默认不在 aosp_arm64 的产品包里（是 VR 专用）
-//   2. sepolicy 按 sepolicy/autod.te 里「启用 vtp 后端」一节改
+//   2. sepolicy 按 sepolicy/remote-control.te 里「启用 vtp 后端」一节改
 //
 // 限制：官方实现只有 2 个触控槽位，做不了 3 指以上手势。
 cc_binary {
-    name: "autod_vtp",
-    defaults: ["autod_defaults"],
+    name: "remote_control_vtp",
+    defaults: ["remote_control_defaults"],
     srcs: [
         "capture_surfaceflinger.cpp",
         "inject_vtp.cpp",
@@ -272,8 +272,8 @@ cc_binary {
 //
 // **不要编进产品镜像。** 名字带 _stub 就是为了避免误装。
 cc_binary {
-    name: "autod_stub",
-    defaults: ["autod_defaults"],
+    name: "remote_control_stub",
+    defaults: ["remote_control_defaults"],
     srcs: [
         "capture_stub.cpp",
         "inject_uinput.cpp",
@@ -290,10 +290,10 @@ cc_binary {
 // 主要用途是 NDK 构建（见 tools/build-ndk.sh），那里完全不需要 AOSP 树。
 //
 // 在这里也提供一份是为了：想在 AOSP 树内编一个「不依赖 SurfaceFlinger 私有 API」
-// 的版本时可以用。注意它会多链一个 libgui（来自 autod_defaults），无害但多余。
+// 的版本时可以用。注意它会多链一个 libgui（来自 remote_control_defaults），无害但多余。
 cc_binary {
-    name: "autod_screencap",
-    defaults: ["autod_defaults"],
+    name: "remote_control_screencap",
+    defaults: ["remote_control_defaults"],
     srcs: [
         "capture_screencap.cpp",
         "inject_uinput.cpp",

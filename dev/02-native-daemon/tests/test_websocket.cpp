@@ -10,8 +10,8 @@
 #include <cstdio>
 #include <string>
 
-using namespace autod;
-using namespace autodtest;
+using namespace remote_control;
+using namespace remote_control_test;
 
 namespace {
 

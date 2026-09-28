@@ -9,9 +9,9 @@
 
 #include <vector>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // ── SHA-1 ───────────────────────────────────────────────────────────────────
@@ -306,4 +306,4 @@ bool WsWriteText(int fd, const std::string& text) {
     return WsWriteFrame(fd, kWsText, text);
 }
 
-}  // namespace autod
+}  // namespace remote_control

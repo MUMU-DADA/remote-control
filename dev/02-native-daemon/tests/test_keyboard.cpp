@@ -10,8 +10,8 @@
 #include "keyboard.h"
 #include "test_util.h"
 
-using namespace autod;
-using namespace autodtest;
+using namespace remote_control;
+using namespace remote_control_test;
 
 namespace {
 

@@ -43,7 +43,7 @@
 
 ```bash
 curl -H "Authorization: Bearer <令牌>" ...
-curl -H "X-Autod-Token: <令牌>" ...
+curl -H "X-Remote-Control-Token: <令牌>" ...
 curl "http://host:8088/api/v1/config?token=<令牌>"      # 给 <img>/WebSocket 用
 ```
 
@@ -84,7 +84,7 @@ curl http://host:8088/api/v1/describe
 
 ```json
 {
-  "service": "autod",
+  "service": "remote-control",
   "protocolVersion": 6,
   "pid": 21266,
   "capabilities": {
@@ -113,7 +113,7 @@ curl http://host:8088/api/v1/describe
   "ok": true,
   "protocolVersion": 7,
   "config": {
-    "socketPath": "/data/local/tmp/autod.sock",
+    "socketPath": "/data/local/tmp/remote-control.sock",
     "usingInitSocket": false,
     "initSocketName": "",
     "socketMode": "432",
@@ -399,7 +399,7 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 | `png/jpeg/webp/raw` | 各格式可用吗 |
 | `h264` / `h264Max` / `h264Used` | H.264 可用性、并发上限、当前占用 |
 | `backend` | `AndroidBitmap_compress`（快）或 `libjpeg/libpng`（回退） |
-| `forced` | 是否被 `AUTOD_IMAGE_BACKEND` 强制指定 |
+| `forced` | 是否被 `REMOTE_CONTROL_IMAGE_BACKEND` 强制指定 |
 
 `nativeCodecs: false` 表示这台设备只有 PNG（没有 JPEG/WebP）。
 
@@ -477,9 +477,9 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 | 头 | 含义 |
 |---|---|
 | `Content-Type` | `image/png` / `image/jpeg` / `image/webp` / `application/octet-stream` |
-| `X-Autod-Width` / `X-Autod-Height` | 尺寸（不用解析图片就能拿到） |
-| `X-Autod-PixelFormat` | Android PixelFormat（1=RGBA_8888，2=RGBX，5=BGRA） |
-| `X-Autod-Stride` | 仅 `raw`：每行像素数（可能大于 width） |
+| `X-RemoteControl-Width` / `X-RemoteControl-Height` | 尺寸（不用解析图片就能拿到） |
+| `X-RemoteControl-PixelFormat` | Android PixelFormat（1=RGBA_8888，2=RGBX，5=BGRA） |
+| `X-RemoteControl-Stride` | 仅 `raw`：每行像素数（可能大于 width） |
 
 `raw` 模式下字节数恒等于 `宽 × 高 × 4`（1280×720 → 3686400），
 字节序是 **RGBA** —— BGRA 已在服务端转好，不用自己转。
@@ -596,7 +596,7 @@ ws.send(JSON.stringify({t:'up',   x:110, y:210, id:0}));
 
 ### POST /key
 
-按键注入。实现走 `/dev/uinput` 虚拟键盘（系统里会多出一个 `autod-keyboard` 输入设备）
+按键注入。实现走 `/dev/uinput` 虚拟键盘（系统里会多出一个 `remote-control-keyboard` 输入设备）
 —— Android 12 没有可用的 native 按键注入接口。
 
 | 字段 | 类型 | 默认 | 说明 |
@@ -804,8 +804,8 @@ curl http://host:8088/api/v1/apps/com.android.settings
 
 ```json
 {"ok":true, "count":24,
- "apps":[{"package":"com.autod.controller",
-          "process":"com.autod.controller",
+ "apps":[{"package":"com.remotecontrol.controller",
+          "process":"com.remotecontrol.controller",
           "pid":4006, "uid":"u0a105", "state":"fg", "system":false}]}
 ```
 
@@ -850,7 +850,7 @@ curl -X POST 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
 原因：不删的话每次安装都在 `/sdcard` 上留一个几十 MB 的 APK，
 用一阵子就是一堆，而且没人会想起来清。成功、失败、连打开失败都删。
 
-中间还有一层：`InstallApp` 自己会在 `/data/local/tmp/autod-install-*.apk`
+中间还有一层：`InstallApp` 自己会在 `/data/local/tmp/remote-control-install-*.apk`
 落一个临时文件，同样无论成败都清掉。
 
 响应：`{"ok":true,"bytes":16805,"replace":true}`
@@ -1008,10 +1008,10 @@ curl -X POST http://<设备IP>:8088/api/v1/files \
 
 ### GET /logfile
 
-落盘的历史日志，`/sdcard/autod.log`，**最多 10KB**。
+落盘的历史日志，`/sdcard/remote-control.log`，**最多 10KB**。
 
 ```json
-{"ok":true, "path":"/sdcard/autod.log", "bytes":5413, "maxBytes":10240,
+{"ok":true, "path":"/sdcard/remote-control.log", "bytes":5413, "maxBytes":10240,
  "text":"09-28 08:31:46 W 图像编码器: AndroidBitmap_compress…\n…"}
 ```
 
@@ -1038,7 +1038,7 @@ curl -X POST http://<设备IP>:8088/api/v1/files \
 
 | 端点 | 说明 |
 |---|---|
-| `POST /shutdown` | 优雅退出 **autod 自身**（不是设备） |
+| `POST /shutdown` | 优雅退出 **remote-control 自身**（不是设备） |
 | `POST /restart` | 退出并由 supervisor 重启（退出码 1） |
 
 ⚠️ 别和 `POST /power` 搞混：`/shutdown` 关的是**服务**，`/power` 关的是**设备**。

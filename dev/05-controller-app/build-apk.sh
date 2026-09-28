@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# build-apk.sh —— 构建上位应用（autod 控制台）
+# build-apk.sh —— 构建上位应用（remote-control 控制台）
 #
 # 为什么不走 Soong：Soong 要占 AOSP 的 out/，而那个目录经常被别的构建占着
 # （防重入检查会直接拒绝）。这里用独立的 SDK build-tools，随时能编。
@@ -21,7 +21,7 @@ PROJECT_ROOT="$(cd "$APP_DIR/../.." && pwd)"
 BT="${BT:-/opt/android/btools/android-13}"
 ANDROID_JAR="${ANDROID_JAR:-$PROJECT_ROOT/aosp/prebuilts/sdk/31/public/android.jar}"
 OUT="$APP_DIR/build"
-PKG=com.autod.controller
+PKG=com.remotecontrol.controller
 
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -148,9 +148,9 @@ step "签名"
 KS="$APP_DIR/debug.keystore"
 if [ ! -f "$KS" ]; then
     # 调试用密钥。生产环境应换成自己的密钥，并把应用装成系统应用。
-    "$KEYTOOL" -genkeypair -keystore "$KS" -alias autod -keyalg RSA -keysize 2048 \
+    "$KEYTOOL" -genkeypair -keystore "$KS" -alias remote-control -keyalg RSA -keysize 2048 \
         -validity 10000 -storepass android -keypass android \
-        -dname "CN=autod debug, OU=dev, O=AutoSnapshotAndroid, L=, S=, C=CN" \
+        -dname "CN=remote-control debug, OU=dev, O=AutoSnapshotAndroid, L=, S=, C=CN" \
         >/dev/null 2>&1 || { bad "keytool 生成密钥失败"; exit 1; }
     ok "已生成调试密钥 $KS"
 else
@@ -159,24 +159,24 @@ fi
 
 "$BT/apksigner" sign \
     --ks "$KS" --ks-pass pass:android --key-pass pass:android \
-    --ks-key-alias autod \
+    --ks-key-alias remote-control \
     --v1-signing-enabled true --v2-signing-enabled true \
-    --out "$OUT/autod-controller.apk" "$OUT/app-aligned.apk"
+    --out "$OUT/remote-control-controller.apk" "$OUT/app-aligned.apk"
 ok "已签名"
 
-"$BT/apksigner" verify --print-certs "$OUT/autod-controller.apk" 2>/dev/null | head -3
+"$BT/apksigner" verify --print-certs "$OUT/remote-control-controller.apk" 2>/dev/null | head -3
 
 # -----------------------------------------------------------------------------
 step "产物"
 # -----------------------------------------------------------------------------
-APK="$OUT/autod-controller.apk"
-printf '  %-40s %8s 字节\n' "autod-controller.apk" "$(stat -c%s "$APK")"
+APK="$OUT/remote-control-controller.apk"
+printf '  %-40s %8s 字节\n' "remote-control-controller.apk" "$(stat -c%s "$APK")"
 "$BT/aapt2" dump badging "$APK" 2>/dev/null | head -3
 
 echo
 echo "安装："
 echo "  adb push $APK /data/local/tmp/"
-echo "  adb shell pm install -r /data/local/tmp/autod-controller.apk"
+echo "  adb shell pm install -r /data/local/tmp/remote-control-controller.apk"
 echo
 echo "⚠️ daemon 的 socket 默认是 0660 root:root，应用以自己的 UID 连不上。"
 echo "   起 daemon 时加 --socket-mode 0666，或装成系统应用后调整策略。"
@@ -185,6 +185,6 @@ if [ "${1:-}" = "--install" ]; then
     step "安装到设备"
     ADB="${ADB:-adb}"
     "$ADB" push "$APK" /data/local/tmp/ >/dev/null
-    "$ADB" shell pm install -r /data/local/tmp/autod-controller.apk
+    "$ADB" shell pm install -r /data/local/tmp/remote-control-controller.apk
     ok "已安装"
 fi

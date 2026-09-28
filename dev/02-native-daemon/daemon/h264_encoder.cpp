@@ -8,7 +8,7 @@
 
 #include <atomic>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
 // 编译期开关：没有 libmediandk 的构建（宿主机测试）就整个降级成"不可用"。
 //
@@ -17,16 +17,16 @@
 // API 21 就有，不存在"设备上没有"的情况（真没有的话
 // AMediaCodec_createEncoderByType 返回 NULL，那是运行时的另一回事）。
 #ifdef __ANDROID__
-#define AUTOD_HAS_MEDIANDK 1
+#define REMOTE_CONTROL_HAS_MEDIANDK 1
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
 #endif
 
-namespace autod {
+namespace remote_control {
 
 namespace {
 
-#ifdef AUTOD_HAS_MEDIANDK
+#ifdef REMOTE_CONTROL_HAS_MEDIANDK
 // NDK 的 media 头里**没有** COLOR_Format* 这些常量 —— 它们是 Java 侧
 // MediaCodecInfo.CodecCapabilities 的字段。值本身是平台稳定的，
 // 所以在这里自己定义。
@@ -53,7 +53,7 @@ int H264Encoder::MaxConcurrent() {
     // 2 是保守值：真机硬件编码器通常 1~2 路。
     // 用环境变量可以调，调试时有用。
     static const int n = []() {
-        const char* v = getenv("AUTOD_H264_MAX");
+        const char* v = getenv("REMOTE_CONTROL_H264_MAX");
         if (v != nullptr) {
             const int x = atoi(v);
             if (x > 0 && x <= 16) return x;
@@ -70,7 +70,7 @@ bool H264Encoder::SlotAvailable() {
 }
 
 bool H264Encoder::Supported() {
-#ifdef AUTOD_HAS_MEDIANDK
+#ifdef REMOTE_CONTROL_HAS_MEDIANDK
     return true;
 #else
     return false;
@@ -82,7 +82,7 @@ H264Encoder::~H264Encoder() { Stop(); }
 bool H264Encoder::Running() const { return running_; }
 
 void H264Encoder::Stop() {
-#ifdef AUTOD_HAS_MEDIANDK
+#ifdef REMOTE_CONTROL_HAS_MEDIANDK
     if (codec_ != nullptr) {
         auto* c = static_cast<AMediaCodec*>(codec_);
         if (running_) AMediaCodec_stop(c);
@@ -97,7 +97,7 @@ void H264Encoder::Stop() {
 }
 
 bool H264Encoder::Start(const Config& cfg, std::string* error) {
-#ifdef AUTOD_HAS_MEDIANDK
+#ifdef REMOTE_CONTROL_HAS_MEDIANDK
     if (cfg.width == 0 || cfg.height == 0) {
         if (error) *error = "尺寸不能为 0";
         return false;
@@ -173,7 +173,7 @@ void H264Encoder::RequestKeyFrame() { wantKeyFrame_ = true; }
 
 H264Encoder::Stats H264Encoder::GetStats() const { return stats_; }
 
-#ifdef AUTOD_HAS_MEDIANDK
+#ifdef REMOTE_CONTROL_HAS_MEDIANDK
 
 namespace {
 
@@ -398,7 +398,7 @@ bool H264Encoder::EncodeRgba(const uint8_t* rgba, uint32_t width, uint32_t heigh
     return true;
 }
 
-#else   // !AUTOD_HAS_MEDIANDK
+#else   // !REMOTE_CONTROL_HAS_MEDIANDK
 
 bool H264Encoder::EncodeRgba(const uint8_t*, uint32_t, uint32_t,
                              std::vector<uint8_t>*, std::string* error) {
@@ -410,6 +410,6 @@ bool H264Encoder::DrainOutput(std::vector<uint8_t>*, bool, std::string*) {
     return false;
 }
 
-#endif  // AUTOD_HAS_MEDIANDK
+#endif  // REMOTE_CONTROL_HAS_MEDIANDK
 
-}  // namespace autod
+}  // namespace remote_control

@@ -20,8 +20,8 @@
 #include "appops.h"
 #include "test_util.h"
 
-using namespace autod;
-using namespace autodtest;
+using namespace remote_control;
+using namespace remote_control_test;
 
 namespace {
 
@@ -242,7 +242,7 @@ void TestParsePmList() {
 }  // namespace
 
 int main() {
-    printf("\033[1m=== autod 应用管理后端测试 ===\033[0m\n");
+    printf("\033[1m=== remote-control 应用管理后端测试 ===\033[0m\n");
 
     TestPackageName();
     TestParseDetail();

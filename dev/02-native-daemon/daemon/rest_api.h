@@ -22,7 +22,7 @@
 #include "http_server.h"
 #include "protocol.h"
 
-namespace autod {
+namespace remote_control {
 
 // ── 画面流的参数与状态 ──
 //
@@ -34,7 +34,7 @@ struct StreamParams {
     int         level         = 0;      // 0 = 按格式选默认
     bool        skipUnchanged = true;
     int         codec         = 0;      // ImageFormat；用 int 免得头文件依赖
-    std::string boundary      = "autodframe";
+    std::string boundary      = "remote-control-frame";
 };
 
 // 每条流各自持有一份（跳过未变化帧的判断是有状态的）
@@ -145,4 +145,4 @@ class RestApi {
     HttpServer* httpServer_ = nullptr;
 };
 
-}  // namespace autod
+}  // namespace remote_control

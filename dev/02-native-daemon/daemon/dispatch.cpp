@@ -32,11 +32,11 @@
 #include "fileops.h"
 #include "json_writer.h"
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "capture.h"
 #include "inject.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 Reply MakeReply(uint32_t status, uint32_t cmd) {
@@ -71,7 +71,7 @@ ReplyPacket MakeJsonReply(uint32_t cmd, const std::string& json) {
 
     if (json.empty()) return packet;
 
-    const int fd = MakeMemfd("autod-json");
+    const int fd = MakeMemfd("remote-control-json");
     if (fd < 0) {
         packet.reply.status = kErrInternal;
         ALOGE("memfd 创建失败: %s", strerror(errno));
@@ -598,7 +598,7 @@ ReplyPacket Dispatcher::HandleInstallApp(const Request& req, int reqFd) {
         return MakeJsonError(req.cmd, kErrIo, "找不到可写的临时目录");
     }
     char nameBuf[128];
-    snprintf(nameBuf, sizeof(nameBuf), "/autod-install-%d-%ld.apk", getpid(),
+    snprintf(nameBuf, sizeof(nameBuf), "/remote-control-install-%d-%ld.apk", getpid(),
              static_cast<long>(time(nullptr)));
     const std::string tmp = dir + nameBuf;
 
@@ -862,7 +862,7 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
 
     json::Writer w;
     w.Obj()
-        .Field("service", "autod")
+        .Field("service", "remote-control")
         .Field("protocolVersion", ServiceState::ProtocolVersion())
         .Field("pid", static_cast<int64_t>(getpid()))
         .Key("capabilities").Obj()
@@ -1102,7 +1102,7 @@ ReplyPacket Dispatcher::HandleShutdown(const Request& req, bool restart) {
     w.Obj().Field("ok", true)
            .Field("action", restart ? "restart" : "shutdown")
            .Field("note", restart
-                    ? "进程即将退出；需要 init（autod.rc）负责拉起，否则不会自动回来"
+                    ? "进程即将退出；需要 init（remote-control.rc）负责拉起，否则不会自动回来"
                     : "进程即将优雅退出：关闭 uinput 设备、清理 socket 文件")
      .EndObj();
     ALOGI("收到 %s 请求，准备退出", restart ? "重启" : "关闭");
@@ -1766,7 +1766,7 @@ ReplyPacket Dispatcher::HandleRunningApps(const Request& req) {
     w.Key("apps").Arr();
 
     // 行形如：
-    //   #21: fg     TOP  LCMN 32373:com.autod.controller/u0a105 act:activities
+    //   #21: fg     TOP  LCMN 32373:com.remotecontrol.controller/u0a105 act:activities
     //   #17: cch+ 5 CEM  ---- 1683:com.android.permissioncontroller/u0a102
     size_t pos = 0;
     uint32_t count = 0;
@@ -1890,4 +1890,4 @@ ReplyPacket Dispatcher::HandleLogFile(const Request& req) {
     return MakeJsonReply(req.cmd, w.str());
 }
 
-}  // namespace autod
+}  // namespace remote_control

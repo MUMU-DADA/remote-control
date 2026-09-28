@@ -1,7 +1,7 @@
 # 往这份 ROM 里加自己的东西（P5）
 
 > 自编 ROM 相对于"直接用官方镜像"的核心价值就在这里：**能改系统**。
-> 本文给出加一个系统组件（以 `autod` 为例）的完整落点与验证方式。
+> 本文给出加一个系统组件（以 `remote-control` 为例）的完整落点与验证方式。
 
 ---
 
@@ -21,10 +21,10 @@
 
 ### 2.1 源码放哪
 
-AOSP 树的模块自己带 `Android.bp`，例如 `autod` 在：
+AOSP 树的模块自己带 `Android.bp`，例如 `remote-control` 在：
 
 ```
-aosp/frameworks/native/cmds/autod/daemon/Android.bp   → 模块名 autod / autodctl
+aosp/frameworks/native/cmds/remote-control/daemon/Android.bp   → 模块名 remote-control / rcctl
 ```
 
 > 我们的产品**不修改 AOSP 上游文件**，但"把自己的模块放进树里"是正常的 ROM 开发动作。
@@ -37,8 +37,8 @@ aosp/frameworks/native/cmds/autod/daemon/Android.bp   → 模块名 autod / auto
 ```make
 # ---- 自制系统组件 ----
 PRODUCT_PACKAGES += \
-    autod \
-    autodctl
+    remote-control \
+    rcctl
 ```
 
 然后：
@@ -53,13 +53,13 @@ cd dev/04-x64-android
 验证二进制真的进了镜像：
 
 ```bash
-ls -la ../aosp/out/target/product/autosnap_x64_arm64/system/bin/autod
+ls -la ../aosp/out/target/product/autosnap_x64_arm64/system/bin/remote-control
 ```
 
 ### 2.3 开机自启 + SELinux
 
-`init.rc` 与 sepolicy 的落点跟模块走（`autod/daemon/Android.bp` 里已经写了
-`init_rc: ["autod.rc"]`，Soong 会自动装到 `/system/etc/init/`）。
+`init.rc` 与 sepolicy 的落点跟模块走（`remote-control/daemon/Android.bp` 里已经写了
+`init_rc: ["remote-control.rc"]`，Soong 会自动装到 `/system/etc/init/`）。
 SELinux domain 按 `dev/02-native-daemon/` 的 sepolicy 清单接进产品即可：
 
 ```make
@@ -71,8 +71,8 @@ BOARD_SEPOLICY_DIRS += device/autosnap/autosnap_x64_arm64/sepolicy
 ```bash
 ./scripts/run-linux.sh --no-wait
 S=emulator-5580; ADB=../aosp/out/host/linux-x86/bin/adb
-$ADB -s $S shell getprop init.svc.autod          # running 才算起来了
-$ADB -s $S shell 'logcat -d | grep -i "avc: denied" | grep autod'   # 空才算 sepolicy 干净
+$ADB -s $S shell getprop init.svc.remote-control          # running 才算起来了
+$ADB -s $S shell 'logcat -d | grep -i "avc: denied" | grep remote-control'   # 空才算 sepolicy 干净
 ```
 
 ---
@@ -81,11 +81,11 @@ $ADB -s $S shell 'logcat -d | grep -i "avc: denied" | grep autod'   # 空才算 
 
 ### 3.1 构建当前开着 `ALLOW_MISSING_DEPENDENCIES`
 
-原因：树里 `frameworks/native/cmds/autod/daemon/Android.bp` 把 `libwebp_vendored`
+原因：树里 `frameworks/native/cmds/remote-control/daemon/Android.bp` 把 `libwebp_vendored`
 （声明为 `cc_library_static`）放进了 `shared_libs`，x86_64 变体解析失败，会让**整棵树**编不过。
 
 - 这个开关只影响**有依赖问题的模块**（会被跳过），不影响我们的 ROM 内容；
-- 但**要真的把 `autod` 编进 ROM**，就必须先修好它：
+- 但**要真的把 `remote-control` 编进 ROM**，就必须先修好它：
   把 `libwebp_vendored` 从 `shared_libs` 挪到 `static_libs`（或把模块改成 `cc_library_shared`）；
 - 修好后用严格模式验证一次：`ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh`。
 

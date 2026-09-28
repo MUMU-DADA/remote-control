@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
 # =============================================================================
-# build-autod.sh —— 在构建容器里编译 autod / autodctl
+# build-remote-control.sh —— 在构建容器里编译 remote-control / rcctl
 #
 # 前置: 先跑 tools/integrate-aosp.sh 把源码接进 AOSP 树
 #
 # 用法:
-#   bash tools/build-autod.sh              # 编 autod + autodctl
-#   bash tools/build-autod.sh --stub       # 额外编 autod_stub（桩截图）
-#   TARGET=aosp_cf_x86_64_phone bash tools/build-autod.sh
+#   bash tools/build-remote-control.sh              # 编 remote-control + rcctl
+#   bash tools/build-remote-control.sh --stub       # 额外编 remote_control_stub（桩截图）
+#   TARGET=aosp_cf_x86_64_phone bash tools/build-remote-control.sh
 #
 # 首次编译需要 30-90 分钟（要编 libgui/libbinder 等依赖）。
-# 之后改 autod 自己的代码，增量编译是分钟级。
+# 之后改 remote-control 自己的代码，增量编译是分钟级。
 #
 # 建议后台跑:
-#   setsid nohup bash tools/build-autod.sh > /var/log/autod-build.log 2>&1 &
-#   tail -f /var/log/autod-build.log
+#   setsid nohup bash tools/build-remote-control.sh > /var/log/remote-control-build.log 2>&1 &
+#   tail -f /var/log/remote-control-build.log
 # =============================================================================
 set -euo pipefail
 
-CONTAINER=${CONTAINER:-autod-builder}
+CONTAINER=${CONTAINER:-remote-control-builder}
 TARGET=${TARGET:-aosp_arm64-userdebug}
 JOBS=${JOBS:-12}          # 31 GiB 内存，经验值约 2 GB/任务
 
 # 源树位置（用来和树内副本比新鲜度）
 SRC_DIR=${SRC_DIR:-"$(cd "$(dirname "$0")/.." && pwd)/dev/02-native-daemon"}
 
-MODULES="autod autodctl"
+MODULES="remote-control rcctl"
 if [ "${1:-}" = "--stub" ]; then
-    MODULES="$MODULES autod_stub"
+    MODULES="$MODULES remote_control_stub"
 fi
 
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
@@ -42,7 +42,7 @@ docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
     || { bad "容器 $CONTAINER 未运行，先跑 tools/setup-host.sh"; exit 1; }
 ok "容器运行中"
 
-docker exec "$CONTAINER" test -f /aosp/frameworks/native/cmds/autod/daemon/Android.bp \
+docker exec "$CONTAINER" test -f /aosp/frameworks/native/cmds/remote-control/daemon/Android.bp \
     || { bad "源码未接入，先跑 tools/integrate-aosp.sh"; exit 1; }
 
 # ⚠️ 光"文件在"不够 —— integrate-aosp.sh 是 **rsync 复制**，不是软链。
@@ -50,7 +50,7 @@ docker exec "$CONTAINER" test -f /aosp/frameworks/native/cmds/autod/daemon/Andro
 #    一个**跟改动无关的旧二进制**，而且 ninja 一句 "No need to regenerate"
 #    就结束，看起来完全像是编译成功了。
 #
-#    实测被这个坑掉过两次完整构建：改完代码跑 build-autod.sh，
+#    实测被这个坑掉过两次完整构建：改完代码跑 build-remote-control.sh，
 #    产物时间戳纹丝不动，还以为是自己改错了。
 #
 #    所以这里比对源树和树内副本的最新修改时间，不新鲜就直接叫停。
@@ -63,7 +63,7 @@ if [ "${SKIP_STALE_CHECK:-0}" != "1" ]; then
     #    rsync -a 会把源目录的 mtime 一并带过去，拿目录 mtime 来比
     #    会得出"源比树新 10 小时"这种假警报。
     tree_mtime=$(docker exec "$CONTAINER" sh -c \
-                     "find /aosp/frameworks/native/cmds/autod -type f \
+                     "find /aosp/frameworks/native/cmds/remote-control -type f \
                           \\( -name '*.cpp' -o -name '*.h' -o -name '*.bp' \
                              -o -name '*.rc' -o -name '*.te' \\) \
                           -printf '%T@\\n' | sort -rn | head -1" 2>/dev/null \
@@ -74,7 +74,7 @@ if [ "${SKIP_STALE_CHECK:-0}" != "1" ]; then
         if [ "$newest_int" -gt "$tree_mtime" ]; then
             warn "树内源码比 dev/ 旧（差 $(( newest_int - tree_mtime )) 秒）"
             bad  "先跑 tools/integrate-aosp.sh —— 否则编出来的是旧二进制"
-            echo "  急着编: SKIP_STALE_CHECK=1 bash tools/build-autod.sh"
+            echo "  急着编: SKIP_STALE_CHECK=1 bash tools/build-remote-control.sh"
             exit 1
         fi
     fi
@@ -100,7 +100,7 @@ ok "无其他编译在跑"
 step "编译 TARGET=$TARGET  MODULES=$MODULES"
 # -----------------------------------------------------------------------------
 # 日志同时写文件，方便失败后翻看
-LOG=/tmp/autod-build-$(date +%Y%m%d-%H%M%S).log
+LOG=/tmp/remote-control-build-$(date +%Y%m%d-%H%M%S).log
 
 set +e
 docker exec "$CONTAINER" bash -lc "
@@ -144,7 +144,7 @@ if [ "$RC" -ne 0 ]; then
         如果源码是边同步边编译的就会这样。重跑一次即可。
   • "duplicate symbol: CreateInjectorBackend"
       → 两个后端被链进了同一个二进制，检查 srcs 只留一个
-  • "./../init/autod.rc: No such file"
+  • "./../init/remote-control.rc: No such file"
       → init_rc 的相对路径问题，确认 init/ 与 daemon/ 同级
 EOF
     exit "$RC"
@@ -157,7 +157,7 @@ docker exec "$CONTAINER" bash -lc '
     cd /aosp
     source build/envsetup.sh >/dev/null 2>&1
     lunch '"$TARGET"' >/dev/null 2>&1
-    for f in autod autodctl autod_stub; do
+    for f in remote-control rcctl remote_control_stub; do
         p="$ANDROID_PRODUCT_OUT/system/bin/$f"
         if [ -f "$p" ]; then
             printf "  %-14s %s  (%s)\n" "$f" "$p" "$(stat -c%s "$p") 字节"
@@ -171,6 +171,6 @@ echo "日志: $LOG"
 echo
 echo "下一步（部署到设备）:"
 echo "  DEV=/root/AutoSnapshotAndroid/aosp/out/target/product/<product>/system/bin"
-echo "  adb push \$DEV/autod    /data/local/tmp/"
-echo "  adb push \$DEV/autodctl /data/local/tmp/"
-echo "  adb shell chmod 755 /data/local/tmp/autod /data/local/tmp/autodctl"
+echo "  adb push \$DEV/remote-control    /data/local/tmp/"
+echo "  adb push \$DEV/rcctl /data/local/tmp/"
+echo "  adb shell chmod 755 /data/local/tmp/remote-control /data/local/tmp/rcctl"

@@ -28,7 +28,7 @@
 
 #include "protocol.h"
 
-namespace autod {
+namespace remote_control {
 
 struct HttpRequest {
     std::string method;                       // GET / POST / ...
@@ -229,4 +229,4 @@ class HttpServer {
     bool        stop_ = false;
 };
 
-}  // namespace autod
+}  // namespace remote_control

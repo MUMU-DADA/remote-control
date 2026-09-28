@@ -20,7 +20,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-namespace autod {
+namespace remote_control {
 
 // 创建一个匿名内存文件，返回 fd（失败返回 -1，errno 已设置）。
 //
@@ -38,4 +38,4 @@ inline int MakeMemfd(const char* name) {
 #endif
 }
 
-}  // namespace autod
+}  // namespace remote_control

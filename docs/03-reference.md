@@ -2,7 +2,7 @@
 
 > 三部分：**Android 版本 API 差异**、**延迟与吞吐**、**触控能力矩阵**。
 >
-> `autod` 依赖的全部是**平台私有 API**，AOSP 每个大版本都可能改签名。升级目标版本时**必须对着源码重新确认，不要照抄**。源码位置随版本变化，用 [cs.android.com](https://cs.android.com/android/platform/superproject) 搜类名最快。
+> `remote-control` 依赖的全部是**平台私有 API**，AOSP 每个大版本都可能改签名。升级目标版本时**必须对着源码重新确认，不要照抄**。源码位置随版本变化，用 [cs.android.com](https://cs.android.com/android/platform/superproject) 搜类名最快。
 
 ---
 
@@ -125,7 +125,7 @@ WebP/PNG 上比内置编码器慢一倍** —— 所谓"原生快路径"其实�
 | webp | 内置 libwebp | 快 87%，只大 2% |
 | png | 内置 zlib | 快 106%，大 17% |
 
-两个开关：`AUTOD_FORCE_FALLBACK=1` 全走内置；`AUTOD_PREFER_NATIVE=1` 全走 Skia。
+两个开关：`REMOTE_CONTROL_FORCE_FALLBACK=1` 全走内置；`REMOTE_CONTROL_PREFER_NATIVE=1` 全走 Skia。
 `/params` 的 `codecs.backend` 逐格式报出当前选择。
 | 6 | 21.8 ms | 126.5 ms | 慢 2.1x，体积 -5.8% |
 
@@ -330,7 +330,7 @@ ioctl(fd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR);
 ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH);
 
 struct uinput_setup usetup = {};
-strncpy(usetup.name, "autod-touch", UINPUT_MAX_NAME_SIZE);
+strncpy(usetup.name, "remote-control-touch", UINPUT_MAX_NAME_SIZE);
 usetup.id.bustype = BUS_VIRTUAL;
 usetup.id.vendor  = 0x1;
 usetup.id.product = 0x1;
@@ -340,7 +340,7 @@ ioctl(fd, UI_DEV_CREATE);
 // 注入：按 multitouch protocol B 顺序写事件，最后 input_sync
 ```
 
-按键注入同理：`keyboard.cpp` 用 uinput 建一个 `autod-keyboard` 虚拟键盘设备。
+按键注入同理：`keyboard.cpp` 用 uinput 建一个 `remote-control-keyboard` 虚拟键盘设备。
 
 **代价与差异**（务必理解，这决定了选哪条路）：
 
@@ -474,7 +474,7 @@ system("/system/bin/input tap 540 1200");
 
 | 环节 | 耗时 | 说明 |
 |---|---|---|
-| 客户端 → socket → autod | 0.1 ms | Unix socket，无网络栈 |
+| 客户端 → socket → remote-control | 0.1 ms | Unix socket，无网络栈 |
 | Binder 到 SurfaceFlinger | 0.3–1 ms | 一次 Binder 往返 |
 | **GPU 合成一帧到捕获缓冲** | **8–20 ms** | ← **主要瓶颈** |
 | 等待 fence | 含在上面 | |
@@ -520,7 +520,7 @@ system("/system/bin/input tap 540 1200");
 
 | 环节 | 耗时 |
 |---|---|
-| 客户端 → socket → autod | 0.1 ms |
+| 客户端 → socket → remote-control | 0.1 ms |
 | 构造事件 | ~0.05 ms |
 | 注入（uinput write / Binder `injectInputEvent`） | 2–10 µs / 0.3–1 ms |
 | InputDispatcher → 应用 | 下一帧，8–17 ms |
@@ -557,7 +557,7 @@ Binder 路径的注入速率上限来自每次 `injectInputEvent` 一次往返�
 
 ## 11. 怎么实测
 
-上面的数字需要实测校验。在 `autod` 里加三处 `CLOCK_MONOTONIC` 打点：
+上面的数字需要实测校验。在 `remote-control` 里加三处 `CLOCK_MONOTONIC` 打点：
 
 ```cpp
 // capture.cpp 的 Grab() 里

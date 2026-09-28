@@ -1,6 +1,6 @@
 // selftest.h —— 部署自检
 //
-// `autod --selftest` 用。第一次把 autod 推到设备上时，
+// `remote-control --selftest` 用。第一次把 remote-control 推到设备上时，
 // 一条命令就能看出环境缺什么，不用靠猜。
 
 #pragma once
@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 // 运行环境自检。
 //
@@ -29,4 +29,4 @@ int RunSelfTest(bool verbose, uint32_t touchWidth, uint32_t touchHeight);
 std::string RunSelfTestJson(bool verbose, uint32_t touchWidth,
                             uint32_t touchHeight);
 
-}  // namespace autod
+}  // namespace remote_control

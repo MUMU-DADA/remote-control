@@ -1,7 +1,7 @@
-// MainActivity.java — autod 服务管理器
+// MainActivity.java — remote-control 服务管理器
 //
 // 这个应用**只做三件事**：
-//   1. 启动 / 停止 autod 服务
+//   1. 启动 / 停止 remote-control 服务
 //   2. 改它的对外监听端口
 //   3. 开关接口访问鉴权
 //
@@ -17,15 +17,15 @@
 //
 // 怎么做到"没有 root 也能启停 root 服务"：
 //
-//   应用改不了进程，但它能写共享存储。配置写在 /sdcard/autod.conf，
-//   由常驻的 autod-supervisord 监视并执行真正的启停。
+//   应用改不了进程，但它能写共享存储。配置写在 /sdcard/remote-control.conf，
+//   由常驻的 remote-control-supervisord 监视并执行真正的启停。
 //   应用侧因此只依赖"文件能写"，不需要任何特权。
 //
 // ⚠️ 写 /sdcard 需要 MANAGE_EXTERNAL_STORAGE（Android 11+ 的
 //    "所有文件访问"）。没有它的话应用只能写自己的私有目录，
 //    守护进程就读不到了。
 
-package com.autod.controller;
+package com.remotecontrol.controller;
 
 import android.Manifest;
 import android.app.Activity;
@@ -67,9 +67,9 @@ import java.util.Map;
 
 public class MainActivity extends Activity {
 
-    /** 与 autod-supervisord 约定的路径 */
-    private static final String CONF   = "/sdcard/autod.conf";
-    private static final String STATUS = "/sdcard/autod.status";
+    /** 与 remote-control-supervisord 约定的路径 */
+    private static final String CONF   = "/sdcard/remote-control.conf";
+    private static final String STATUS = "/sdcard/remote-control.status";
 
     private TextView statusView;
     private TextView tokenView;
@@ -167,7 +167,7 @@ public class MainActivity extends Activity {
 
         // 标题
         TextView title = new TextView(this);
-        title.setText("autod 服务管理");
+        title.setText("remote-control 服务管理");
         title.setTextSize(19);
         title.setTypeface(null, Typeface.BOLD);
         title.setPadding(dp(16), dp(16), dp(16), dp(4));
@@ -320,7 +320,7 @@ public class MainActivity extends Activity {
         m.put(key, value);
 
         StringBuilder sb = new StringBuilder();
-        sb.append("# autod 配置 —— 由上位应用或手工编辑，守护进程启动时读取。\n");
+        sb.append("# remote-control 配置 —— 由上位应用或手工编辑，守护进程启动时读取。\n");
         sb.append("# 改完之后需要重启服务才生效。\n\n");
         sb.append("# 服务是否应当运行\n");
         sb.append("enabled=").append(m.containsKey("enabled") ? m.get("enabled") : "1").append('\n');
@@ -379,13 +379,13 @@ public class MainActivity extends Activity {
         String t = m.get("token");
         if (t == null || t.isEmpty()) { toast("当前没有令牌"); return; }
         ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        cm.setPrimaryClip(ClipData.newPlainText("autod token", t));
+        cm.setPrimaryClip(ClipData.newPlainText("remote-control token", t));
         toast("令牌已复制");
     }
 
     // ── 状态显示 ────────────────────────────────────────────────────────────
     //
-    // 状态来自 supervisor 写的 /sdcard/autod.status。
+    // 状态来自 supervisor 写的 /sdcard/remote-control.status。
     // 不去探端口：端口可能被转发规则挡住，"进程在不在"才是确定的；
     // 而且服务没起来时探端口只会得到"连不上"，分不清是挂了还是没启动。
 

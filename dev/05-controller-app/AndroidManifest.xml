@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  autod 上位应用 —— 服务管理器
+  remote-control 上位应用 —— 服务管理器
 
   职责只有三件：
-    1. 启动 / 停止 autod 服务
+    1. 启动 / 停止 remote-control 服务
     2. 改它的对外监听端口
     3. 开关接口访问鉴权
 
@@ -12,7 +12,7 @@
 
   权限：
     MANAGE_EXTERNAL_STORAGE 是必需的，不是可选的。
-    配置写在 /sdcard/autod.conf，Android 11+ 里往共享存储根目录写文件
+    配置写在 /sdcard/remote-control.conf，Android 11+ 里往共享存储根目录写文件
     需要"所有文件访问"。没有它，本应用写的文件守护进程读不到，
     "改端口"这类操作就会静默失效 —— 那比申请权限更糟。
     这个权限只能在系统设置里由用户授予，应用会引导过去。
@@ -20,21 +20,21 @@
   没有 INTERNET 权限：本应用不与服务通信，只改配置文件。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.autod.controller">
+    package="com.remotecontrol.controller">
 
     <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="31" />
 
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
-        android:label="autod 服务管理"
+        android:label="remote-control 服务管理"
         android:allowBackup="false"
         android:supportsRtl="true">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="autod 服务管理">
+            android:label="remote-control 服务管理">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

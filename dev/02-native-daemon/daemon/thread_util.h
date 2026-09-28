@@ -17,7 +17,7 @@
 #include <new>
 #include <utility>
 
-namespace autod {
+namespace remote_control {
 
 namespace detail {
 
@@ -58,4 +58,4 @@ bool SpawnDetached(F&& fn) {
     return true;
 }
 
-}  // namespace autod
+}  // namespace remote_control

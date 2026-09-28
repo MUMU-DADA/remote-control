@@ -10,7 +10,7 @@
 # =============================================================================
 set -euo pipefail
 
-CONTAINER=autod-builder
+CONTAINER=remote-control-builder
 BRANCH=android-12.0.0_r34
 AOSP_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/git/AOSP
 REPO_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/git/git-repo

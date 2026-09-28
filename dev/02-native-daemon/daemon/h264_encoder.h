@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 
 class H264Encoder {
   public:
@@ -107,4 +107,4 @@ class H264Encoder {
     std::vector<uint8_t> yuv_;        // RGBA→YUV 的转换缓冲，复用避免每帧分配
 };
 
-}  // namespace autod
+}  // namespace remote_control

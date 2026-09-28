@@ -19,13 +19,13 @@
 #include "fileops.h"
 #include "test_util.h"
 
-using namespace autod;
-using autodtest::Check;
+using namespace remote_control;
+using remote_control_test::Check;
 
 namespace {
 
-const char* kRoot = "/tmp/autod-fileops-test/storage";
-const char* kDl   = "/tmp/autod-fileops-test/storage/Download";
+const char* kRoot = "/tmp/remote-control-fileops-test/storage";
+const char* kDl   = "/tmp/remote-control-fileops-test/storage/Download";
 
 void RmTree(const std::string& p) {
     std::string cmd = "rm -rf '" + p + "'";
@@ -127,20 +127,20 @@ void TestSymlink() {
 int main() {
     printf("文件管理路径边界测试\n");
 
-    RmTree("/tmp/autod-fileops-test");
-    if (mkdir("/tmp/autod-fileops-test", 0755) != 0) { /* 可能已存在 */ }
+    RmTree("/tmp/remote-control-fileops-test");
+    if (mkdir("/tmp/remote-control-fileops-test", 0755) != 0) { /* 可能已存在 */ }
     if (mkdir(kRoot, 0755) != 0) { /* 可能已存在 */ }
     if (mkdir(kDl, 0755) != 0) { /* 可能已存在 */ }
 
     TestResolve();
     TestSymlink();
 
-    RmTree("/tmp/autod-fileops-test");
+    RmTree("/tmp/remote-control-fileops-test");
 
-    printf("\n\033[1;32m全部通过\033[0m  (%d 项检查)\n", autodtest::gChecks);
-    if (autodtest::gFailed > 0) {
-        printf("\033[1;31m%d / %d 项失败\033[0m\n", autodtest::gFailed,
-               autodtest::gChecks);
+    printf("\n\033[1;32m全部通过\033[0m  (%d 项检查)\n", remote_control_test::gChecks);
+    if (remote_control_test::gFailed > 0) {
+        printf("\033[1;31m%d / %d 项失败\033[0m\n", remote_control_test::gFailed,
+               remote_control_test::gChecks);
         return 1;
     }
     return 0;

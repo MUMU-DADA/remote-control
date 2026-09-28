@@ -11,7 +11,7 @@
 | 步骤 | 必须吗 | 规模 |
 |---|---|---|
 | `repo sync` 拉源码 | ✅ **必须** | ~85 GB（`--depth=1`），一次性 |
-| `m autod` 编模块 | ✅ **必须** | 首次 30–90 分钟，之后**几分钟** |
+| `m remote-control` 编模块 | ✅ **必须** | 首次 30–90 分钟，之后**几分钟** |
 | 编完整系统镜像 | ❌ **不必须** | 额外 ~65 GB + 1–2 小时 |
 | 刷机 | ❌ **不必须** | — |
 
@@ -19,7 +19,7 @@
 
 ### 1.1 为什么躲不掉 `repo sync`
 
-`autod` 用了这些平台私有库，**头文件只存在于 AOSP 源码里，NDK 里没有**：
+`remote-control` 用了这些平台私有库，**头文件只存在于 AOSP 源码里，NDK 里没有**：
 
 | 头文件 | 位置 |
 |---|---|
@@ -33,7 +33,7 @@
 
 只有三种情况：
 
-1. 把 `autod` 装进 `/system/bin/` 并开机自启
+1. 把 `remote-control` 装进 `/system/bin/` 并开机自启
 2. 走 Java 系统服务方案（系统服务必须编进镜像）
 3. 给设备刷自定义 ROM
 
@@ -66,7 +66,7 @@ x86_64 Cuttlefish  →  快速迭代、调 Binder 调用、验证协议和链路
 ARM64 真机        →  最终验证、测真实延迟
 ```
 
-`autod` 源码是架构无关的（`protocol.h` 用定长类型，Python 客户端用 `"<"` 小端格式，aarch64 上同样成立）。两个目标都编一遍，首次之后增量都很快。
+`remote-control` 源码是架构无关的（`protocol.h` 用定长类型，Python 客户端用 `"<"` 小端格式，aarch64 上同样成立）。两个目标都编一遍，首次之后增量都很快。
 
 ---
 
@@ -99,10 +99,10 @@ ARM64 真机        →  最终验证、测真实延迟
 
 1. **`repo sync --depth=1 -c --no-tags`** → 省 ~25 GB
 2. **不开 ccache** → 省 100 GB。代价：`make clean` 后要全量重编。只要不 clean，增量编译完全正常
-3. **只 `m autod`，不编系统镜像** → 省 ~65 GB ← **单项最大**
+3. **只 `m remote-control`，不编系统镜像** → 省 ~65 GB ← **单项最大**
 4. **Cuttlefish 用预编译镜像** → 省 ~20 GB
 
-编完之后 `autod` 二进制只有几 MB，可以删掉 `out/` 再进下一轮。
+编完之后 `remote-control` 二进制只有几 MB，可以删掉 `out/` 再进下一轮。
 
 ### 4.3 结论
 
@@ -121,7 +121,7 @@ ARM64 真机        →  最终验证、测真实延迟
 | 档 | CPU / 主板 | 内存 | 硬盘 | 电源 | 参考价 | 首次全量编译 |
 |---|---|---|---|---|---|---|
 | 入门 | Ryzen 7 9700X（8C/16T）/ B650 | 64 GB DDR5-5600 | 1 TB NVMe PCIe 4.0 | 750W | ~¥7500 | 3–5 小时，重构时难受 |
-| **推荐 ← 甜点** | **Ryzen 9 9950X（16C/32T）/ X670E** | 64 GB DDR5-6000 | 1 TB NVMe PCIe 4.0（预算够上 2 TB） | 850W | ~¥11000 | 1–1.5 小时；日常 `m autod` 几分钟 |
+| **推荐 ← 甜点** | **Ryzen 9 9950X（16C/32T）/ X670E** | 64 GB DDR5-6000 | 1 TB NVMe PCIe 4.0（预算够上 2 TB） | 850W | ~¥11000 | 1–1.5 小时；日常 `m remote-control` 几分钟 |
 | 高配 | Threadripper 7960X（24C/48T）/ TRX50 | 128 GB DDR5 RDIMM | 4 TB NVMe | 1000W | ~¥29000 | 除非要同时跑多个 Cuttlefish 实例，否则没必要 |
 
 三档都是**核显即可**，编译完全不需要显卡（CPU + I/O 密集）。
@@ -151,7 +151,7 @@ ARM64 真机        →  最终验证、测真实延迟
 | **ARM64 测试机** | **Pixel 6 / 6a，解锁 bootloader + Magisk** | **~¥1000–1500（二手）** |
 | 独显 | 仅在要测延迟时需要 | ¥0–2000 |
 
-**推荐测试机：Pixel 6 / 6a**——出厂即 Android 12；bootloader 可解锁；AOSP 有完整设备树；Magisk root 后 `autod` 可直接从 `/data/local/tmp` 跑。
+**推荐测试机：Pixel 6 / 6a**——出厂即 Android 12；bootloader 可解锁；AOSP 有完整设备树；Magisk root 后 `remote-control` 可直接从 `/data/local/tmp` 跑。
 
 ---
 
@@ -173,18 +173,18 @@ repo sync -c --depth=1 --no-tags -j8
 # 每次改代码（首次 30–90 分钟，之后几分钟）
 source build/envsetup.sh
 lunch aosp_arm64-userdebug
-m autod
+m remote-control
 
 # 部署（需要 Magisk root）
-adb push $ANDROID_PRODUCT_OUT/system/bin/autod /data/local/tmp/
-adb shell chmod 755 /data/local/tmp/autod
+adb push $ANDROID_PRODUCT_OUT/system/bin/remote-control /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/remote-control
 ```
 
 `lunch` 目标选择：
 
 | 目标 | 用途 | 需要 vendor blobs |
 |---|---|---|
-| `aosp_arm64-userdebug` | 只编 `autod` | ❌ |
+| `aosp_arm64-userdebug` | 只编 `remote-control` | ❌ |
 | `aosp_oriole-userdebug` | Pixel 6 完整镜像 | ✅ |
 | `aosp_raven-userdebug` | Pixel 6 Pro 完整镜像 | ✅ |
 | `aosp_cf_x86_64_phone` | Cuttlefish 测试 | ❌ |
@@ -265,13 +265,13 @@ git config --system url.https://mirrors.tuna.tsinghua.edu.cn/git/git-repo.instea
 宿主是 Debian 13（gcc 14 / Python 3.13），而 **AOSP 12 官方只支持 Ubuntu 20.04/22.04**。直接编会踩一堆兼容性问题，所以用容器隔离。
 
 ```bash
-docker exec -it autod-builder bash     # 进入构建环境
+docker exec -it remote-control-builder bash     # 进入构建环境
 ```
 
 | 项 | 值 |
 |---|---|
-| 镜像 | `autod-aosp12-builder`（基于 `ubuntu:22.04`） |
-| 容器 | `autod-builder` |
+| 镜像 | `remote-control-aosp12-builder`（基于 `ubuntu:22.04`） |
+| 容器 | `remote-control-builder` |
 | 挂载 | `/root/AutoSnapshotAndroid/aosp` ↔ `/aosp` |
 | Java | OpenJDK 11（**AOSP 12 要求 JDK 11，不是 17**） |
 | Python | 3.10 |
@@ -299,13 +299,13 @@ docker exec -it autod-builder bash     # 进入构建环境
 
 ```bash
 # 进入构建环境
-docker exec -it autod-builder bash
+docker exec -it remote-control-builder bash
 
 # 在容器内
 cd /aosp
 source build/envsetup.sh
 lunch aosp_arm64-userdebug       # 只编二进制，不需要 vendor blobs
-m autod autodctl                 # 编我们自己的模块（分钟级）
+m remote-control rcctl                 # 编我们自己的模块（分钟级）
 
 # 产物
 ls $ANDROID_PRODUCT_OUT/system/bin/
@@ -320,10 +320,10 @@ tail -f /var/log/aosp-sync.log
 # 查看进度
 du -sh /root/AutoSnapshotAndroid/aosp
 df -h /root/AutoSnapshotAndroid
-docker exec autod-builder pgrep -f "repo/main.py" >/dev/null && echo 运行中 || echo 已停止
+docker exec remote-control-builder pgrep -f "repo/main.py" >/dev/null && echo 运行中 || echo 已停止
 ```
 
-### 8.7 模拟器（跑 arm64 应用验证 `autod`，不需要真机）
+### 8.7 模拟器（跑 arm64 应用验证 `remote-control`，不需要真机）
 
 **当前路线（2026-09-28 起）**：`dev/04-x64-android/` —— **自编 x86_64 Android 12 ROM +
 ARM 用户态翻译层**，同架构运行、KVM/WHPX 加速，能跑 arm64 应用。详见该目录的 README。
@@ -349,7 +349,7 @@ ARM 用户态翻译层**，同架构运行、KVM/WHPX 加速，能跑 arm64 应�
 | 阶段 | 占用 |
 |---|---|
 | 源码（shallow） | ~85 GB |
-| `out/` 只编 `autod` | ~35 GB |
+| `out/` 只编 `remote-control` | ~35 GB |
 | `out/` 全量编系统镜像 | ~100 GB |
 
 空间充裕，不需要开 ccache 省，也不需要频繁清理。

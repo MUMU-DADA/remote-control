@@ -22,7 +22,7 @@ import sys
 import time
 import urllib.request
 
-BOUNDARY = "autodframe"
+BOUNDARY = "remote-control-frame"
 
 
 def http_get(url: str, timeout: float = 5.0) -> bytes:

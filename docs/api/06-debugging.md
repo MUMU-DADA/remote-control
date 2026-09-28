@@ -2,7 +2,7 @@
 
 ---
 
-## `AUTOD_FORCE_FALLBACK=1` —— 强制走回退编码器
+## `REMOTE_CONTROL_FORCE_FALLBACK=1` —— 强制走回退编码器
 
 Android 11+ 永远探测得到 `AndroidBitmap_compress`，所以
 **libjpeg / 内置 libwebp / zlib 那条回退路径在开发机上根本跑不到**。
@@ -10,11 +10,11 @@ Android 11+ 永远探测得到 `AndroidBitmap_compress`，所以
 而"没跑过的代码"和"没有的代码"在出故障时是一样的。
 
 ```bash
-adb shell "AUTOD_FORCE_FALLBACK=1 setsid nohup \
-           /data/local/tmp/autod-supervisord.sh > /dev/null 2>&1 &"
+adb shell "REMOTE_CONTROL_FORCE_FALLBACK=1 setsid nohup \
+           /data/local/tmp/remote-control-supervisord.sh > /dev/null 2>&1 &"
 ```
 
-环境变量会从 supervisor 继承给 autod（脚本用的是 `nohup "$BIN" …`，
+环境变量会从 supervisor 继承给 remote-control（脚本用的是 `nohup "$BIN" …`，
 没有清环境）。
 
 ### 它做什么
@@ -42,9 +42,9 @@ curl -s http://host:8088/api/v1/params | jq .codecs
 服务端日志也会打：
 
 ```
-W autod: AUTOD_FORCE_FALLBACK=1 —— 跳过 AndroidBitmap_compress，
+W remote-control: REMOTE_CONTROL_FORCE_FALLBACK=1 —— 跳过 AndroidBitmap_compress，
         强制走回退编码器（仅用于验证老设备路径）
-I autod: 图像编码器: libjpeg: 6b … + libwebp（内置） + zlib PNG（回退路径，强制）
+I remote-control: 图像编码器: libjpeg: 6b … + libwebp（内置） + zlib PNG（回退路径，强制）
 ```
 
 ### 实测：两条路差多少
@@ -68,9 +68,9 @@ I autod: 图像编码器: libjpeg: 6b … + libwebp（内置） + zlib PNG（回
 
 | 变量 | 作用 |
 |---|---|
-| `AUTOD_CONFIG` | 配置文件路径（默认 `/sdcard/autod.conf`） |
-| `AUTOD_IDLE_TIMEOUT_SEC` | socket 空闲超时。**测试用** —— 不压到 1 秒的话集成测试要等 30 秒 |
-| `AUTOD_FORCE_FALLBACK` | 见上 |
+| `REMOTE_CONTROL_CONFIG` | 配置文件路径（默认 `/sdcard/remote-control.conf`） |
+| `REMOTE_CONTROL_IDLE_TIMEOUT_SEC` | socket 空闲超时。**测试用** —— 不压到 1 秒的话集成测试要等 30 秒 |
+| `REMOTE_CONTROL_FORCE_FALLBACK` | 见上 |
 
 ---
 
@@ -81,7 +81,7 @@ I autod: 图像编码器: libjpeg: 6b … + libwebp（内置） + zlib PNG（回
 
 ```
 1. 默认（有 Skia）           → 验证主路径
-2. AUTOD_FORCE_FALLBACK=1    → 验证老设备路径
+2. REMOTE_CONTROL_FORCE_FALLBACK=1    → 验证老设备路径
 3. 两者都跑一遍 /params，确认 codecs 与实际编码结果一致
 ```
 

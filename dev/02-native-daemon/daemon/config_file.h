@@ -1,4 +1,4 @@
-// config_file.h — 持久化配置（/sdcard/autod.conf）
+// config_file.h — 持久化配置（/sdcard/remote-control.conf）
 //
 // 为什么放在 /sdcard：
 //
@@ -27,7 +27,7 @@
 
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 struct PersistedConfig {
     bool        enabled = true;
@@ -42,7 +42,7 @@ struct PersistedConfig {
 
 class ConfigFile {
   public:
-    // 默认路径。可用 AUTOD_CONFIG 环境变量覆盖（测试和非常规部署要用）。
+    // 默认路径。可用 REMOTE_CONTROL_CONFIG 环境变量覆盖（测试和非常规部署要用）。
     static std::string DefaultPath();
 
     // 读取。**文件不存在不算错误** —— 返回全默认值。
@@ -67,4 +67,4 @@ class ConfigFile {
     static std::string Serialize(const PersistedConfig& cfg);
 };
 
-}  // namespace autod
+}  // namespace remote_control

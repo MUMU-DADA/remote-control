@@ -1,6 +1,6 @@
 # 实机验证证据
 
-`emulator-android12-shot.png` —— **autod 在真实 Android 12 上抓的第一帧**。
+`emulator-android12-shot.png` —— **remote-control 在真实 Android 12 上抓的第一帧**。
 
 ## 环境
 
@@ -41,7 +41,7 @@ swipe    已滑动 (160,400) -> (160,100)
 内核侧确认虚拟设备真的注册了：
 
 ```
-N: Name="autod-touch"
+N: Name="remote-control-touch"
 S: Sysfs=/devices/virtual/input/input16
 H: Handlers=event14
 B: PROP=2          ← INPUT_PROP_DIRECT

@@ -1,13 +1,13 @@
-// autodctl.cpp — autod 的参考客户端（在设备上运行）
+// rcctl.cpp — remote-control 的参考客户端（在设备上运行）
 //
-// 为什么必须有 C++ 版本：autod 用 SOCK_SEQPACKET + SCM_RIGHTS 传帧，
+// 为什么必须有 C++ 版本：remote-control 用 SOCK_SEQPACKET + SCM_RIGHTS 传帧，
 // 这两样都过不了 `adb forward`（TCP）。所以客户端必须在设备上跑。
 //
 // 用法：
-//   autodctl --socket /data/local/tmp/autod.sock info
-//   autodctl --socket /data/local/tmp/autod.sock capture -o /data/local/tmp/shot.png
-//   autodctl --socket /data/local/tmp/autod.sock tap 540 1200
-//   autodctl --socket /data/local/tmp/autod.sock swipe 540 1600 540 400
+//   rcctl --socket /data/local/tmp/remote-control.sock info
+//   rcctl --socket /data/local/tmp/remote-control.sock capture -o /data/local/tmp/shot.png
+//   rcctl --socket /data/local/tmp/remote-control.sock tap 540 1200
+//   rcctl --socket /data/local/tmp/remote-control.sock swipe 540 1600 540 400
 
 #include <errno.h>
 #include <fcntl.h>
@@ -33,7 +33,7 @@
 
 #include "../daemon/protocol.h"
 
-using namespace autod;
+using namespace remote_control;
 
 namespace {
 
@@ -188,7 +188,7 @@ int CmdCapture(int sockFd, const char* outPath, bool raw) {
         }
     } else {
 // AndroidBitmap_compress 是 API 30 才有的。编到更低版本时走下面的 PPM 分支 ——
-// autodctl 是调试工具，输出格式降级无所谓，**编不过才是问题**。
+// rcctl 是调试工具，输出格式降级无所谓，**编不过才是问题**。
 #if defined(__ANDROID__) && __ANDROID_API__ >= 30
         // 用 AndroidBitmap_compress 编码成 PNG，和 AOSP 的 screencap 同一条路
         AndroidBitmapInfo info;
@@ -289,7 +289,7 @@ int CmdSwipe(int sockFd, int x1, int y1, int x2, int y2, uint32_t durationMs) {
 }
 
 void Usage(const char* argv0) {
-    fprintf(stderr, R"(autodctl — autod 客户端
+    fprintf(stderr, R"(rcctl — remote-control 客户端
 
 用法: %s --socket <路径> <子命令> [参数]
 
@@ -336,7 +336,7 @@ void Usage(const char* argv0) {
   restart                                   退出并由 init 重启（退出码 1）
 
 选项:
-  --socket <路径>   autod 的 Unix socket 路径（必填）
+  --socket <路径>   remote-control 的 Unix socket 路径（必填）
 )", argv0);
 }
 

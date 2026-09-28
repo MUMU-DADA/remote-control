@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# build-cuttlefish.sh —— 编 Cuttlefish 镜像（用于真实验证 autod）
+# build-cuttlefish.sh —— 编 Cuttlefish 镜像（用于真实验证 remote-control）
 #
-# 为什么需要它：autod 的 ARM64 二进制已经编出来了，但**从没在真实 Android 上跑过**。
+# 为什么需要它：remote-control 的 ARM64 二进制已经编出来了，但**从没在真实 Android 上跑过**。
 # 没有实体设备的情况下，Cuttlefish 是唯一的验证途径 —— 它是 AOSP 官方的
-# 虚拟设备方案，跑完整 Android，能装 autod 并真实执行。
+# 虚拟设备方案，跑完整 Android，能装 remote-control 并真实执行。
 #
 # 为什么是 x86_64 而不是 arm64：
 #   Cuttlefish 跑在 KVM 上，跨架构没有 KVM 加速。x86_64 主机只能用
-#   aosp_cf_x86_64_phone。好在 autod 的代码是架构无关的，
+#   aosp_cf_x86_64_phone。好在 remote-control 的代码是架构无关的，
 #   x86_64 上验证过的逻辑，ARM64 上一样。
 #
 # 规模：完整系统镜像，首次约 40000-80000 个 ninja 动作，1-3 小时
@@ -23,7 +23,7 @@ set -euo pipefail
 #    所以字符串内部**不能出现反引号** —— 宿主 shell 会把它当命令替换执行。
 #    （第一版注释里写了 `m`，结果宿主上真的去执行了 m 命令并报错。）
 
-CONTAINER=${CONTAINER:-autod-builder}
+CONTAINER=${CONTAINER:-remote-control-builder}
 TARGET=${TARGET:-aosp_cf_x86_64_phone-userdebug}
 JOBS=${JOBS:-12}
 
@@ -67,12 +67,12 @@ docker exec "$CONTAINER" bash -lc "
     echo \"TARGET_PRODUCT=\$TARGET_PRODUCT\"
     echo \"TARGET_BUILD_VARIANT=\$TARGET_BUILD_VARIANT\"
     echo \"ANDROID_PRODUCT_OUT=\$ANDROID_PRODUCT_OUT\"
-    # 先编镜像，再编 autod/autodctl。
+    # 先编镜像，再编 remote-control/rcctl。
     #
     # ⚠️ 光跑 m 是不够的 —— 它只编 PRODUCT_PACKAGES 里的模块，
-    #    而 autod 不在其中，所以 system/bin/ 下不会出现 autod。
+    #    而 remote-control 不在其中，所以 system/bin/ 下不会出现 remote-control。
     #    verify-cuttlefish.sh 要 push 这个二进制，缺了就无从验证。
-    m -j$JOBS droid autod autodctl
+    m -j$JOBS droid remote-control rcctl
 " 2>&1 | tee "$LOG"
 RC=${PIPESTATUS[0]}
 set -e
@@ -104,15 +104,15 @@ echo
 echo "日志: $LOG"
 echo
 cat <<'EOF'
-下一步（启动 Cuttlefish 并部署 autod）:
+下一步（启动 Cuttlefish 并部署 remote-control）:
   bash tools/verify-cuttlefish.sh
 
 或者手工：
-  docker exec -it autod-builder bash
+  docker exec -it remote-control-builder bash
   cd /aosp && source build/envsetup.sh && lunch aosp_cf_x86_64_phone-userdebug
   launch_cvd --daemon
   adb wait-for-device
-  adb push $ANDROID_PRODUCT_OUT/system/bin/autod    /data/local/tmp/
-  adb push $ANDROID_PRODUCT_OUT/system/bin/autodctl /data/local/tmp/
-  adb root && adb shell /data/local/tmp/autod --selftest
+  adb push $ANDROID_PRODUCT_OUT/system/bin/remote-control    /data/local/tmp/
+  adb push $ANDROID_PRODUCT_OUT/system/bin/rcctl /data/local/tmp/
+  adb root && adb shell /data/local/tmp/remote-control --selftest
 EOF

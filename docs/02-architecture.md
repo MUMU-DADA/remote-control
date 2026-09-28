@@ -1,6 +1,6 @@
 # 02 · 架构设计
 
-> `autod` 的组件划分、协议设计与关键决策。
+> `remote-control` 的组件划分、协议设计与关键决策。
 >
 > **接口细节（三条传输的参数、响应、错误码）以 [`api/`](api/README.md) 为准**，本文不重复罗列。
 
@@ -17,7 +17,7 @@
          └───────────┬──────────────────┘
                      ▼
      ┌───────────────────────────────────────────┐
-     │            autod (native daemon)          │
+     │            remote-control (native daemon)          │
      │                                           │
      │  socket_server.cpp   Unix socket 服务端    │
      │  http_server.cpp     HTTP/1.1 + WS 升级    │
@@ -25,9 +25,9 @@
      │  dispatch.cpp        ← 唯一的 Dispatcher   │
      │  capture_*.cpp       截图后端（编译期选）   │
      │  inject_*.cpp        注入后端（编译期选）   │
-     │  config_file.cpp     /sdcard/autod.conf   │
+     │  config_file.cpp     /sdcard/remote-control.conf   │
      │                                           │
-     │  SELinux domain: autod                    │
+     │  SELinux domain: remote-control                    │
      └───────┬──────────────────────┬────────────┘
              │ Binder               │ syscall
              ▼                      ▼
@@ -53,7 +53,7 @@
 | `capture.h` + `capture_surfaceflinger.cpp` / `capture_screencap.cpp` | 抓帧并拷进 memfd。前者直连 SF，后者 exec `/system/bin/screencap` | ✅ `libgui` / ❌（只 fork/exec） |
 | `inject.{h,cpp}` + `inject_uinput.cpp` / `inject_vtp.cpp` / `inject_binder.cpp` | 手势与按键逻辑（平台无关）+ 可替换的注入后端 | ✅ 视后端而定 |
 | `keyboard.cpp` / `clipops.cpp` / `appops.cpp` / `fileops.cpp` | 按键、剪贴板、应用管理、文件管理 | ⚠️ 走 `pm`/`am`/`cmd`/`dumpsys` 子进程 |
-| `config_file.{h,cpp}` / `service_state.{h,cpp}` | `/sdcard/autod.conf`、运行时状态（API 的"控制自身"） | ❌ 无 |
+| `config_file.{h,cpp}` / `service_state.{h,cpp}` | `/sdcard/remote-control.conf`、运行时状态（API 的"控制自身"） | ❌ 无 |
 | `webui.cpp` / `image_encoder.cpp` / `png_encoder.cpp` | 内置网页控制台与图像编码 | ❌ 无 |
 | `main.cpp` | 初始化、参数解析、信号处理、拉起两条传输 | ⚠️ `libbinder` |
 
@@ -94,12 +94,12 @@ capture_*.cpp  → memfd（逐行 memcpy，步长用 getStride()）
 ### 3.2 socket 由 init 创建
 
 ```
-init 读取 autod.rc 里的 `socket autod seqpacket 0660 system system`
+init 读取 remote-control.rc 里的 `socket remote-control seqpacket 0660 system system`
      │
-     ├─ 创建 /dev/socket/autod
-     ├─ 自动打上 SELinux 标签 autod_socket
+     ├─ 创建 /dev/socket/remote-control
+     ├─ 自动打上 SELinux 标签 remote_control_socket
      ├─ listen()
-     └─ 通过环境变量 ANDROID_SOCKET_autod 把 fd 传给 autod
+     └─ 通过环境变量 ANDROID_SOCKET_remote-control 把 fd 传给 remote-control
 ```
 
 **好处**：
@@ -108,7 +108,7 @@ init 读取 autod.rc 里的 `socket autod seqpacket 0660 system system`
 2. 服务崩溃重启时 socket 不会丢
 3. 避免 race condition（先 bind 还是先降权）
 
-开发期的手动模式（`--socket <路径>`，默认 `/data/local/tmp/autod.sock`）保留，用于阶段 1 免 sepolicy 原型；此时文件权限由 `--socket-mode`（默认 0660）决定。init 模式下 `--socket-mode` 无效——init 建的文件我们不去改。
+开发期的手动模式（`--socket <路径>`，默认 `/data/local/tmp/remote-control.sock`）保留，用于阶段 1 免 sepolicy 原型；此时文件权限由 `--socket-mode`（默认 0660）决定。init 模式下 `--socket-mode` 无效——init 建的文件我们不去改。
 
 ### 3.3 鉴权分层
 
@@ -127,7 +127,7 @@ HTTP / WebSocket：
 
 > ⚠️ **首启默认无鉴权。** 在无鉴权且 bind 被改成 `0.0.0.0` 的情况下，同一网络里任何人都能看屏幕、点屏幕、按键、读剪贴板、装应用。这个不对称是有意的：让"对外"成为一个需要主动做的决定。
 
-**生产环境建议**：socket 侧建一个专用 AID（如 `AID_AUTOD`），需要调用的客户端进程加入该组；或校验 `cred.uid` 是否在允许列表内。HTTP 侧开启 `auth=1`。
+**生产环境建议**：socket 侧建一个专用 AID（如 `AID_REMOTE_CONTROL`），需要调用的客户端进程加入该组；或校验 `cred.uid` 是否在允许列表内。HTTP 侧开启 `auth=1`。
 
 ---
 
@@ -191,7 +191,7 @@ static_assert(sizeof(Reply) == 40, "布局变了，需同步 Python 客户端");
 ```
 
 ```python
-# autod_client.py
+# rc_client.py
 assert REQUEST_SIZE == 44
 assert REPLY_SIZE == 40
 ```
@@ -225,7 +225,7 @@ curl -s http://host:8088/api/v1/describe | jq '.protocolVersion, (.commands|leng
 ```
 ① 客户端 sendmsg(Request{cmd=Capture})
         │
-② autod 收到请求
+② remote-control 收到请求
         │
 ③ SurfaceComposerClient::getPhysicalDisplayIds()  → 选显示
         │
@@ -274,20 +274,20 @@ android::ProcessState::self()->startThreadPool();
 ```
 开机
   │
-  ├─ init 解析 /system/etc/init/autod.rc
-  ├─ init 创建 /dev/socket/autod（打标签、设置权限）
+  ├─ init 解析 /system/etc/init/remote-control.rc
+  ├─ init 创建 /dev/socket/remote-control（打标签、设置权限）
   │
   ▼
 on property:sys.boot_completed=1
   │
-  ├─ init fork/exec /system/bin/autod --init-socket autod
-  ├─ 应用 seclabel u:r:autod:s0（SELinux 域转换）
+  ├─ init fork/exec /system/bin/remote-control --init-socket remote-control
+  ├─ 应用 seclabel u:r:remote-control:s0（SELinux 域转换）
   │
   ▼
 main()
   ├─ ProcessState::setThreadPoolMaxThreadCount(0) + startThreadPool()
   │                                       ← 截图必需，且必须在任何抓帧之前
-  ├─ 解析命令行 + 读 /sdcard/autod.conf（优先级：CLI > 配置文件 > 内置默认）
+  ├─ 解析命令行 + 读 /sdcard/remote-control.conf（优先级：CLI > 配置文件 > 内置默认）
   ├─ Capture::Init()                      → 连接 SurfaceFlinger，解析显示
   ├─ Injector::Init()                     → 打开 /dev/uinput，注册虚拟设备
   ├─ SocketServer::Start()                → 接管 init 传来的 fd（或自己 bind）
@@ -309,11 +309,11 @@ main()
 
 | 层 | 组成 | 说明 |
 |---|---|---|
-| 服务本体 | `/system/bin/autod`（init 拉起）或 `/data/local/tmp/autod`（root 手动） | 同一个二进制，靠 `--init-socket` / `--socket` 区分 |
-| 配置 | `/sdcard/autod.conf`（key=value 纯文本） | 上位应用与守护进程都能读写；`enabled` 每 2s 热读 |
-| supervisor | `tools/autod-supervisord.sh`（root 常驻） | 按配置**保活**，状态写 `/sdcard/autod.status` |
+| 服务本体 | `/system/bin/remote-control`（init 拉起）或 `/data/local/tmp/remote-control`（root 手动） | 同一个二进制，靠 `--init-socket` / `--socket` 区分 |
+| 配置 | `/sdcard/remote-control.conf`（key=value 纯文本） | 上位应用与守护进程都能读写；`enabled` 每 2s 热读 |
+| supervisor | `tools/remote-control-supervisord.sh`（root 常驻） | 按配置**保活**，状态写 `/sdcard/remote-control.status` |
 | 上位应用 | `dev/05-controller-app/` | **只做服务管理**：启停、改端口、开关鉴权 |
-| 运行身份 | init 模式 `user system` / `group system uhid graphics` | ⚠️ **待核实**：`captureDisplay` 的权限检查比的是 **UID** 而非 GID，"在 graphics 组里"并不满足；若抓帧报 `PERMISSION_DENIED`，按 `autod.rc` 的备选方案改用 `user shell`。`autod --selftest` 的 [2] 会直接报出来 |
+| 运行身份 | init 模式 `user system` / `group system uhid graphics` | ⚠️ **待核实**：`captureDisplay` 的权限检查比的是 **UID** 而非 GID，"在 graphics 组里"并不满足；若抓帧报 `PERMISSION_DENIED`，按 `remote-control.rc` 的备选方案改用 `user shell`。`remote-control --selftest` 的 [2] 会直接报出来 |
 
 上位应用是普通 Android 应用（**没有 root**），起不了 root 守护进程，但能写共享存储——所以它只写配置文件，真正的进程管理交给 supervisor；应用侧因此只依赖"文件能写"这一件事。网页控制台里已有的能力（画面、触控、应用管理）应用不再重复实现，避免两套 UI 行为不一致。
 

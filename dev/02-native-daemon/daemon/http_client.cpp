@@ -10,9 +10,9 @@
 
 #include <vector>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 // ── libcurl 的最小 ABI 声明 ─────────────────────────────────────────────────
@@ -207,7 +207,7 @@ bool HttpClient::DownloadToFile(const std::string& url,
     g_api.easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
     g_api.easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     g_api.easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
-    g_api.easy_setopt(curl, CURLOPT_USERAGENT, "autod/2.0");
+    g_api.easy_setopt(curl, CURLOPT_USERAGENT, "remote-control/2.0");
     // 重定向后也只允许 http/https
     g_api.easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
     g_api.easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
@@ -246,4 +246,4 @@ bool HttpClient::DownloadToFile(const std::string& url,
     return true;
 }
 
-}  // namespace autod
+}  // namespace remote_control

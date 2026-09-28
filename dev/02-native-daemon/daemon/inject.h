@@ -15,7 +15,7 @@
 #include <memory>
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 // 动作常量。
 //
@@ -46,7 +46,7 @@ struct InjectorConfig {
     uint32_t touchHeight = 0;
 
     // 虚拟设备名。uinput 后端用它注册输入设备；binder 后端忽略。
-    const char* deviceName = "autod-touch";
+    const char* deviceName = "remote-control-touch";
 
     // 目标显示 ID。binder 后端用它；uinput 后端交给 Android 自行关联。
     int32_t displayId = 0;
@@ -114,4 +114,4 @@ class Injector {
     int64_t downTimeNs_ = 0;           // 当前手势起始时间；0 表示无进行中手势
 };
 
-}  // namespace autod
+}  // namespace remote_control

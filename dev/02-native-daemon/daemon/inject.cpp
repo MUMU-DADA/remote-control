@@ -15,10 +15,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "inject_backend.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 int64_t NowNs() {
@@ -256,4 +256,4 @@ bool Injector::TouchUp(const TouchPoint& point, bool async, std::string* error) 
     return SendSingle(kActionUp, point, NowNs(), async, error);
 }
 
-}  // namespace autod
+}  // namespace remote_control

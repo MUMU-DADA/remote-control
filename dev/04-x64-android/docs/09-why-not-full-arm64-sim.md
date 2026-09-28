@@ -94,5 +94,5 @@ ranchu 机器能起来 ✓ → arm64 guest 启动 ✓ → 零宿主段错误 / �
 
 官方 `system-images;android-31;google_apis;x86_64` 本身就是"x86_64 + arm64 桥"：
 `ro.product.cpu.abilist = x86_64,arm64-v8a`，34 秒开机就能跑 arm64 应用。
-本项目的差别只在于**可控**：能加系统服务、改 framework、塞 `autod`、做交付裁剪。
+本项目的差别只在于**可控**：能加系统服务、改 framework、塞 `remote-control`、做交付裁剪。
 详见 [`00-bridge-eval.md`](00-bridge-eval.md)。

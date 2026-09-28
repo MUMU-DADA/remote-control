@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 class PngEncoder {
   public:
@@ -35,4 +35,4 @@ class PngEncoder {
     void* handle_ = nullptr;
 };
 
-}  // namespace autod
+}  // namespace remote_control

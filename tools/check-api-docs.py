@@ -14,10 +14,10 @@
 """
 import json, urllib.request, urllib.error, urllib.parse, re, sys, os
 
-# 默认地址可被参数或 AUTOD_BASE 覆盖 —— 设备 IP 会变，
+# 默认地址可被参数或 REMOTE_CONTROL_BASE 覆盖 —— 设备 IP 会变，
 # 写死一个只会让人以为"检查通过了"而其实连的是别的东西。
 BASE = (sys.argv[1] if len(sys.argv) > 1
-        else os.environ.get("AUTOD_BASE", "http://127.0.0.1:8088"))
+        else os.environ.get("REMOTE_CONTROL_BASE", "http://127.0.0.1:8088"))
 B = BASE.rstrip("/") + "/api/v1"
 DOCS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "api")
 def api(p):

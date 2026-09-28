@@ -10,7 +10,7 @@
 
 set -uo pipefail
 
-CONTAINER=${CONTAINER:-autod-builder}
+CONTAINER=${CONTAINER:-remote-control-builder}
 
 docker exec "$CONTAINER" ps -eo stat,comm --no-headers 2>/dev/null \
     | awk '$1 !~ /^Z/ && $2 ~ /^(soong_ui|soong_build|ckati|ninja)$/ { found = 1 } END { exit !found }'

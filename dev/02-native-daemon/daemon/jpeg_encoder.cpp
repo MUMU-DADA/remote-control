@@ -7,14 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 
 // vendor 的头文件。用相对路径引，省得每个构建系统都要加 -I。
 // 来源与"为什么必须从 AOSP 拿"见 vendor/jpeg/README.md。
 #include "vendor/jpeg/jpeglib.h"
 #include "vendor/jpeg/jversion.h"   // JVERSION（编译期版本串）
 
-namespace autod {
+namespace remote_control {
 
 // ── dlopen 出来的函数指针 ──
 struct JpegEncoder::Api {
@@ -98,23 +98,23 @@ bool JpegEncoder::Init(std::string* error) {
 
     // 一个宏而不是一张表：dlsym 失败时报出**具体是哪个符号**，
     // 比"libjpeg 不可用"有用得多 —— 有些精简 ROM 会裁掉部分符号。
-#define AUTOD_JPEG_SYM(field, name)                                        \
+#define REMOTE_CONTROL_JPEG_SYM(field, name)                                        \
     do {                                                                   \
         *(void**)(&api->field) = dlsym(handle_, name);                     \
         if (api->field == nullptr) { missing = name; goto fail; }          \
     } while (0)
 
-    AUTOD_JPEG_SYM(std_error,        "jpeg_std_error");
-    AUTOD_JPEG_SYM(create_compress,  "jpeg_CreateCompress");
-    AUTOD_JPEG_SYM(destroy_compress, "jpeg_destroy_compress");
-    AUTOD_JPEG_SYM(set_defaults,     "jpeg_set_defaults");
-    AUTOD_JPEG_SYM(set_quality,      "jpeg_set_quality");
-    AUTOD_JPEG_SYM(start_compress,   "jpeg_start_compress");
-    AUTOD_JPEG_SYM(write_scanlines,  "jpeg_write_scanlines");
-    AUTOD_JPEG_SYM(finish_compress,  "jpeg_finish_compress");
-    AUTOD_JPEG_SYM(mem_dest,         "jpeg_mem_dest");
-    AUTOD_JPEG_SYM(abort_compress,   "jpeg_abort_compress");
-#undef AUTOD_JPEG_SYM
+    REMOTE_CONTROL_JPEG_SYM(std_error,        "jpeg_std_error");
+    REMOTE_CONTROL_JPEG_SYM(create_compress,  "jpeg_CreateCompress");
+    REMOTE_CONTROL_JPEG_SYM(destroy_compress, "jpeg_destroy_compress");
+    REMOTE_CONTROL_JPEG_SYM(set_defaults,     "jpeg_set_defaults");
+    REMOTE_CONTROL_JPEG_SYM(set_quality,      "jpeg_set_quality");
+    REMOTE_CONTROL_JPEG_SYM(start_compress,   "jpeg_start_compress");
+    REMOTE_CONTROL_JPEG_SYM(write_scanlines,  "jpeg_write_scanlines");
+    REMOTE_CONTROL_JPEG_SYM(finish_compress,  "jpeg_finish_compress");
+    REMOTE_CONTROL_JPEG_SYM(mem_dest,         "jpeg_mem_dest");
+    REMOTE_CONTROL_JPEG_SYM(abort_compress,   "jpeg_abort_compress");
+#undef REMOTE_CONTROL_JPEG_SYM
 
     api_ = api;
     available_ = true;
@@ -239,4 +239,4 @@ std::string JpegEncoder::EncodeRgba(const uint8_t* rgba, uint32_t width,
     return out;
 }
 
-}  // namespace autod
+}  // namespace remote_control

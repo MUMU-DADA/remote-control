@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # =============================================================================
-# autod-supervisord —— 按 /sdcard/autod.conf 管理 autod 的启停
+# remote-control-supervisord —— 按 /sdcard/remote-control.conf 管理 remote-control 的启停
 #
 # 为什么需要它：
 #
@@ -12,7 +12,7 @@
 # 它做的事：
 #   1. 每 INTERVAL 秒读一次配置
 #   2. **进程始终保活**，bind/port/auth/token 变了才重启
-#   3. 把实际状态写进 /sdcard/autod.status，供上位应用显示
+#   3. 把实际状态写进 /sdcard/remote-control.status，供上位应用显示
 #
 # ⚠️ enabled=0 **不再停进程**。
 #
@@ -21,15 +21,15 @@
 #   把它开回来了 —— 网页打不开、接口不通，只能跑到机器跟前。
 #   supervisor 的职责因此收敛成两个字：保活。
 #
-# 用法（需要 root；真实设备上建议做成 init 服务，见 autod.rc）：
-#   nohup /data/local/tmp/autod-supervisord.sh >/dev/null 2>&1 &
+# 用法（需要 root；真实设备上建议做成 init 服务，见 remote-control.rc）：
+#   nohup /data/local/tmp/remote-control-supervisord.sh >/dev/null 2>&1 &
 # =============================================================================
 
-CONF=${AUTOD_CONFIG:-/sdcard/autod.conf}
-STATUS=/sdcard/autod.status
-BIN=${AUTOD_BIN:-/data/local/tmp/autod}
-SOCK=${AUTOD_SOCK:-/data/local/tmp/autod.sock}
-LOG=/data/local/tmp/autod-run.log
+CONF=${REMOTE_CONTROL_CONFIG:-/sdcard/remote-control.conf}
+STATUS=/sdcard/remote-control.status
+BIN=${REMOTE_CONTROL_BIN:-/data/local/tmp/remote-control}
+SOCK=${REMOTE_CONTROL_SOCK:-/data/local/tmp/remote-control.sock}
+LOG=/data/local/tmp/remote-control-run.log
 INTERVAL=2
 
 # 当前生效的值，用来判断"要不要重启"
@@ -76,9 +76,9 @@ write_status() {
     } > "$STATUS.tmp" 2>/dev/null && mv "$STATUS.tmp" "$STATUS" 2>/dev/null
 }
 
-stop_autod() {
+stop_remote-control() {
     if [ -n "$cur_pid" ] && kill -0 "$cur_pid" 2>/dev/null; then
-        log "停止 autod (pid $cur_pid)"
+        log "停止 remote-control (pid $cur_pid)"
         kill "$cur_pid" 2>/dev/null
         # 给它 3 秒优雅退出（它会关掉 uinput 设备、清理 socket 文件）
         i=0
@@ -93,9 +93,9 @@ stop_autod() {
     cur_pid=""
 }
 
-start_autod() {
-    stop_autod
-    log "启动 autod (bind=$1 port=$2)"
+start_remote-control() {
+    stop_remote-control
+    log "启动 remote-control (bind=$1 port=$2)"
     # **不传 --http-bind/--http-port** —— 让守护进程自己读配置文件。
     # 传了的话 CLI 优先级更高，配置文件里改端口就不会生效了，
     # 而那正是上位机要控制的东西。
@@ -134,7 +134,7 @@ while true; do
     # 注意 fp 里**不含 enabled**：拨开关不该重启服务，
     # 那会打断所有正在看的画面流和触控连接。
     if [ "$alive" = "0" ] || [ "$fp" != "$cur_fp" ]; then
-        start_autod "$B" "$P"
+        start_remote-control "$B" "$P"
         cur_fp="$fp"
     fi
     if [ -n "$cur_pid" ]; then

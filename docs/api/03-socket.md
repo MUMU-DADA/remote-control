@@ -1,6 +1,6 @@
 # Unix socket 二进制协议
 
-> 地址：`/data/local/tmp/autod.sock`（默认）或 init 创建的 `/dev/socket/autod`
+> 地址：`/data/local/tmp/remote-control.sock`（默认）或 init 创建的 `/dev/socket/remote-control`
 > 类型：**`SOCK_SEQPACKET`**，不是 `SOCK_STREAM`
 
 ---
@@ -113,7 +113,7 @@ REQ = struct.Struct("<IIIIiiiiIff")     # 44 字节
 REP = struct.Struct("<IIIIIIIIQ")       # 40 字节（含显式 reserved）
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-s.connect("/data/local/tmp/autod.sock")
+s.connect("/data/local/tmp/remote-control.sock")
 
 # 发一个截图请求：magic, cmd, flags, pointerId, x, y, x2, y2, ms, pressure, size
 req = REQ.pack(MAGIC, CMD_CAPTURE, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0)
@@ -139,7 +139,7 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 
 ### C++
 
-见 `dev/02-native-daemon/client/autodctl.cpp` —— 它是完整的参考实现，
+见 `dev/02-native-daemon/client/rcctl.cpp` —— 它是完整的参考实现，
 包含 fd 接收、memfd 读取、以及用 `AndroidBitmap_compress` 编码 PNG。
 
 ---

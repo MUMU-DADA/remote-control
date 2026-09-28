@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-namespace autod {
+namespace remote_control {
 
 class JpegEncoder {
   public:
@@ -67,4 +67,4 @@ class JpegEncoder {
     std::string backend_;
 };
 
-}  // namespace autod
+}  // namespace remote_control

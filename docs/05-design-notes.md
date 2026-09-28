@@ -464,7 +464,7 @@ uinput 的 ABS 范围在设备创建时就固定了，客户端按它发坐标�
 
 ### ⚠️ 安全边界：路径约束
 
-**所有路径参数都来自客户端，而 autod 以 root 运行。
+**所有路径参数都来自客户端，而 remote-control 以 root 运行。
 一个 `../..` 就能删掉 `/data`。**
 
 所以每个入口都强制走 `FileOps::ResolveInside()`，把路径约束在下载目录内：
@@ -628,7 +628,7 @@ Y=21  Z=44
 | | 说明 |
 |---|---|
 | 内存环形缓冲 | 2048 行，按 `sinceSeq` 增量拉 |
-| 落盘历史 | `/sdcard/autod.log`，**最多 10KB** |
+| 落盘历史 | `/sdcard/remote-control.log`，**最多 10KB** |
 | 日志流 | WebSocket，按序号增量推 |
 
 裁剪带**滞回**：超过 10KB 裁到 7.5KB。裁到"刚好 10KB"的话下一行又超、
@@ -643,9 +643,9 @@ Y=21  Z=44
 ### supervisor：让无 root 的应用能管 root 服务
 
 ```
-上位应用 → 写 /sdcard/autod.conf
-autod-supervisord（常驻 root 脚本）→ 监视文件 → 启停/重启
-                                  → 写 /sdcard/autod.status 供应用显示
+上位应用 → 写 /sdcard/remote-control.conf
+remote-control-supervisord（常驻 root 脚本）→ 监视文件 → 启停/重启
+                                  → 写 /sdcard/remote-control.status 供应用显示
 ```
 
 应用侧只依赖"文件能写"这一件事，**不需要任何特权**。
@@ -682,9 +682,9 @@ autod-supervisord（常驻 root 脚本）→ 监视文件 → 启停/重启
 | `http://<本机IP>:8088/api/v1/...` | HTTP API |
 | `adb connect <本机IP>:15555` | 完整 adb（可用 scrcpy） |
 
-HTTP 不再需要转发：autod 自己读配置里的 `bind`，可以直接绑 `0.0.0.0`。
+HTTP 不再需要转发：remote-control 自己读配置里的 `bind`，可以直接绑 `0.0.0.0`。
 多一层转发反而让"改端口"变成一个改完就失联的操作 ——
-上位应用改了 autod 的端口，转发器还指着旧端口，两边对不上。
+上位应用改了 remote-control 的端口，转发器还指着旧端口，两边对不上。
 
 ### 为什么不用真桥接（`-net-tap` + 网桥）
 

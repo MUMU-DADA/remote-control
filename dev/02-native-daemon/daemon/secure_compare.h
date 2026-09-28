@@ -22,7 +22,7 @@
 #include <cstddef>
 #include <string>
 
-namespace autod {
+namespace remote_control {
 
 // 恒定时间字符串比较。
 //
@@ -68,4 +68,4 @@ inline std::string RedactToken(const std::string& url) {
     return out;
 }
 
-}  // namespace autod
+}  // namespace remote_control

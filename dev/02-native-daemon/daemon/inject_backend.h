@@ -16,7 +16,7 @@
 
 #include "inject.h"
 
-namespace autod {
+namespace remote_control {
 
 class InjectorBackend {
   public:
@@ -43,4 +43,4 @@ class InjectorBackend {
 // 由选中的后端 .cpp 实现。整个程序里只能有一个定义。
 std::unique_ptr<InjectorBackend> CreateInjectorBackend();
 
-}  // namespace autod
+}  // namespace remote_control

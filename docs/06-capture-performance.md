@@ -241,8 +241,8 @@ float frameScaleY{1};
 两个开关都留着：
 
 ```bash
-AUTOD_FORCE_FALLBACK=1   # 全走内置（验证老设备路径）
-AUTOD_PREFER_NATIVE=1    # 全走 Skia（要最小体积时）
+REMOTE_CONTROL_FORCE_FALLBACK=1   # 全走内置（验证老设备路径）
+REMOTE_CONTROL_PREFER_NATIVE=1    # 全走 Skia（要最小体积时）
 ```
 
 `/params` 的 `codecs.backend` 也跟着改成**逐格式**报，不再是一个笼统的名字：
@@ -260,7 +260,7 @@ AUTOD_PREFER_NATIVE=1    # 全走 Skia（要最小体积时）
   （默认是 jpeg）。PNG 是给"要无损"的少数场景用的，
   那种场景下 2 倍帧率比 17% 体积重要。
 
-如果哪天要反过来，`AUTOD_PREFER_NATIVE=1` 就够了，不用改代码。
+如果哪天要反过来，`REMOTE_CONTROL_PREFER_NATIVE=1` 就够了，不用改代码。
 
 ### 顺带确认：`webp_encoder.h` 里原有的调优是对的
 

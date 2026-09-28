@@ -11,7 +11,7 @@
 
 #include <algorithm>
 
-#include "autod_log.h"
+#include "remote_control_log.h"
 #include "capture.h"
 #include "inject.h"
 #include "json_writer.h"
@@ -19,7 +19,7 @@
 #include "log_buffer.h"
 #include "protocol.h"
 
-namespace autod {
+namespace remote_control {
 namespace {
 
 int64_t MonotonicMs() {
@@ -595,4 +595,4 @@ int64_t ServiceState::UptimeMs() const {
     return MonotonicMs() - startTimeMs_;
 }
 
-}  // namespace autod
+}  // namespace remote_control
