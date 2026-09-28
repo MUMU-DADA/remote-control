@@ -72,11 +72,53 @@ for f in main.cpp socket_server.cpp dispatch.cpp selftest.cpp \
          appops.cpp subprocess.cpp fileops.cpp http_client.cpp \
          service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp \
          json_parser.cpp png_encoder.cpp keyboard.cpp clipops.cpp \
-         webui.cpp image_encoder.cpp jpeg_encoder.cpp websocket.cpp \
+         webui.cpp image_encoder.cpp jpeg_encoder.cpp webp_encoder.cpp \
+         websocket.cpp \
          config_file.cpp; do
     [ -f "$DAEMON/$f" ] || { bad "缺源文件: daemon/$f"; exit 1; }
 done
-ok "24 个源文件齐备"
+ok "25 个源文件齐备"
+
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+step "编译内置的 libwebp"
+# -----------------------------------------------------------------------------
+# WebP 和 JPEG 不一样：JPEG 可以 dlopen 设备上已有的 libjpeg，
+# WebP 设备上没有（实测 Android 12 就没有 libwebp.so），
+# 所以只能把源码整个编进来。
+#
+# 98 个 .c 文件用 C 编译器单独编成 .o，再和 C++ 那部分链接 ——
+# 不能混在一条命令行里，C 和 C++ 的 flags 不一样。
+WEBP_DIR="$DAEMON/vendor/webp"
+WEBP_OBJ="$OUT/$ABI/webpobj"
+mkdir -p "$WEBP_OBJ"
+
+# 这几个开关来自 AOSP 的 libwebp-encode：
+#   ANDROID            走 Android 的内存/日志适配
+#   WEBP_SWAP_16BIT_CSP  Android 的 16 位通道顺序
+#   WEBP_USE_THREAD    允许多线程（我们固定 thread_level=0，但代码要在）
+# ⚠️ 不要自己加 -DWEBP_USE_SSE2 之类 —— dsp.h 会按编译器的预定义宏
+#    （__SSE2__ / __ARM_NEON）自己判断，重复定义会报 macro redefined。
+WEBP_CFLAGS=(-O2 -DANDROID -DWEBP_SWAP_16BIT_CSP -DWEBP_USE_THREAD -I"$WEBP_DIR")
+
+webp_n=0 webp_fail=0
+while IFS= read -r cf; do
+    obj="$WEBP_OBJ/$(echo "${cf#$WEBP_DIR/}" | tr '/' '_' | sed 's/\.c$/.o/')"
+    if [ ! -f "$obj" ] || [ "$cf" -nt "$obj" ]; then
+        if ! "$CC" "${WEBP_CFLAGS[@]}" -c "$cf" -o "$obj" 2>"$WEBP_OBJ/err.txt"; then
+            webp_fail=$((webp_fail + 1))
+            [ $webp_fail -le 3 ] && sed 's/^/    /' "$WEBP_OBJ/err.txt" | head -3
+        fi
+    fi
+    webp_n=$((webp_n + 1))
+done < <(find "$WEBP_DIR/src" -name '*.c' | sort)
+
+if [ $webp_fail -gt 0 ]; then
+    printf '\033[1;31m  ✗ libwebp: %s 个文件里有 %s 个编不过\033[0m\n' \
+           "$webp_n" "$webp_fail"
+    exit 1
+fi
+ok "libwebp: $webp_n 个源文件 → $(ls "$WEBP_OBJ"/*.o 2>/dev/null | wc -l) 个 .o"
 
 # -----------------------------------------------------------------------------
 step "编译 autod"
@@ -97,7 +139,7 @@ COMMON_FLAGS=(
     -I"$DAEMON"
 )
 
-"$CXX" "${COMMON_FLAGS[@]}" \
+"$CXX" "${COMMON_FLAGS[@]}" -I"$WEBP_DIR" \
     -o "$OUT/$ABI/autod" \
     "$DAEMON/main.cpp" \
     "$DAEMON/socket_server.cpp" \
@@ -121,9 +163,11 @@ COMMON_FLAGS=(
     "$DAEMON/webui.cpp" \
     "$DAEMON/image_encoder.cpp" \
     "$DAEMON/jpeg_encoder.cpp" \
+    "$DAEMON/webp_encoder.cpp" \
+    "$WEBP_OBJ"/*.o \
     "$DAEMON/websocket.cpp" \
     "$DAEMON/config_file.cpp" \
-    -llog -static-libstdc++
+    -llog -static-libstdc++ -lm -pthread
 
 ok "autod → $OUT/$ABI/autod"
 

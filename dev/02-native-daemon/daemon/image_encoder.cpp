@@ -49,9 +49,22 @@
 #include "autod_log.h"
 #include "jpeg_encoder.h"
 #include "png_encoder.h"
+#include "webp_encoder.h"
 
 namespace autod {
 namespace {
+
+// WebP 的默认 method。
+//
+// 实测（320x480 真实抓帧，q75）：
+//   0 →  3.3 ms / 17,192 B      最快
+//   2 →  5.2 ms / 14,542 B      ← 这里
+//   3 → 10.3 ms / 14,036 B      Skia 用的
+//   6 → 21.8 ms / 13,222 B      最慢最好
+//
+// 选 2 是因为它只比最强的差 3.6% 体积，却快一倍。
+// Skia 选 3 是为了跟 Chrome 对齐，不是因为它最优。
+constexpr int kDefaultWebpMethod = 2;
 
 #ifdef AUTOD_HAS_JNIGRAPHICS
 
@@ -188,7 +201,10 @@ bool ImageEncoder::Supports(ImageFormat f) const {
     if (f == ImageFormat::kPng) return native_ || PngEncoder::Instance().Init(nullptr);
     if (native_) return true;                      // AndroidBitmap：JPEG / WebP 都有
     if (f == ImageFormat::kJpeg) return JpegEncoder::Instance().Available();
-    return false;                                  // WebP 只有 AndroidBitmap 能出
+    // WebP 现在**总是**可用 —— libwebp 已经内置进来了。
+    // 以前这里返回 false，因为 WebP 只有 AndroidBitmap 能出（API 30+）。
+    if (f == ImageFormat::kWebp) return WebpEncoder::Instance().Available();
+    return false;
 }
 
 ImageFormat ImageEncoder::BestFormat() const {
@@ -235,6 +251,10 @@ std::string ImageEncoder::BackendSummary() const {
     if (native_) s = "AndroidBitmap_compress";
     else {
         if (JpegEncoder::Instance().Available()) s += JpegEncoder::Instance().BackendName();
+        if (WebpEncoder::Instance().Available()) {
+            if (!s.empty()) s += " + ";
+            s += "libwebp（内置）";
+        }
         if (PngEncoder::Instance().Available()) {
             if (!s.empty()) s += " + ";
             s += "zlib PNG";
@@ -297,13 +317,14 @@ std::string ImageEncoder::Encode(const uint8_t* rgba, uint32_t width,
         return {};
     }
 
-    // ── 回退：WebP 只有 AndroidBitmap 能出 ──
+    // ── 回退：WebP 走内置的 libwebp ──
+    //
+    // 以前这里直接报错（"WebP 只有 AndroidBitmap 能出"），
+    // 因为设备上没有 libwebp.so。现在源码内置了，任何版本都能编。
     if (format == ImageFormat::kWebp) {
-        if (error) {
-            *error = "WebP 只有 AndroidBitmap_compress 能编码（需要 API 30+），"
-                     "这台设备不支持；可用 format=jpeg 或 format=png";
-        }
-        return {};
+        return WebpEncoder::Instance().EncodeRgba(rgba, width, height,
+                                                  quality > 0 ? quality : 75,
+                                                  kDefaultWebpMethod, error);
     }
 
     // ── 回退：PNG 走 zlib ──

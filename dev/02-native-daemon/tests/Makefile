@@ -33,6 +33,19 @@ COMMON_HDRS = $(DAEMON)/inject.h $(DAEMON)/inject_backend.h \
               $(DAEMON)/autod_log.h $(DAEMON)/autod_platform.h \
               $(DAEMON)/protocol.h test_util.h
 
+# 内置的 libwebp（vendor/webp）。dispatch 现在会调到 ImageEncoder，
+# 而 WebP 那条路是完整内置的源码 —— 测试要链进来。
+#
+# JPEG 那边不用：它是 dlopen 系统库，没有链接期依赖。
+WEBP_DIR   = $(DAEMON)/vendor/webp
+WEBP_SRCS  = $(wildcard $(WEBP_DIR)/src/enc/*.c) \
+             $(wildcard $(WEBP_DIR)/src/dsp/*.c) \
+             $(wildcard $(WEBP_DIR)/src/utils/*.c)
+WEBP_OBJS  = $(patsubst $(WEBP_DIR)/src/%.c,$(WEBP_OBJ)/%.o,$(WEBP_SRCS))
+WEBP_OBJ   = build/webp
+WEBP_CFLAGS = -O2 -DANDROID -DWEBP_SWAP_16BIT_CSP -DWEBP_USE_THREAD \
+              -I$(WEBP_DIR)
+
 # [1] 单元测试：只测注入后端
 UNIT_SRCS = test_inject_uinput.cpp $(COMMON_SRCS)
 
@@ -54,7 +67,10 @@ INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
              $(DAEMON)/json_parser.cpp \
              $(DAEMON)/webui.cpp \
              $(DAEMON)/websocket.cpp \
-             $(DAEMON)/config_file.cpp
+             $(DAEMON)/config_file.cpp \
+             $(DAEMON)/image_encoder.cpp \
+             $(DAEMON)/jpeg_encoder.cpp \
+             $(DAEMON)/webp_encoder.cpp
 
 # [3] screencap 截图后端：配 fake_screencap 冒充设备命令
 SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
@@ -69,9 +85,14 @@ all: $(BINS) fake_screencap
 test_inject_uinput: $(UNIT_SRCS) $(COMMON_HDRS)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(UNIT_SRCS)
 
-test_integration: $(INTEG_SRCS) $(COMMON_HDRS) \
+$(WEBP_OBJ)/%.o: $(WEBP_DIR)/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(WEBP_CFLAGS) -c $< -o $@
+
+test_integration: $(INTEG_SRCS) $(COMMON_HDRS) $(WEBP_OBJS) \
                   $(DAEMON)/socket_server.h $(DAEMON)/dispatch.h $(DAEMON)/capture.h
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(INTEG_SRCS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -I$(WEBP_DIR) -pthread -o $@ \
+	    $(INTEG_SRCS) $(WEBP_OBJS) -lm
 
 JSON_SRCS = test_json.cpp $(DAEMON)/json_parser.cpp $(DAEMON)/json_writer.h
 
@@ -124,6 +145,7 @@ _run: all
 	 exit $$(( u + i + c + a + j + k + w ))
 
 clean:
+	rm -rf $(WEBP_OBJ)
 	rm -f $(BINS) fake_screencap
 
 .PHONY: all run _run clean

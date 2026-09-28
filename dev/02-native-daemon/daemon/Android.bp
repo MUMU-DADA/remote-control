@@ -40,6 +40,7 @@ cc_defaults {
         "webui.cpp",
         "image_encoder.cpp",
         "jpeg_encoder.cpp",
+        "webp_encoder.cpp",
         "websocket.cpp",
         "config_file.cpp",
     ],
@@ -79,6 +80,7 @@ cc_defaults {
         //
         //    改成 dlopen + dlsym 之后，"这个函数不存在"变成一个
         //    可以处理的返回值 —— 见 image_encoder.cpp 的 ProbeJniGraphics。
+        "libwebp_vendored",
         "liblog",
         "libui",               // GraphicBuffer / PixelFormat
         "libutils",
@@ -114,6 +116,40 @@ cc_defaults {
 // 是 Java-only AIDL（见 docs/06-constraints.md 约束 1）。
 //
 // 代价：uinput 会创建一个可枚举的输入设备。
+// 内置的 libwebp（编码器部分）。
+//
+// 为什么内置：设备上**没有** libwebp.so（实测 Android 12 就没有，
+// Skia 里也没找到），而 AndroidBitmap_compress 是 API 30 才有的。
+// 不内置的话 Android 8~10 完全没有 WebP。
+//
+// 和 libjpeg 的处理方式不同 —— 那个 dlopen 系统库就够了（VNDK 稳定
+// ABI），WebP 没有系统库可用，只能把源码编进来。
+//
+// 只编编码器需要的三个目录：
+//   enc    编码主流程
+//   dsp    SIMD 加速（dsp.h 会按 __SSE2__/__ARM_NEON 自行选择）
+//   utils  公共工具
+// dec/ 的 .c 不需要，但 **src/dec 的头文件要留着** ——
+// 编码器的头文件里 include 了它们。
+cc_library_static {
+    name: "libwebp_vendored",
+    srcs: [
+        "vendor/webp/src/enc/*.c",
+        "vendor/webp/src/dsp/*.c",
+        "vendor/webp/src/utils/*.c",
+    ],
+    local_include_dirs: ["vendor/webp"],
+    // 这几个开关抄自 AOSP 的 external/webp（libwebp-encode）。
+    // ⚠️ 不要自己加 -DWEBP_USE_SSE2 —— dsp.h 会按编译器的预定义宏
+    //    自己判断，重复定义会报 macro redefined。
+    cflags: [
+        "-O2",
+        "-DANDROID",
+        "-DWEBP_SWAP_16BIT_CSP",
+        "-DWEBP_USE_THREAD",
+    ],
+}
+
 cc_binary {
     name: "autod",
     defaults: ["autod_defaults"],

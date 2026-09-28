@@ -150,8 +150,16 @@ std::string JpegEncoder::EncodeRgba(const uint8_t* rgba, uint32_t width,
         if (error) *error = "空图像";
         return {};
     }
-    if (quality < 1) quality = 1;
-    if (quality > 100) quality = 100;
+    // ⚠️ 参数在这之后就**不能再改**了。
+    //
+    //    setjmp/longjmp 的规则：在 setjmp 和 longjmp 之间被改动过的、
+    //    非 volatile 的局部变量（含参数），longjmp 回来之后取值未定义。
+    //    编译器会报 -Wclobbered。
+    //
+    //    这里先归一化到局部变量，之后只读 —— 参数本身不再被改。
+    int q = quality;
+    if (q < 1) q = 1;
+    if (q > 100) q = 100;
 
     jpeg_compress_struct cinfo;
     ErrorMgr jerr;
@@ -203,7 +211,7 @@ std::string JpegEncoder::EncodeRgba(const uint8_t* rgba, uint32_t width,
     cinfo.in_color_space   = JCS_EXT_RGBA;
 
     api_->set_defaults(&cinfo);
-    api_->set_quality(&cinfo, quality, TRUE);
+    api_->set_quality(&cinfo, q, TRUE);
 
     // ⚠️ 这一行是"和 Skia 输出一致"的关键。
     //

@@ -78,19 +78,35 @@ dlsym 指针调用（改造后）            14.87 ms   76,466 字节
 `libjpeg` 就是依赖。两条路输出差 554 字节，正好是 Skia 多嵌的一个
 ICC 段（完整证据链见 `tools/bench/README.md`）。
 
-### 只有 WebP 留在 API 30+
+### ✅ WebP 也内置了（全版本可用）
 
-设备上没有 `libwebp.so`（Skia 里也没有），所以 WebP 只有
-`AndroidBitmap_compress` 能出：
+设备上没有 `libwebp.so`（Skia 里也没找到），所以**把源码编了进来**：
 
 | 格式 | Android 11+ | Android 8~10 |
 |---|---|---|
 | JPEG | AndroidBitmap | dlopen libjpeg ✅ |
-| **WebP** | AndroidBitmap | ❌ 要 vendor 那 5.9 MB 源码 |
+| **WebP** | AndroidBitmap | **内置 libwebp** ✅ |
 | PNG | AndroidBitmap | zlib ✅ |
 
-`GET /api/v1/describe` 和 `GET /api/v1/params` 会如实报告哪些可用，
-客户端不该假设。
+代价：二进制 **+578 KB**（1.62 MB → 2.20 MB），
+源码 `daemon/vendor/webp/`（98 个 `.c`，2.5 MB）。
+
+**参数选择**（实测，`tools/bench/webp_bench.cpp`）：
+
+| method | 320×480 | 1080p | 相对 Skia 默认(m=3) |
+|---|---|---|---|
+| 0 | 3.3 ms | 24.8 ms | 快 3.1x，体积 +22% |
+| **2** | **5.2 ms** | 38.8 ms | **快 2.0x，体积 +3.6%** ← 用的这个 |
+| 3（Skia） | 10.3 ms | 78.5 ms | — |
+| 6 | 21.8 ms | 126.5 ms | 慢 2.1x，体积 -5.8% |
+
+Skia 用 3 是为了跟 Chrome 对齐，不是因为它最优。
+`thread_level=1` 只快 5%（libwebp 的线程只并行熵编码），没采用。
+
+许可：libwebp 是 BSD 3-Clause，见 `THIRD-PARTY-NOTICES.md`。
+
+`GET /api/v1/describe` 和 `/params` 的 `codecs` 字段仍然如实报告，
+客户端照旧不该假设 —— 只是现在三个格式在任何版本上都是 `true`。
 
 ### 怎么真正编出 Android 8 版本
 
