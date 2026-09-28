@@ -792,3 +792,41 @@ native.bridge:  libndk_translation.so
 用 **`google_apis` 版 Android 11（API 30）x86_64 镜像**（内置 `ndk_translation`），
 它对外暴露 `arm64-v8a` ABI，**arm64 的 ELF 可以被直接执行**（走转译）。
 这正是 Google 官方文档说的那条路，也是社区的主流做法。
+
+---
+
+## 第 14 轮：把 arm64 库落地的最后一步 —— 卡在"分区全满"
+
+### 已确认的事实
+
+- 转译层 `/system/lib64/arm64/` 自带 **59 个基础库**（libc/liblog/libEGL/libandroid/…），
+  但**没有框架库**（libbinder 等）；`autod` 的 arm64 依赖闭包共 **190 个 / 48.3MB**，
+  剔除自带的后**需补 161 个 / 40MB**。
+- ⚠️ **不能用 `LD_LIBRARY_PATH`**：它会被 **x86_64 的转译运行器**继承
+  （报 `libandroidfw.so is for EM_AARCH64 instead of EM_X86_64`）——
+  库必须放在**转译层自己的架构专属目录**里。
+- 走 `-writable-system` + `adb remount` 的路线很脆：`remount` 会禁用 verity 并要求
+  **重启 guest**，而重启后 **adbd 起不来**（guest 起来了，但 `/system/bin/adbd` 不可用），
+  且 `/system` 依旧是只读 ✗。
+
+### 于是想直接改镜像 —— 结果发现四个分区**全都是满的**
+
+| 分区 | 大小 | 空闲 |
+|---|---|---|
+| system（super 内） | 1.08GB | **3.2MB**（784 块）|
+| system_ext | 126MB | — |
+| product（super 内） | 1.45GB | **4.3MB**（1044 块）|
+| vendor（super 内） | 158MB | **0.5MB**（119 块）|
+
+super 总量 3.01GB，四个分区合计 2.48GB，**还有 0.53GB 未分配** ✓，
+所以理论上可以"扩容 system 的 ext4 + 用 `lpmake` 重建 super"（`lpmake`/`lpdump`/
+`resize2fs`/`e2fsck` 这些主机工具在 `out/host/linux-x86/bin/` 里**都齐**✓）。
+
+### 下一轮（两条都很具体）
+
+1. **省事路线**：`product` 分区里装着预装 Google 应用 —— 删掉一两个大的（Maps/YouTube 等）
+   即可腾出几十 MB，把 161 个库注入 `/product/lib64/arm64/`（标准 linker 搜索路径），
+   再启动验证 `autod`；
+2. **彻底路线**：`resize2fs` 把 system 的 ext4 扩容 128MB → 注入 `/lib64/arm64/` →
+   `lpmake` 按原布局重建 super（四个分区 + `emulator_dynamic_partitions` 组）→
+   写回 `system.img` 的 2MB 处 → 启动（仍需 `-writable-system` 关 verity）。
