@@ -84,8 +84,8 @@ capture_*.cpp  → memfd（逐行 memcpy，步长用 getStride()）
 
 | 后端 | 做法 | 单次耗时 |
 |---|---|---|
-| `capture_surfaceflinger.cpp` ← 默认 | 直连 `ISurfaceComposer::captureDisplay`，需 AOSP 树 | ~23 ms |
-| `capture_screencap.cpp` | fork/exec `/system/bin/screencap`，NDK 即可编 | ~120 ms |
+| `capture_surfaceflinger.cpp` ← 默认 | 直连 `ISurfaceComposer::captureDisplay`，需 AOSP 树 | **8–12 ms**（720p） |
+| `capture_screencap.cpp` | fork/exec `/system/bin/screencap`，NDK 即可编 | **~197 ms** |
 
 `memfd` 是匿名内存文件，没有文件系统实体，可以安全地跨进程传递 fd。
 
@@ -214,6 +214,7 @@ curl -s http://host:8088/api/v1/describe | jq '.protocolVersion, (.commands|leng
 | v4 | 长按/拖拽/双击、按键注入、剪贴板 |
 | v5 | 设备电源（关机/重启） |
 | v6 | 服务软开关、运行中应用、历史日志、日志流 |
+| v7 | 屏幕方向 `Rotate`（设备转不动时退到 `wm size`，见 `api/01-http.md`） |
 
 **为什么命令集长这样**：必须保留消息边界与定长请求头，所以命令粒度按"操作"划分而不是按"界面"划分——长按、拖拽、双击各给一条命令，而不是让调用方自己拼 `Touch*` 序列（自己拼几乎一定会踩时序的坑，见 `03-reference.md` 第三部分）。
 
@@ -264,7 +265,7 @@ android::ProcessState::self()->startThreadPool();
 
 否则 Binder 回调永远收不到，`waitForResults()` 会**死等**。参考 `screencap.cpp` 里关于 b/36066697 的注释。
 
-> 上面是 **SF 直连后端**的数据流（Android 12 的调用形态）。`capture_screencap.cpp` 后端把 ③–⑨ 换成一次 `fork/exec /system/bin/screencap` + 读它的 stdout，其余（memfd 落盘、`SCM_RIGHTS` 传输、客户端 `mmap`）完全相同——代价是慢一个数量级（120ms vs 23ms），收益是 NDK 就能编、任何 root 设备都能跑。
+> 上面是 **SF 直连后端**的数据流（Android 12 的调用形态）。`capture_screencap.cpp` 后端把 ③–⑨ 换成一次 `fork/exec /system/bin/screencap` + 读它的 stdout，其余（memfd 落盘、`SCM_RIGHTS` 传输、客户端 `mmap`）完全相同——代价是慢一个数量级（~197ms vs 8–12ms），收益是 NDK 就能编、任何 root 设备都能跑。
 
 ---
 
@@ -298,7 +299,7 @@ main()
         └─ 每个连接：ServeConnection() → Dispatcher::Handle()
 ```
 
-**并发模型**：两条传输各跑各的（HTTP 在独立线程，避免互相排队），但**操作是串行的**——锁在 `Dispatcher::Handle()` 里。这是刻意的：`Injector` 是有状态的（按下/抬起、槽位映射、手势 downTime），并发注入会互相破坏手势。代价是一次抓帧（~23ms）会让同时在跑的触控事件排队最多 23ms。
+**并发模型**：两条传输各跑各的（HTTP 在独立线程，避免互相排队），但**操作是串行的**——锁在 `Dispatcher::Handle()` 里。这是刻意的：`Injector` 是有状态的（按下/抬起、槽位映射、手势 downTime），并发注入会互相破坏手势。代价是一次抓帧（~8–12ms）会让同时在跑的触控事件排队最多十几毫秒。
 
 **退出与重启**：`Shutdown` 让两条传输的 accept 立刻返回并正常退出（退出码 0）；`Restart` 以**退出码 1** 退出，由 init 的 `oneshot` + 外部监督脚本据此重新拉起。
 
@@ -322,8 +323,9 @@ main()
 
 ## 8. 相关文档
 
-- 方案选型理由与硬约束 → `01-selection.md`
-- 版本 API 差异 / 延迟数据 / 触控能力矩阵 → `03-reference.md`
+- 方案选型理由与硬约束 → [`01-selection.md`](01-selection.md)
+- 版本 API 差异 / 触控能力矩阵 → [`03-reference.md`](03-reference.md)
+- 抓帧与编码性能 → [`06-capture-performance.md`](06-capture-performance.md)
 - 接口的权威说明 → [`api/README.md`](api/README.md)
 - 设计与踩坑记录 → `05-design-notes.md`
 - 代码实现 → `../dev/02-native-daemon/`

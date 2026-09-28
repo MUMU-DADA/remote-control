@@ -46,8 +46,9 @@ API 28 / 26 报的是同样两条。拦路的都是 `__INTRODUCED_IN(30)`：
 | `AndroidBitmap_compress` → **dlopen + dlsym** 运行时探测 | API < 30 时自动不用它 | **+0.07 ms（0.45%）**（实测，见下） |
 | 新增 `jpeg_encoder`（dlopen libjpeg + vendor 头文件） | **JPEG 保住了**，不再退回 PNG | 高版本不走这条路 |
 
-**关键：高版本行为不变。** 探测到 `AndroidBitmap_compress` 可用时
-走的就是原来那条路，一行代码都没改。
+**⚠️ 「高版本行为不变」这条后来被推翻了 —— 见下面「编码器现在按格式选」。**
+当初的假设是"能用 Skia 就用 Skia"，后来实测发现 Skia 在 WebP/PNG 上
+比内置编码器慢一倍。
 
 ### 实测：改造对高版本的影响
 
@@ -82,11 +83,11 @@ ICC 段（完整证据链见 `tools/bench/README.md`）。
 
 设备上没有 `libwebp.so`（Skia 里也没找到），所以**把源码编了进来**：
 
-| 格式 | Android 11+ | Android 8~10 |
+| 格式 | 老版本（API < 30） | 新版本（API 30+） |
 |---|---|---|
-| JPEG | AndroidBitmap | dlopen libjpeg ✅ |
-| **WebP** | AndroidBitmap | **内置 libwebp** ✅ |
-| PNG | AndroidBitmap | zlib ✅ |
+| JPEG | dlopen libjpeg ✅ | AndroidBitmap（Skia） |
+| **WebP** | **内置 libwebp** ✅ | **内置 libwebp** ✅ ← 见下面「按格式选」 |
+| PNG | zlib ✅ | **zlib** ✅ ← 同上 |
 
 代价：二进制 **+578 KB**（1.62 MB → 2.20 MB），
 源码 `daemon/vendor/webp/`（98 个 `.c`，2.5 MB）。
@@ -98,6 +99,34 @@ ICC 段（完整证据链见 `tools/bench/README.md`）。
 | 0 | 3.3 ms | 24.8 ms | 快 3.1x，体积 +22% |
 | **2** | **5.2 ms** | 38.8 ms | **快 2.0x，体积 +3.6%** ← 用的这个 |
 | 3（Skia） | 10.3 ms | 78.5 ms | — |
+
+### ⚠️ 编码器现在**按格式选**（2024 实测推翻原设计）
+
+原先的逻辑是"`AndroidBitmap_compress` 可用就用它"。**实测发现它在
+WebP/PNG 上比内置编码器慢一倍** —— 所谓"原生快路径"其实是慢路径：
+
+720p，60fps 目标，宿主空闲（详测见 [`06-capture-performance.md`](06-capture-performance.md) 第七节）：
+
+| 格式 | Skia `AndroidBitmap_compress` | 内置编码器 | 提升 |
+|---|---|---|---|
+| jpeg | 60.3 fps | 61.0 fps | 持平 |
+| **webp** | 20.5 fps | **38.3 fps** | **+87%** |
+| **png** | 22.2 fps | **45.8 fps** | **+106%** |
+
+原因在参数上：Skia 的 WebP 用 `method=3`（跟 Chrome 对齐），内置的用
+`method=2` —— 正好差一倍。也就是说上面那张 method 表**在 API 30+ 上
+一直是死代码**，直到改成按格式选才生效。
+
+现在的选择：
+
+| 格式 | 走哪条 | 理由 |
+|---|---|---|
+| jpeg | Skia | 持平，没必要动 |
+| webp | 内置 libwebp | 快 87%，只大 2% |
+| png | 内置 zlib | 快 106%，大 17% |
+
+两个开关：`AUTOD_FORCE_FALLBACK=1` 全走内置；`AUTOD_PREFER_NATIVE=1` 全走 Skia。
+`/params` 的 `codecs.backend` 逐格式报出当前选择。
 | 6 | 21.8 ms | 126.5 ms | 慢 2.1x，体积 -5.8% |
 
 Skia 用 3 是为了跟 Chrome 对齐，不是因为它最优。
@@ -423,7 +452,21 @@ system("/system/bin/input tap 540 1200");
 
 # 第二部分 · 延迟与吞吐
 
-> ⚠️ 本部分的数字是按管线结构**估算**的。实测数据见 `05-design-notes.md`：单次抓帧 SurfaceFlinger 后端 **23 ms**、`screencap` 后端 **120 ms**；流帧率 **29.8 fps** vs **9.6 fps**。两者量级一致，估算值可用于设计，实测值用于验收。
+> **本部分是「为什么慢」的结构模型，不是实测数据。**
+>
+> **实测数字一律以 [`06-capture-performance.md`](06-capture-performance.md) 为准** ——
+> 那里有测量方法、测量纪律（宿主编译会污染结果）和可复现的命令。
+>
+> 当前口径（720p，SurfaceFlinger 后端）：
+>
+> | 项 | 实测 |
+> |---|---|
+> | 抓一帧 | **8–12 ms** |
+> | JPEG 端到端 | **61 fps** |
+> | PNG / WebP 端到端 | **45.8 / 38.3 fps** |
+>
+> 下面那些"20–35 ms""15–30 fps"是**按管线结构估的**，量级对得上，
+> 但不要拿它当验收标准。
 
 ## 8. 截图延迟
 
@@ -449,12 +492,15 @@ system("/system/bin/input tap 540 1200");
 
 **吞吐**：
 
-| 实现方式 | 帧率 |
+| 实现方式 | 估算帧率 |
 |---|---|
 | 同步 `waitForResults()` 串行 | **15–30 fps** |
-| 改流水线（不等每帧结果） | **30–60 fps** |
+| 共享抓帧（现在的做法，见 `06-capture-performance.md`） | 实测 **61 fps**（jpeg） |
 
-流水线的代价是持续占用 GPU，会拖慢前台应用。
+> 早期这里是"改流水线（不等每帧结果）"，代价是持续占用 GPU。
+> 现在的做法不同：**一个抓帧线程按所有订阅者的最高需求定时抓**，
+> 消费者直接拿最新帧 —— 既没有请求-应答的延迟，也不需要持续占着 GPU。
+> 详见 `05-design-notes.md` 的「共享抓帧」一节。
 
 **对比 adb 方案**：
 
@@ -463,7 +509,12 @@ system("/system/bin/input tap 540 1200");
 | `adb exec-out screencap` | 100–300 ms |
 | **daemon 方案（SF 后端）** | **20–35 ms** |
 
-**快 5–10 倍。** `screencap` exec 后端没有这个优势（实测 120 ms），它的价值是"任何 root 设备都能跑、不需要编进 AOSP 树"。
+**快 5–10 倍。** `screencap` exec 后端没有这个优势（NDK 构建实测 **197 ms/帧**），
+它的价值是"任何 root 设备都能跑、不需要编进 AOSP 树"。
+
+> ⚠️ 这个对比有个坑：**别拿 NDK 构建（screencap 后端）去测 SF 的性能**。
+> 两份二进制长得一样，看 `/api/v1/config` 的 `runtime.capture.backend`
+> 才能确认跑的是哪条路。
 
 ## 9. 触控延迟
 
@@ -575,7 +626,8 @@ ALOGI("capture: 合成=%lldus 拷贝=%lldus",
 
 ## 相关文档
 
-- 为什么合成是瓶颈、为什么必须走 uinput → `01-selection.md`
-- Android 12 触控约束的完整核实记录 → `01-selection.md` 约束 1
-- 实测性能数据与踩坑记录 → `05-design-notes.md`
-- 接口的权威说明 → `api/README.md`
+- 为什么合成是瓶颈、为什么必须走 uinput → [`01-selection.md`](01-selection.md)
+- Android 12 触控约束的完整核实记录 → [`01-selection.md`](01-selection.md) 第 7 节
+- **实测性能数据** → [`06-capture-performance.md`](06-capture-performance.md)
+- 设计与踩坑记录 → [`05-design-notes.md`](05-design-notes.md)
+- 接口的权威说明 → [`api/README.md`](api/README.md)

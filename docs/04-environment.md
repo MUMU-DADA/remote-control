@@ -211,7 +211,7 @@ adb shell chmod 755 /data/local/tmp/autod
 ```
 /dev/sda  500 GiB  VMware Virtual S
 ├── sda1  466 GiB  ext4  →  /root/AutoSnapshotAndroid
-│   ├── README.md, SUMMARY.md, docs/, dev/, tools/    ← 项目文件
+│   ├── README.md, docs/, dev/, tools/                ← 项目文件
 │   └── aosp/                                          ← AOSP 源码树
 └── sda2   34 GiB  swap
 
@@ -283,7 +283,6 @@ docker exec -it autod-builder bash     # 进入构建环境
 ```
 /root/AutoSnapshotAndroid/          458 GiB 挂载点
 ├── README.md                       项目索引
-├── SUMMARY.md                      方案总结与决策记录
 ├── docs/                           专题文档
 ├── dev/                            开发轨道
 ├── tools/                          环境、构建与集成脚本
@@ -359,7 +358,7 @@ ARM 用户态翻译层**，同架构运行、KVM/WHPX 加速，能跑 arm64 应�
 
 ## 9. 相关文档
 
-- 硬件/源码树为什么躲不掉 → `01-selection.md` 约束 4
-- 源码同步后的下一步 → `../dev/02-native-daemon/README.md`
-- 纯 NDK 免源码树方案 → `../dev/01-ndk-prototype/README.md`
-- 延迟数据 → `03-reference.md`
+- 硬件/源码树为什么躲不掉 → [`01-selection.md`](01-selection.md) 第 7 节
+- 源码同步后的下一步 → [`../dev/02-native-daemon/README.md`](../dev/02-native-daemon/README.md)
+- 纯 NDK 免源码树方案 → [`../dev/01-ndk-prototype/README.md`](../dev/01-ndk-prototype/README.md)
+- 抓帧性能实测 → [`06-capture-performance.md`](06-capture-performance.md)

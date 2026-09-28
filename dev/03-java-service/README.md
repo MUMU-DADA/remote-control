@@ -8,7 +8,7 @@
 
 **Android 12 的 `injectInputEvent` 是 Java-only AIDL，native 进程调不了。**
 
-完整论证见 [`../../docs/06-constraints.md`](../../docs/06-constraints.md) 约束 1。
+完整论证见 [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节「硬约束与风险」。
 
 对比之下，截图用的 `ISurfaceComposer` 是 native AIDL，C++ 可以直连。
 
@@ -318,6 +318,6 @@ adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 
 
 ## 相关文档
 
-- Android 12 的约束 → `../../docs/06-constraints.md` 约束 1
+- Android 12 的约束 → [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节的约束 1
 - 主线方案 → `../02-native-daemon/README.md`
 - 架构总览 → `../../docs/02-architecture.md`

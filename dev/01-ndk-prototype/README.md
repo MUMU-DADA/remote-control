@@ -78,7 +78,7 @@ adb shell /data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 1
 | 项 | NDK 路径 | AOSP 路径 |
 |---|---|---|
 | 编译前置 | NDK 640 MB | 源码树 110 GB + 首次编译 1 小时 |
-| 截图延迟 | **100–300 ms**（每次 fork+exec） | **20–35 ms**（SF 直连） |
+| 截图延迟 | **~197 ms**（每次 fork+exec） | **8–12 ms**（SF 直连，720p） |
 | 能拿到显示尺寸 | ✅ 启动探针自动探测 | ✅ |
 | 区域截图 / 降采样 | ❌ | ✅（`sourceCrop`） |
 | 触控 | ✅ uinput | ✅ uinput 或官方 vtp 服务 |
@@ -142,12 +142,13 @@ ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 
 > AOSP 官方也有等价实现（`frameworks/native/services/vr/virtual_touchpad/`），
 > 还带一份 `.idc` 声明 `touch.deviceType = touchScreen`。
-> 详见 [`../../docs/08-official-implementations.md`](../../docs/08-official-implementations.md)。
+> 详见 [`docs/01-selection.md`](../../docs/01-selection.md) 第 6 节「官方与开源实现对照」。
 
 ---
 
 ## 相关文档
 
-- 官方/开源实现对照 → `../../docs/08-official-implementations.md`
-- AOSP 主线 → `../02-native-daemon/README.md`
-- Android 12 的触控约束 → `../../docs/06-constraints.md`
+- 官方/开源实现对照 → [`docs/01-selection.md`](../../docs/01-selection.md) 第 6 节
+- Android 12 的触控约束 → [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节
+- 抓帧性能实测 → [`docs/06-capture-performance.md`](../../docs/06-capture-performance.md)
+- AOSP 主线 → [`../02-native-daemon/README.md`](../02-native-daemon/README.md)

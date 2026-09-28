@@ -343,7 +343,31 @@ void TestNoFdLeak() {
         close(fd);
     }
 
-    const int after = CountOpenFds();
+    // ⚠️ 计数前要**等服务端把连接关干净**。
+    //
+    // 客户端这一侧是同步 close 的，但服务端是另一个线程在 read 到 EOF
+    // 之后才关它那一半 —— 两者之间有窗口。直接数会偶尔多出 1 个，
+    // 看起来像泄漏，其实是"还没关完"。
+    //
+    // 实测：同一份二进制跑三次全过，第四次报 9 → 10（+1）。
+    // 这种 flake 比不测还糟 —— 它训练人去忽略失败。
+    //
+    // 所以轮询到稳定为止（最多 2 秒）：连续两次读数相同才认。
+    // 轮询到**回到基线**为止，超时才算失败。
+    //
+    // 不能写成"连续两次读数相同就算稳定" —— 瞬时那个 fd 常常在头两次
+    // 读数里都在（服务端线程还没轮到处理 EOF），于是第一次比较就"稳定"
+    // 了，直接误判成泄漏。第一版就是这么写的，仍然 flaky。
+    int after = CountOpenFds();
+    int waitedMs = 0;
+    while (after > before && waitedMs < 5000) {
+        usleep(50 * 1000);
+        waitedMs += 50;
+        after = CountOpenFds();
+    }
+    if (after > before) {
+        Info("等了 %d ms 仍未回到基线", waitedMs);
+    }
 
     Check(failures == 0, "%d 次抓帧全部成功（失败 %d 次）", kIterations, failures);
     Check(after <= before, "fd 数量没有增长：%d → %d（%+d）",

@@ -82,7 +82,7 @@
 ## ✅ 触控注入：uinput 后端已实现并验证
 
 **Android 12 的 `IInputManager` 是 Java-only AIDL，native 进程调不了**
-（完整论证见 [`../../docs/06-constraints.md`](../../docs/06-constraints.md) 约束 1）。
+（完整论证见 [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节「硬约束与风险」。）
 已实现的 `inject_uinput.cpp` 走 `/dev/uinput`，绕开这个限制。
 
 ### 验证方式：真实设备，不是 mock
@@ -339,7 +339,7 @@ adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 
 - 帧通道改直接导出 `GraphicBuffer` 的 dmabuf fd（省一次 memcpy）
 - 加请求处理线程池（当前是串行）
 - 实现 `KeyEvent`、真多点触控
-- 对外网络暴露（需要独立的网关层，见 `../../docs/06-constraints.md` 约束 6）
+- 对外网络暴露（见 [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节的约束 6）
 
 ---
 
@@ -380,9 +380,9 @@ ls $ANDROID_PRODUCT_OUT/system/bin/autod
 
 - 方案选型 → `../../docs/01-selection.md`
 - 架构与协议 → `../../docs/02-architecture.md`
-- Android 12 触控约束 → `../../docs/06-constraints.md`
-- 硬件与构建 → `../../docs/04-hardware.md`
-- 延迟数据 → `../../docs/05-latency-and-touch.md`
+- Android 12 触控约束 → [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节
+- 硬件与构建 → [`docs/04-environment.md`](../../docs/04-environment.md)
+- 抓帧性能实测 → [`docs/06-capture-performance.md`](../../docs/06-capture-performance.md)
 
 ---
 

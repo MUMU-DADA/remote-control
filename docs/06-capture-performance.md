@@ -395,3 +395,14 @@ frames=2065  changeGen=3  unchanged=2062     ← 静止画面上 99.9% 的帧是
 - **PNG 在 720p 的实际用途**：72.7 KiB/帧 @23fps ≈ 1.7 MB/s，
   比 JPEG 大 65% 还更慢。如果 PNG 只是给「要无损」的少数场景用，
   那 23fps 也许够；但如果控制台默认用它就会很难受。
+
+---
+
+## 相关
+
+- [`03-reference.md`](03-reference.md) —— 各版本 API 差异、触控能力矩阵（含「编码器按格式选」的结论）
+- [`05-design-notes.md`](05-design-notes.md) —— 设计取舍与踩过的坑
+- [`api/02-websocket.md`](api/02-websocket.md) —— 流的参数（fps / quality / format / maxWidth）
+- `dev/02-native-daemon/tools/bench/` —— 编码器基准程序（`webp_bench.cpp` 等）
+- `dev/02-native-daemon/tools/bench/stream_fps.py` —— 本文所有端到端数字的测量工具
+

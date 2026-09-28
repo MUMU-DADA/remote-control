@@ -175,7 +175,7 @@ AOSP 自带 `frameworks/base/cmds/screencap/`，命令 `/system/bin/screencap`�
 | `capture_screencap.cpp` | **直接 exec `/system/bin/screencap`**，解析它的 stdout 原始像素流 |
 | `capture_surfaceflinger.cpp` | **对照 `screencap.cpp` 实现**，走 `ScreenshotClient::captureDisplay` |
 
-为什么 SF 路径不直接复用 `screencap` 命令：exec 一次 100–300 ms，SF 直连 20–35 ms（实测 120 ms vs 23 ms，见 `03-reference.md`）；但 SF 路径必须编进 AOSP 树（依赖 `libgui`），所以 NDK 路径保留了 exec 方案。
+为什么 SF 路径不直接复用 `screencap` 命令：exec 一次 100–300 ms，SF 直连 8–12 ms（720p 实测，见 `06-capture-performance.md`）；但 SF 路径必须编进 AOSP 树（依赖 `libgui`），所以 NDK 路径保留了 exec 方案。
 
 **两条路径都源自官方实现，没有自己发明抓屏方式。**
 
@@ -418,7 +418,7 @@ AutodInputService    →  注入（InputManager.injectInputEvent）✅
 
 `autod` 用的平台私有头文件（`gui/SurfaceComposerClient.h`、`gui/SyncScreenCaptureListener.h`、`input/Input.h` 等）**不在 NDK 里**。
 
-**唯一绕开的方式**是纯 NDK 方案（截图 exec `screencap`，触控 uinput），代价是截图慢一个数量级（120ms vs 23ms）。头文件清单与源码树体积见 `04-environment.md`。
+**唯一绕开的方式**是纯 NDK 方案（截图 exec `screencap`，触控 uinput），代价是截图慢一个数量级（~197 ms vs 8–12 ms）。头文件清单与源码树体积见 `04-environment.md`。
 
 ### 约束 5 · SELinux domain 是主要工作量
 
@@ -504,8 +504,9 @@ adb shell dmesg | grep avc > avc.log
 
 ## 8. 相关文档
 
-- 架构与关键设计决策 → `02-architecture.md`
-- Android 版本 API 差异、延迟数据、触控能力矩阵 → `03-reference.md`
-- 硬件、磁盘预算、构建环境 → `04-environment.md`
-- 接口的权威说明 → `api/README.md`
-- 设计与踩坑记录 → `05-design-notes.md`
+- 架构与关键设计决策 → [`02-architecture.md`](02-architecture.md)
+- Android 版本 API 差异、触控能力矩阵 → [`03-reference.md`](03-reference.md)
+- 硬件、磁盘预算、构建环境 → [`04-environment.md`](04-environment.md)
+- 设计与踩坑记录 → [`05-design-notes.md`](05-design-notes.md)
+- **抓帧与编码性能实测** → [`06-capture-performance.md`](06-capture-performance.md)
+- 接口的权威说明 → [`api/README.md`](api/README.md)

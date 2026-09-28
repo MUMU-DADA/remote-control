@@ -153,12 +153,12 @@ API=29 bash tools/build-ndk.sh   # ✗ memfd_create / AndroidBitmap_compress
 
 两个 API 都是 `__INTRODUCED_IN(30)`，API 28/26 报同样两条。
 
-低于 Android 11 的设备**没有实测过**；理论上能压到 Android 8/9
-（两处改动，见 [`docs/03-reference.md`](../03-reference.md) 的
-「最低支持的 Android 版本」），但现在没做。
+**运行时下限已经压到 Android 8**：`memfd_create` 换成裸系统调用、
+`AndroidBitmap_compress` 改成 `dlopen` 运行时探测、内置了 libwebp
+源码。详见 [`docs/03-reference.md`](../03-reference.md) 的「最低支持的 Android 版本」。
 
-> 这与**协议版本**是两件事，别混：协议 v6 说的是接口形态，
-> API 30 说的是能跑在哪些设备上。
+> 这与**协议版本**是两件事，别混：协议 v7 说的是接口形态，
+> API 级别说的是能跑在哪些设备上。
 
 ---
 
