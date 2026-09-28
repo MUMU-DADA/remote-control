@@ -32,6 +32,17 @@ enum class ImageFormat {
     kJpeg,
     kWebp,
     kRaw,    // 不编码，直接给原始像素（调用方自己处理）
+
+    // H.264（走设备端 MediaCodec）。
+    //
+    // 和上面几个有本质区别：H.264 是**有状态**的（SPS/PPS 只发一次、
+    // 帧间参考），所以不能用这个类来编 —— 它每次调用都是独立的。
+    // 流式路径自己持有 H264Encoder（每个流一个）。
+    // 这个枚举值只是让"格式解析/能力上报"有个统一的说法。
+    //
+    // 也**不能走 MJPEG** —— multipart 里装不下带帧间依赖的流。
+    // 只支持 WebSocket。
+    kH264,
 };
 
 class ImageEncoder {

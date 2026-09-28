@@ -601,6 +601,11 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
             .Field("jpeg", ImageEncoder::Instance().Supports(ImageFormat::kJpeg))
             .Field("webp", ImageEncoder::Instance().Supports(ImageFormat::kWebp))
             .Field("raw",  true)
+            // H.264 走设备端 MediaCodec，比软件编码器小两个数量级，
+            // 但**并发有硬上限**（真机硬件编码器通常 1~2 路）。
+            .Field("h264", ImageEncoder::Instance().Supports(ImageFormat::kH264))
+            .Field("h264Max",  static_cast<int64_t>(H264Encoder::MaxConcurrent()))
+            .Field("h264Used", static_cast<int64_t>(H264Encoder::ActiveCount()))
             .Field("backend", ImageEncoder::Instance().BackendSummary())
             // 开着 AUTOD_FORCE_FALLBACK 时如实标出来 ——
             // 一个强制走回退的实例，它的 codecs 不代表这台设备的真实能力。
@@ -622,6 +627,7 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
         if (ImageEncoder::Instance().Supports(ImageFormat::kJpeg)) fmts += "|jpeg";
         if (ImageEncoder::Instance().Supports(ImageFormat::kWebp)) fmts += "|webp";
         if (ImageEncoder::Instance().Supports(ImageFormat::kPng))  fmts += "|png";
+        if (ImageEncoder::Instance().Supports(ImageFormat::kH264)) fmts += "|h264";
         base += "{\"name\":\"format\",\"range\":\"" + fmts +
                 "\",\"desc\":\"编码格式\"},";
     }
@@ -962,6 +968,79 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
     st->lastHash = hash;
     st->haveLast = true;
 
+    // ── H.264：不走 ImageEncoder ──
+    //
+    // 它是**有状态**的（SPS/PPS 只发一次、帧间参考），而
+    // ImageEncoder 每次调用都是独立的。所以这里自己管一个实例。
+    if (static_cast<ImageFormat>(p.codec) == ImageFormat::kH264) {
+        std::string herr;
+
+        if (!st->h264) {
+            // 并发上限是**硬限制**：真机硬件编码器通常只支持 1~2 路。
+            // 超了不是变慢，是创建失败 —— 所以先问名额，好在日志里
+            // 说清楚"为什么这个流没画面"。
+            if (!H264Encoder::SlotAvailable()) {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    ALOGW("H.264 编码器已达上限（%d 路在用），"
+                          "这个流改用 JPEG 或等一路释放",
+                          H264Encoder::MaxConcurrent());
+                }
+                return {};
+            }
+            st->h264 = std::make_unique<H264Encoder>();
+        }
+
+        // 尺寸变了必须重建：编码器一旦 configure 就不能改尺寸
+        if (st->h264W != dw || st->h264H != dh) {
+            H264Encoder::Config cfg;
+            cfg.width  = dw;
+            cfg.height = dh;
+            cfg.fps    = static_cast<uint32_t>(p.fps > 0 ? p.fps : 30);
+            // 码率由 quality 推导。经验公式：每像素每帧约 0.1 bit
+            // 是"看得过去"的量级，再按 quality/75 缩放。
+            const int q = (p.level > 0 && p.level <= 100) ? p.level : 75;
+            uint64_t br = static_cast<uint64_t>(dw) * dh * cfg.fps / 10 * q / 75;
+            if (br < 200000) br = 200000;          // 再低就全是块了
+            if (br > 20000000) br = 20000000;
+            cfg.bitrate = static_cast<uint32_t>(br);
+
+            if (!st->h264->Start(cfg, &herr)) {
+                ALOGW("H.264 启动失败，这个流没有画面: %s", herr.c_str());
+                st->h264.reset();
+                return {};
+            }
+            st->h264W = dw;
+            st->h264H = dh;
+            // 新实例：必须让下一个输出是关键帧，否则客户端开头是黑的
+            // （要等到下一个 I 帧，默认 2 秒）
+            st->needKeyFrame = true;
+            ALOGI("流 H.264 编码器: %ux%u @%u bps",
+                  dw, dh, cfg.bitrate);
+        }
+
+        if (st->needKeyFrame) {
+            st->h264->RequestKeyFrame();
+            st->needKeyFrame = false;
+        }
+
+        std::vector<uint8_t> nal;
+        if (!st->h264->EncodeRgba(enc, dw, dh, &nal, &herr)) {
+            ALOGW("H.264 编码失败: %s", herr.c_str());
+            st->h264.reset();
+            st->h264W = st->h264H = 0;
+            return {};
+        }
+        // 编码器有内部缓冲，不是每送一帧就出一帧 —— 空是正常的
+        if (nal.empty()) {
+            *unchanged = true;
+            return {};
+        }
+        ++st->frameNo;
+        return std::string(reinterpret_cast<const char*>(nal.data()), nal.size());
+    }
+
     std::string perr;
     std::string out = ImageEncoder::Instance().Encode(enc, dw, dh,
                                                       static_cast<ImageFormat>(p.codec),
@@ -997,6 +1076,18 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
 
     HttpResponse resp = HttpResponse::Stream(
             "multipart/x-mixed-replace; boundary=" + boundary);
+
+    // H.264 不能走 MJPEG。
+    //
+    // multipart/x-mixed-replace 是"每段一张独立的图"，而 H.264 的
+    // P 帧依赖前面的帧 —— 拆成独立 part 就解不出来了。
+    // 明确拒绝，别让客户端拿到一堆解不开的字节。
+    if (static_cast<ImageFormat>(p.codec) == ImageFormat::kH264) {
+        return HttpResponse::Error(
+                400, "H.264 只能走 WebSocket（需要 Upgrade 头）—— "
+                     "MJPEG 的 multipart 装不下带帧间依赖的流。"
+                     "用 ws://…/api/v1/stream?format=h264");
+    }
 
     resp.streamer = [this, boundary, intervalMs, p](int fd) {
         StreamState st;
@@ -1088,6 +1179,7 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
 
         int64_t  nextFrameAt = NowMs();
         uint64_t sent = 0;
+        bool     codecSent = false;   // H.264 的 codec 串只发一次
 
         // 主循环用 poll 同时等两件事：客户端发来的控制消息、下一帧的时间点。
         //
@@ -1200,6 +1292,22 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                     .Field("h", static_cast<int64_t>(st.outH))
                  .EndObj();
                 if (!WsWriteText(fd, w.str())) return;
+            }
+
+            // H.264 还要告诉客户端 **codec 串**（"avc1.42C029"）。
+            //
+            // WebCodecs 的 VideoDecoder 必须要它。各设备的 profile/level
+            // 不同，客户端不能猜、服务端也不该写死 —— 它来自 SPS，
+            // 所以要等**第一帧编出来之后**才拿得到，只能放在这里发。
+            if (static_cast<ImageFormat>(p.codec) == ImageFormat::kH264 &&
+                !codecSent && st.h264) {
+                const std::string cs = st.h264->CodecString();
+                if (!cs.empty()) {
+                    json::Writer w;
+                    w.Obj().Field("t", "codec").Field("codec", cs).EndObj();
+                    if (!WsWriteText(fd, w.str())) return;
+                    codecSent = true;
+                }
             }
 
             if (!WsWriteFrame(fd, kWsBinary, img)) return;

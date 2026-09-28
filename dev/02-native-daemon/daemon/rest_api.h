@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "frame_hub.h"
+#include "h264_encoder.h"
 #include "http_server.h"
 #include "protocol.h"
 
@@ -51,6 +52,17 @@ struct StreamState {
     // 第一个订阅者启动抓帧线程，最后一个离开时停掉它 ——
     // **没人在看的时候完全不抓帧**。
     std::unique_ptr<FrameHub::Sub> hubSub;
+
+    // ── H.264（只有 format=h264 时才建）──
+    //
+    // H.264 是**有状态**的：SPS/PPS 只发一次、后面是帧间参考。
+    // 所以它不能用 ImageEncoder（那个每次调用都是独立的），
+    // 必须每个流自己持有一个实例。
+    //
+    // 尺寸变了要 Stop 再 Start —— 编码器一旦 configure 就不能改尺寸。
+    std::unique_ptr<H264Encoder> h264;
+    uint32_t h264W = 0, h264H = 0;   // 当前编码器的尺寸
+    bool     needKeyFrame = false;   // 下一个输出要是关键帧
     uint64_t hubSeq = 0;          // 本连接已经消费到哪一帧
     uint64_t hubTimeouts = 0;     // 等新帧超时的次数（诊断用）
 };

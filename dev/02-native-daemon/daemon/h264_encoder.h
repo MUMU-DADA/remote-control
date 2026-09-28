@@ -22,7 +22,26 @@ namespace autod {
 
 class H264Encoder {
   public:
-    static H264Encoder& Instance();
+    // **不是单例** —— H.264 编码器是有状态的（SPS/PPS 只发一次、帧间
+    // 参考），不同的尺寸必须用不同的实例。每个流一个。
+    H264Encoder() = default;
+    ~H264Encoder();
+    H264Encoder(const H264Encoder&) = delete;
+    H264Encoder& operator=(const H264Encoder&) = delete;
+
+    // 同时能存在几个编码器。
+    //
+    // 这是**硬限制**不是省资源：真机的硬件编码器通常只支持 1~2 路
+    // 并发。超了不是变慢，是创建失败。所以宁可明确拒绝（调用方退回
+    // JPEG），也不要让它失败在一个说不清的地方。
+    static int MaxConcurrent();
+    static int ActiveCount();
+
+    // 还空着名额吗（创建之前问一下，好在日志里说清楚原因）
+    static bool SlotAvailable();
+
+    // 这个构建/这台设备支持 H.264 吗
+    static bool Supported();
 
     struct Config {
         uint32_t width  = 0;
@@ -71,11 +90,6 @@ class H264Encoder {
     Stats GetStats() const;
 
   private:
-    H264Encoder() = default;
-    ~H264Encoder();
-    H264Encoder(const H264Encoder&) = delete;
-    H264Encoder& operator=(const H264Encoder&) = delete;
-
     bool DrainOutput(std::vector<uint8_t>* out, bool block, std::string* error);
 
     void*  codec_ = nullptr;          // AMediaCodec*
@@ -83,6 +97,12 @@ class H264Encoder {
     bool   running_ = false;
     bool   wantKeyFrame_ = false;
     std::string codecString_;
+
+    // SPS/PPS。MediaCodec 会把它作为**单独一个** CODEC_CONFIG buffer
+    // 吐出来，但那不是一个完整的访问单元 —— WebCodecs 的
+    // VideoDecoder 要的是"一个 chunk = 一个访问单元"。
+    // 所以先存住，等下一个真正的帧来了再拼到前面。
+    std::vector<uint8_t> codecConfig_;
     Stats  stats_;
     std::vector<uint8_t> yuv_;        // RGBA→YUV 的转换缓冲，复用避免每帧分配
 };

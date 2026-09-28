@@ -2,8 +2,11 @@
 
 #include "h264_encoder.h"
 
+#include <stdlib.h>   // getenv/atoi
 #include <string.h>
 #include <time.h>
+
+#include <atomic>
 
 #include "autod_log.h"
 
@@ -41,9 +44,37 @@ int64_t NowMs() {
 
 }  // namespace
 
-H264Encoder& H264Encoder::Instance() {
-    static H264Encoder enc;
-    return enc;
+namespace {
+// 全局并发计数。用原子而不是锁 —— 只增只减，没必要为它引入一把锁。
+std::atomic<int> g_activeEncoders{0};
+}  // namespace
+
+int H264Encoder::MaxConcurrent() {
+    // 2 是保守值：真机硬件编码器通常 1~2 路。
+    // 用环境变量可以调，调试时有用。
+    static const int n = []() {
+        const char* v = getenv("AUTOD_H264_MAX");
+        if (v != nullptr) {
+            const int x = atoi(v);
+            if (x > 0 && x <= 16) return x;
+        }
+        return 2;
+    }();
+    return n;
+}
+
+int H264Encoder::ActiveCount() { return g_activeEncoders.load(); }
+
+bool H264Encoder::SlotAvailable() {
+    return g_activeEncoders.load() < MaxConcurrent();
+}
+
+bool H264Encoder::Supported() {
+#ifdef AUTOD_HAS_MEDIANDK
+    return true;
+#else
+    return false;
+#endif
 }
 
 H264Encoder::~H264Encoder() { Stop(); }
@@ -57,6 +88,7 @@ void H264Encoder::Stop() {
         if (running_) AMediaCodec_stop(c);
         AMediaCodec_delete(c);
         codec_ = nullptr;
+        g_activeEncoders.fetch_sub(1);
     }
 #endif
     running_ = false;
@@ -121,8 +153,10 @@ bool H264Encoder::Start(const Config& cfg, std::string* error) {
     codec_ = c;
     cfg_ = cfg;
     running_ = true;
+    g_activeEncoders.fetch_add(1);
     wantKeyFrame_ = true;      // 第一帧必须是关键帧，否则客户端开头是黑的
     codecString_.clear();
+    codecConfig_.clear();
     stats_ = Stats{};
     ALOGI("H.264 编码器就绪: %ux%u @%u bps, %u fps, I 帧间隔 %us",
           cfg.width, cfg.height, cfg.bitrate, cfg.fps, cfg.iFrameIntervalSec);
@@ -229,6 +263,38 @@ bool H264Encoder::DrainOutput(std::vector<uint8_t>* out, bool block,
         uint8_t* buf = AMediaCodec_getOutputBuffer(c, static_cast<size_t>(idx), &cap);
         if (buf != nullptr && info.size > 0) {
             const uint8_t* p = buf + info.offset;
+
+            // CODEC_CONFIG（SPS/PPS）单独存起来，**不作为一帧发出**。
+            //
+            // 它不是一个完整的访问单元。单独发出去的话：
+            //   - WebCodecs 会拿到一个只有参数集、没有图像的 chunk
+            //   - 客户端的解码器可能直接报错
+            // 拼到下一个真正的帧（IDR）前面才是对的。
+            if ((info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                codecConfig_.assign(p, p + info.size);
+                if (codecString_.empty()) {
+                    for (int k = 0; k + 4 < info.size; ++k) {
+                        if (p[k] == 0 && p[k + 1] == 0 &&
+                            (p[k + 2] == 1 || (p[k + 2] == 0 && p[k + 3] == 1))) {
+                            const size_t o = (p[k + 2] == 1) ? k + 3 : k + 4;
+                            if (o < static_cast<size_t>(info.size) &&
+                                (p[o] & 0x1F) == 7) {
+                                codecString_ = CodecStringFromSps(
+                                        p + o, static_cast<size_t>(info.size) - o);
+                            }
+                            break;
+                        }
+                    }
+                }
+                AMediaCodec_releaseOutputBuffer(c, static_cast<size_t>(idx), false);
+                continue;
+            }
+
+            // 真正的帧：先把存着的 SPS/PPS 拼上（只拼一次）
+            if (!codecConfig_.empty()) {
+                out->insert(out->end(), codecConfig_.begin(), codecConfig_.end());
+                codecConfig_.clear();
+            }
             if (codecString_.empty()) {
                 // Annex-B 起始码之后是 NAL 头，0x67 就是 SPS
                 for (int k = 0; k + 4 < info.size; ++k) {

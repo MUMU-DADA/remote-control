@@ -89,6 +89,39 @@ ws://host:8088/api/v1/stream?fps=30&format=jpeg&quality=75&maxWidth=720&skipUnch
 `skipUnchanged=1` 时静止画面**整帧不编码**（实测 10 秒只发 1 帧）。
 暂停后重连、或想强制每帧都发，用 `skipUnchanged=0`。
 
+### H.264（`format=h264`）
+
+帧比 JPEG **小两个数量级**（P 帧几十~几百字节 vs 11 KB），但它有两处
+前提：
+
+1. **只能走 WebSocket** —— MJPEG 的 `multipart` 是"每段一张独立的图"，
+   装不下带帧间依赖的流。带 `format=h264` 走 MJPEG 会返回 400。
+2. **客户端必须支持 WebCodecs**（`VideoDecoder`，Chrome/WebView **94+**）。
+   设备上的 WebView 是 91 —— 所以**在设备本机**打开控制台用不了，
+   从桌面浏览器打开可以。
+
+握手多一条消息：
+
+```json
+← {"t":"hello","format":"h264","fps":15,...}
+← {"t":"size","w":320,"h":480}
+← {"t":"codec","codec":"avc1.42C029"}     ← 第一帧之前
+← 二进制 <Annex-B：SPS PPS IDR>
+← 二进制 <Annex-B：非 IDR>
+```
+
+`codec` 串来自 SPS 的第 1~3 字节，**各设备不同，不能写死** ——
+写死了 WebCodecs 的 `isConfigSupported` 会拒掉。
+
+**服务端保证**：第一个二进制帧一定是完整的访问单元（`SPS PPS IDR`）。
+MediaCodec 本来把 SPS/PPS 作为单独一个 CODEC_CONFIG buffer 吐出来，
+服务端会先存住、拼到下一个真正的帧前面再发 —— 单独发出去的话客户端
+会拿到一个只有参数集、没有图像的 chunk。
+
+⚠️ **并发有硬上限**：真机的硬件编码器通常只支持 1~2 路。超了不是
+变慢，是创建失败。当前默认 2，`GET /api/v1/params` 的
+`codecs.h264Max` / `h264Used` 能查到占用。
+
 ### 消息时序
 
 ```

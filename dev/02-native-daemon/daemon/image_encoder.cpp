@@ -49,6 +49,7 @@
 
 #include "autod_log.h"
 #include "jpeg_encoder.h"
+#include "h264_encoder.h"
 #include "png_encoder.h"
 #include "webp_encoder.h"
 
@@ -201,6 +202,7 @@ bool ImageEncoder::ParseFormat(const std::string& name, ImageFormat* out) {
     if (name == "jpeg" || name == "jpg") { *out = ImageFormat::kJpeg; return true; }
     if (name == "webp")                { *out = ImageFormat::kWebp; return true; }
     if (name == "raw")                 { *out = ImageFormat::kRaw;  return true; }
+    if (name == "h264")                { *out = ImageFormat::kH264; return true; }
     return false;
 }
 
@@ -210,6 +212,7 @@ const char* ImageEncoder::Name(ImageFormat f) {
         case ImageFormat::kJpeg: return "jpeg";
         case ImageFormat::kWebp: return "webp";
         case ImageFormat::kRaw:  return "raw";
+        case ImageFormat::kH264: return "h264";
         default:                 return "auto";
     }
 }
@@ -219,6 +222,7 @@ const char* ImageEncoder::MimeType(ImageFormat f) {
         case ImageFormat::kPng:  return "image/png";
         case ImageFormat::kJpeg: return "image/jpeg";
         case ImageFormat::kWebp: return "image/webp";
+        case ImageFormat::kH264: return "video/h264";
         default:                 return "application/octet-stream";
     }
 }
@@ -233,6 +237,8 @@ bool ImageEncoder::Supports(ImageFormat f) const {
     // WebP 现在**总是**可用 —— libwebp 已经内置进来了。
     // 以前这里返回 false，因为 WebP 只有 AndroidBitmap 能出（API 30+）。
     if (f == ImageFormat::kWebp) return WebpEncoder::Instance().Available();
+    // H.264 走设备端 MediaCodec，和上面的软件编码器不是一回事
+    if (f == ImageFormat::kH264) return H264Encoder::Supported();
     return false;
 }
 

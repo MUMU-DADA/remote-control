@@ -124,6 +124,8 @@ const std::string& WebUiHtml() {
         <button onclick="setCodec('jpeg',90)">JPEG 清</button>
         <button onclick="setCodec('webp',75)">WebP</button>
         <button onclick="setCodec('png',1)">PNG 无损</button>
+        <button id="btn-h264" onclick="setCodec('h264',75)"
+                title="H.264：帧比 JPEG 小两个数量级，需要浏览器支持 WebCodecs">H.264</button>
       </div>
       <div class="row" style="margin-top:6px">
         <label style="font-size:12px; display:flex; align-items:center; gap:5px">
@@ -272,6 +274,94 @@ let fps = 30;
 //    WebSocket 根本没创建，页面上只显示"画面流断开"，
 //    看不出任何原因。实测就是这么坑了半天。
 let codec = 'jpeg';
+
+// ── H.264 / WebCodecs ────────────────────────────────────────────────────
+//
+// H.264 的帧比 JPEG 小两个数量级（P 帧几十~几百字节 vs 11 KB），
+// 但它**必须由 WebCodecs 解码**，而那需要 Chrome/WebView 94+。
+//
+// 设备上的 WebView 是 91 —— 也就是说在**设备本机**打开这个控制台
+// 用不了 H.264；从桌面浏览器打开可以（那才是常规用法）。
+//
+// 所以要**探测 + 回退**：探测不到就禁用按钮，别让用户选到一个永远
+// 黑屏的选项；中途发现不支持也要退回去。
+const hasWebCodecs = (typeof VideoDecoder !== 'undefined' &&
+                      typeof EncodedVideoChunk !== 'undefined');
+
+let h264Dec = null;        // VideoDecoder 实例
+let h264Ready = false;     // 配置成功、可以喂数据了
+let h264Ts = 0;            // 时间戳（WebCodecs 要求单调递增）
+
+function stopH264() {
+  if (h264Dec) {
+    try { h264Dec.close(); } catch (e) {}
+    h264Dec = null;
+  }
+  h264Ready = false;
+  h264Ts = 0;
+}
+
+// 一段 Annex-B 里有没有 IDR（NAL 类型 5）？
+//
+// WebCodecs 的 EncodedVideoChunk 必须标明 key/delta，而服务端发的是
+// 裸 Annex-B，没有额外元信息 —— 只能自己扫 NAL 头。
+function hasIdr(buf) {
+  const d = new Uint8Array(buf);
+  for (let i = 0; i + 4 < d.length; i++) {
+    if (d[i] === 0 && d[i + 1] === 0 &&
+        (d[i + 2] === 1 || (d[i + 2] === 0 && d[i + 3] === 1))) {
+      const off = (d[i + 2] === 1) ? i + 3 : i + 4;
+      if (off < d.length && (d[off] & 0x1F) === 5) return true;
+    }
+  }
+  return false;
+}
+
+function startH264(codecStr) {
+  stopH264();
+  if (!hasWebCodecs) return false;
+  try {
+    h264Dec = new VideoDecoder({
+      output: (frame) => {
+        if (cvs.width !== frame.displayWidth || cvs.height !== frame.displayHeight) {
+          cvs.width = frame.displayWidth;
+          cvs.height = frame.displayHeight;
+          sw = cvs.width; sh = cvs.height;
+          updateMeta();
+        }
+        ctx.drawImage(frame, 0, 0);
+        frame.close();     // 不 close 会攒着不放，几秒就吃满内存
+        ++streamFrames;
+      },
+      error: (e) => {
+        dbg('VideoDecoder 错误: ' + e);
+        h264Ready = false;
+        setStatus('H.264 解码器出错，退回 JPEG', true);
+        fallbackToJpeg();
+      }
+    });
+    // optimizeForLatency：别为了重排攒缓冲。画面流要的是低延迟。
+    h264Dec.configure({ codec: codecStr, optimizeForLatency: true });
+    h264Ready = true;
+    dbg('H.264 解码器已配置: ' + codecStr);
+    return true;
+  } catch (e) {
+    dbg('VideoDecoder configure 失败: ' + e);
+    stopH264();
+    return false;
+  }
+}
+
+// 退回 JPEG 并重连。只在确认不支持时调，避免来回切。
+let fallingBack = false;
+function fallbackToJpeg() {
+  if (fallingBack || codec !== 'h264') return;
+  fallingBack = true;
+  codec = 'jpeg';
+  stopH264();
+  stopStream();
+  setTimeout(() => { fallingBack = false; startStream(); pushStreamParams(); }, 400);
+}
 let quality = 75;
 // 降采样宽度。设备屏幕往往比展示区域大得多，全分辨率纯属浪费带宽。
 let maxW = 720;
@@ -463,11 +553,38 @@ function startStream() {
           sw = m.w; sh = m.h;
           updateMeta();
         }
+      } else if (m.t === 'codec') {
+        // 服务端在**第一帧之前**告诉 codec 串 —— WebCodecs 必须要它，
+        // 而各设备的 profile/level 不同，不能写死。
+        if (!startH264(m.codec)) {
+          setStatus('这个浏览器不支持 H.264（需要 WebCodecs），已退回 JPEG', true);
+          dbg('没有 WebCodecs，退回 JPEG');
+          fallbackToJpeg();
+        } else {
+          setStatus('画面流 H.264（' + m.codec + '）');
+        }
       } else if (m.t === 'hello') {
         setStatus('画面流 ' + m.format + ' @' + m.fps + 'fps');
       }
       return;
     }
+
+    // H.264：喂给 WebCodecs，不走 createImageBitmap
+    if (h264Ready && h264Dec) {
+      try {
+        h264Dec.decode(new EncodedVideoChunk({
+          type: hasIdr(ev.data) ? 'key' : 'delta',
+          timestamp: (h264Ts += 33333),   // 微秒；单调递增即可
+          data: ev.data
+        }));
+      } catch (e) {
+        if (streamFrames === 0) dbg('H.264 decode 失败: ' + e);
+      }
+      return;
+    }
+    // 选了 H.264 但解码器还没起来（codec 消息没到 / 配置失败）：
+    // 这些是裸 H.264 字节，当图片解只会报错 —— 直接丢。
+    if (codec === 'h264') return;
 
     // 二进制帧：解码到 canvas
     if (streamFrames === 0) {
@@ -499,6 +616,7 @@ function pushStreamParams() {
 }
 
 function stopStream() {
+  stopH264();
   if (streamWs) { try { streamWs.close(); } catch (e) {} streamWs = null; }
   streamReady = false;
   setStatus('画面流已暂停');
@@ -524,7 +642,27 @@ function setFps(v) {
   setStatus('流帧率：' + v + ' fps');
 }
 
+
+// 没有 WebCodecs 就把 H.264 按钮置灰。
+//
+// 只在点击时报错是不够的 —— 用户会以为"这个选项应该有画面"，
+// 点几下才发现不行。置灰 + title 说明是更清楚的表达。
+(function disableH264IfUnsupported() {
+  if (hasWebCodecs) return;
+  const b = document.getElementById('btn-h264');
+  if (b) {
+    b.disabled = true;
+    b.title = '这个浏览器不支持 WebCodecs（需要 Chrome/WebView 94+），无法解码 H.264';
+    b.style.opacity = '0.4';
+    b.style.cursor = 'not-allowed';
+  }
+})();
+
 function setCodec(c, q) {
+  if (c === 'h264' && !hasWebCodecs) {
+    setStatus('这个浏览器不支持 H.264（WebCodecs 需要 Chrome/WebView 94+）', true);
+    return;
+  }
   codec = c; quality = q;
   startStream();
   pushStreamParams();
