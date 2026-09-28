@@ -192,4 +192,4 @@ echo "  自检： bash tools/lan-up.sh --status"
 echo
 echo "  ⚠️ 这些端口没有鉴权 —— 同一局域网内任何设备都能控制模拟器。"
 echo "     只在可信网络里用；要暴露到不可信网络的话，"
-echo "     先给 autod 加 --http-token（见 docs/10-http-api.md 的安全模型）。"
+echo "     先给 autod 加 --http-token（见 docs/api/04-config.md 的鉴权一节）。"

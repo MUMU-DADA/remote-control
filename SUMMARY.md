@@ -227,9 +227,7 @@ cd dev/02-native-daemon/tests && sudo make run
 | `docs/06-constraints.md` | 关键约束与风险清单 |
 | `docs/07-environment.md` | 本机实际环境：磁盘、镜像源、构建容器 |
 | `docs/08-official-implementations.md` | 官方/开源实现对照：用了哪个、为什么 |
-| `docs/09-app-and-file-api.md` | 应用与文件管理的设计记录 |
-| `docs/10-http-api.md` | HTTP 传输的设计记录（含安全模型） |
-| `docs/11-live-stream-and-input.md` | 实时流与输入的设计记录（含性能实测） |
+| `docs/05-design-notes.md` | **设计记录**：为什么这么做、踩过的坑、实测数据 |
 | `dev/01-ndk-prototype/` | 阶段 0：纯 NDK 快速验证 |
 | `dev/02-native-daemon/` | 阶段 1–2：AOSP native daemon（主体代码） |
 | `dev/03-java-service/` | 阶段 3：Java 系统服务（长期形态） |
