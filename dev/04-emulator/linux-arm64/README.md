@@ -1467,3 +1467,55 @@ init: Command 'restart surfaceflinger' action=onrestart (<Service 'vendor.hwcomp
 3. `kernel-ranchu` 打 `ramoops→noramop`（消除 pstore panic）；
 4. 用四个镜像 `lpmake` 重建 super 并写回；
 5. 启动（ranchu + `-cpu cortex-a53` + 三个 QEMU 二进制补丁）并挂上会自动截图的守护。
+
+---
+
+## 第 26 轮：修 hwcomposer 缺库 —— 根因确定，mk 路线不通，改走"替换文件"
+
+### 一、根因（第 25 轮已定位，本轮再确认）
+
+`hwcomposer.ranchu.so` 的 NEEDED 里有两个库**在 vendor 里不存在**：
+
+```
+android.hardware.graphics.mapper@4.0.so     ← 只在 /system/lib64
+libgralloctypes.so                          ← 只在 /system/lib64
+```
+
+而**本 build 没有 VNDK 运行时**（`/system/lib64/vndk-30/` 是空目录 ✗，`vendor/lib64/` 下也没有
+vndk 目录 ✗），vendor 命名空间**看不到 `/system/lib64`** ⇒ vendor 里的 hwcomposer 加载失败 ⇒
+`signal 6` abort ⇒ `init` 按 `onrestart` 重启 `surfaceflinger` ⇒ boot 无法收尾。
+
+### 二、试过但不通的：往 `PRODUCT_PACKAGES` 里加
+
+先弄清 product 的继承链：`sdk_phone64_arm64.mk` →
+`device/generic/goldfish/arm64-vendor.mk` + `64bitonly/product/emulator64_vendor.mk`
+（后者又 `inherit-product-if-exists` 了 `64bitonly/product/vendor.mk`）+ `emulator64_arm64/device.mk`；
+另外 `device/google/cuttlefish/shared/device.mk` 里也有 `hwcomposer.ranchu`。
+
+于是把 `libgralloctypes.vendor` / `android.hardware.graphics.mapper@4.0.vendor`
+加进**三个**相关 mk（goldfish/vendor.mk、goldfish/64bitonly/product/vendor.mk、
+cuttlefish/shared/device.mk）✗，结果：
+
+- `m vendorimage` → **`ninja: no work to do`**，`vendor.img` 时间戳不变 ✗
+- `m`（完整）→ **"build completed successfully (4 seconds)"** ✗
+- `installed-files-vendor.json` 里依旧没有它们 ✗
+
+（模块本身是存在的：`m libgralloctypes.vendor` 能编出 `STATIC_LIBRARIES/libgralloctypes`，
+源码在 `frameworks/native/libs/gralloc/types`，带 `vendor_available: true` + `vndk.enabled`；
+`android.hardware.graphics.mapper@4.0` 是 `hardware/interfaces/graphics/mapper/4.0` 的
+`hidl_interface`，也是 vndk enabled。）
+
+**结论：靠 `PRODUCT_PACKAGES` 让这两个库进 vendor，在这个 build 配置下不生效** ✗。
+
+### 三、下一轮改走的确定路线：**替换 vendor 里已有的库文件**
+
+第 23 轮已经验证：**镜像手术"替换/删除已有文件"是有效的**（只有"新增"无效）。
+
+所以做法是：在 vendor 的 ext4 里，**挑两个无用/可牺牲的 vendor 库，
+把 `libgralloctypes.so` 与 `android.hardware.graphics.mapper@4.0.so` 写进去（覆盖同名文件）** ——
+用 `debugfs -w -R "rm <file>"` + `write`，或直接 `write` 覆盖。
+
+更干净一点的等价做法：**把这两个库塞进一个已经存在、且不会被用到的目录路径**（不新增文件），
+或**用 `e2fsck`/`debugfs` 把某个现有大文件截断再复用其块** ✗ 复杂，优先用"覆盖同名文件"。
+
+替换完再 `lpmake` 重建 super → 写回 → 用 `assemble-and-boot.sh` 启动即可。
