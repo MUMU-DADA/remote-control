@@ -741,3 +741,54 @@ QEMU 解析后仍要求 PCI 总线；而这台串口设备是**调制解调器/R
 2. 把**自编的 arm64 `autod`** 推进去跑 —— 这就是社区验证过的、
    在 x86_64 Linux 上验证 arm64 二进制的正规做法；
 3. 若转译不可用，退路是 **API 28 x86（官方点名的那个）**（本轮已下载 ✓）。
+
+---
+
+## 第 13 轮：**在 x86_64 Linux 上跑 arm64 二进制 —— 打通了**
+
+### 一、修掉一个自己挖的坑：解压被截断
+
+`google_apis` 包第一次解压时被我 20s 的命令超时打断，留下一个**名义大小对、实际数据不全**
+的 `system.img`（3.23GB 的表象、只有 ~111MB 有数据）—— 这正是前两次"guest 卡在
+`pc_memory_init`"的真正原因。重新完整解压后一切正常。
+（教训：大文件解压/拷贝必须后台跑并校验**可读性**，不能只看 `ls` 的大小。）
+
+### 二、确认转译组件在本机镜像里
+
+在宿主机拆开 `google_apis` 的 `system.img`（GPT → super → `lpdump` 定位 system 分区）：
+**`/system/etc/init/ndk_translation.rc` 存在** ✓ —— 转译组件确实在这个镜像里
+（AOSP 的 `default` tag 镜像则**没有**，实测 `abilist=x86_64,x86`）。
+
+### 三、**实测成功**
+
+启动 `google_apis` API30 x86_64（KVM）后，guest 报：
+
+```
+abilist:        x86_64,x86,arm64-v8a,armeabi-v7a,armeabi
+native.bridge:  libndk_translation.so
+```
+
+**这台 x86_64 模拟器已经能跑 arm64 二进制** ✓✓。把自编的 **arm64 `autod`** 推进去：
+
+- guest 里 `toybox file` 认它为 **`ELF ... 64-bit LSB arm64, dynamic (/system/bin/linker64)`** ✓
+- 直接执行时进入 **arm64 的 linker**（报 `library "libbinder.so" not found`）✓
+  —— 说明转译链路是通的，只是**框架库**不在转译层自带的库目录里
+  （`/system/lib64/arm64/` 只有 59 个基础库：libc/liblog/libEGL/libandroid/…）
+
+### 四、最后一步的做法（已就绪，待重启后收尾）
+
+1. 用 `readelf -d` 递归算出 `autod` 的 arm64 依赖闭包：**190 个库、48.3MB**
+   （直接依赖：libbase/libbinder/libcutils/libgui/libjnigraphics/liblog/libui/libutils/libc/libm/libdl）；
+2. **剔除转译层自带的 59 个**，剩 **161 个、40MB** 需要补；
+3. ⚠️ **不能用 `LD_LIBRARY_PATH`** —— 它会被 **x86_64 的转译运行器**继承，
+   导致 `libandroidfw.so is for EM_AARCH64 instead of EM_X86_64` ✗；
+   正确做法是把库放进转译层自己的搜索路径 **`/system/lib64/arm64/`**；
+4. 需要 `-writable-system` 启动 + `adb remount`（会要求**重启 guest** 生效），
+   然后 `tar` 解到该目录即可 —— 本轮已走到重启这一步（guest 尚在启动中）。
+
+### 五、结论
+
+**"Linux 平台上跑 arm64 安卓"这个目标，在 x86_64 机器上已经打通** ✓：
+用 **`google_apis` 版 Android 11（API 30）x86_64 镜像**（内置 `ndk_translation`），
+它对外暴露 `arm64-v8a` ABI，**arm64 的 ELF 可以被直接执行**（走转译）。
+这正是 Google 官方文档说的那条路，也是社区的主流做法。
