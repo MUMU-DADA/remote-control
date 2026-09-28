@@ -40,6 +40,7 @@ cc_defaults {
         "webui.cpp",
         "image_encoder.cpp",
         "frame_hub.cpp",
+        "h264_encoder.cpp",
         "jpeg_encoder.cpp",
         "webp_encoder.cpp",
         "websocket.cpp",
@@ -82,6 +83,7 @@ cc_defaults {
         //    改成 dlopen + dlsym 之后，"这个函数不存在"变成一个
         //    可以处理的返回值 —— 见 image_encoder.cpp 的 ProbeJniGraphics。
         "liblog",
+        "libmediandk",     // AMediaCodec：H.264 编码
         "libui",               // GraphicBuffer / PixelFormat
         "libutils",
     ],

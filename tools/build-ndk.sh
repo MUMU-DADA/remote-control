@@ -72,13 +72,14 @@ for f in main.cpp socket_server.cpp dispatch.cpp selftest.cpp \
          appops.cpp subprocess.cpp fileops.cpp http_client.cpp \
          service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp \
          json_parser.cpp png_encoder.cpp keyboard.cpp clipops.cpp \
-         webui.cpp image_encoder.cpp frame_hub.cpp jpeg_encoder.cpp \
+         webui.cpp image_encoder.cpp frame_hub.cpp h264_encoder.cpp \
+         jpeg_encoder.cpp \
          webp_encoder.cpp \
          websocket.cpp \
          config_file.cpp; do
     [ -f "$DAEMON/$f" ] || { bad "缺源文件: daemon/$f"; exit 1; }
 done
-ok "26 个源文件齐备"
+ok "27 个源文件齐备"
 
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
@@ -164,12 +165,13 @@ COMMON_FLAGS=(
     "$DAEMON/webui.cpp" \
     "$DAEMON/image_encoder.cpp" \
     "$DAEMON/frame_hub.cpp" \
+    "$DAEMON/h264_encoder.cpp" \
     "$DAEMON/jpeg_encoder.cpp" \
     "$DAEMON/webp_encoder.cpp" \
     "$WEBP_OBJ"/*.o \
     "$DAEMON/websocket.cpp" \
     "$DAEMON/config_file.cpp" \
-    -llog -static-libstdc++ -lm -pthread
+    -llog -lmediandk -static-libstdc++ -lm -pthread
 
 ok "autod → $OUT/$ABI/autod"
 

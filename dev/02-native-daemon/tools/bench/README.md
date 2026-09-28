@@ -247,3 +247,58 @@ dequeueOutputBuffer: -2          ← INFO_OUTPUT_FORMAT_CHANGED，正常
 
 这意味着 H.264 必须**带自动回退**：探测不到 WebCodecs 就退回
 JPEG/MJPEG。不能假设客户端都能解。
+
+
+---
+
+# h264_bench —— H264Encoder 的实测
+
+```bash
+$CXX -std=c++20 -O2 -fno-exceptions -I daemon -o h264b h264_bench.cpp \
+     daemon/h264_encoder.cpp daemon/log_buffer.cpp -lmediandk -llog -static-libstdc++
+curl -o real.raw 'http://<设备>:8088/api/v1/capture?format=raw'
+adb push h264b real.raw /data/local/tmp/
+adb shell '/data/local/tmp/h264b /data/local/tmp/real.raw 320 480 30 /data/local/tmp/out.h264'
+```
+
+## 实测（Android 12 / x86_64 模拟器，320x480 真实抓帧）
+
+```
++ 编码器已启动
+第 0 帧:   31 字节   8 ms  NAL: SPS PPS     ← codec config
+第 2 帧: 7200 字节   7 ms  NAL: IDR         ← 关键帧
+第 3 帧:  109 字节   7 ms  NAL: 非IDR       ← P 帧
+第 4 帧:   70 字节   1 ms  NAL: 非IDR
+第 5 帧:   90 字节   1 ms  NAL: 非IDR
+
+送帧 30，出帧 27，有数据的轮次 27/30
+平均 4292 字节/轮，平均 2.43 ms/轮
+codec 串: avc1.42C029      ← 从 SPS 正确解析
+```
+
+产物用独立脚本解析 NAL 序列确认：
+
+```
+共 28 个 NAL:  类型 1（非IDR）×25  类型 5（IDR）×1
+               类型 7（SPS）×1     类型 8（PPS）×1
+✓ SPS / PPS / IDR / 非IDR 齐全 —— 是完整的可解码流
+```
+
+**P 帧 70~110 字节 vs JPEG 的 11,000 字节 —— 小两个数量级。**
+（平均 4292 被 IDR 拉高：这个测试每帧改一个字节，对静止画面
+会触发较多帧内刷新。真实画面流里 I 帧间隔 2 秒，平均会低得多。）
+
+## 实现里几个不显然的点
+
+**`COLOR_Format*` 常量 NDK 头里没有** —— 它们是 Java 侧
+`MediaCodecInfo.CodecCapabilities` 的字段。值本身平台稳定，
+在 h264_encoder.cpp 里自己定义（19=I420，21=NV12）。
+
+**`queueInputBuffer` 没有关键帧标志** —— `AMEDIACODEC_BUFFER_FLAG_*`
+只有 CODEC_CONFIG / EOS / PARTIAL。原生侧的正确做法是
+`AMediaCodec_setParameters("request-sync", 1)`，而那是 **API 26+**
+（正好是我们的下限）。
+
+**codec 串不能写死** —— WebCodecs 的 `isConfigSupported` 会按
+profile/level 校验。必须从 SPS 的第 1~3 字节解析（这次拿到
+`avc1.42C029`）。
