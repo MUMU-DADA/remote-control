@@ -69,6 +69,15 @@ cc_defaults {
     //    系统库就会用自己那份，两边不再混。
     ldflags: ["-Wl,--exclude-libs,ALL"],
 
+    // 内置的 libwebp（编码器部分）。
+    //
+    // ⚠️ 必须放 static_libs 而不是 shared_libs —— 它是 cc_library_static，
+    //    只产出 link:static 变体。放 shared_libs 会报
+    //    "dependency ... missing variant"（消费者要 link:shared）。
+    static_libs: [
+        "libwebp_vendored",
+    ],
+
     shared_libs: [
         "libbase",
         "libbinder",
@@ -104,6 +113,16 @@ cc_defaults {
     ],
 
     cppflags: ["-std=c++20"],
+
+    // webp_encoder.cpp 里写的是 #include "src/webp/encode.h" ——
+    // 源码布局决定了 -I 要指到 vendor/webp/，不是 vendor/webp/src。
+    //
+    // ⚠️ 这个必须给**消费者**（autod_defaults）。libwebp_vendored 里那份
+    //    是给它自己的源码用的，不会传给谁 —— 是 webp_encoder.cpp 在
+    //    include，不是 libwebp 自己在 include。
+    //    NDK 构建那边是显式加 -I"$WEBP_DIR" 的，所以一直没事；
+    //    AOSP 这边就编不过（fatal error: 'src/webp/encode.h' not found）。
+    local_include_dirs: ["vendor/webp"],
     stl: "libc++_static",
 
     // 用平台私有 API，必须标记为非 NDK

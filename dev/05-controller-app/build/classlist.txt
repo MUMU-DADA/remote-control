@@ -1,3 +1,0 @@
-/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/MainActivity$1.class
-/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/R.class
-/root/AutoSnapshotAndroid/dev/05-controller-app/build/classes/com/autod/controller/MainActivity.class

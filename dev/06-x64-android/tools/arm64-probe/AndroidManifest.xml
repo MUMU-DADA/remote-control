@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  arm64 探针 APK：只带 lib/arm64-v8a 一个 ABI 的原生库。
+  在 x86_64 ROM 上能装能跑 = 翻译层（libndk_translation）真的在工作。
+  由 tools/build-probe-apk.sh 打包。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.autosnap.arm64probe">
+
+    <application android:label="ARM64 Probe" android:extractNativeLibs="true">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

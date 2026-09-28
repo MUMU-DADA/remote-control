@@ -1,0 +1,25 @@
+# 运行期与产物（不入库）
+#
+# 本项目位于 dev/06-x64-android/（原在仓库根的 x64-android/，已下移与 04-emulator 同级）。
+# 细则就近维护在这里；仓库根的 .gitignore 里另有一段"大件速查"。
+
+# 运行期：模拟器 datadir、符号链接工作目录、日志、下载的模拟器包、打包锁
+.run/
+
+# ROM 产物（system-qemu.img 等，5.7 GB）与打包目录
+artifacts/*
+!artifacts/.gitkeep
+
+# 翻译层：Google 专有二进制（23 MB），由 scripts/fetch-payload.sh 从官方镜像重新生成。
+# MANIFEST.sha256 保留入库，用于锁定"这份 ROM 用的是哪一版载荷"。
+payload/system/
+
+# Windows 侧下载物
+windows/sdk/
+windows/images/
+windows/data/
+windows/*.apk
+
+# 验收用 APK（含 apksigner 生成的 .idsig）
+*.apk
+*.apk.idsig
