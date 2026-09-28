@@ -1057,3 +1057,73 @@ guest 的 `/system/lib64/arm64/`（转译层自带 59 个）里是：
 - **`adb root` + `mount --bind <dir> /system/lib64/arm64`** 这一招 ——
   **不改镜像、不需要 `-writable-system`/remount/重启**就能给转译层加 arm64 库 ✓✓；
 - 计算 arm64 依赖闭包 + "只补 guest 缺失的、但该覆盖的要覆盖"的推送策略。
+
+---
+
+## 第 19 轮：**打通 `ranchu` —— 19 轮的关键突破**
+
+### 一、终于找对了 `-device virtio-serial` 的修法：改 QEMU 的**设备别名表**
+
+第 10~12 轮一直卡在这句：
+
+```
+qemu-system-aarch64-headless: -device virtio-serial,...:
+    No 'PCI' bus found for device 'virtio-serial-pci'      ← ranchu 没有 PCI 总线
+```
+
+本轮把 QEMU 内部的**设备别名表**解码出来了。它是一个 **24 字节一组的表**，
+每组形如 `[实现名, 通用名, 标志]`，例如：
+
+```
+0x24ccf20: "virtio-serial"      ← 通用名
+0x24ccf28: 0x200                ← 标志
+0x24ccf30: "virtio-serial-pci"  ← 实现名（PCI）
+0x24ccf38: "virtio-serial"      ← 通用名（别名）
+0x24ccf40: 0xfffffdff
+```
+
+**正确改法**（第 11 轮我改错了 —— 把*别名名*指针也改了，导致 `'virtio-serial' is not a
+valid device model name`）：
+- **别名名指针保持指向 `virtio-serial`**（不动）；
+- **只把"实现"指针改成 MMIO 设备名 `virtio-serial-device`** ✓✓。
+
+即：`{impl: "virtio-serial-pci"} → {impl: "virtio-serial-device"}`，
+于是 QEMU 解析 `virtio-serial` 时**只剩 MMIO 实现可选** ✓。
+
+### 二、配套的两处修正
+
+| 问题 | 修法 |
+|---|---|
+| 模拟器无条件加 PCI 音频设备 | 字符串补丁 `-soundhw` → `-name`（`-name hda` 合法且无害）|
+| 传给设备的 PCI 专有属性 `ioeventfd=off` | 改成 MMIO 合法属性 `max_ports=511`（先试 999 超上限 511，QEMU 明确报错后改对）|
+
+补丁打在 **`/tmp/qemu-headless.broken.bak`**（第 11 轮留下的 30.8.3 真正 headless 二进制，
+仅局部小损伤）上，恢复为 `prebuilts/android-emulator/.../qemu-system-aarch64-headless`。
+
+### 三、**结果：`ranchu` 起来了，且 guest 一路干净推进**
+
+```
+[   13.7] init: starting service 'apexd-bootstrap'...
+[  111.9] apexd: Decompressing /system/apex/com.android.media.capex ...
+[  136.2] init: starting service 'odsign'...
+[  153.9] init: ... bpfloader ... load_bpf_programs
+```
+
+- **宿主段错误：0**（`virt` 时代 20~70 秒必崩 ✗）
+- **guest 崩溃 / 进 recovery：0**
+- QEMU 满载 102% 稳定跑着
+
+也就是说：**用真设备（ranchu）跑 arm64 guest，前面 18 轮里那一大堆 whack-a-mole
+（缺失 MMIO 导致的宿主崩溃、USB/wifi/电池 HAL 崩溃、`audioserver` 崩溃……）全都不存在了** ✓✓。
+
+### 四、复现命令（写进本文件备用）
+
+```bash
+EMU=prebuilts/android-emulator/linux-x86_64/emulator
+$EMU -sysdir <A12 arm64 产物> -datadir /tmp/d -no-window -gpu swiftshader_indirect \
+     -no-audio -no-snapshot -no-boot-anim -accel off -memory 4096 -cores 4 -port 5556 \
+     -show-kernel -selinux permissive \
+     -feature -VirtconsoleLogcat,-VirtioInput,-VirtioMouse,-VirtioWifi,-VirtioVsockPipe \
+     -qemu -cpu cortex-a53
+```
+（**不要**再加 `-qemu -machine type=virt`；`-cpu cortex-a53` 仍是消除 guest 段错误的关键 ✓）
