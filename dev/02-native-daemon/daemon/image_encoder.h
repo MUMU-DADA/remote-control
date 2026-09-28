@@ -45,6 +45,27 @@ enum class ImageFormat {
     kH264,
 };
 
+// 每种格式的 quality 取值范围。
+//
+// ⚠️ **唯一的来源**。三个地方都用它：
+//     - `/api/v1/params` 上报给客户端（网页的拖动条按它设范围）
+//     - 请求解析时钳位（`?quality=`）
+//     - WebSocket 的 {"t":"quality"} 命令
+//
+// 各写一份的话迟早会出现"接口说支持 1-100、实际只认到 9"这种不一致 ——
+// 而用户看到的是"拖了没反应"。实测踩过：h264 被当成 PNG 钳到 9，
+// 拖动条拖到 75 实际按 9 走。
+//
+// 量纲本来就不同：PNG 是 zlib 压缩级别（1-9），JPEG/WebP 是图像质量
+// （1-100），H.264 会被换算成码率（也是 1-100 的量纲）。
+struct QualityRange {
+    int min = 1;
+    int max = 100;
+    int def = 75;
+};
+
+QualityRange QualityRangeFor(ImageFormat f);
+
 class ImageEncoder {
   public:
     static ImageEncoder& Instance();

@@ -582,6 +582,13 @@ HttpResponse RestApi::HandleTouchStream(const HttpRequest& req) {
 // 让调用方能**查到**流支持哪些参数、当前默认值是什么，而不是去翻文档。
 HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
     const StreamParams def;   // 内置默认
+    const FrameHub::Stats h = FrameHub::Instance().GetStats();
+    // quality 范围也从**同一个来源**取 —— 上报的和服务端实际钳的
+    // 必须是同一个数，各写一份迟早漂移。
+    const QualityRange qj = QualityRangeFor(ImageFormat::kJpeg);
+    const QualityRange qw = QualityRangeFor(ImageFormat::kWebp);
+    const QualityRange qp = QualityRangeFor(ImageFormat::kPng);
+    const QualityRange qh = QualityRangeFor(ImageFormat::kH264);
     json::Writer w;
     w.Obj()
         .Field("ok", true)
@@ -592,6 +599,41 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
         .Field("defaultSkipUnchanged", def.skipUnchanged)
         .Field("defaultFormat", ImageEncoder::Name(ImageEncoder::Instance().BestFormat()))
         .Field("nativeCodecs", ImageEncoder::Instance().hasNativeCodecs())
+        // ── 当前抓帧节奏 ──
+        //
+        // 抓帧线程按**所有订阅者的最高需求**跑。客户端只报自己的 fps，
+        // 看不到"服务端实际在按多少抓" —— 那会让"我明明要 10fps 为什么
+        // 设备这么烫"变成一个查不出来的问题。
+        //
+        // 这里如实报出来。activeFps=0 表示没有订阅者、一次都没在抓。
+        .Key("capture").Obj()
+            .Field("activeFps", static_cast<int64_t>(h.maxFps))
+            .Field("subscribers", static_cast<int64_t>(h.subscribers))
+            .Field("frames", h.frames)
+            .Field("lastCaptureMs", h.lastCaptureMs)
+            // served/misses：取帧时"最新帧已备好"和"没等到"的次数。
+            // misses 高 = 抓帧跟不上需求，客户端在等。
+            .Field("served", h.served)
+            .Field("misses", h.misses)
+            .Field("running", h.running)
+        .EndObj()
+        // ── 每种格式的 quality 范围 ──
+        //
+        // 各格式的量纲完全不同（PNG 是 zlib 级别 1-9，JPEG/WebP 是
+        // 1-100，H.264 那边会换算成码率）。界面上的拖动条要按当前格式
+        // 取这个范围，不能写死 —— 写死了就会出现"拖到 75 但 PNG 只认 9"。
+        .Key("quality").Obj()
+            .Key("jpeg").Obj().Field("min", qj.min).Field("max", qj.max)
+                             .Field("default", qj.def).EndObj()
+            .Key("webp").Obj().Field("min", qw.min).Field("max", qw.max)
+                             .Field("default", qw.def).EndObj()
+            .Key("png").Obj().Field("min", qp.min).Field("max", qp.max)
+                            .Field("default", qp.def)
+                            .Field("note", "zlib 压缩级别，不是图像质量").EndObj()
+            .Key("h264").Obj().Field("min", qh.min).Field("max", qh.max)
+                             .Field("default", qh.def)
+                             .Field("note", "换算成码率，不是图像质量").EndObj()
+        .EndObj()
         .Key("codecs").Obj()
             // 这三个是**这台设备实际**能编的，不是"理论上支持的"。
             //
@@ -785,14 +827,12 @@ bool ParseStreamParams(const HttpRequest& req, StreamParams* out,
     if (!qs.empty()) {
         out->level = ClampInt(qs, 1, 100, 0);
     }
-    const bool lossy = (fmt == ImageFormat::kJpeg || fmt == ImageFormat::kWebp);
-    if (lossy) {
-        if (out->level < 1 || out->level > 100) {
-            out->level = (fmt == ImageFormat::kWebp) ? 80 : 75;
-        }
-    } else {
-        if (out->level < 1 || out->level > 9) out->level = 1;
-    }
+    // 按格式的真实范围钳位。
+    //
+    // 早先写成 `lossy = JPEG||WebP`，其余一律当 PNG 钳到 1-9 ——
+    // h264 被误伤（它也是 1-100），拖动条拖到 75 实际按 9 走。
+    const QualityRange qr = QualityRangeFor(fmt);
+    if (out->level < qr.min || out->level > qr.max) out->level = qr.def;
     return true;
 }
 
@@ -1264,12 +1304,10 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                             WsWriteText(fd, "{\"t\":\"ack\",\"fps\":" +
                                                 std::to_string(nf) + "}");
                         } else if (t == "quality") {
-                            const int nq = ClampInt(std::to_string(v.num("v", p.level)),
-                                                    1, 100, p.level);
-                            const bool lossy =
-                                (p.codec == static_cast<int>(ImageFormat::kJpeg) ||
-                                 p.codec == static_cast<int>(ImageFormat::kWebp));
-                            p.level = lossy ? nq : ((nq > 9) ? 9 : nq);
+                            const QualityRange qr = QualityRangeFor(
+                                    static_cast<ImageFormat>(p.codec));
+                            p.level = ClampInt(std::to_string(v.num("v", p.level)),
+                                               qr.min, qr.max, p.level);
                             st.haveLast = false;
                             WsWriteText(fd, "{\"t\":\"ack\",\"quality\":" +
                                                 std::to_string(p.level) + "}");

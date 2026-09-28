@@ -126,6 +126,14 @@ const std::string& WebUiHtml() {
         <button onclick="setCodec('png',1)">PNG 无损</button>
         <button id="btn-h264" onclick="setCodec('h264',75)"
                 title="H.264：帧比 JPEG 小两个数量级，需要浏览器支持 WebCodecs">H.264</button>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <span class="dim" style="font-size:11px;align-self:center">质量</span>
+          <input type="range" id="qslider" min="1" max="100" value="75"
+                 oninput="onQualitySlide(this.value)"
+                 style="flex:1;min-width:60px;accent-color:#4a9eff">
+          <span id="qval" class="dim" style="font-size:11px;width:2.5em;
+                text-align:right">75</span>
       </div>
       <div class="row" style="margin-top:6px">
         <label style="font-size:12px; display:flex; align-items:center; gap:5px">
@@ -274,6 +282,65 @@ let fps = 30;
 //    WebSocket 根本没创建，页面上只显示"画面流断开"，
 //    看不出任何原因。实测就是这么坑了半天。
 let codec = 'jpeg';
+
+// ── 画质拖动条 ──
+//
+// ⚠️ 范围**跟着格式走**，不能写死。
+//
+//    PNG 的 quality 是 zlib 压缩级别（1-9），JPEG/WebP 是 1-100，
+//    H.264 那边会被换算成码率。写死 1-100 的话：
+//      - 选 PNG 时拖到 75，服务端只认 9，用户看到的数字和实际不符
+//      - 拖到 1 再切回 JPEG 就变成"质量 1"，画面糊成马赛克
+//
+//    范围从 /api/v1/params 的 quality 段拿（服务端是唯一权威）。
+let qualityRange = {
+  jpeg: { min: 1, max: 100, default: 75 },
+  webp: { min: 1, max: 100, default: 80 },
+  png:  { min: 1, max: 9,   default: 1 },
+  h264: { min: 1, max: 100, default: 75 },
+};
+
+function syncQualitySlider() {
+  const r = qualityRange[codec] || { min: 1, max: 100, default: 75 };
+  const el = document.getElementById('qslider');
+  const lab = document.getElementById('qval');
+  if (!el) return;
+
+  // 换格式时把当前值钳进新范围，而不是留着越界的旧值
+  if (!(quality >= r.min && quality <= r.max)) {
+    quality = r.default;
+  }
+  el.min = r.min;
+  el.max = r.max;
+  el.value = quality;
+  if (lab) lab.textContent = quality;
+}
+
+// 拖动时的节流句柄
+let qTimer = null;
+let qPending = null;
+
+function onQualitySlide(v) {
+  const q = parseInt(v, 10);
+  if (isNaN(q)) return;
+  quality = q;
+  const lab = document.getElementById('qval');
+  if (lab) lab.textContent = q;
+
+  // ⚠️ 必须节流。拖动时 oninput 每秒能触发几十次，每次都发一条
+  //    WebSocket 消息的话，服务端要不停地重配编码器（H.264 还要
+  //    重建），画面会一顿一顿的，而且用户根本感觉不到中间那些值。
+  qPending = q;
+  if (qTimer) return;
+  qTimer = setTimeout(() => {
+    qTimer = null;
+    const val = qPending;
+    qPending = null;
+    if (streamReady && streamWs) {
+      streamWs.send(JSON.stringify({ t: 'quality', v: val }));
+    }
+  }, 120);
+}
 
 // ── H.264 / WebCodecs ────────────────────────────────────────────────────
 //
@@ -750,6 +817,31 @@ function applyUrlParams() {
   if (wantFmt || q.get('fps') || q.get('quality')) {
     dbg('URL 参数: format=' + codec + ' fps=' + fps + ' quality=' + quality);
   }
+
+  syncQualitySlider();
+}
+
+// 从服务端取每种格式的 quality 范围。
+//
+// 不在前端写死：范围是服务端定的（PNG 走 zlib 级别、H.264 换算码率），
+// 前端写死就会和实际不符。拿不到就用内置兜底，不影响使用。
+function loadQualityRange() {
+  fetch(withToken('/api/v1/params'))
+    .then(r => r.json())
+    .then(d => {
+      if (!d || !d.quality) return;
+      for (const k of Object.keys(d.quality)) {
+        const v = d.quality[k];
+        if (v && typeof v.min === 'number' && typeof v.max === 'number') {
+          qualityRange[k] = { min: v.min, max: v.max,
+                              default: (typeof v.default === 'number')
+                                       ? v.default : v.min };
+        }
+      }
+      syncQualitySlider();
+      dbg('quality 范围: ' + JSON.stringify(qualityRange[codec]));
+    })
+    .catch(e => dbg('取 quality 范围失败: ' + e));
 }
 
 function setCodec(c, q) {
@@ -759,6 +851,7 @@ function setCodec(c, q) {
     dbg('注意：这个浏览器没有 VideoDecoder，H.264 很可能放不出来');
   }
   codec = c; quality = q;
+  syncQualitySlider();     // 换了格式，范围也要跟着换
   startStream();
   pushStreamParams();
   setStatus('编码：' + c.toUpperCase() + ' 质量 ' + q);
@@ -1293,6 +1386,7 @@ function logHistory() {
 //    放在后面的话第一帧已经按默认的 jpeg 拉了，
 //    ?format=h264 要等下一次重连才生效。
 applyUrlParams();
+loadQualityRange();      // 不阻塞启动，拿到之后自己更新拖动条
 applyCollapsed();
 refresh();
 refreshService();

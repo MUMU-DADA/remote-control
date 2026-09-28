@@ -191,6 +191,23 @@ bool ProbeJniGraphics() { return false; }
 
 }  // namespace
 
+QualityRange QualityRangeFor(ImageFormat f) {
+    switch (f) {
+        case ImageFormat::kPng:
+            // zlib 压缩级别，不是图像质量。1 最快最大，9 最小最慢。
+            return QualityRange{1, 9, 1};
+        case ImageFormat::kWebp:
+            return QualityRange{1, 100, 80};
+        case ImageFormat::kJpeg:
+            return QualityRange{1, 100, 75};
+        case ImageFormat::kH264:
+            // 也是 1-100，但会被换算成码率（见 rest_api 里那段公式）
+            return QualityRange{1, 100, 75};
+        default:
+            return QualityRange{1, 100, 75};
+    }
+}
+
 ImageEncoder& ImageEncoder::Instance() {
     static ImageEncoder enc;
     return enc;
