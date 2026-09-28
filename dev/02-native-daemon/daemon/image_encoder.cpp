@@ -32,6 +32,7 @@
 #include "image_encoder.h"
 
 #include <dlfcn.h>
+#include <stdlib.h>   // getenv
 #include <string.h>
 
 // AndroidBitmap_* 只在 Android 上存在。宿主机（编测试用）没有这些头，
@@ -66,6 +67,31 @@ namespace {
 // Skia 选 3 是为了跟 Chrome 对齐，不是因为它最优。
 constexpr int kDefaultWebpMethod = 2;
 
+// 环境变量：强制走回退路径。
+//
+// 存在的理由：**回退路径原本只能在老设备上验证**。Android 11+ 永远
+// 探测得到 AndroidBitmap，所以 libjpeg / 内置 libwebp 那条路在开发机上
+// 根本跑不到 —— 而"没跑过的代码"和"没有的代码"在出故障时是一样的。
+//
+//   AUTOD_FORCE_FALLBACK=1 autod --socket ...
+//
+// supervisor 启动的话变量会继承下去：
+//   adb shell "AUTOD_FORCE_FALLBACK=1 setsid nohup
+//              /data/local/tmp/autod-supervisord.sh > /dev/null 2>&1 &"
+//
+// ⚠️ 它只影响**编码器选择**，不改协议、不改截图后端。
+//    /config 的 codecs.forced 会如实标出来 —— 别把强制的结果当设备真相。
+bool ForcedFallback() {
+    static const bool forced = []() {
+        const char* v = getenv("AUTOD_FORCE_FALLBACK");
+        if (v == nullptr || v[0] != '1') return false;
+        ALOGW("AUTOD_FORCE_FALLBACK=1 —— 跳过 AndroidBitmap_compress，"
+              "强制走回退编码器（仅用于验证老设备路径）");
+        return true;
+    }();
+    return forced;
+}
+
 #ifdef AUTOD_HAS_JNIGRAPHICS
 
 // ⚠️ 自己声明写回调的类型，**不用头文件里的 `AndroidBitmap_CompressWriteFunc`**。
@@ -99,6 +125,7 @@ JniGraphics& Jni() {
 // **只试一次**并缓存结果：在缺这个符号的设备上（Android 8~10），
 // 每帧都重试一遍失败的 dlopen 是纯浪费。
 bool ProbeJniGraphics() {
+    if (ForcedFallback()) return false;
     static const bool ok = []() {
         JniGraphics& g = Jni();
         if (g.handle != nullptr) return g.compress != nullptr;
@@ -198,7 +225,9 @@ const char* ImageEncoder::MimeType(ImageFormat f) {
 
 bool ImageEncoder::Supports(ImageFormat f) const {
     if (f == ImageFormat::kRaw) return true;
-    if (f == ImageFormat::kPng) return native_ || PngEncoder::Instance().Init(nullptr);
+    // 只读查询 —— 初始化在 Init() 里做过一次了。
+    // 这里再 Init 会在"报告能力"时产生副作用（加载库、占 fd）。
+    if (f == ImageFormat::kPng) return native_ || PngEncoder::Instance().Available();
     if (native_) return true;                      // AndroidBitmap：JPEG / WebP 都有
     if (f == ImageFormat::kJpeg) return JpegEncoder::Instance().Available();
     // WebP 现在**总是**可用 —— libwebp 已经内置进来了。
@@ -242,9 +271,12 @@ bool ImageEncoder::Init(std::string* error) {
     }
 
     ALOGI("图像编码器: %s%s", BackendSummary().c_str(),
-          native_ ? "（Skia）" : "（回退路径）");
+          native_ ? "（Skia）"
+                  : (ForcedFallback() ? "（回退路径，强制）" : "（回退路径）"));
     return true;
 }
+
+bool ImageEncoder::FallbackForced() const { return ForcedFallback(); }
 
 std::string ImageEncoder::BackendSummary() const {
     std::string s;

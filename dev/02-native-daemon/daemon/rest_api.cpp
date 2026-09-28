@@ -600,6 +600,9 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
             .Field("webp", ImageEncoder::Instance().Supports(ImageFormat::kWebp))
             .Field("raw",  true)
             .Field("backend", ImageEncoder::Instance().BackendSummary())
+            // 开着 AUTOD_FORCE_FALLBACK 时如实标出来 ——
+            // 一个强制走回退的实例，它的 codecs 不代表这台设备的真实能力。
+            .Field("forced", ImageEncoder::Instance().FallbackForced())
         .EndObj()
      .EndObj();
     // 上面那串只是说明，真正的参数表在下面

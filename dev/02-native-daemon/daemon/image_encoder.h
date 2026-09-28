@@ -56,6 +56,12 @@ class ImageEncoder {
     // 当前实际在用的编码器，给 /describe 和日志展示用
     std::string BackendSummary() const;
 
+    // 是否被 AUTOD_FORCE_FALLBACK=1 强制走了回退路径。
+    //
+    // 暴露出来是为了**别把强制的结果当成设备真相** ——
+    // 一个开着这个变量的实例，它的 codecs 和能力都不代表这台设备。
+    bool FallbackForced() const;
+
     // 编码。rgba 必须是 RGBA8888（和 capture 的输出一致）。
     //
     // quality 含义随格式变：JPEG/WebP 是 0-100（默认 75/80），

@@ -174,6 +174,22 @@ Dispatcher::Dispatcher(Capture* capture, Injector* injector)
       : capture_(capture), injector_(injector) {
     appOps_  = std::make_unique<AppOps>();
     fileOps_ = std::make_unique<FileOps>();
+
+    // 图像编码器**在启动时初始化一次**，不要懒加载。
+    //
+    // 之前的写法是让各个查询点自己 Init()（HandleDescribe、Supports()…），
+    // 那些 Init 会 dlopen(libz / libjpeg)，各占一个 fd。后果有两个：
+    //
+    //   1. 第一次 /describe 会**产生副作用**（默默加载一个库、多一个 fd）。
+    //      一个"报告状态"的接口不该改变状态。
+    //   2. fd 泄漏检测会误报 —— 集成测试测 200 次抓帧前后 fd 数，
+    //      中间的 /describe 一调就 +1，看着像漏了。
+    //
+    // 启动时初始化之后，那些查询点看到的是已经就绪的状态，纯只读。
+    std::string encErr;
+    if (!ImageEncoder::Instance().Init(&encErr)) {
+        ALOGW("图像编码器不可用: %s", encErr.c_str());
+    }
 }
 
 Dispatcher::~Dispatcher() = default;
@@ -784,7 +800,7 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
             .Field("fileManagement", fileOps_ != nullptr && fileOps_->Init(nullptr))
             .Field("keyInjection", access("/dev/uinput", W_OK) == 0)
             .Field("clipboard", ClipOps::Instance().Init(nullptr))
-            .Field("screenStream", PngEncoder::Instance().Init(nullptr))
+            .Field("screenStream", PngEncoder::Instance().Available())
             // 编码能力按**这台设备实际**能用的报。
             //
             // 以前这里只有 screenStream 一个布尔，客户端看不出
@@ -796,6 +812,7 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
                 .Field("jpeg", ImageEncoder::Instance().Supports(ImageFormat::kJpeg))
                 .Field("webp", ImageEncoder::Instance().Supports(ImageFormat::kWebp))
                 .Field("backend", ImageEncoder::Instance().BackendSummary())
+                .Field("forced", ImageEncoder::Instance().FallbackForced())
             .EndObj()
             .Field("webUi", true)
             .Field("power", true)

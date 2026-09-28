@@ -178,3 +178,7 @@ curl -s http://host:8088/api/v1/describe | jq '.protocolVersion, (.commands|leng
 | v4 | 长按/拖拽/双击、按键注入、剪贴板 |
 | v5 | 设备电源（关机/重启） |
 | v6 | 服务软开关、运行中应用、历史日志、日志流 |
+
+---
+
+- [06-debugging.md](06-debugging.md) —— 环境变量、强制回退路径、验证方法
