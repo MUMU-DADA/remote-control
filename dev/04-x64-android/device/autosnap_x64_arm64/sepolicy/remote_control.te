@@ -135,6 +135,11 @@ net_domain(remote_control)
 # 我们作为客户端只需要能映射它给的 GraphicBuffer。
 
 binder_call(remote_control, surfaceflinger)
+# 抓帧是**回调**：SurfaceFlinger 拿到我们的 BufferQueue 之后要反向调回来。
+# 只给单向的话实测报
+#     avc: denied { call } for comm="surfaceflinger"
+#         scontext=u:r:surfaceflinger:s0 tcontext=u:r:remote_control:s0 tclass=binder
+binder_call(surfaceflinger, remote_control)
 allow remote_control surfaceflinger_service:service_manager find;
 
 # GraphicBuffer 底层是 gralloc 分配的 dma-buf，需要访问 GPU 设备节点
@@ -219,8 +224,18 @@ allow remote_control remote_control_data_file:file {
 # 不会撞 domain.te:773 那条"coredomain 不许开 file_type 的 socket"：
 # remote_control_data_file 带 core_data_file_type，正列在那条的排除项里。
 allow remote_control remote_control_data_file:sock_file {
-    create read write open getattr unlink
+    create read write open getattr unlink setattr
 };
+
+# 应用管理（/api/v1/app* 那些接口）要跑 dumpsys。
+allow remote_control system_file:file {
+    read open getattr map execute execute_no_trans
+};
+
+# JSON 响应是先写进 memfd 再发出去的 —— 少了这条，响应根本拼不出来，
+# 表现为**服务在跑、端口在听、连接却永远不返回**（实测 HTTP 000）。
+# memfd 落在通用 tmpfs 类型上（我们的域没有 tmpfs 的 type_transition）。
+allow remote_control tmpfs:file { read write open getattr map };
 
 # HTTP / JSON API 的 TCP 监听。
 #
