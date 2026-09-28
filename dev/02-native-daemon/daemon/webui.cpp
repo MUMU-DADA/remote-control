@@ -109,6 +109,11 @@ const std::string& WebUiHtml() {
     <div class="card">
       <h2>状态</h2>
       <div id="status" class="dim">就绪</div>
+      <!-- 服务端**实际**在按什么节奏抓帧。
+           本页要 10fps 不代表设备只被拉 10fps —— 抓帧节奏取所有订阅者的
+           最高需求，另一个客户端挂着 60fps 就会把整机拉满。
+           没有这一行的话，"我明明只要 10 帧为什么设备这么烫"只能靠 curl。 -->
+      <div id="cadence" class="dim" style="font-size:11px;margin-top:4px"></div>
       <div id="dbg" class="dim" style="font-size:11px;margin-top:4px"></div>
       <div class="row" style="margin-top:8px">
         <button onclick="refresh()">刷新状态</button>
@@ -470,6 +475,36 @@ function dbg(t) {
   if (el) el.textContent = streamDbg;
 }
 
+// 服务端抓帧节奏。
+//
+// 和顶栏那个 shownFps 是**两回事**：那个是本页实际收到多少帧，
+// 这个是设备被拉到了多快。两个数不一致本身就是要看的信息 ——
+// 服务端跑得比本页需求高，说明有别的客户端在拉，或者本页在丢帧。
+function renderCadence(c) {
+  const el = $('cadence');
+  if (!el) return;
+  if (!c || !c.running) {
+    el.textContent = '抓帧  空闲（没有订阅者，一次都没在抓）';
+    el.style.color = '';
+    return;
+  }
+  const n = (c.subscriberList || []).length;
+  let t = '抓帧  服务端 ' + c.activeFps + 'fps · ' + n + ' 个订阅'
+        + ' · ' + c.lastCaptureMs + 'ms';
+  if (c.captureWidth > 0) t += ' · 宽 ' + c.captureWidth;
+
+  // 服务端比本页需求高 → 有别人在拉，或者本页跟不上。
+  // 这正是"看不出是谁在拉"要提醒的那种情况，标黄。
+  const overshoot = c.activeFps > fps + 1;
+  if (overshoot) {
+    t += '  ⚠ 高于本页 ' + fps + 'fps';
+    el.style.color = '#e0a020';
+  } else {
+    el.style.color = '';
+  }
+  el.textContent = t;
+}
+
 function setStatus(t, err) {
   const el = $('status');
   el.textContent = t;
@@ -496,6 +531,7 @@ function updateMeta(r) {
 }
 
 function refresh() {
+  pollCadence();
   api('/config').then(d => {
     const r = d.runtime;
     const cap = r.capture;
@@ -825,11 +861,25 @@ function applyUrlParams() {
 //
 // 不在前端写死：范围是服务端定的（PNG 走 zlib 级别、H.264 换算码率），
 // 前端写死就会和实际不符。拿不到就用内置兜底，不影响使用。
+// 抓帧节奏单独轮询。
+//
+// 只在打开页面时取一次是不够的 —— "设备现在被拉到多快"随时在变，
+// 而这一行存在的意义就是**实时**看出有没有别人在拉。
+// 2 秒一次：够及时，又不会把 /params 变成负担（几百字节）。
+function pollCadence() {
+  fetch(withToken('/api/v1/params'))
+    .then(r => r.json())
+    .then(d => { if (d) renderCadence(d.capture); })
+    .catch(() => {});   // 取不到就保持上一次的值，别刷错误
+}
+
 function loadQualityRange() {
   fetch(withToken('/api/v1/params'))
     .then(r => r.json())
     .then(d => {
-      if (!d || !d.quality) return;
+      if (!d) return;
+      renderCadence(d.capture);
+      if (!d.quality) return;
       for (const k of Object.keys(d.quality)) {
         const v = d.quality[k];
         if (v && typeof v.min === 'number' && typeof v.max === 'number') {
@@ -1387,6 +1437,7 @@ function logHistory() {
 //    ?format=h264 要等下一次重连才生效。
 applyUrlParams();
 loadQualityRange();      // 不阻塞启动，拿到之后自己更新拖动条
+setInterval(pollCadence, 2000);
 applyCollapsed();
 refresh();
 refreshService();

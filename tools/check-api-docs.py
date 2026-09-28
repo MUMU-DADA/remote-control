@@ -14,7 +14,10 @@
 """
 import json, urllib.request, urllib.error, re, sys, os
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://192.168.0.108:8088"
+# 默认地址可被参数或 AUTOD_BASE 覆盖 —— 设备 IP 会变，
+# 写死一个只会让人以为"检查通过了"而其实连的是别的东西。
+BASE = (sys.argv[1] if len(sys.argv) > 1
+        else os.environ.get("AUTOD_BASE", "http://127.0.0.1:8088"))
 B = BASE.rstrip("/") + "/api/v1"
 DOCS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "api")
 def api(p):
@@ -90,6 +93,33 @@ chk(j.get("status") == 4099 and st == 400, "kErrBadArg = 4099 → HTTP 400",
     f"实际 status={j.get('status')} http={st}")
 st, j = code_of("/capture?format=bogus")
 chk(st == 400, "未知格式 → HTTP 400", f"实际 {st}")
+
+print("\n[6] /params 的抓帧节奏（01-http.md）")
+pm = api("/params")
+cap = pm.get("capture", {})
+t = open(os.path.join(DOCS, "01-http.md"), encoding="utf-8").read()
+for f in ("activeFps", "subscribers", "frames", "lastCaptureMs",
+          "captureWidth", "served", "misses", "running", "subscriberList"):
+    chk(f in cap, f"capture.{f} 存在", f"实际字段 {sorted(cap)}")
+    chk(f in t, f"01-http.md 里写了 capture.{f}")
+chk(isinstance(cap.get("subscriberList"), list),
+    "capture.subscriberList 是**数组**（不是被转义的字符串）",
+    f"实际类型 {type(cap.get('subscriberList')).__name__}")
+
+print("\n[7] /params 的 quality 范围（01-http.md）")
+ql = pm.get("quality", {})
+for f, want in (("png", (1, 9)), ("jpeg", (1, 100)),
+                ("webp", (1, 100)), ("h264", (1, 100))):
+    v = ql.get(f, {})
+    chk((v.get("min"), v.get("max")) == want,
+        f"quality.{f} 范围 = {want[0]}-{want[1]}",
+        f"实际 {v.get('min')}-{v.get('max')}")
+    chk(f in t, f"01-http.md 里写了 quality.{f}")
+
+print("\n[8] 编码器逐格式上报（01-http.md）")
+be = pm.get("codecs", {}).get("backend", "")
+chk("jpeg=" in be and "webp=" in be and "png=" in be,
+    "codecs.backend 逐格式上报", f"实际 {be!r}")
 
 print(f"\n{'='*44}\n  通过 {ok} 项，失败 {bad} 项\n")
 sys.exit(1 if bad else 0)
