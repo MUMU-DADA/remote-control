@@ -72,10 +72,11 @@ for f in main.cpp socket_server.cpp dispatch.cpp selftest.cpp \
          appops.cpp subprocess.cpp fileops.cpp http_client.cpp \
          service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp \
          json_parser.cpp png_encoder.cpp keyboard.cpp clipops.cpp \
-         webui.cpp image_encoder.cpp websocket.cpp config_file.cpp; do
+         webui.cpp image_encoder.cpp jpeg_encoder.cpp websocket.cpp \
+         config_file.cpp; do
     [ -f "$DAEMON/$f" ] || { bad "缺源文件: daemon/$f"; exit 1; }
 done
-ok "23 个源文件齐备"
+ok "24 个源文件齐备"
 
 # -----------------------------------------------------------------------------
 step "编译 autod"
@@ -119,16 +120,19 @@ COMMON_FLAGS=(
     "$DAEMON/clipops.cpp" \
     "$DAEMON/webui.cpp" \
     "$DAEMON/image_encoder.cpp" \
+    "$DAEMON/jpeg_encoder.cpp" \
     "$DAEMON/websocket.cpp" \
     "$DAEMON/config_file.cpp" \
-    -ljnigraphics -llog -static-libstdc++
+    -llog -static-libstdc++
 
 ok "autod → $OUT/$ABI/autod"
 
 # -----------------------------------------------------------------------------
 step "编译 autodctl"
 # -----------------------------------------------------------------------------
-# 设备端客户端。用 AndroidBitmap_compress 编码 PNG，链 libjnigraphics。
+# 设备端客户端。用 AndroidBitmap_compress 编码 PNG。
+# autodctl 仍然直接链 libjnigraphics —— 它是调试工具，只在开发机上跑，
+# 不需要照顾老设备（autod 本体已经改成 dlopen 了）。
 "$CXX" "${COMMON_FLAGS[@]}" \
     -o "$OUT/$ABI/autodctl" \
     "$SRC/client/autodctl.cpp" \

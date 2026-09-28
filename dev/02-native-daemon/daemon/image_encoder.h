@@ -42,7 +42,19 @@ class ImageEncoder {
     bool Init(std::string* error);
 
     // 设备上是否能用 AndroidBitmap_compress（能用就有 JPEG/WebP）
+    //
+    // ⚠️ 这是**运行时探测**的结果，不是编译期常量。
+    //    Android 11+ 为 true，Android 8~10 为 false。
     bool hasNativeCodecs() const { return native_; }
+
+    // 某个格式在这台设备上能不能编。
+    //
+    // 客户端应该用它来决定"要不要提供这个选项"，而不是假设 ——
+    // Android 8~10 上没有 WebP，硬发 format=webp 只会拿到一个错误。
+    bool Supports(ImageFormat f) const;
+
+    // 当前实际在用的编码器，给 /describe 和日志展示用
+    std::string BackendSummary() const;
 
     // 编码。rgba 必须是 RGBA8888（和 capture 的输出一致）。
     //

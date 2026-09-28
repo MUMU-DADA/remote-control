@@ -18,6 +18,7 @@
 //
 // 定位：**让服务能尽早在真机上跑起来**。AOSP 树就绪后换成 SurfaceFlinger 后端。
 
+#include "memfd_util.h"
 #include "capture.h"
 
 #include <errno.h>
@@ -285,9 +286,9 @@ bool Capture::Grab(Frame* out, std::string* error) {
     }
 
     // --- 2. 建 memfd 并直接把像素读进 mmap（省一次拷贝）---
-    frame.fd = memfd_create("autod-frame", MFD_CLOEXEC);
+    frame.fd = MakeMemfd("autod-frame");
     if (frame.fd < 0) {
-        if (error) *error = ErrnoString("memfd_create");
+        if (error) *error = ErrnoString("memfd 创建");
         cleanup();
         return false;
     }

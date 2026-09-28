@@ -8,6 +8,7 @@
 // 与其他截图后端实现同一个 Capture 接口，由 Android.bp / Makefile 选择。
 // **不要编进产品镜像。**
 
+#include "memfd_util.h"
 #include "capture.h"
 
 #include <errno.h>
@@ -102,10 +103,10 @@ bool Capture::Grab(Frame* out, std::string* error) {
     const uint64_t size   = static_cast<uint64_t>(width) * height * 4;
 
     Frame frame;
-    frame.fd = memfd_create("autod-stub-frame", MFD_CLOEXEC);
+    frame.fd = MakeMemfd("autod-stub-frame");
     if (frame.fd < 0) {
         if (error) {
-            *error = std::string("memfd_create 失败: ") + strerror(errno);
+            *error = std::string("memfd 创建失败: ") + strerror(errno);
         }
         return false;
     }

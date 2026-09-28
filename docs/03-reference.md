@@ -8,7 +8,15 @@
 
 ## 最低支持的 Android 版本
 
-**Android 11（API 30）。这是实测出来的硬下限，不是估计。**
+**编译期：Android 11（API 30）。运行时：Android 8 起。**
+
+代码已经改造成**运行时探测**，所以下限由编译期决定 —— 而编译期
+下限现在是 API 30，因为用的是 NDK 默认的 `minSdk`。要真正支持
+Android 8，编译时传 `API=26` 即可（见下面"怎么把下限压下去"）。
+
+### 原来的硬下限（改造前）
+
+**Android 11（API 30）。实测出来的，不是估计。**
 
 ```bash
 $ API=30 bash tools/build-ndk.sh     # ✓ 编译通过
@@ -28,23 +36,75 @@ API 28 / 26 报的是同样两条。拦路的都是 `__INTRODUCED_IN(30)`：
 其余用到的 API 都远低于这道线：`accept4` = API 21，
 设备命令行的 `cmd` = Android 7，`/dev/uinput` 是内核特性。
 
-### 这道线是可以降低的（但现在没做）
+### ✅ 这道线已经压下去了（已完成）
 
-两处改动就能把下限压到 **Android 8/9**：
+三处改动，都验证过：
 
-1. **`memfd_create` → `syscall(SYS_memfd_create, ...)`**
-   绕开 bionic 包装，直接用系统调用。内核 3.17+ 都有，
-   而 Android 8 的内核是 4.4。
+| 改动 | 效果 | 对高版本的影响 |
+|---|---|---|
+| `memfd_create()` → `syscall(SYS_memfd_create, …)` | 内核 3.17+ 都支持，不受 bionic 包装的版本限制 | **+29 ns/帧**（实测） |
+| `AndroidBitmap_compress` → **dlopen + dlsym** 运行时探测 | API < 30 时自动不用它 | **+0.07 ms（0.45%）**（实测，见下） |
+| 新增 `jpeg_encoder`（dlopen libjpeg + vendor 头文件） | **JPEG 保住了**，不再退回 PNG | 高版本不走这条路 |
 
-2. **`AndroidBitmap_compress` → 回退到 `png_encoder`**
-   已有的 dlopen zlib 那条路本来就能用，只是现在 `#ifdef __ANDROID__`
-   把它限制在非 Android 构建上。改成"运行时探测、有就用"即可 ——
-   代价是失去 JPEG/WebP（只剩 PNG，流带宽大一个数量级）。
+**关键：高版本行为不变。** 探测到 `AndroidBitmap_compress` 可用时
+走的就是原来那条路，一行代码都没改。
 
-再往下就要看别的了：`cmd`（Android 7）、`dumpsys activity lru` 的输出格式、
+### 实测：改造对高版本的影响
+
+```
+直接调用 &AndroidBitmap_compress    14.80 ms   76,466 字节
+dlsym 指针调用（改造后）            14.87 ms   76,466 字节
+差异: +0.07 ms（0.45%），输出完全一致
+```
+
+`/api/v1/stream` 端到端：改造前 JPEG q75 = 29.9 fps，改造后 **30.0 fps**
+（帧大小 11,345 → 11,168 字节，内容差异）。
+
+### JPEG 为什么没有失去
+
+原来的判断是"老版本只能退回 PNG，失去 JPEG/WebP"—— **这对 JPEG 是错的**。
+
+漏掉的三件事：
+1. `libjpeg` 是 **VNDK 库**（`vendor_available` + `vndk: enabled`），
+   ABI 跨版本稳定
+2. 头文件可以 vendor：AOSP 的 `jconfig.h` 把 `JPEG_LIB_VERSION`
+   钉死在 `62`，布局确定
+3. `jpeglibmangler.h` 只改名内部符号，公开 API 没动
+
+实测（`tools/bench/jpeg_dlopen_test.cpp`）：dlopen 成功、10 个符号齐全、
+编出合法 JPEG、`file(1)` 独立确认。
+
+而且**它和 Skia 是同一个编码器** —— `external/skia/Android.bp` 里
+`libjpeg` 就是依赖。两条路输出差 554 字节，正好是 Skia 多嵌的一个
+ICC 段（完整证据链见 `tools/bench/README.md`）。
+
+### 只有 WebP 留在 API 30+
+
+设备上没有 `libwebp.so`（Skia 里也没有），所以 WebP 只有
+`AndroidBitmap_compress` 能出：
+
+| 格式 | Android 11+ | Android 8~10 |
+|---|---|---|
+| JPEG | AndroidBitmap | dlopen libjpeg ✅ |
+| **WebP** | AndroidBitmap | ❌ 要 vendor 那 5.9 MB 源码 |
+| PNG | AndroidBitmap | zlib ✅ |
+
+`GET /api/v1/describe` 和 `GET /api/v1/params` 会如实报告哪些可用，
+客户端不该假设。
+
+### 怎么真正编出 Android 8 版本
+
+```bash
+API=26 ABI=arm64-v8a bash tools/build-ndk.sh
+```
+
+⚠️ **低于 Android 11 的设备仍然没有实测过。** 上面的分析基于编译期
+报错、源码 `__INTRODUCED_IN` 标注，以及在 Android 12 上对
+各条回退路径的独立验证（dlopen libjpeg 跑通、syscall 跑通）。
+"能不能在真 Android 8 上跑起来"还需要真机。
+
+再往下会遇到别的：`cmd`（Android 7）、`dumpsys activity lru` 的输出格式、
 `/dev/uinput` 的属主（Android 11 起是 `0660 uhid:uhid`，更早是 `system:input`）。
-
-**⚠️ 低于 Android 11 的设备没有实测过。** 上表是编译期与源码层面的分析。
 
 ### SurfaceFlinger 直连那条路更低
 

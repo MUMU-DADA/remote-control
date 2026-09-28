@@ -12,6 +12,7 @@
 //
 // Android 12 与 15/16 的差异很大，换版本时见 docs/03-version-matrix.md。
 
+#include "memfd_util.h"
 #include "capture.h"
 
 #include <errno.h>
@@ -43,9 +44,9 @@ std::string ErrnoString(const char* what) {
 
 // 创建匿名内存文件。memfd 没有文件系统实体，可以安全地通过 SCM_RIGHTS 传递。
 int CreateMemFd(const char* name, uint64_t size) {
-    int fd = memfd_create(name, MFD_CLOEXEC);
+    int fd = MakeMemfd(name);
     if (fd < 0) {
-        ALOGE("memfd_create 失败: %s", strerror(errno));
+        ALOGE("memfd 创建失败: %s", strerror(errno));
         return -1;
     }
     if (ftruncate(fd, static_cast<off_t>(size)) != 0) {
@@ -263,7 +264,7 @@ bool Capture::Grab(Frame* out, std::string* error) {
     if (frame.fd < 0) {
         // lock 之后必须 unlock，否则 SurfaceFlinger 的缓冲区会被耗尽
         buffer->unlock();
-        if (error) *error = ErrnoString("memfd_create");
+        if (error) *error = ErrnoString("memfd 创建");
         return false;
     }
 

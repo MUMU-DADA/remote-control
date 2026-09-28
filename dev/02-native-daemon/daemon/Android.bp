@@ -39,6 +39,7 @@ cc_defaults {
         "clipops.cpp",
         "webui.cpp",
         "image_encoder.cpp",
+        "jpeg_encoder.cpp",
         "websocket.cpp",
         "config_file.cpp",
     ],
@@ -69,7 +70,15 @@ cc_defaults {
         "libbinder",
         "libcutils",
         "libgui",              // SurfaceComposerClient / SyncScreenCaptureListener
-        "libjnigraphics",      // AndroidBitmap_compress：JPEG/WebP/PNG 编码
+        // ⚠️ 这里**故意不链** libjnigraphics。
+        //
+        //    AndroidBitmap_compress 是 API 30 才有的符号，直接链接的话
+        //    二进制在 Android 8~10 上**加载就会失败**
+        //    （"cannot locate symbol AndroidBitmap_compress"），
+        //    连运行时探测的机会都没有。
+        //
+        //    改成 dlopen + dlsym 之后，"这个函数不存在"变成一个
+        //    可以处理的返回值 —— 见 image_encoder.cpp 的 ProbeJniGraphics。
         "liblog",
         "libui",               // GraphicBuffer / PixelFormat
         "libutils",

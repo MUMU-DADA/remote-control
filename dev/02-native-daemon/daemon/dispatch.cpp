@@ -2,6 +2,7 @@
 //
 // 从 main.cpp 抽出来的。逻辑不变，但现在是可测试的。
 
+#include "memfd_util.h"
 #include "dispatch.h"
 
 #include <errno.h>
@@ -66,10 +67,10 @@ ReplyPacket MakeJsonReply(uint32_t cmd, const std::string& json) {
 
     if (json.empty()) return packet;
 
-    const int fd = memfd_create("autod-json", MFD_CLOEXEC);
+    const int fd = MakeMemfd("autod-json");
     if (fd < 0) {
         packet.reply.status = kErrInternal;
-        ALOGE("memfd_create 失败: %s", strerror(errno));
+        ALOGE("memfd 创建失败: %s", strerror(errno));
         return packet;
     }
     if (ftruncate(fd, static_cast<off_t>(json.size())) != 0) {
