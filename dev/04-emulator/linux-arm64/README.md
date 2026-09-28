@@ -389,3 +389,44 @@ dmesg: qemu-system-aar[...]: segfault at 0 ip 0000000000dd68b1 / 0000000000dc6cb
 
 **下一步**：① 用 `-verbose` 列出 `virt` 下实际保留的 PCI 设备逐个 bisect；
 ② 或换用真正带 PCI 的 arm 机器（如 `sbsa-ref`）来承载这些设备。
+
+---
+
+## 第 4 轮：宿主侧段错误的根因彻底定位
+
+上轮留下的"QEMU 自己段错误"（`dmesg: segfault at 0 ip 0xdd68b1`，core dump 显示
+`rdi=0`，即空指针解引用）本轮查清了：
+
+**现象**：把 guest 的 HAL 一个个摘掉，崩溃就"转移到下一个"：
+`vendor.usb-hal` → `vendor.wifi_hal_legacy` → `vendor.power-default` …
+**规律**：凡是访问 **ranchu 专有 MMIO 设备**（goldfish 电池 / pstore / USB / WiFi / power …
+连内核驱动读电池也算）的访问，在 `virt` 板上都会让 QEMU 崩。
+
+**根因（两条路都堵）**：
+
+| 板子 | 状态 |
+|---|---|
+| `ranchu`（官方支持、设备齐全） | **没有 PCI 总线** ✗，而模拟器**无条件**要挂 PCI 音频设备（`-soundhw hda` 或 `virtio-snd-pci`，两个模拟器版本都一样，无 feature 可关、`hw.audioOutput=false` 与 `-no-audio` 都不影响它）→ QEMU 创建设备时直接 `exit(1)` |
+| `virt`（换板绕法） | 能过 PCI 这一关、能把 guest 启到 zygote ✓，但 guest 一碰 ranchu 专有设备就把宿主 QEMU 弄崩 ✗ |
+
+→ **结论：这套 AOSP 模拟器（30.8.3 / 31.x）在 x86_64 宿主上跑不了 arm64 Android**，
+与 Google 从 34+ 起移除 x86_64 上的 arm64 支持是一致的。
+
+### 已验证可用的替代路径
+
+1. **x86_64 guest + KVM**（秒级启动，本机已验证可用 ✓）—— `--fast` 通道，日常开发用它；
+2. **真机 arm64**（adb）—— 做 AArch64 真实行为验证；
+3. **arm64 宿主**（如 ARM 云主机）—— 在那里 arm64 模拟器可走硬件加速。
+
+### 本轮之前修好的两项（对 arm64 宿主同样有价值）
+
+- `patches/0001-tcg-arm64-pure-soft-rkp.patch`：keystore2 的 `GenerateBcc()` 崩溃 → 12 次降到 0；
+- system 镜像 `init.rc` 的 `mkdir /data/misc … encryption=Require` → **`Attempt`**：
+  消除 `Rebooting into recovery`（三个镜像一致复现的那个阻塞）。
+
+### 仍未试的一条（如果还要继续）
+
+**AVD 模式**：模拟器在 AVD 模式下会从 AVD 的 `config.ini` 生成硬件配置，
+`hw.audioOutput = no` 有可能**真正**去掉音频设备 → 那么 `ranchu` 可用 → guest 拿到
+真设备 → 不再触碰缺失的 MMIO。需要在 SDK 布局里补 `package.xml` 元数据
+（之前 AVD 模式报的 `Package path is not valid` 正是缺它）。
