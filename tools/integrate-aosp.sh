@@ -119,7 +119,7 @@ if grep -rqiE "backend|vintfstability" \
      "$AOSP/frameworks/base/core/java/android/hardware/input/IInputManager.aidl" 2>/dev/null
 then
     warn "IInputManager.aidl 现在有 backend 标注了！"
-    warn "→ 可能可以启用 inject_binder.cpp，见 docs/06-constraints.md"
+    warn "→ 可能可以启用 inject_binder.cpp，见 docs/01-selection.md 的约束部分"
 else
     ok "IInputManager 仍是 Java-only → uinput 后端仍必需"
 fi

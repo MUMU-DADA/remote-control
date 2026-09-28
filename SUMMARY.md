@@ -116,7 +116,7 @@ boolean injectInputEvent(in InputEvent ev, int mode);
 
 对比：截图用的 `ISurfaceComposer` **是** native AIDL（在 `frameworks/native/libs/gui/`），C++ 可直连。
 
-→ **native daemon 能截图，但注入不了触摸。** 这是方案 B 在 Android 12 上的硬约束，必须分拆解决。详见 `docs/06-constraints.md`。
+→ **native daemon 能截图，但注入不了触摸。** 这是方案 B 在 Android 12 上的硬约束，必须分拆解决。详见 `docs/01-selection.md` 的约束部分。
 
 ---
 
@@ -203,31 +203,50 @@ cd dev/02-native-daemon/tests && sudo make run
 
 1. **触控路径二选一**（见 `dev/01-ndk-prototype/` 与 `dev/03-java-service/`）
 2. **是否先做纯 NDK 原型**快速验证思路
-3. **构建机采购**（见 `docs/04-hardware.md`）
+3. **构建机采购**（见 `docs/04-environment.md`）
 4. **测试设备**：Magisk root 的 ARM64 真机 vs Cuttlefish
 
 ---
 
 ## 九、文档索引
 
+**接口以 `docs/api/` 为准** —— 那是唯一权威版本。
+
+### 接口文档
+
 | 文档 | 内容 |
 |---|---|
-| **`docs/api/`** | **接口文档（权威）** —— HTTP / WebSocket / Unix socket / 配置 / 错误码 |
-| `docs/api/README.md` | 索引、5 分钟上手、三条传输的取舍 |
-| `docs/api/01-http.md` | HTTP/JSON API 全部 29 个端点 |
+| `docs/api/README.md` | 索引、5 分钟上手、三条传输的取舍、坐标约定 |
+| `docs/api/01-http.md` | HTTP/JSON API —— 29 个端点逐个的参数与响应 |
 | `docs/api/02-websocket.md` | 画面流 / 触控流 / 日志流 |
 | `docs/api/03-socket.md` | Unix socket 二进制协议（32 条命令） |
-| `docs/api/04-config.md` | 配置文件、命令行、鉴权、supervisor |
+| `docs/api/04-config.md` | 配置文件、命令行、鉴权、supervisor、部署 |
 | `docs/api/05-errors.md` | 状态码与错误处理 |
-| `docs/01-selection.md` | 方案选型：为什么不用内核，三种落点对比 |
-| `docs/02-architecture.md` | 架构设计：组件、协议、关键决策 |
-| `docs/03-version-matrix.md` | 各 Android 版本的截图/注入 API 差异 |
-| `docs/04-hardware.md` | 硬件配置、磁盘预算、构建环境 |
-| `docs/05-latency-and-touch.md` | 延迟拆解、吞吐、触控能力矩阵 |
-| `docs/06-constraints.md` | 关键约束与风险清单 |
-| `docs/07-environment.md` | 本机实际环境：磁盘、镜像源、构建容器 |
-| `docs/08-official-implementations.md` | 官方/开源实现对照：用了哪个、为什么 |
-| `docs/05-design-notes.md` | **设计记录**：为什么这么做、踩过的坑、实测数据 |
+
+### 设计文档
+
+| 文档 | 内容 |
+|---|---|
+| `docs/01-selection.md` | **选型与结论**：为什么不用内核、三种落点对比、关键约束、官方实现对照 |
+| `docs/02-architecture.md` | **架构**：组件、协议、数据流 |
+| `docs/03-reference.md` | **技术参考**：各 Android 版本 API 差异、延迟拆解、触控能力矩阵 |
+| `docs/04-environment.md` | **环境与构建**：硬件预算、镜像源、构建流程、本机环境 |
+| `docs/05-design-notes.md` | **设计记录**：为什么这么做、踩过的坑（含 20 条速查表）、实测数据 |
+
+### 代码
+
+| 路径 | 内容 |
+|---|---|
 | `dev/01-ndk-prototype/` | 阶段 0：纯 NDK 快速验证 |
 | `dev/02-native-daemon/` | 阶段 1–2：AOSP native daemon（主体代码） |
 | `dev/03-java-service/` | 阶段 3：Java 系统服务（长期形态） |
+| `dev/04-emulator/` | 模拟器方向（**独立线，见该目录的 README**） |
+| `dev/05-controller-app/` | 上位应用（只做服务管理） |
+
+### 工具
+
+| 路径 | 内容 |
+|---|---|
+| `tools/check-api-docs.py` | 文档一致性检查 —— 改了协议跑一遍 |
+| `tools/lan-up.sh` | 一键部署到模拟器并暴露到局域网 |
+| `tools/build-ndk.sh` | NDK 构建（不需要 AOSP 源码树） |

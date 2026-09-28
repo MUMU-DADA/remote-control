@@ -92,7 +92,7 @@ if [ "$RC" -ne 0 ]; then
         放在 libgui 的 export_include_dirs 里）
   • "fatal error: 'gui/XXX.h' file not found"
       → Android 12 的 gui 头文件位置与实现不符，对照
-        docs/03-version-matrix.md 核实
+        docs/03-reference.md 核实
   • "fatal error: 'jni.h' file not found"
       → <android/bitmap.h> 需要 jni.h，而它由 libjnigraphics 通过
         export_header_lib_headers 传递。确认 client/Android.bp 的

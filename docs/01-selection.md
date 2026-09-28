@@ -158,7 +158,7 @@ KernelSU 的 LKM 模式能工作，是因为它**针对具体内核版本专门�
 | 截图（设备命令） | AOSP `screencap` | **直接用** | ✅ |
 | 截图（SF 直连） | AOSP `screencap.cpp` | **对照实现** | ✅ |
 | 触控（uinput 路径） | AOSP `EvdevInjector` | 自己写（有原因，见 6.3） | ⚠️ |
-| 触控（Binder 路径） | AOSP `virtual_touchpad` | **直接用** | ✅ Android 13+ |
+| 触控（Binder 路径） | AOSP `virtual_touchpad` | **直接用**（`autod_vtp` 目标） | ✅ 需加进产品包 |
 | SELinux 策略 | AOSP `virtual_touchpad.te` | **照抄模板** | ✅ |
 | init 服务框架 | AOSP `init.rc` / `android_get_control_socket` | **直接用** | ✅ |
 | 日志 | AOSP `liblog` / NDK `android/log.h` | **直接用** | ✅ |
@@ -186,16 +186,12 @@ AOSP 自带 `frameworks/base/cmds/screencap/`，命令 `/system/bin/screencap`�
 
 ```
 frameworks/native/services/vr/virtual_touchpad/
-├── EvdevInjector.{h,cpp}            通用 uinput 封装
-├── VirtualTouchpadEvdev.{h,cpp}     造设备 + 事件合成
-├── VirtualTouchpadService.cpp       Binder 服务
-├── VirtualTouchpadClient.cpp        Binder 客户端
-├── main.cpp                         /system/bin/virtual_touchpad
-├── idc/vr-virtual-touchpad-0.idc    声明 touch.deviceType = touchScreen
-├── virtual_touchpad.rc              service（user system / group system input uhid）
-├── include/VirtualTouchpad.h        ★ 导出
-├── include/VirtualTouchpadClient.h  ★ 导出
-└── aidl/android/dvr/IVirtualTouchpadService.aidl
+├── EvdevInjector.{h,cpp}                通用 uinput 封装
+├── VirtualTouchpadEvdev.{h,cpp}         造设备 + 事件合成
+├── VirtualTouchpad{Service,Client}.cpp  Binder 服务 / 客户端
+├── main.cpp + virtual_touchpad.rc       /system/bin/virtual_touchpad
+├── idc/vr-virtual-touchpad-0.idc        声明 touch.deviceType = touchScreen
+└── include/VirtualTouchpad{,Client}.h   ★ 导出
 ```
 
 **这不是触摸板，是触摸屏。** `.idc` 里明确写着：
@@ -229,9 +225,8 @@ tp->Touch(slot, x_norm, y_norm, pressure);   // 坐标 [0.0, 1.0)
 | 限制 | 说明 |
 |---|---|
 | **只有 2 个触控槽位** | `VirtualTouchpadEvdev::kTouchpads = 2`，做不了 3 指以上手势 |
-| 不在默认产品包里 | 是 VR 专用，需要 `PRODUCT_PACKAGES += virtual_touchpad` |
+| 不在默认产品包里 | 是 VR 专用，需要 `PRODUCT_PACKAGES += virtual_touchpad`；不加的话 `attach()` 会失败（`status=-2`） |
 | 多一次 Binder 往返 | 约 0.3–1 ms，仍远快于 adb 的 30–80 ms |
-| 仅 Android 13+ | Android 12 的 `IInputManager` 是 Java-only，Binder 路径不可用 |
 
 **三个注入后端并存**：
 
@@ -257,30 +252,17 @@ inject_binder.cpp   IInputManager：不可枚举，但 Android 12 上加载会�
 
 1. **头文件没导出。** `libvirtualtouchpad` 的 `export_include_dirs` 只有 `include/`，而 `EvdevInjector.h` 在模块根目录。外部模块 include 不到，要用就得往 include path 里塞 `..`——而 Soong 明确禁止路径逃逸（`init_rc` 上实测报 `Path is outside directory`）。
 
-2. **会丢掉主机可测性。** `EvdevInjector` 依赖 `android-base/unique_fd.h` 和 `utils/String8.h`，只能在 AOSP 树内编译。而我们的版本是纯 Linux syscall，在开发机上能跑 31 项真实设备测试（真的创建虚拟触摸屏、注入、读回校验）。
+2. **会丢掉主机可测性。** `EvdevInjector` 依赖 `android-base/unique_fd.h` 和 `utils/String8.h`，只能在 AOSP 树内编译。而我们的版本是纯 Linux syscall，在开发机上能跑 35 项真实设备测试（真的创建虚拟触摸屏、注入、读回校验）。
 
 **结论：这里自己写是有依据的取舍，不是重复造轮子。** 但官方版的能力（2 槽位）覆盖不了我们的需求（多点触控），这也是保留自研版本的理由之一。
 
 ### 6.4 评估过但没采用的方案
 
-**scrcpy** —— 开源、成熟，做「投屏 + 控制」的事实标准。没采用的原因：
+**scrcpy** —— 开源、成熟，做「投屏 + 控制」的事实标准。没采用：它以 `shell` 身份跑（adb 推 server 到 `/data/local/tmp`）、生命周期绑定 adb 连接、对外是需配套客户端的私有协议、注入优先走 Java `InputManager`——部署模型和「开机自启的系统级常驻服务」不匹配。它的**原理**我们采用了（VirtualDisplay + MediaCodec 那条路没走，因为要的是单帧截图而非视频流）。
 
-| 项 | scrcpy | 我们的目标 |
-|---|---|---|
-| 运行身份 | `shell`（通过 adb 推 server 到 `/data/local/tmp`） | 系统服务 |
-| 生命周期 | 绑定 adb 连接 | 开机自启，常驻 |
-| 对外接口 | 私有协议，需配套客户端 | 明文 HTTP/JSON + WebSocket |
-| 输入注入 | 优先走 Java `InputManager` | uinput / 官方 vtp 服务 |
+**minicap / minitouch** —— STF 的设备端组件。没采用：minicap 读 SurfaceFlinger，原理与我们的 SF 后端一致；minitouch 直接写 `/dev/input/eventX`（**已存在的**设备节点），而我们要创建**新的**虚拟设备——两者不是一回事；两者都需要 root 且部署方式与 scrcpy 类似。
 
-scrcpy 的**原理**我们采用了（VirtualDisplay + MediaCodec 那条路我们没走，因为要的是单帧截图而非视频流），但它的部署模型和「系统级常驻服务」不匹配。
-
-**minicap / minitouch** —— STF 的设备端组件。没采用的原因：
-
-- minicap 读 SurfaceFlinger，原理与我们的 SF 后端一致
-- minitouch 直接写 `/dev/input/eventX`（**已存在的**设备节点），而我们要创建**新的**虚拟设备——两者不是一回事
-- 两者都需要 root 且部署方式和 scrcpy 类似
-
-**Kbox-patches** —— 华为鲲鹏的云手机方案（Apache-2.0，含内核补丁）。没采用的原因是它的补丁用于让 AOSP 在容器里启动（SELinux/vintf/seccomp/gralloc），不是做截图触控的；而且要配套鲲鹏硬件。
+**Kbox-patches** —— 华为鲲鹏的云手机方案（Apache-2.0，含内核补丁）。没采用：它的补丁用于让 AOSP 在容器里启动（SELinux/vintf/seccomp/gralloc），不是做截图触控的，而且要配套鲲鹏硬件。
 
 ### 6.5 明确自己写的部分
 
@@ -302,13 +284,10 @@ scrcpy 的**原理**我们采用了（VirtualDisplay + MediaCodec 那条路我�
 **已在本地 synced 的 Android 12 源码树中实地核实**（不再是网上的推断）：
 
 ```bash
-# 全树只有这一个 IInputManager 定义
+# 全树只有这一个 IInputManager 定义，且没有任何 backend / vintfstability / ndk 标注
 find aosp/frameworks -name "IInputManager*"
 # → aosp/frameworks/base/core/java/android/hardware/input/IInputManager.aidl
-
-# 没有任何 backend / vintfstability / ndk 标注
-grep -inE "backend|vintfstability|ndk" IInputManager.aidl
-# → （无输出）
+grep -inE "backend|vintfstability|ndk" IInputManager.aidl      # → 无输出
 ```
 
 ```java
@@ -522,7 +501,7 @@ adb shell dmesg | grep avc > avc.log
 
 | # | 风险 | 影响 | 缓解 |
 |---|---|---|---|
-| 1 | Android 12 注入 Java-only | **方案 B 无法单进程完成** | 走 uinput（短期）或拆 Java 服务（长期） |
+| 1 | Android 12 注入 Java-only | **native 单进程注入不了触摸** | 已走 uinput 落地；长期可拆 Java 服务 |
 | 2 | SELinux 规则调不通 | 服务起不来 | `permissive` 定位 + `audit2allow` |
 | 3 | 平台 API 版本差异 | 编译失败 | 集中改 `capture_*.cpp` / `inject_*.cpp` |
 | 4 | 构建环境缺失 | 无法编译 | 见 `04-environment.md` |

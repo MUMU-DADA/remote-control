@@ -70,7 +70,7 @@ AutoSnapshotAndroid/
 | 构建环境 | Docker 容器 `autod-builder`（Ubuntu 22.04 + JDK 11） |
 | 镜像源 | **全部国内**（清华 TUNA + daocloud） |
 
-详见 [`docs/07-environment.md`](docs/07-environment.md)。
+详见 [`docs/04-environment.md`](docs/04-environment.md)。
 
 ```bash
 # 进入构建环境
@@ -153,7 +153,7 @@ adb push $ANDROID_PRODUCT_OUT/system/bin/autod /data/local/tmp/
 
 **2. 唯一躲不掉的是 `repo sync`。** 因为 `autod` 用了 `libgui` 这类平台私有库，头文件只存在于 AOSP 源码里。除非走纯 NDK 轨道。
 
-**3. Android 12 上 native 进程注入不了触摸。** `IInputManager` 在 12 上是 Java-only AIDL。必须改用 `/dev/uinput` 或拆 Java 服务。详见 `docs/06-constraints.md`。
+**3. Android 12 上 native 进程注入不了触摸。** `IInputManager` 在 12 上是 Java-only AIDL。必须改用 `/dev/uinput` 或拆 Java 服务。详见 `docs/01-selection.md` 的约束部分。
 
 ---
 
