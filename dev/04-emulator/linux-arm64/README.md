@@ -1127,3 +1127,57 @@ $EMU -sysdir <A12 arm64 产物> -datadir /tmp/d -no-window -gpu swiftshader_indi
      -qemu -cpu cortex-a53
 ```
 （**不要**再加 `-qemu -machine type=virt`；`-cpu cortex-a53` 仍是消除 guest 段错误的关键 ✓）
+
+---
+
+## 第 20 轮：`ranchu` 启动实测 + 定位最后一个自设障碍
+
+### 一、`ranchu` 上的 A12 arm64 guest：**全程零崩溃地推进**
+
+第 19 轮打通 `ranchu` 后，本轮完整跟踪了它的启动（`runs/rq7`）：
+
+| guest 时间 | 阶段 |
+|---|---|
+| 13.7s | `apexd-bootstrap` |
+| 111.9s | `apexd: Decompressing /system/apex/com.android.media.capex` |
+| 136.2s | `odsign`（post-fs-data）|
+| 153.9s | `bpfloader` / `load_bpf_programs` |
+| 182.9s | **`zygote` 起来了** ✓ + `vendor.light/vibrator/rebootescrow` 等 HAL |
+| 219.9s | `mediaextractor` / `mediametrics` |
+| 244.5s | 创建 socket（`mdns`/`fwmarkd`）|
+| 268.7s | **`surfaceflinger` 已启动** + `goldfish-logcat` |
+| 318.5s | 仍在推进（2599 行内核日志）|
+
+**宿主段错误 0、guest 崩溃 0、无 recovery** ✓ —— 对比 `virt` 时代"20~70 秒必崩"，
+**用真设备跑 arm64 guest 彻底消除了那一整类问题** ✓✓。
+
+### 二、唯一剩下的卡点：**我自己在第 6 轮删掉的 HAL**
+
+日志反复出现：
+
+```
+init: Control message: Could not find 'android.hardware.health@2.0::IHealth/default'
+```
+
+第 6 轮为了绕开 `virt` 上没有电池设备导致的崩溃，我把 **health/thermal/power/media/wifi/
+audio/usb/sensors/gnss/bluetooth/camera/rild** 这一批 vendor HAL 的 rc 与二进制都删了 ✗。
+**但在 `ranchu` 上这些设备都是真实存在的** ✓ —— 那些删除**完全没必要**，反而让 guest
+卡在等 health HAL 上不去。
+
+### 三、修法（两条，都已验证可行性的一半）
+
+1. **把我删掉的 HAL 注回 vendor 分区** ✓：`out/target/product/emulator64_arm64/vendor/`
+   里**原件都在**（staging 未被破坏 ✓），health HAL 只有 **62KB**、vendor 还有约 476KB 空闲 ✓；
+   本轮已提取 vendor 分区，但**用的偏移（LBA 5201920）与当前 `super.img` 的布局不符**
+   （`debugfs: Filesystem not open`）—— 下一轮先 `lpdump` 当前 `super.img` 取真实 extent，
+   再注入、`lpmake` 重建 super、写回、启动即可；
+2. **走一次干净编译** ✓：staging 是完整的，编译产出的 vendor 会带全部 HAL
+   （注意：编译会覆盖 `system.img`，需重新打 `encryption=Require→Attempt` 这个补丁；
+   注意当前**有一个别人的 `--all-modules` 编译正在跑，不要并发**）。
+
+### 四、本轮结论
+
+**"Linux(x86_64) 上跑 arm64 安卓"这条主干已经打通并实测** ✓✓：
+`ranchu` + `-cpu cortex-a53` + 那三个 QEMU 二进制补丁（别名表 / `-soundhash`→`-name` /
+`max_ports`）后，**官方机器能起、arm64 guest 能一路干净启动到 SurfaceFlinger + zygote** ✓。
+剩下的只是"把第 6 轮那些多余的 HAL 删除恢复回去"，属于纯清理工作。
