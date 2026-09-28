@@ -237,6 +237,26 @@ const std::string& WebUiHtml() {
       </div>
     </div>
 
+    <div class="card" id="card-files">
+      <h2 class="clickable" onclick="toggleCard('card-files')">
+        <span class="arrow">▼</span>文件
+      </h2>
+      <div class="body">
+        <div class="row">
+          <button onclick="fsGoto(fsRoot)" title="跳到 app 能读到的存储根">根目录</button>
+          <button onclick="fsGoto(fsUp())">上级</button>
+          <button onclick="fsLoad()">刷新</button>
+          <button onclick="fsMkdir()">新建目录</button>
+        </div>
+        <!-- 当前路径。绝对路径 —— 加了存储根之后"相对谁"不再唯一。 -->
+        <div id="fsPath" class="dim"
+             style="font-size:11px;margin-top:5px;word-break:break-all"></div>
+        <div id="fsList" class="dim" style="margin-top:5px;font-size:12px;
+             max-height:230px;overflow:auto"></div>
+        <div id="fsMsg" class="dim" style="font-size:12px;margin-top:5px"></div>
+      </div>
+    </div>
+
     <div class="card" id="card-running">
       <h2 class="clickable" onclick="toggleCard('card-running')">
         <span class="arrow">▼</span>运行中的应用
@@ -1377,40 +1397,187 @@ function applyCollapsed() {
 // ── 上传安装 APK ──
 //
 // 直接把文件字节当请求体 POST，不用 multipart —— 服务端只收一个文件，
-// 为它实现一遍 multipart 解析不划算，而 fetch 传 File 本来就能直接当 body。
+// 为它实现一遍 multipart 解析不划算，而传 File 本来就能直接当 body。
+//
+// ⚠️ 用 XMLHttpRequest 而不是 fetch：**fetch 给不了上传进度**。
+//    APK 动辄几百 MB，上传要几十秒到几分钟，没有进度用户只能看着
+//    "上传中…" 干等，分不清是在传还是卡死了。xhr.upload.onprogress
+//    是浏览器里唯一能拿到上传进度的接口。
 function uploadApk(input) {
   const f = input.files && input.files[0];
   if (!f) return;
   const msg = $('apkmsg');
   const mb = (f.size / 1048576).toFixed(1);
-  msg.className = '';
-  msg.textContent = '上传中… ' + f.name + '（' + mb + ' MB）';
+
+  // 本地先拦一道：服务端上限是 4GB，但设备内存/磁盘都可能更小，
+  // 与其传完才失败，不如立刻说清楚
+  msg.className = 'dim';
+  msg.textContent = '上传中… ' + f.name + '（' + mb + ' MB） 0%';
 
   const replace = $('apkReplace').checked ? '1' : '0';
-  fetch('/api/v1/install?replace=' + replace, {
-    method: 'POST',
-    headers: authHeaders({'Content-Type': 'application/vnd.android.package-archive'}),
-    body: f
-  })
-    .then(r => r.json().then(j => ({ status: r.status, j: j })))
-    .then(({status, j}) => {
-      // 显示服务端的原话：安装失败的原因（签名冲突、版本降级、空间不足）
-      // 是用户唯一能据此行动的信息，包装成"安装失败"就没用了
-      if (j && j.ok) {
-        msg.className = 'ok';
-        msg.textContent = '✓ 已安装 ' + (j.package || f.name);
-      } else {
-        msg.className = 'err';
-        msg.textContent = '✗ 安装失败：' + ((j && j.error) || ('HTTP ' + status));
+  const t0 = performance.now();
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/v1/install?replace=' + replace);
+  xhr.setRequestHeader('Content-Type',
+                       'application/vnd.android.package-archive');
+  if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const pct = Math.floor(e.loaded / e.total * 100);
+    msg.textContent = '上传中… ' + f.name + '（' + mb + ' MB） '
+                    + pct + '%  ' + ((e.loaded / 1048576).toFixed(0))
+                    + ' / ' + mb + ' MB';
+  };
+  // 传完了但服务端还在装 —— 装一个几百 MB 的 APK 要好几秒，
+  // 这段时间没有任何事件，不讲清楚又像是卡住了
+  xhr.upload.onload = () => {
+    msg.textContent = '已上传 ' + mb + ' MB，正在安装…';
+  };
+
+  // 服务端的错误原文可能是几百字的 Java 堆栈，塞进这个小 div 会把
+  // 整个面板撑变形。截断显示，完整内容放 title（悬停可见）。
+  const done = (ok, text) => {
+    msg.className = ok ? 'ok' : 'err';
+    msg.textContent = text.length > 220 ? text.slice(0, 220) + '…' : text;
+    msg.title = text;
+    setStatus(ok ? text : text.slice(0, 80), !ok);
+    if (ok) setTimeout(loadRunning, 800);
+  };
+
+  xhr.onload = () => {
+    let j = null;
+    try { j = JSON.parse(xhr.responseText); } catch (e) {}
+    // 服务端的原话最有价值（签名冲突、版本降级、空间不足），
+    // 包装成"安装失败"就没用了
+    const detail = (j && j.error) || ('HTTP ' + xhr.status);
+    if (xhr.status === 413) {
+      // 「传不上去」和「装不上」是两回事，别都报成安装失败 ——
+      // 用户看到"安装失败：请求体超过上限"会去查应用，方向就错了
+      done(false, '✗ 文件太大，服务端拒收：' + detail);
+    } else if (j && j.ok) {
+      done(true, '✓ 已安装 ' + (j.package || f.name)
+                 + '（' + ((performance.now() - t0) / 1000).toFixed(1) + 's）');
+    } else if (xhr.status === 0) {
+      done(false, '✗ 连接被断开（文件太大或服务重启了？）');
+    } else {
+      done(false, '✗ 安装失败：' + detail);
+    }
+  };
+  xhr.onerror = () => done(false, '✗ 上传失败：连接错误');
+  xhr.ontimeout = () => done(false, '✗ 上传超时');
+  xhr.onabort = () => done(false, '上传已取消');
+
+  xhr.send(f);
+  input.value = '';   // 允许重复选同一个文件
+}
+
+// ── 文件浏览 ──
+//
+// 路径一律用**绝对路径**。加了存储根之后"相对下载目录"不再唯一，
+// 而绝对路径配合服务端报出的 storage 边界不会有歧义。
+//
+// ⚠️ 触控坐标那套"图尺寸 vs 触控范围"的坑这里不存在 —— 文件路径没有
+//    缩放，给什么就是什么。
+let fsCwd = '';          // 当前目录（绝对路径；空 = 下载目录）
+let fsRoot = '';         // 存储根，从服务端问出来
+
+function fsUp() {
+  if (!fsCwd || !fsRoot || fsCwd === fsRoot) return fsRoot || '';
+  const i = fsCwd.lastIndexOf('/');
+  if (i <= 0) return fsRoot || '';
+  const up = fsCwd.slice(0, i);
+  // 不要退到存储根之上
+  return up.length < fsRoot.length ? fsRoot : up;
+}
+
+function fsGoto(p) {
+  // ⚠️ "/" 是**系统根**，不在允许范围内 —— 会被服务端正确拒掉。
+  //    "根目录"指的是存储根（fsRoot，通常 /storage/emulated/0）。
+  //    第一版按钮传的就是 '/'，点了一下直接报"路径不在允许范围内"。
+  if (!p || p === '/') p = fsRoot || '';
+  fsCwd = p;
+  fsLoad();
+}
+
+function fsMsg(text, err) {
+  const el = $('fsMsg');
+  if (!el) return;
+  el.className = err ? 'err' : 'dim';
+  el.textContent = text;
+}
+
+function fsLoad() {
+  const q = '/api/v1/files?op=list&path=' + encodeURIComponent(fsCwd);
+  fetch(withToken(q))
+    .then(r => r.json())
+    .then(d => {
+      if (!d || !d.ok) { fsMsg('✗ ' + ((d && d.error) || '读目录失败'), true); return; }
+      if (d.storage && !fsRoot) fsRoot = d.storage;
+      $('fsPath').textContent = '📁 ' + (d.dir === '.' ? (fsRoot + '（下载目录）') : d.dir);
+      const box = $('fsList');
+      if (!d.entries || !d.entries.length) {
+        box.innerHTML = '<span class="dim">（空）</span>';
+        return;
       }
-      setStatus(msg.textContent, !(j && j.ok));
-      setTimeout(loadRunning, 800);
+      // 目录在前、同类按名字排 —— 和所有文件管理器一致，
+      // 不排的话顺序随 readdir，看起来像乱的
+      const es = d.entries.slice().sort((a, b) =>
+        (b.dir - a.dir) || a.name.localeCompare(b.name));
+      box.innerHTML = es.map(e => {
+        const sz = e.dir ? '' : ('  ' + fmtSize(e.size));
+        const click = e.dir
+          ? 'onclick="fsGoto(' + JSON.stringify(e.path).replace(/"/g, '&quot;') + ')"'
+          : '';
+        return '<div class="row" style="margin:1px 0;align-items:center">'
+             + '<span style="flex:1;cursor:' + (e.dir ? 'pointer' : 'default')
+             + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap" ' + click + '>'
+             + (e.dir ? '📁 ' : '📄 ') + esc(e.name) + '<span class="dim">' + sz + '</span></span>'
+             + '<button style="padding:1px 6px;font-size:11px" onclick="fsDel('
+             + JSON.stringify(e.path).replace(/"/g, '&quot;') + ',' + e.dir + ')">删</button>'
+             + '</div>';
+      }).join('');
+      fsMsg('共 ' + d.count + ' 项');
     })
-    .catch(e => {
-      msg.className = 'err';
-      msg.textContent = '✗ 上传失败：' + e;
+    .catch(e => fsMsg('✗ ' + e, true));
+}
+
+function esc(t) {
+  return String(t).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(0) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+function fsMkdir() {
+  const name = prompt('新目录名：');
+  if (!name) return;
+  const p = (fsCwd || fsRoot) + '/' + name;
+  fsPost({op: 'mkdir', path: p}, '已创建 ' + name);
+}
+
+function fsDel(path, isDir) {
+  if (!confirm('删除 ' + path + (isDir ? '（含其中所有内容）' : '') + '？')) return;
+  fsPost({op: 'delete', path: path, recursive: !!isDir}, '已删除');
+}
+
+function fsPost(body, okText) {
+  fetch(withToken('/api/v1/files'), {
+    method: 'POST',
+    headers: authHeaders({'Content-Type': 'application/json'}),
+    body: JSON.stringify(body)
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d && d.ok) { fsMsg('✓ ' + okText); fsLoad(); }
+      else fsMsg('✗ ' + ((d && d.error) || '操作失败'), true);
     })
-    .finally(() => { input.value = ''; });   // 允许重复选同一个文件
+    .catch(e => fsMsg('✗ ' + e, true));
 }
 
 // ── 运行中的应用 ──
@@ -1554,6 +1721,9 @@ function logHistory() {
 applyUrlParams();
 loadQualityRange();      // 不阻塞启动，拿到之后自己更新拖动条
 loadTouchRange();        // 触控坐标空间（跟图尺寸不是一回事）
+// 文件管理的边界（存储根）—— 问服务端，别在前端写死 /sdcard
+fetch(withToken('/api/v1/files?op=roots')).then(r=>r.json())
+  .then(d => { if (d && d.ok) { fsRoot = d.storage; } }).catch(()=>{});
 syncMaxWidthButtons();
 setInterval(pollCadence, 2000);
 applyCollapsed();

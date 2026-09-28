@@ -102,31 +102,66 @@ std::string RelativeTo(const std::string& root, const std::string& abs) {
 }  // namespace
 
 // ── 路径约束 ────────────────────────────────────────────────────────────────
-bool FileOps::ResolveInside(const std::string& root, const std::string& input,
+std::string FileOps::NormalizeAlias(const std::string& input) const {
+    for (const auto& a : aliases_) {
+        if (input == a) return storageRoot_;
+        if (input.size() > a.size() &&
+            input.compare(0, a.size(), a) == 0 && input[a.size()] == '/') {
+            return storageRoot_ + input.substr(a.size());
+        }
+    }
+    return input;
+}
+
+// path 是不是 base（或 base 自己）。两边都要求无尾斜杠。
+static bool IsUnder(const std::string& path, const std::string& base) {
+    if (base.empty()) return false;
+    if (path == base) return true;
+    return path.size() > base.size() &&
+           path.compare(0, base.size(), base) == 0 &&
+           path[base.size()] == '/';
+}
+
+bool FileOps::ResolveInside(const std::string& root,
+                            const std::string& storageRoot,
+                            const std::string& input,
                             std::string* out, std::string* error) {
     if (out == nullptr) return false;
     if (root.empty() || root[0] != '/') {
         if (error) *error = "下载目录未初始化";
         return false;
     }
+    // 边界：有存储根就用存储根，没有就退回下载目录（功能变窄但不会变宽）
+    const std::string& bound = storageRoot.empty() ? root : storageRoot;
 
     std::string rest = input;
+    // full 是已经拼好的绝对前缀；相对路径从 root 起，绝对路径从边界起
+    std::string base = root;
 
-    // 绝对路径：只接受已经在下载目录里的（客户端常用 list 返回的 path 直接回传）
+    // 绝对路径：只要落在**存储边界**之内就收。
+    //
+    // 以前这里只认下载目录，于是 /sdcard/DCIM 这种路径直接被拒 ——
+    // 而"app 能读到的那个根目录"本来就该能管。边界仍然是硬的：
+    // 出了 bound 一律拒绝，下面还有软链接兜底。
     if (!rest.empty() && rest[0] == '/') {
-        if (rest == root) {
-            *out = root;
+        if (rest == bound) {
+            *out = bound;
             return true;
         }
-        if (rest.size() > root.size() && rest.compare(0, root.size(), root) == 0 &&
-            rest[root.size()] == '/') {
-            rest = rest.substr(root.size() + 1);
-        } else {
+        if (!IsUnder(rest, bound)) {
             if (error) {
-                *error = "路径不在下载目录内: " + input + "（只能是 " + root +
-                         " 下的相对路径）";
+                *error = "路径不在允许范围内: " + input + "（只能是 " + bound +
+                         " 下的路径）";
             }
             return false;
+        }
+        // 落在下载目录里 → 相对下载目录；否则相对存储根
+        if (IsUnder(rest, root)) {
+            base = root;
+            rest = rest.substr(root.size());
+        } else {
+            base = bound;
+            rest = rest.substr(bound.size());
         }
     }
 
@@ -151,9 +186,9 @@ bool FileOps::ResolveInside(const std::string& root, const std::string& input,
         i = slash + 1;
     }
 
-    std::string full = root;
+    std::string full = base;
     for (const auto& p : parts) full = JoinPath(full, p);
-    if (full.empty()) full = root;
+    if (full.empty()) full = base;
 
     // 软链接检查：对**已存在的最深祖先**做 realpath，确认解析后仍在 root 内。
     //
@@ -161,18 +196,16 @@ bool FileOps::ResolveInside(const std::string& root, const std::string& input,
     // ../ 检查形同虚设 —— 因为文件系统层面它确实"在"下载目录下。
     {
         char rootReal[PATH_MAX];
-        if (realpath(root.c_str(), rootReal) != nullptr) {
+        if (realpath(bound.c_str(), rootReal) != nullptr) {
             std::string probe = full;
             while (!probe.empty() && probe != "/") {
                 char real[PATH_MAX];
                 if (realpath(probe.c_str(), real) != nullptr) {
                     const std::string r(real);
                     const std::string rr(rootReal);
-                    if (r != rr && !(r.size() > rr.size() &&
-                                     r.compare(0, rr.size(), rr) == 0 &&
-                                     r[rr.size()] == '/')) {
+                    if (!IsUnder(r, rr)) {
                         if (error) {
-                            *error = "路径经软链接解析后落在下载目录之外: " + input;
+                            *error = "路径经软链接解析后落在允许范围之外: " + input;
                         }
                         return false;
                     }
@@ -277,6 +310,51 @@ bool FileOps::Init(std::string* error) {
         return false;
     }
 
+    // 共享存储根 —— **app 能读到的那个根目录**。
+    //
+    // 它是下载目录的父目录，也是绝对路径的允许边界。挑存在的那个，
+    // 理由同上：别把软链接写进来当基准。
+    //
+    // ⚠️ 这里刻意**不**退到 "/" —— 那等于把整个文件系统开放出去，
+    //    而 /data、/system 里全是我们不该碰的东西。探不到就只用下载目录。
+    const char* storageCandidates[] = {
+        "/storage/emulated/0",
+        "/sdcard",
+        "/data/media/0",
+        nullptr,
+    };
+    for (int i = 0; storageCandidates[i] != nullptr; ++i) {
+        struct stat st{};
+        if (stat(storageCandidates[i], &st) == 0 && S_ISDIR(st.st_mode)) {
+            storageRoot_ = storageCandidates[i];
+            break;
+        }
+    }
+    // 兜底：用下载目录的父目录。真探不到就退化成"只能操作下载目录"，
+    // 功能变窄但不会变危险。
+    if (storageRoot_.empty()) {
+        const size_t slash = root_.rfind('/');
+        if (slash != std::string::npos && slash > 0) {
+            storageRoot_ = root_.substr(0, slash);
+        }
+    }
+
+    // 别名：realpath 确认过的才收
+    aliases_.clear();
+    if (!storageRoot_.empty()) {
+        char canon[PATH_MAX];
+        if (realpath(storageRoot_.c_str(), canon) != nullptr) {
+            const char* aliasCandidates[] = {"/sdcard", "/data/media/0", nullptr};
+            for (int i = 0; aliasCandidates[i] != nullptr; ++i) {
+                char a[PATH_MAX];
+                if (realpath(aliasCandidates[i], a) != nullptr &&
+                    strcmp(a, canon) == 0) {
+                    aliases_.emplace_back(aliasCandidates[i]);
+                }
+            }
+        }
+    }
+
     std::string httpErr;
     if (!http_.Init(&httpErr)) {
         // 下载不可用不是致命错误 —— 文件操作仍然能用
@@ -285,7 +363,8 @@ bool FileOps::Init(std::string* error) {
 
     if (!loggedOnce_) {
         // 同 AppOps：Init 会被反复调用，日志只打一次
-        ALOGI("文件后端就绪：下载目录 %s，libcurl %s", root_.c_str(),
+        ALOGI("文件后端就绪：下载目录 %s，存储根 %s，libcurl %s",
+              root_.c_str(), storageRoot_.c_str(),
               http_.Available() ? http_.version().c_str() : "不可用");
         loggedOnce_ = true;
     }
@@ -317,7 +396,7 @@ bool FileOps::Download(const std::string& url, const std::string& filename,
     std::string dirAbs = root_;
     if (!subdir.empty()) {
         std::string subAbs;
-        if (!ResolveInside(root_, subdir, &subAbs, error)) return false;
+        if (!ResolveInside(root_, storageRoot_, subdir, &subAbs, error)) return false;
         if (!MkdirP(subAbs, error)) return false;
         dirAbs = subAbs;
     }
@@ -326,7 +405,7 @@ bool FileOps::Download(const std::string& url, const std::string& filename,
     const std::string relCandidate =
         (subdir.empty() ? name : (subdir + "/" + name));
     std::string destAbs;
-    if (!ResolveInside(root_, relCandidate, &destAbs, error)) return false;
+    if (!ResolveInside(root_, storageRoot_, relCandidate, &destAbs, error)) return false;
 
     const int64_t limit = maxBytes > 0 ? maxBytes : kDefaultMaxDownload;
     const int timeout = timeoutSec > 0 ? timeoutSec : kDefaultTimeoutSec;
@@ -359,7 +438,7 @@ bool FileOps::List(const std::string& relPath, std::vector<FileEntry>* out,
                    std::string* error) {
     out->clear();
     std::string abs;
-    if (!ResolveInside(root_, relPath, &abs, error)) return false;
+    if (!ResolveInside(root_, storageRoot_, NormalizeAlias(relPath), &abs, error)) return false;
 
     DIR* d = opendir(abs.c_str());
     if (d == nullptr) {
@@ -378,7 +457,9 @@ bool FileOps::List(const std::string& relPath, std::vector<FileEntry>* out,
         e.isDir = S_ISDIR(st.st_mode);
         e.size  = e.isDir ? 0 : static_cast<int64_t>(st.st_size);
         e.mtime = static_cast<int64_t>(st.st_mtime);
-        e.path  = RelativeTo(root_, childAbs);
+        // 绝对路径：加了存储根之后"相对谁"不再唯一，
+        // 客户端拿它回传时必须能唯一指向一个文件
+        e.path  = childAbs;
         out->push_back(std::move(e));
     }
     closedir(d);
@@ -394,7 +475,7 @@ bool FileOps::List(const std::string& relPath, std::vector<FileEntry>* out,
 bool FileOps::Stat(const std::string& relPath, FileEntry* out, std::string* error) {
     *out = FileEntry{};
     std::string abs;
-    if (!ResolveInside(root_, relPath, &abs, error)) return false;
+    if (!ResolveInside(root_, storageRoot_, NormalizeAlias(relPath), &abs, error)) return false;
 
     struct stat st{};
     if (lstat(abs.c_str(), &st) != 0) {
@@ -404,14 +485,14 @@ bool FileOps::Stat(const std::string& relPath, FileEntry* out, std::string* erro
     out->isDir = S_ISDIR(st.st_mode);
     out->size  = out->isDir ? 0 : static_cast<int64_t>(st.st_size);
     out->mtime = static_cast<int64_t>(st.st_mtime);
-    out->path  = RelativeTo(root_, abs);
+    out->path  = abs;
     out->name  = out->path == "." ? "/" : out->path.substr(out->path.find_last_of('/') + 1);
     return true;
 }
 
 bool FileOps::Mkdir(const std::string& relPath, bool parents, std::string* error) {
     std::string abs;
-    if (!ResolveInside(root_, relPath, &abs, error)) return false;
+    if (!ResolveInside(root_, storageRoot_, NormalizeAlias(relPath), &abs, error)) return false;
     if (abs == root_) return true;   // 根目录已存在
 
     struct stat st{};
@@ -431,7 +512,7 @@ bool FileOps::Mkdir(const std::string& relPath, bool parents, std::string* error
 bool FileOps::Delete(const std::string& relPath, bool recursive,
                      std::string* error) {
     std::string abs;
-    if (!ResolveInside(root_, relPath, &abs, error)) return false;
+    if (!ResolveInside(root_, storageRoot_, NormalizeAlias(relPath), &abs, error)) return false;
 
     // 不允许删下载目录本身 —— 那是把整个目录端掉，不会是调用方想要的
     if (abs == root_) {
@@ -461,8 +542,8 @@ bool FileOps::Delete(const std::string& relPath, bool recursive,
 bool FileOps::Rename(const std::string& fromRel, const std::string& toRel,
                      std::string* error) {
     std::string fromAbs, toAbs;
-    if (!ResolveInside(root_, fromRel, &fromAbs, error)) return false;
-    if (!ResolveInside(root_, toRel, &toAbs, error)) return false;
+    if (!ResolveInside(root_, storageRoot_, NormalizeAlias(fromRel), &fromAbs, error)) return false;
+    if (!ResolveInside(root_, storageRoot_, NormalizeAlias(toRel), &toAbs, error)) return false;
     if (fromAbs == root_ || toAbs == root_) {
         if (error) *error = "不能重命名下载目录本身";
         return false;

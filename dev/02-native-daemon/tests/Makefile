@@ -81,7 +81,7 @@ SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
 APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
                  $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_fileops
 
 all: $(BINS) fake_screencap
 
@@ -103,6 +103,12 @@ WS_SRCS = test_websocket.cpp $(DAEMON)/websocket.cpp $(DAEMON)/log_buffer.cpp
 
 test_websocket: $(WS_SRCS) test_util.h $(DAEMON)/websocket.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(WS_SRCS)
+
+# fileops 要的是「路径边界」那部分逻辑，所以连 http_client 一起编进来
+FO_SRCS = test_fileops.cpp $(DAEMON)/fileops.cpp $(DAEMON)/http_client.cpp $(DAEMON)/log_buffer.cpp $(DAEMON)/subprocess.cpp
+
+test_fileops: $(FO_SRCS) test_util.h $(DAEMON)/fileops.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(FO_SRCS) -o $@ $(LDFLAGS)
 
 KB_SRCS = test_keyboard.cpp $(DAEMON)/keyboard.cpp $(DAEMON)/log_buffer.cpp
 
@@ -137,6 +143,7 @@ _run: all
 	 ./test_json;                                j=$$?; echo; \
 	 ./test_keyboard;                            k=$$?; echo; \
 	 ./test_websocket;                           w=$$?; echo; \
+	 ./test_fileops;                             f=$$?; echo; \
 	 echo "───────────────────────────────"; \
 	 printf "  %-34s %s\n" "注入后端单元测试"   "$$([ $$u -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "端到端集成测试"     "$$([ $$i -eq 0 ] && echo 通过 || echo 失败)"; \
@@ -145,7 +152,8 @@ _run: all
 	 printf "  %-34s %s\n" "JSON 解析/输出"      "$$([ $$j -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "按键注入"            "$$([ $$k -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "WebSocket 握手"       "$$([ $$w -eq 0 ] && echo 通过 || echo 失败)"; \
-	 exit $$(( u + i + c + a + j + k + w ))
+	 printf "  %-34s %s\n" "文件路径边界"         "$$([ $$f -eq 0 ] && echo 通过 || echo 失败)"; \
+	 exit $$(( u + i + c + a + j + k + w + f ))
 
 clean:
 	rm -rf $(WEBP_OBJ)

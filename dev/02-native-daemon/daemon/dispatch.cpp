@@ -656,7 +656,8 @@ ReplyPacket Dispatcher::HandleFileOp(const Request& req,
                                      const std::vector<std::string>& args) {
     if (args.empty() || args[0].empty()) {
         return MakeJsonError(req.cmd, kErrPayload,
-                             "缺少 op 参数（list|stat|mkdir|delete|rename|exists）");
+                             "缺少 op 参数"
+                             "（roots|list|stat|mkdir|delete|rename|exists）");
     }
     const std::string op   = args[0];
     const std::string path = args.size() > 1 ? args[1] : std::string();
@@ -667,12 +668,24 @@ ReplyPacket Dispatcher::HandleFileOp(const Request& req,
 
     json::Writer w;
 
+    // 让客户端能**问出**边界在哪，而不是靠猜或翻文档。
+    // 边界变了（不同设备 /sdcard 挂在哪）客户端也能自适应。
+    if (op == "roots") {
+        w.Obj().Field("ok", true)
+            .Field("storage", fileOps_->storageRoot())
+            .Field("download", fileOps_->downloadDir())
+            .Field("note", "相对路径相对 download；绝对路径在 storage 之内即可")
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
     if (op == "list") {
         std::vector<FileEntry> entries;
         if (!fileOps_->List(path, &entries, &error)) {
             return MakeJsonError(req.cmd, kErrNotFound, error);
         }
         w.Obj().Field("ok", true).Field("dir", path.empty() ? "." : path)
+                                .Field("storage", fileOps_->storageRoot())
                                 .Field("count", static_cast<uint64_t>(entries.size()))
             .Key("entries").Arr();
         for (const auto& e : entries) {
@@ -813,6 +826,10 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
             .Field("appManagement", appOps_ != nullptr && appOps_->Init(nullptr))
             .Field("download", fileOps_ != nullptr && fileOps_->httpAvailable())
             .Field("fileManagement", fileOps_ != nullptr && fileOps_->Init(nullptr))
+            // 文件管理的**边界**。不加这个，客户端只能猜 /sdcard 能不能用 ——
+            // 而不同设备挂载点不同（/sdcard 只是 /storage/emulated/0 的软链接）。
+            .Field("fileStorageRoot",
+                  fileOps_ != nullptr ? fileOps_->storageRoot() : "")
             .Field("keyInjection", access("/dev/uinput", W_OK) == 0)
             .Field("clipboard", ClipOps::Instance().Init(nullptr))
             .Field("screenStream", PngEncoder::Instance().Available())

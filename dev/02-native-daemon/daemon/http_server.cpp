@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "thread_util.h"
@@ -116,6 +117,34 @@ std::string HttpRequest::header(const std::string& lowerKey,
     return def;
 }
 
+bool HttpRequest::ReadBody(std::string* out, std::string* error) const {
+    if (bodyFile.empty()) {
+        *out = body;
+        return true;
+    }
+    const int fd = open(bodyFile.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (error) *error = "打开 " + bodyFile + " 失败: " + strerror(errno);
+        return false;
+    }
+    out->clear();
+    out->reserve(bodySize);
+    char buf[64 * 1024];
+    for (;;) {
+        const ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (error) *error = std::string("读 ") + bodyFile + " 失败";
+            close(fd);
+            return false;
+        }
+        if (n == 0) break;
+        out->append(buf, static_cast<size_t>(n));
+    }
+    close(fd);
+    return true;
+}
+
 HttpResponse HttpResponse::Json(int status, const std::string& json) {
     HttpResponse r;
     r.status = status;
@@ -208,6 +237,8 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     port_     = opts.port;
     token_    = opts.token;
     maxBody_  = opts.maxBodyBytes;
+    spoolThreshold_ = opts.spoolThresholdBytes;
+    spoolDir_ = opts.spoolDir;
 
     const bool loopbackOnly = (opts.bindAddr == "127.0.0.1" ||
                                opts.bindAddr == "::1" ||
@@ -534,21 +565,91 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out, HttpResponse* errRepl
         }
     }
 
-    while (body.size() < contentLength) {
+    // ── 大请求体落盘 ──
+    //
+    // 超过阈值的写进临时文件，不留在内存里。
+    //
+    // 为什么：APK 动辄几百 MB，而设备总共才几 GB 内存。早先全量读进
+    // std::string，上限只能定 64 MB —— 稍大的 APK 直接 413，
+    // 网页上传表现为"传不上去"。
+    //
+    // ⚠️ 阈值判断用的是 **Content-Length**，是客户端说了算的值。
+    //    所以落盘这条路也不能让 body 无限增长 —— 往下写多少磁盘就是
+    //    多少，最后靠 maxBody_ 兜底（它在上面已经查过了）。
+    const bool spool = (contentLength > spoolThreshold_);
+
+    std::string  spoolPath;
+    int          spoolFd = -1;
+    if (spool) {
+        const std::string dir = spoolDir_.empty() ? "/data/local/tmp"
+                                                  : spoolDir_;
+        spoolPath = dir + "/autod-body-" + std::to_string(getpid()) + "-" +
+                    std::to_string(reinterpret_cast<uintptr_t>(out)) + ".tmp";
+        spoolFd = open(spoolPath.c_str(),
+                       O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (spoolFd < 0) {
+            *errReply = HttpResponse::Error(
+                    500, "无法创建落盘文件 " + spoolPath + ": " +
+                                 strerror(errno));
+            return false;
+        }
+        // 已经把头部 buf 里带过来的那截正文写进去
+        if (!body.empty()) {
+            if (write(spoolFd, body.data(), body.size()) !=
+                static_cast<ssize_t>(body.size())) {
+                close(spoolFd);
+                unlink(spoolPath.c_str());
+                *errReply = HttpResponse::Error(500, "写落盘文件失败");
+                return false;
+            }
+        }
+    }
+
+    size_t written = body.size();
+    while (written < contentLength) {
         const ssize_t n = read(connFd, tmp, sizeof(tmp));
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (spoolFd >= 0) { close(spoolFd); unlink(spoolPath.c_str()); }
             *errReply = HttpResponse::Error(400, "读请求体失败");
             return false;
         }
         if (n == 0) {
+            if (spoolFd >= 0) { close(spoolFd); unlink(spoolPath.c_str()); }
             *errReply = HttpResponse::Error(400, "请求体不完整");
             return false;
         }
-        body.append(tmp, static_cast<size_t>(n));
+        if (spoolFd >= 0) {
+            const char* p = tmp;
+            ssize_t left = n;
+            while (left > 0) {
+                const ssize_t w = write(spoolFd, p, static_cast<size_t>(left));
+                if (w < 0) {
+                    if (errno == EINTR) continue;
+                    close(spoolFd);
+                    unlink(spoolPath.c_str());
+                    *errReply = HttpResponse::Error(500, "写落盘文件失败");
+                    return false;
+                }
+                p += w;
+                left -= w;
+            }
+        } else {
+            body.append(tmp, static_cast<size_t>(n));
+        }
+        written += static_cast<size_t>(n);
     }
-    body.resize(contentLength);
-    out->body = std::move(body);
+
+    out->bodySize = contentLength;
+    if (spoolFd >= 0) {
+        fsync(spoolFd);
+        close(spoolFd);
+        out->bodyFile = spoolPath;
+        out->body.clear();          // 落盘之后内存里不留
+    } else {
+        body.resize(contentLength);
+        out->body = std::move(body);
+    }
 
     // 鉴权**不在这里**做。
     //
@@ -611,6 +712,16 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
         }
         return;
     }
+
+    // 落盘的请求体，**这条连接处理完就删**。
+    //
+    // 用 RAII 而不是在每个 return 前面手写 unlink：这个函数后面还有
+    // 流式响应、WebSocket 升级好几条返回路径，漏一条就是往
+    // /data/local/tmp 里堆一个几百 MB 的废文件。
+    struct SpoolCleanup {
+        std::string path;
+        ~SpoolCleanup() { if (!path.empty()) unlink(path.c_str()); }
+    } spoolGuard{req.bodyFile};
 
     // 直接调用，不包 try/catch。
     //

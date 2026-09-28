@@ -661,6 +661,16 @@ curl -X POST 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
 
 ## 七、文件与下载
 
+
+**上传上限 4 GB**，且**超过 4 MB 的请求体会落盘**而不是读进内存 ——
+设备总共几 GB 内存，塞不下一个几百 MB 的 APK。
+
+早先这里写死 64 MB，稍大的 APK 直接 `413`，网页表现就是"传不上去"。
+现在上限只受磁盘约束；真的超了会明确回 413 并带上上限值。
+
+上传完成后文件**成功失败都会删**（那是个几百 MB 的临时文件，留着没人清）。
+`?keep=1` 可以保留，调试用。
+
 ### POST /download
 
 ```json
@@ -677,32 +687,75 @@ curl -X POST 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
 依赖设备上的 `libcurl`（运行时 dlopen）。没有就明确报错，不会假装成功。
 **支持 HTTPS。**
 
-### GET /files?path=
+### GET /files  ·  POST /files
 
-列出下载目录（或指定子目录）。
+文件管理。**边界是「app 能读到的那个根目录」，通常是 `/storage/emulated/0`**
+（`/sdcard` 是它的软链接）。
 
-```json
-{"ok":true,"dir":".","count":3,
- "entries":[{"name":"a.apk","dir":false,"size":16805,"mtime":…}]}
+```bash
+# 边界在哪 —— 别猜，问它
+curl 'http://<设备IP>:8088/api/v1/files?op=roots'
+# {"ok":true,"storage":"/storage/emulated/0",
+#  "download":"/storage/emulated/0/Download",
+#  "note":"相对路径相对 download；绝对路径在 storage 之内即可"}
+
+# 列目录（三种写法都行）
+curl 'http://<设备IP>:8088/api/v1/files?path=/sdcard/DCIM'
+curl 'http://<设备IP>:8088/api/v1/files?path=/storage/emulated/0/DCIM'
+curl 'http://<设备IP>:8088/api/v1/files'            # 不带 = 下载目录
+
+# 列出下载目录的子目录（相对路径仍相对下载目录）
+curl 'http://<设备IP>:8088/api/v1/files?path=sub'
 ```
 
-### POST /files
-
 ```json
-{"op":"mkdir","path":"a/b","recursive":true}
-{"op":"delete","path":"a/b","recursive":true}
-{"op":"rename","path":"a","to":"b"}
+{"ok":true,"dir":"/sdcard/DCIM","storage":"/storage/emulated/0","count":2,
+ "entries":[{"name":"a.jpg","path":"/storage/emulated/0/DCIM/a.jpg",
+             "dir":false,"size":16805,"mtime":1790598308}]}
 ```
 
-| op | 需要的字段 |
+| 字段 | 说明 |
 |---|---|
-| `list` | `path` |
-| `stat` / `exists` | `path` |
-| `mkdir` | `path`，可选 `recursive` |
-| `delete` | `path`，可选 `recursive` |
-| `rename` | `path` + `to` |
+| `dir` | 实际列出的目录 |
+| `storage` | **边界**。绝对路径落在这里面就收 |
+| `entries[].path` | **绝对路径**。加了存储根之后"相对谁"不再唯一，客户端回传时必须能唯一定位 |
 
----
+**路径规则**：
+
+| 写法 | 怎么解析 |
+|---|---|
+| `a.txt`、`sub/b.txt` | 相对**下载目录**（向后兼容，老客户端不用改） |
+| `/storage/emulated/0/DCIM` | 绝对路径，须在 `storage` 之内 |
+| `/sdcard/DCIM` | 同上 —— `/sdcard` 是别名，自动换算（用 `realpath` 确认过才认） |
+| `/data`、`/system`、`/` | **拒绝**。边界外一律不碰 |
+
+写操作走 `POST /files`，`op` 取 `mkdir` / `delete` / `rename` / `stat` / `exists`：
+
+```bash
+curl -X POST http://<设备IP>:8088/api/v1/files \
+     -H 'Content-Type: application/json' \
+     -d '{"op":"mkdir","path":"/sdcard/Documents/新目录"}'
+
+curl -X POST http://<设备IP>:8088/api/v1/files \
+     -H 'Content-Type: application/json' \
+     -d '{"op":"delete","path":"/sdcard/tmp","recursive":true}'
+
+curl -X POST http://<设备IP>:8088/api/v1/files \
+     -H 'Content-Type: application/json' \
+     -d '{"op":"rename","path":"/sdcard/a.txt","to":"/sdcard/b.txt"}'
+```
+
+越界时会明确说清楚边界在哪：
+
+```json
+{"ok":false,"status":4105,
+ "error":"路径不在允许范围内: /data（只能是 /storage/emulated/0 下的路径）"}
+```
+
+> ⚠️ **这是整个共享存储的读写权限**，不只是下载目录。
+> 服务本身已经能点屏幕、装应用、重启设备，所以这不是新的信任边界 ——
+> 但**默认不鉴权且绑 `0.0.0.0`** 的组合下，同网络任何人都能删你的文件。
+> 对外暴露前请先看 [`04-config.md`](04-config.md) 的鉴权一节。
 
 ## 八、电源
 

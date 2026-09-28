@@ -165,7 +165,7 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 | 14 | `ForegroundApp` | 2 | 无 | 当前前台应用 |
 | 15 | `InstallApp` | 2 | 无（**fd = APK**） | 安装 |
 | 16 | `Download` | 2 | `<url>[,filename[,subdir]]` | 下载 |
-| 17 | `FileOp` | 2 | `<op>[,path[,arg]]` | 文件操作 |
+| 17 | `FileOp` | 2 | `<op>[,path[,arg]]` | 文件操作（边界 = 共享存储根，op 含 `roots` 可问出边界；见 [01-http.md](01-http.md) 的 `/files`） |
 | 20 | `Describe` | 3 | 无 | 能力清单 |
 | 21 | `GetConfig` | 3 | 无 | 配置 + 运行时状态 |
 | 22 | `SetConfig` | 3 | `<key>\0<value>` | 热改配置 |

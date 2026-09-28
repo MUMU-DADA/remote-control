@@ -34,7 +34,24 @@ struct HttpRequest {
     std::string rawPath;                      // 解码前，便于日志
     std::vector<std::pair<std::string, std::string>> query;
     std::vector<std::pair<std::string, std::string>> headers;   // 键已转小写
+
+    // 正文。**两个只有一个非空**：
+    //   body      —— 小请求体，直接放在内存里
+    //   bodyFile  —— 大请求体（超过 Options::spoolThresholdBytes）落到了
+    //                这个临时文件里，读完由 HttpServer 负责删
+    //
+    // 为什么必须落盘：APK 动辄几百 MB，而设备总共才几 GB 内存。
+    // 早先全量读进 std::string，上限只能定在 64 MB —— 结果就是
+    // 稍大一点的 APK 直接 413，网页上传"莫名其妙传不上去"。
     std::string body;
+    std::string bodyFile;
+
+    // 正文长度（不管在内存还是文件里）
+    size_t bodySize = 0;
+
+    // 取正文内容。bodyFile 非空时把文件读进来（调用方自己别对
+    // 大文件用它 —— 那就白落盘了）。
+    bool ReadBody(std::string* out, std::string* error) const;
 
     std::string queryParam(const std::string& key,
                            const std::string& def = "") const;
@@ -96,7 +113,21 @@ class HttpServer {
         // 网页本身（/ 和 /ui）不校验 —— 它只是个静态页面，
         // 不含任何秘密，而用户得先打开它才能输入令牌。
         std::string token;
-        size_t      maxBodyBytes = 64u << 20;   // 64MB，够传 APK
+        // 请求体上限。现在大体会**落盘**而不是进内存，所以可以给得很宽
+        // —— 真正的约束是磁盘，不是内存。
+        // ⚠️ 但非落盘的那条路仍然全量进内存，所以这个值不能当成
+        //    "随便多大都行"：超过 spoolThresholdBytes 的会自动走落盘。
+        size_t      maxBodyBytes = 4ull << 30;        // 4GB
+
+        // 超过这个大小就落盘，不留在内存里。
+        // 4MB 是个折中：小于它的请求（JSON、剪贴板文本）走内存更快，
+        // 大于它的（APK、文件上传）走磁盘不会被 OOM 干掉。
+        size_t      spoolThresholdBytes = 4u << 20;   // 4MB
+
+        // 落盘目录。空 = /data/local/tmp。
+        // 要选一个 **installer 能读到** 的地方（pm install 用的是
+        // 它自己的权限，不是我们的）。
+        std::string spoolDir;
     };
 
     HttpServer() = default;
@@ -176,6 +207,8 @@ class HttpServer {
     // 非空时优先用它 —— 让鉴权可以运行时改变
     std::function<std::string()> tokenProvider_;
     size_t      maxBody_ = 0;
+    size_t      spoolThreshold_ = 4u << 20;   // 超过就落盘
+    std::string spoolDir_;                     // 空 = /data/local/tmp
     bool        stop_ = false;
 };
 

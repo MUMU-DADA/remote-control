@@ -302,13 +302,29 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
     // 而真实文件如果忘了删，用几次就把 /sdcard 堆满了 APK。
     std::string path = req.queryParam("path", "");
     const bool fromBody = path.empty();
+    bool spooled = false;      // 用的是 HttpServer 落盘的临时文件
 
     if (fromBody) {
-        if (req.body.empty()) {
+        if (req.bodySize == 0 && req.body.empty()) {
             return HttpResponse::Error(
                     400, "请求体为空：把 APK 字节作为请求体发送，"
                          "或用 ?path= 指定设备上已有的文件");
         }
+
+        // ── 大文件：HTTP 层已经落盘了，直接拿来用 ──
+        //
+        // 不要再往 /sdcard 抄一份：APK 动辄几百 MB，而后面
+        // Dispatcher 还会再拷一次给 pm install —— 抄三遍纯属浪费，
+        // 在手机上就是几十秒的等待。
+        //
+        // 这个文件的删除由 HttpServer 的 RAII 负责（请求处理完就删），
+        // 所以这里**不要** unlink。
+        if (!req.bodyFile.empty()) {
+            path = req.bodyFile;
+            spooled = true;
+            ALOGI("收到上传的 APK（落盘）: %s（%zu 字节）",
+                  path.c_str(), req.bodySize);
+        } else {
         // 放 /sdcard 而不是 /data/local/tmp：installer 对两者都能读，
         // 但 /sdcard 上的文件用户自己也能看见 —— 出问题时好排查。
         path = "/sdcard/autod-upload-" + std::to_string(getpid()) + ".apk";
@@ -338,7 +354,8 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
             return HttpResponse::Error(500, std::string("写 APK 失败: ") +
                                                 strerror(errno));
         }
-        ALOGI("收到上传的 APK: %s（%zu 字节）", path.c_str(), req.body.size());
+        ALOGI("收到上传的 APK: %s（%zu 字节）", path.c_str(), req.bodySize);
+        }
     } else if (access(path.c_str(), R_OK) != 0) {
         return HttpResponse::Error(404, "找不到文件: " + path);
     }
@@ -348,8 +365,9 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
     if (fd < 0) {
         // 打开失败也要删 —— 上传上来的文件已经落地了，
         // 不删就是垃圾。只有 keep=1 才留。
+        // （落盘的临时文件不归我们管，见上面 spooled 那段。）
         const bool keep = req.queryParam("keep", "0") == "1";
-        if (!keep) unlink(path.c_str());
+        if (!keep && !spooled) unlink(path.c_str());
         return HttpResponse::Error(500, "打开 " + path + " 失败: " +
                                             strerror(errno));
     }
@@ -366,6 +384,11 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
     // 用一阵子就是一堆几十 MB 的文件，而且没人会想起来清。
     //
     // keep=1 可以保留（调试用：想手工确认 APK 内容时）。
+    if (spooled) {
+        // 落盘文件由 HttpServer 删 —— 这里动它会让 RAII 再删一次（无害），
+        // 但如果调用了方还持有 path 去排查就找不到了。交给它。
+        return resp;
+    }
     if (req.queryParam("keep", "0") != "1") {
         if (unlink(path.c_str()) == 0) {
             ALOGI("安装%s，已删除 %s", resp.status == 200 ? "成功" : "失败",
@@ -1835,8 +1858,10 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
     }
     if (res == "files") {
         if (method == "GET") {
+            // ?op=roots 问边界；默认 list
+            const std::string op = req.queryParam("op", "list");
             return Call(Cmd::FileOp,
-                        PackArgs({"list", req.queryParam("path")}), 0, -1);
+                        PackArgs({op, req.queryParam("path")}), 0, -1);
         }
         if (method == "POST") {
             json::Value b; HttpResponse err;

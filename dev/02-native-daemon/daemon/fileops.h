@@ -19,7 +19,9 @@ namespace autod {
 
 struct FileEntry {
     std::string name;
-    std::string path;      // 相对下载目录的路径
+    // **绝对路径**。早先是"相对下载目录的路径"，但加了共享存储根之后
+    // 相对谁就不明确了 —— 客户端拿它回传时要能唯一指向一个文件。
+    std::string path;
     bool        isDir = false;
     int64_t     size  = 0;
     int64_t     mtime = 0;   // Unix 秒
@@ -35,6 +37,13 @@ class FileOps {
 
     bool        httpAvailable() const { return http_.Available(); }
     std::string downloadDir() const { return root_; }
+
+    // **app 能读到的那个根目录** —— 共享存储根，通常 /storage/emulated/0
+    // （/sdcard 是它的软链接）。
+    //
+    // 和 root_（下载目录）的关系：root_ 在它下面。相对路径仍然相对
+    // 下载目录解析（向后兼容），而绝对路径只要落在 storageRoot_ 里就收。
+    std::string storageRoot() const { return storageRoot_; }
 
     // ── 下载 ────────────────────────────────────────────────────────────────
     //
@@ -58,9 +67,15 @@ class FileOps {
 
     // ── 路径约束（公开出来是为了能单独测）──────────────────────────────────
     //
-    // 把客户端给的 input 解析成 root 内的绝对路径。
-    // 拒绝：绝对路径、含 ".." 逃逸、以及**软链接逃逸**（对已存在的部分做 realpath）。
-    static bool ResolveInside(const std::string& root, const std::string& input,
+    // 把客户端给的 input 解析成绝对路径。
+    //
+    //   · 相对路径 → 相对 root（下载目录）
+    //   · 绝对路径 → 必须在 storageRoot 之内
+    //
+    // 拒绝：逃出边界的 ".."、以及**软链接逃逸**（对已存在的部分做 realpath）。
+    static bool ResolveInside(const std::string& root,
+                              const std::string& storageRoot,
+                              const std::string& input,
                               std::string* out, std::string* error);
 
     // 从 URL 推断文件名，去掉 query/fragment，并做安全化
@@ -73,7 +88,19 @@ class FileOps {
     // 让下载目录里的新文件出现在系统"下载"列表里
     void NotifyMediaScanner(const std::string& absPath);
 
+    // 把 /sdcard、/data/media/0 这类**软链接别名**换算成规范前缀。
+    //
+    // 客户端天然会写 /sdcard（文档、adb、所有教程都这么写），
+    // 而边界是按 /storage/emulated/0 判的 —— 字符串前缀对不上就被拒，
+    // 用户看到的是"路径不在允许范围内: /sdcard"，一头雾水。
+    //
+    // ⚠️ 只换算 Init 时**用 realpath 确认过确实指向同一个存储**的别名，
+    //    不盲信名字。
+    std::string NormalizeAlias(const std::string& input) const;
+
     std::string root_;        // 下载目录绝对路径，无尾斜杠
+    std::string storageRoot_; // 共享存储根（app 能读到的那个），无尾斜杠
+    std::vector<std::string> aliases_;   // 指向同一存储的别名前缀
     HttpClient  http_;
     bool        loggedOnce_ = false;   // Init 会被反复调用，日志只打一次
 };

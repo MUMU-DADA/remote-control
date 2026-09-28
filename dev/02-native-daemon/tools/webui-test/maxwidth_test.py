@@ -46,6 +46,13 @@ with sync_playwright() as p:
         c = pg.evaluate("()=>({sw:sw, sh:sh, cw:cvs.width, ch:cvs.height, ready:streamReady})")
         s = params()
         c["srvW"] = s["captureWidth"]
+        # FrameHub 的抓帧宽度 = **所有订阅者里最大的 maxWidth**（0 视作原始）。
+        # 所以断言必须按这个算，不能假定"只有我一个客户端" ——
+        # 第一版就是那么写的，控制台另开一个页面时它会假失败。
+        subs = s.get("subscriberList") or []
+        c["expectW"] = 0 if any(x["maxWidth"] == 0 for x in subs) \
+                            else max([x["maxWidth"] for x in subs], default=0)
+        c["nsubs"] = len(subs)
         return c
 
     checks = []
@@ -55,7 +62,7 @@ with sync_playwright() as p:
 
     a = state()
     print(f"  改之前: 画布 {a['sw']}x{a['sh']}  抓帧宽 {a['srvW']}")
-    chk("初始 720", a["sw"] == 720 and a["srvW"] == 720)
+    chk("初始 720", a["sw"] == 720)
 
     # ── 中途改到 360 ──
     pg.evaluate("()=>{window.__log=[]; setMaxWidth(360);}")
@@ -64,7 +71,9 @@ with sync_playwright() as p:
     print("       消息:", pg.evaluate("()=>window.__log.slice(-3)"))
     print(f"  改到 360: 画布 {bb['sw']}x{bb['sh']}  抓帧宽 {bb['srvW']}  流还在={bb['ready']}")
     chk("画面宽度变成 360", bb["sw"] == 360, f"实际 {bb['sw']}")
-    chk("服务端抓帧宽度也变成 360", bb["srvW"] == 360, f"实际 {bb['srvW']}")
+    chk("服务端抓帧宽度 = 订阅者里的最大值",
+        bb["srvW"] == bb["expectW"],
+        f"实际 {bb['srvW']}，按 {bb['nsubs']} 个订阅者算应为 {bb['expectW']}")
     chk("连接没断", bb["ready"] is True)
 
     # ── 再改到 480 ──
@@ -73,14 +82,15 @@ with sync_playwright() as p:
     c = state()
     print("       消息:", pg.evaluate("()=>window.__log.slice(-3)"))
     print(f"  改到 480: 画布 {c['sw']}x{c['sh']}  抓帧宽 {c['srvW']}")
-    chk("再改到 480 也生效", c["sw"] == 480 and c["srvW"] == 480)
+    chk("再改到 480 也生效", c["sw"] == 480 and c["srvW"] == c["expectW"],
+        f"画布 {c['sw']}，抓帧宽 {c['srvW']}（应为 {c['expectW']}）")
 
     # ── 改回原始 ──
     pg.evaluate("()=>setMaxWidth(0)")
     time.sleep(3)
     d = state()
     print(f"  改回原始: 画布 {d['sw']}x{d['sh']}  抓帧宽 {d['srvW']}")
-    chk("改回原始（不降采样）", d["sw"] == 720 and d["srvW"] == 0)
+    chk("改回原始（不降采样）", d["sw"] == 720 and d["srvW"] == d["expectW"])
 
     chk("页面无 JS 报错", not errs, str(errs[:1]))
     b.close()

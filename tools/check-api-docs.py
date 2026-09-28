@@ -12,7 +12,7 @@
 
 退出码 0 = 全部一致；非 0 = 有文档与实际不符。
 """
-import json, urllib.request, urllib.error, re, sys, os
+import json, urllib.request, urllib.error, urllib.parse, re, sys, os
 
 # 默认地址可被参数或 AUTOD_BASE 覆盖 —— 设备 IP 会变，
 # 写死一个只会让人以为"检查通过了"而其实连的是别的东西。
@@ -218,7 +218,26 @@ chk(nums <= {ncmd}, f"文档里的命令数都是 {ncmd}", f"出现 {sorted(nums
 # 删掉的文档不该再被提到
 chk("SUMMARY.md" not in t_all, "没有文档还在引用已删除的 SUMMARY.md")
 
-print("\n[13] README 里自报的检查数没有过期")
+print("\n[13] 文件管理：边界与根目录（01-http.md）")
+roots = api("/files?op=roots")
+chk(roots.get("ok") is True, "files?op=roots 可用")
+chk(bool(roots.get("storage")), "报出了存储根", repr(roots.get("storage")))
+chk(bool(roots.get("download")), "报出了下载目录", repr(roots.get("download")))
+# 存储根必须真的能列
+lst = api("/files?path=" + urllib.parse.quote(roots.get("storage", "/")))
+chk(lst.get("ok") is True, "存储根能列目录", str(lst.get("error"))[:60])
+# 越界必须被拒
+deny = api("/files?path=/data")
+chk(deny.get("ok") is not True, "越界路径被拒", str(deny)[:60])
+# 绝对路径（别名写法）
+alias = api("/files?path=/sdcard")
+chk(alias.get("ok") is True, "/sdcard 别名可用", str(alias.get("error"))[:60])
+t01 = open(os.path.join(DOCS, "01-http.md"), encoding="utf-8").read()
+for f in ("storage", "op=roots", "4 GB", "realpath"):
+    chk(f in t01, f"01-http.md 里写了 {f}")
+chk("install" in t01 and "落盘" in t01, "01-http.md 说明了上传落盘")
+
+print("\n[14] README 里自报的检查数没有过期")
 # ⚠️ 这条是自指的：README 写「文档一致性 N 项」，N 必须等于实际跑出来的数。
 #    不守的话它一定会烂 —— 每加一条断言，README 就错一次。
 # ⚠️ 要**加上本节自己的两条断言**，否则算出来永远是改之前的数
