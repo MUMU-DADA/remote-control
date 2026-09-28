@@ -37,6 +37,15 @@ BOARD_USES_SYSTEM_OTHER_ODEX :=
 BOARD_USERDATAIMAGE_PARTITION_SIZE := 576716800
 
 BOARD_SEPOLICY_DIRS += device/generic/goldfish/sepolicy/x86
+# remote-control 的 SELinux 域。
+#
+# ⚠️ **必须放设备树，不能放 system/sepolicy/private/**。
+#    往平台策略树里加文件会让 AOSP 的 sepolicy_freeze_test 挂掉
+#    （它 diff 当前树与 prebuilts/api/31.0，多了文件就报
+#     "Only in system/sepolicy/private: ..."，整个 ninja 停在那里）。
+#    设备/产品自己的策略本来就该走 BOARD_SEPOLICY_DIRS ——
+#    goldfish 的 x86 策略就是这么接的（上一行）。
+BOARD_SEPOLICY_DIRS += device/autosnap/autosnap_x64_arm64/sepolicy
 
 # Wifi.
 BOARD_WLAN_DEVICE           := emulator

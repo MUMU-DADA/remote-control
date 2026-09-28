@@ -28,6 +28,7 @@
 #include "log_buffer.h"
 #include "selftest.h"
 #include "service_state.h"
+#include "sha256.h"
 #include "subprocess.h"
 #include "fileops.h"
 #include "json_writer.h"
@@ -863,6 +864,10 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
     json::Writer w;
     w.Obj()
         .Field("service", "remote-control")
+        // buildId = 本二进制的 sha256。热替换之后靠它确认"跑的确实是新版" ——
+        // 不看它的话，"推上去了但跑的还是旧进程"这个坑必踩（项目里
+        // integrate-aosp.sh / build-remote-control.sh 的新鲜度检查是同一个道理）。
+        .Field("buildId", SelfBuildId())
         .Field("protocolVersion", ServiceState::ProtocolVersion())
         .Field("pid", static_cast<int64_t>(getpid()))
         .Key("capabilities").Obj()

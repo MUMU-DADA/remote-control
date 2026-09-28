@@ -46,7 +46,7 @@ done
 
 step "提权 + 关 SELinux"
 # ⚠️ 关 SELinux 只是开发期方便 —— 生产形态必须走 init 起的 remote-control.rc
-#    加专属 SELinux domain，见 dev/02-native-daemon/sepolicy/。
+#    加专属 SELinux domain，见 dev/04-x64-android/device/autosnap_x64_arm64/sepolicy/。
 timeout "$TMO" "$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
 sleep 4
 sh_ setenforce 0 2>/dev/null || true

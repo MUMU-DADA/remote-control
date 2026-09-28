@@ -285,3 +285,71 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
   否则没人能把它开回来（现状是对的，保持）。
 - **不为了热替换去改 AOSP 上游文件**（设备树/sepolicy 走 `apply-overlay.sh` 与
   `integrate-sepolicy.sh` 的既有落点）。
+
+---
+
+## 9. 实施记录（2026-09-29）
+
+> 本次按本计划实施后的实际结果。**§5 的核心机制实测被 AOSP 策略挡死**，
+> 下面把它逐条记下来，避免下次再花一遍时间。
+
+### 9.1 §3 / §4 已落地
+
+| 项 | 结果 |
+|---|---|
+| §3 保活 | `oneshot` 已删（它和"崩了自动拉起"语义相反）、加 `restart_period 5`、保留 `disabled` + `on property:sys.boot_completed=1` |
+| §4.1 域名 | `.rc` 的 `seclabel` 改下划线；`remote_control.te` 注释里的文件名一并改 |
+| §4.2 脚本 | `integrate-sepolicy.sh` 不再按连字符找文件；顺带发现它**从来没接进过树** |
+| §4.3 镜像 | 产品清单补 `PRODUCT_PACKAGES`，**还要补 `PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST`** —— 只写前者会撞 artifact path requirement，构建直接失败（计划里没提这条） |
+| §4.4 UID | 改 `user shell`（`/sdcard` 是 FUSE 挡的，加 sepolicy 也没用） |
+| §4.5 socket | 改 `0666` |
+
+**两处计划里没写、但会挡住构建的**：
+
+1. **策略不能放 `system/sepolicy/private/`**。放进去 sepolicy_freeze_test 必挂
+   （它 diff 当前树与 `prebuilts/api/31.0/`，多一个文件就 `Only in ...`），
+   ninja 直接停。**正确落点是设备树**：`device/autosnap_x64_arm64/sepolicy/`
+   + `BoardConfig.mk` 的 `BOARD_SEPOLICY_DIRS`（同一份 BoardConfig 里
+   goldfish 的 x86 策略就是这么接的）。脚本已改成这个落点。
+2. **`remote_control_controller.te` 里有三个东西在 Android 12 上不存在**：
+   `app_use_file_type`、`appdomain_different_pkg`（都是更新版本才有的），
+   还有一处 SELinux 语法错误
+   （`allow init x:{ sock_file create unlink };` —— `X:{ }` 是**类**的列表，
+   权限不能写进去）。这份策略从来没被编译过，所以一直没人发现。
+
+### 9.2 §5 热替换通道：**实测被挡死**（§7 未验证项 2 的答案）
+
+计划 §5 的机制是"壳 exec `/data` 里的载荷"。实测**三条 neverallow 互相咬住**，
+每条都单独试过：
+
+| # | 规则 | 挡住了什么 |
+|---|---|---|
+| ① | `private/domain.te:315` | "除了 appdomain，谁都不许执行 /data 下的东西" → 壳必须在 appdomain 里 |
+| ② | `public/domain.te:1186` | 只有 zygote/runas/app_zygote 那几家能转换**进** appdomain → **init 拉不起一个 appdomain 的壳** |
+| ③ | `public/domain.te:959` | coredomain 只能对 `system_file_type` 有 `entrypoint` → **coredomain 的服务没法从 /data 的载荷进入** |
+
+中间还撞过另外几条，一并记下（都是试出来的）：
+
+- `sepolicy_tests`：`file_contexts` 里任何 `/data` 路径对应的类型**必须**带
+  `data_file_type`，否则 `The following types on /data/ must be associated with ...`
+- `private/domain.te:249`：要被执行，类型必须是 `system_file_type` /
+  `vendor_file_type` / **`exec_type`** / … 之一 → 载荷必须带 `exec_type`
+- `public/domain.te:502`：**只有内核**能 `relabelto` 成 `exec_type`
+  → "运行时给它打标签"这条路也堵死
+- 带 `app_data_file_type` 会引入 `allow installd ... relabelto` 之类的既有规则，
+  又和 502 打架
+
+**只让开一条没用** —— 三条一起才构成"服务能起来"的完整链路。
+
+### 9.3 要绕开的话，只有这两条路（都需要人来定）
+
+| 方案 | 代价 |
+|---|---|
+| **A. 壳跑 `shell` 域 + 服务放弃 `coredomain`** | ②对 `-shell` 有豁免、③只管 coredomain，两条都绕开了。代价：一个常驻服务跑在 **shell 域**（adb 调试域，权限很宽）；服务不再是 coredomain（SELinux 语义上"假装不是平台核心"，Treble 的分层保证就没了）。已确认没有 neverallow 挡非 coredomain 调 SurfaceFlinger，技术上可行。 |
+| **B. 载荷放 `/system`，用 `adb disable-verity` + `remount` 换** | 完全合法（载荷是 `system_file_type`，本来就能执行）。代价：要先关 verity（测试机可接受，正式机不行）；换版本 = push 到 `/system/bin` + `ctl.restart`，仍是秒级、也跨重启。计划的 §5.1 表格里列过这条。 |
+
+**本次先不选**：这两个都是安全/架构层面的取舍，不是"哪个能编过"的问题。
+在定下来之前，`.rc` 直接指向 `/system/bin/remote-control`（§3/§4 的自启与保活
+不受影响 —— 那才是本次需求的根因部分）。
+`daemon/launcher.cpp`（壳）与 `tools/rc-update.sh`（推送/切换/回滚）都已写好、
+能编译，选 A 或 B 之后接上即可。

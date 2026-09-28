@@ -21,6 +21,7 @@
 #include "thread_util.h"
 #include "remote_control_log.h"
 #include "remote_control_platform.h"
+#include "sha256.h"
 
 #if REMOTE_CONTROL_HAS_BINDER_PLATFORM
 #include <binder/ProcessState.h>
@@ -71,6 +72,10 @@ void PrintUsage(const char* argv0) {
   --socket-mode <8进制>  socket 文件权限，默认 0660
                         放宽到 0666 可让上位应用以自己的 UID 连入；
                         但那意味着同设备任何进程都能控制本服务，请自行权衡
+  --ready-file <路径>   就绪后把**自身二进制的 sha256** 写进这个文件。
+                        启动壳（remote-control-launch）靠它判断载荷起没起来，
+                        也靠它确认"跑的就是我选的那一份"。
+  --version            打印 buildId（本二进制的 sha256）后退出
   --foreground         前台运行，日志输出到 stderr
   --verbose            详细日志
   -h, --help           显示本帮助
@@ -138,6 +143,8 @@ int main(int argc, char** argv) {
     std::string configPath = ConfigFile::DefaultPath();
     // 日志落盘路径。与配置文件同目录 —— 上位应用（无 root）也要能读它。
     std::string logPath = "/sdcard/remote-control.log";
+    // 就绪标记文件。空 = 不写（开发期手工跑不需要）。
+    std::string readyFile;
     bool cliBind = false, cliPort = false, cliToken = false;
 
     enum LongOpt {
@@ -153,6 +160,8 @@ int main(int argc, char** argv) {
         kOptHttpBind,
         kOptHttpPort,
         kOptHttpToken,
+        kOptReadyFile,
+        kOptVersion,
     };
     static const option kLongOptions[] = {
         {"socket",      required_argument, nullptr, kOptSocket},
@@ -167,6 +176,8 @@ int main(int argc, char** argv) {
         {"http-bind",   required_argument, nullptr, kOptHttpBind},
         {"http-port",   required_argument, nullptr, kOptHttpPort},
         {"http-token",  required_argument, nullptr, kOptHttpToken},
+        {"ready-file",  required_argument, nullptr, kOptReadyFile},
+        {"version",     no_argument,       nullptr, kOptVersion},
         {"foreground",  no_argument,       nullptr, 'f'},
         {"verbose",     no_argument,       nullptr, 'v'},
         {"help",        no_argument,       nullptr, 'h'},
@@ -219,6 +230,13 @@ int main(int argc, char** argv) {
                 httpToken = optarg;
                 cliToken = true;
                 break;
+            case kOptReadyFile:
+                readyFile = optarg;
+                break;
+            case kOptVersion:
+                // buildId = 本二进制的 sha256。热替换之后靠它确认跑的是哪一版。
+                printf("%s\n", SelfBuildId().c_str());
+                return 0;
 
             case kOptSocketMode: {
                 // 八进制解析：写成 0666 或 666 都接受
@@ -585,6 +603,26 @@ int main(int argc, char** argv) {
             httpServer.Stop();
         } else {
             httpThreadStarted = true;
+        }
+    }
+
+    // ── 就绪：告诉壳"这版起来了" ──
+    //
+    // ⚠️ 写在 server.Run **之前**、HTTP 线程起来**之后** —— 位置很关键：
+    //    早了（socket 还没 listen）会把一个其实没起来的版本报成就绪；
+    //    晚了就永远写不到（Run 是阻塞的）。
+    //
+    // 内容必须是**自身二进制的哈希**：壳拿它和期望的槽哈希比对。
+    // 只写个"ready"的话，上一版留下的残留文件会让一个起不来的新版通过检查。
+    if (!readyFile.empty()) {
+        const std::string& id = SelfBuildId();
+        FILE* rf = fopen(readyFile.c_str(), "w");
+        if (rf != nullptr) {
+            fprintf(rf, "%s\n", id.c_str());
+            fclose(rf);
+            ALOGI("就绪标记已写: %s = %s", readyFile.c_str(), id.c_str());
+        } else {
+            ALOGW("写就绪标记失败: %s（%s）", readyFile.c_str(), strerror(errno));
         }
     }
 

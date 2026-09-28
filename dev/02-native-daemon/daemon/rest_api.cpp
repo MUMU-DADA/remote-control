@@ -27,6 +27,7 @@
 #include "png_encoder.h"
 #include "protocol.h"
 #include "service_state.h"
+#include "sha256.h"
 #include "websocket.h"
 #include "webui.h"
 
@@ -1550,6 +1551,7 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
             // 给个索引，浏览器打开根路径时不至于 404 得莫名其妙
             json::Writer w;
             w.Obj().Field("service", "remote-control")
+                   .Field("buildId", SelfBuildId())
                    .Field("protocolVersion", ServiceState::ProtocolVersion())
                    .Field("hint", "所有接口在 /api/v1/ 下；GET /api/v1/describe 看完整清单")
              .EndObj();
@@ -1744,6 +1746,8 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         json::Writer w;
         w.Obj()
             .Field("ok", true)
+            // 正在跑的是哪一版。tools/rc-update.sh verify 就比对它和本地二进制。
+            .Field("buildId", SelfBuildId())
             .Field("primaryWidth", static_cast<int64_t>(cp.reply.width))
             .Field("primaryHeight", static_cast<int64_t>(cp.reply.height))
             .Field("primaryStride", static_cast<int64_t>(cp.reply.stride))

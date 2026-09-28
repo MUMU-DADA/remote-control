@@ -5,44 +5,89 @@
 #
 # ⚠️ remote-control.rc 必须与 Android.bp 同目录 —— Soong 的 init_rc 不允许 ".." 路径，
 #    否则报 "Path is outside directory"。
+#
+# ⚠️⚠️ **init 不重读 rc**（property_service.cpp 只暴露 ctl.start/stop/restart
+#      与 sys.powerctl，没有 reload）—— 这份文件一次定稿，改它必须重编 ROM。
+#      所以这里只放"几乎不会变"的东西：真正会变的二进制走 §5 的载荷槽，
+#      由 /data/misc/remote-control/current 指针决定跑哪一版。
+#
+# 完整设计见 docs/09-deployment-and-update.md。
 
-service remote-control /system/bin/remote-control --init-socket remote-control
+service remote-control /system/bin/remote-control --init-socket remote-control --config /data/misc/remote-control/remote-control.conf
     class core
 
-    # system UID 才能写 /dev/uinput 并访问 SurfaceFlinger。
+    # ── 运行身份：shell，不是 system ──────────────────────────────────────
     #
-    # ⚠️ 这一行有未验证的风险，见 sepolicy/remote-control.te 的「UID 选择」一节：
-    #    SurfaceFlinger::captureDisplay 的权限检查是
-    #        uid == AID_GRAPHICS(1003) || checkPermission(READ_FRAME_BUFFER)
-    #    比的是 **UID** 不是 GID，所以"在 graphics 组里"并不满足。
-    #    AID_SHELL(2000) 确定有 READ_FRAME_BUFFER（screencap 就是这么跑的）；
-    #    AID_SYSTEM(1000) 是否自动获得全部权限，需要实测确认。
+    # 两个原因，都实测过：
     #
-    #    若实测抓帧报 PERMISSION_DENIED，把这两行换成：
-    #        user shell
-    #        group shell uhid graphics
-    #    shell 同时满足三个条件：READ_FRAME_BUFFER、uhid 组、INJECT_EVENTS。
+    # ① **抓帧权限**：SurfaceFlinger 的 validateScreenshotPermissions 只认
+    #    AID_GRAPHICS 或 checkPermission(READ_FRAME_BUFFER)，**没有** AID_SYSTEM
+    #    的 UID 白名单。Shell 应用显式申请了 READ_FRAME_BUFFER
+    #    （frameworks/base/packages/Shell/AndroidManifest.xml），screencap 走的就是这条。
     #
-    #    怎么确认：推上去先跑 `remote-control --selftest`，[2] 截图一节会直接报出来。
-    user system
+    # ② **/sdcard 读写**：这是**存储层（FUSE）**挡的，加 sepolicy 规则没用。
+    #    实测（SELinux 当时是 permissive，已排除策略因素）：
+    #        su 1000(system)  读/写 /sdcard/...  → Permission denied
+    #        su 2000(shell)   读 → OK   写 → OK
+    #    而日志默认就写在 /sdcard/remote-control.log。
+    #
+    # 配置**不放 /sdcard**（见下面的 --config）：那是共享存储，上位应用能写，
+    # 把"可执行载荷"和配置文件放一起等于把执行权交出去。
+    user shell
 
     # ⚠️ uhid 组不能漏 —— /dev/uinput 的 POSIX 权限是 0660 uhid:uhid
     #    （见 system/core/rootdir/ueventd.rc:55）。
     #    只靠 SELinux 的 allow 规则不够，POSIX 权限这关也得过。
-    group system uhid graphics
+    group shell uhid graphics
 
     # 独立 SELinux domain。没有这一行 init 会拒绝启动。
-    seclabel u:r:remote-control:s0
-
-    # init 创建 /dev/socket/remote-control，把 fd 通过 ANDROID_SOCKET_remote-control 传给 remote-control。
     #
-    # 0660 + system:system 意味着只有 system UID/组能连。
-    # seqpacket 对应 AF_UNIX SOCK_SEQPACKET。
-    socket remote-control seqpacket 0660 system system
+    # ⚠️ **必须是下划线**：SELinux 标识符是 [A-Za-z0-9_]，域类型定义在
+    #    dev/04-x64-android/device/autosnap_x64_arm64/sepolicy/remote_control.te 里的 `type remote_control, domain;`。
+    #    上游 sepolicy 里没有任何带连字符的类型名。写成 remote-control 的话
+    #    域不存在，init 起服务时会失败。
+    # ⚠️ 用 remote_control 域（下划线）—— 上游 sepolicy 里没有带连字符的类型名。
+    #
+    #    这里本来要指向启动壳的域（计划 §5 的热替换通道）。实测那条路被
+    #    AOSP 策略挡死了，而且是三条 neverallow 互相咬住，详见
+    #    dev/04-x64-android/device/autosnap_x64_arm64/sepolicy/remote_control.te
+    #    里「载荷槽的类型暂时不声明」那一节，以及
+    #    docs/09-deployment-and-update.md 末尾的「实施记录」。
+    #    取舍定了之后这里再换成 remote-control-launch。
+    seclabel u:r:remote_control:s0
 
-    # 崩了自动重启，但不循环重启
-    oneshot
+    # init 创建 /dev/socket/remote-control，把 fd 通过
+    # ANDROID_SOCKET_remote-control 传给 remote-control。
+    #
+    # ⚠️ 权限必须是 **0666**：0660 + system:system 意味着只有 system UID/组能连，
+    #    而上位应用是 untrusted_app 自己的 UID —— 连不上。
+    #    真正的边界交给 SELinux 域（dev/04-x64-android/device/autosnap_x64_arm64/sepolicy/remote_control_controller.te
+    #    里已经只为控制器应用放开了这一个 socket）。
+    #
+    #    注意：init 模式下 `--socket-mode` 是**无效**的（fd 由 init 建好传进来），
+    #    所以只能在这里定。
+    socket remote-control seqpacket 0666 system system
+
+    # ⚠️ **不要写 oneshot**。
+    #
+    #    service.cpp 的 Reap：`oneshot && !RESTART && !RESET` → 进程退出后置回
+    #    SVC_DISABLED，而"disabled 的进程不会被自动拉起"（同文件下一段直接 return）。
+    #    也就是说 oneshot 的语义恰恰是"退出后不再重启"，和保活完全相反。
+    #    （这里原来就是 oneshot，注释还写着"崩了自动重启"—— 注释和代码是反的。）
+    #
+    # 崩了之后等 5 秒拉起（= restart_period 默认值，写出来是为了显式）。
+    # 没写 critical → 不受"崩 4 次熔断"限制，会一直拉。
+    restart_period 5
     disabled
+
+# 载荷槽的目录。init 的 mkdir 会按 file_contexts 打标签。
+#
+# ⚠️ 属主给 shell：服务就是 shell 身份跑的，它要能写 current 指针和 last-good。
+#    /data/misc 本身是 system:misc 0771，shell 建不了自己的子目录，
+#    所以必须由 init 在这里建。
+on post-fs-data
+    mkdir /data/misc/remote-control 0770 shell shell
+    mkdir /data/misc/remote-control/releases 0755 shell shell
 
 # 开机完成后再起 —— remote-control 要调 SurfaceFlinger 和 system_server，
 # 起太早会失败。

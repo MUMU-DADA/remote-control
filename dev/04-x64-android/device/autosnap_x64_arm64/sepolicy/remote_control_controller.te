@@ -46,11 +46,17 @@
 
 # 声明专属域与类型
 type remote_control_controller, domain;
-type remote_control_controller_app_data_file, file_type, data_file_type, app_use_file_type;
+# ⚠️ app_use_file_type 在 Android 12 的策略里**不存在** —— 那是更新版本
+#    才有的属性。这个版本对应的是 app_data_file_type
+#    （见 AOSP 自己写的 system_app_data_file 声明，以及 public/attributes）。
+#    写错了 checkpolicy 直接报 'attribute app_use_file_type is not declared'。
+type remote_control_controller_app_data_file, file_type, data_file_type, app_data_file_type;
 
 # 应用的基本形态：普通不受信应用
 app_domain(remote_control_controller)
-appdomain_different_pkg(remote_control_controller)
+# ⚠️ appdomain_different_pkg 在 Android 12 里也**不存在**（同样是更新版本
+#    才加的宏）。这个版本里自定义 app domain 的标准组合就是
+#    app_domain() + net_domain() 两个，已在上面/下面各一行。
 net_domain(remote_control_controller)
 allow remote_control_controller remote_control_controller_app_data_file:dir create_dir_perms;
 allow remote_control_controller remote_control_controller_app_data_file:file create_file_perms;

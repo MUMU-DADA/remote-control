@@ -46,6 +46,7 @@ cc_defaults {
         "webp_encoder.cpp",
         "websocket.cpp",
         "config_file.cpp",
+        "sha256.cpp",          // buildId（自身哈希）+ 就绪标记；壳也用它核对载荷
     ],
 
     // ⚠️ 必须排除静态库的符号导出，否则会与系统的 libc++.so 打架。
@@ -214,6 +215,43 @@ cc_binary {
 }
 
 // ---------------------------------------------------------------------------
+// 启动壳 —— init 拉起的入口
+// ---------------------------------------------------------------------------
+//
+// 它按 /data/misc/remote-control/current 的指针挑一版载荷、核对 sha256、
+// fork+exec 拉起，并在载荷起不来时回退。设计见 launcher.cpp 的文件头
+// 与 docs/09-deployment-and-update.md §5。
+//
+// ⚠️ **故意不套 remote_control_defaults**：那会把整个守护进程的源码
+//    （30 多个 .cpp、libwebp、jsoncpp……）链进来，壳就不再是"几十行、
+//    几乎永不改"的东西 —— 而这正是整套热替换方案能成立的前提：
+//    init 不重读 rc，壳只能靠重编 ROM 更新，所以它必须薄到不用动。
+//
+//    它只需要 launcher.cpp + sha256.cpp，没有别的依赖。
+cc_binary {
+    name: "remote-control-launch",
+    srcs: [
+        "launcher.cpp",
+        "sha256.cpp",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wno-unused-parameter",
+    ],
+    cppflags: ["-std=c++20"],
+
+    // 和守护进程同样的处理：把静态 libc++ 的符号藏起来，
+    // 免得和系统 libc++.so 里的 iostream 静态初始化打架（见上面那段说明）。
+    ldflags: ["-Wl,--exclude-libs,ALL"],
+    stl: "libc++_static",
+    sdk_version: "",
+
+    vendor: false,
+    proprietary: false,
+}
+
+// ---------------------------------------------------------------------------
 // 可选目标：IInputManager 触控后端
 // ---------------------------------------------------------------------------
 //
@@ -244,7 +282,7 @@ cc_binary {
 // 前置条件（两个都要做，否则跑不起来）：
 //   1. 产品配置里加：PRODUCT_PACKAGES += virtual_touchpad
 //      它默认不在 aosp_arm64 的产品包里（是 VR 专用）
-//   2. sepolicy 按 sepolicy/remote-control.te 里「启用 vtp 后端」一节改
+//   2. sepolicy 按 device/autosnap_x64_arm64/dev/04-x64-android/device/autosnap_x64_arm64/sepolicy/remote_control.te 里「启用 vtp 后端」一节改
 //
 // 限制：官方实现只有 2 个触控槽位，做不了 3 指以上手势。
 cc_binary {

@@ -36,7 +36,11 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
     system/etc/ld.config.arm64.txt \
     system/lib64/arm64/% \
     system/lib64/libndk_translation.so \
-    system/lib64/libndk_translation_proxy_%.so
+    system/lib64/libndk_translation_proxy_%.so \
+    system/bin/remote-control \
+    system/bin/remote-control-launch \
+    system/bin/rcctl \
+    system/etc/init/remote-control.rc
 
 #
 # All components inherited here go to system_ext image
@@ -94,6 +98,39 @@ PRODUCT_SYSTEM_PROPERTIES += \
 
 PRODUCT_VENDOR_PROPERTIES += \
     ro.dalvik.vm.native.bridge=libndk_translation.so
+
+# ===========================================================================
+# remote-control（截图 / 触控 / 设备管理服务）
+# ===========================================================================
+#
+# ⚠️ 不写这一段的话模块**根本不会进 system.img** —— Soong 编得出来，
+#    但没有人把它装进镜像，开机后 /system/bin/ 里什么都没有。
+#    之前就是漏了这里：生产形态的 rc 早就写好了，
+#    可镜像里根本没有这个二进制（见 docs/09-deployment-and-update.md §4.3）。
+#
+# ⚠️ 光写 PRODUCT_PACKAGES 还不够 —— 还会撞上 artifact path requirement：
+#        device/autosnap_.../autosnap_x64_arm64.mk produces files inside
+#        build/make/target/product/generic_system.mk's artifact path requirement
+#        Offending entries: system/bin/remote-control ...
+#    因为 generic_system.mk 规定了 system 镜像里哪些路径算"合规"，
+#    我们的二进制不在那份清单里。上面的
+#    PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST 就是放行用的
+#    （翻译层载荷当年也是这么放行的）。
+#
+# 三个模块的分工：
+#   remote-control-launch  壳。init 拉起的入口，只负责"选版本 + 校验 + 拉起"。
+#                          几十行、几乎永不改（init 不重读 rc，所以壳必须薄）。
+#   remote-control         真正的载荷。会频繁更新，运行时从
+#                          /data/misc/remote-control/current 指向的版本槽里取，
+#                          可以热替换而不重编 ROM。
+#   rcctl                  控制客户端（命令行）。
+#
+# 第一次开机 / 载荷槽还是空的时候，壳回退到 /system/bin/remote-control，
+# 所以全新机器开箱即可用，不需要先手工推一版。
+PRODUCT_PACKAGES += \
+    remote-control-launch \
+    remote-control \
+    rcctl
 
 # Overrides
 PRODUCT_BRAND := AutoSnap

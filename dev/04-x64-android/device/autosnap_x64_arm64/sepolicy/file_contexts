@@ -1,0 +1,45 @@
+# remote-control 的 SELinux 文件标签
+#
+# 安装位置：追加到 system/sepolicy/private/file_contexts
+#          （或作为片段加到 sepolicy 的 build 输入里）
+#
+# 已对照 android-12.0.0_r34 的 private/file_contexts 核实格式：
+#   /system/bin/virtual_touchpad     u:object_r:virtual_touchpad_exec:s0
+#   /dev/socket/statsdw              u:object_r:statsdw_socket:s0
+
+# 二进制
+# 二进制：启动壳 + 镜像自带的载荷
+#
+# ⚠️ 壳和服务是**两个域**（见 remote_control.te）：壳必须是 appdomain
+#    才能执行 /data 里的载荷，服务本体必须是 coredomain 才能调
+#    SurfaceFlinger。两者靠 exec 时的域转换接上。
+/system/bin/remote-control-launch u:object_r:remote_control_exec:s0
+/system/bin/remote-control u:object_r:remote_control_exec:s0
+
+# 载荷槽（热替换通道）。
+#
+# ⚠️ 顺序有意义：file_contexts 里**最后一条匹配的生效**，
+#    所以"具体路径"必须写在"通配"**后面**。反过来的话
+#    releases/<sha>/remote-control 会被通配标成 data_file，壳执行不了。
+# 载荷槽。
+#
+# ⚠️ 顺序有意义：file_contexts 里**最后一条匹配的生效**，
+#    所以"具体路径"必须写在"通配"**后面**，否则载荷会被通配标成 data_file。
+/data/misc/remote-control(/.*)? u:object_r:remote_control_data_file:s0
+
+# 对外 socket
+#
+# init 在解析 remote-control.rc 的 `socket remote-control seqpacket ...` 时会创建 /dev/socket/remote-control。
+# init 按这里的规则给它打标签，所以这条必须存在，否则 socket 会是
+# socket_device 标签，remote-control 反而访问不了自己的 socket。
+/dev/socket/remote-control u:object_r:remote_control_socket:s0
+
+# ⚠️ 这里原来还给 /data/local/tmp/remote-control.sock 打 remote_control_socket
+#    标签（阶段 1 原型用）。**已删除**，原因不是"生产不需要"那么简单：
+#    只要一个类型出现在任何 /data 路径上，sepolicy_tests 就要求它带
+#    data_file_type **且** core_data_file_type；而 socket 一旦带上
+#    core_data_file_type，public/domain.te:757 又不许 appdomain 访问它
+#    （neverallow { appdomain -coredomain } { coredomain_socket unlabeled
+#      core_data_file_type ... }:sock_file ...）—— 控制器应用就再也连不上，
+#    而 §4.5 要的恰恰是它能连上。
+#    所以这个开发期 socket 不再单独打标签（阶段 1 本来就是 root + permissive）。

@@ -41,10 +41,10 @@ DAEMON    = ../daemon
 # log_buffer 现在是所有用到 ALOG* 的模块的依赖（日志同时进环形缓冲），
 # 所以放进公共源，而不是每个测试各加一遍。
 COMMON_SRCS = $(DAEMON)/inject.cpp $(DAEMON)/inject_uinput.cpp \
-              $(DAEMON)/log_buffer.cpp
+              $(DAEMON)/log_buffer.cpp $(DAEMON)/sha256.cpp
 COMMON_HDRS = $(DAEMON)/inject.h $(DAEMON)/inject_backend.h \
               $(DAEMON)/remote_control_log.h $(DAEMON)/remote_control_platform.h \
-              $(DAEMON)/protocol.h test_util.h
+              $(DAEMON)/sha256.h $(DAEMON)/protocol.h test_util.h
 
 # 内置的 libwebp（vendor/webp）。dispatch 现在会调到 ImageEncoder，
 # 而 WebP 那条路是完整内置的源码 —— 测试要链进来。
@@ -95,7 +95,7 @@ SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
 APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
                  $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_fileops
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_fileops test_sha256
 
 all: $(BINS) fake_screencap
 
@@ -130,6 +130,11 @@ KB_SRCS = test_keyboard.cpp $(DAEMON)/keyboard.cpp $(DAEMON)/log_buffer.cpp
 test_keyboard: $(KB_SRCS) test_util.h $(DAEMON)/keyboard.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(KB_SRCS)
 
+# SHA-256：纯算法，无外部依赖。单独测它是因为它是**载荷校验**的依据 ——
+# 算错了要么把好版本判成坏的（服务一直回退），要么把没核对过的文件当好的执行。
+test_sha256: test_sha256.cpp $(DAEMON)/sha256.cpp test_util.h $(DAEMON)/sha256.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ test_sha256.cpp $(DAEMON)/sha256.cpp
+
 test_json: $(JSON_SRCS) test_util.h
 	@test -f $(JSONCPP_DIR)/include/json/json.h || \
 	  { echo "找不到 jsoncpp（$(JSONCPP_DIR)）。先跑 tools/repo-sync.sh，"; \
@@ -162,6 +167,7 @@ _run: all
 	 ./test_keyboard;                            k=$$?; echo; \
 	 ./test_websocket;                           w=$$?; echo; \
 	 ./test_fileops;                             f=$$?; echo; \
+	 ./test_sha256;                             s=$$?; echo; \
 	 echo "───────────────────────────────"; \
 	 printf "  %-34s %s\n" "注入后端单元测试"   "$$([ $$u -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "端到端集成测试"     "$$([ $$i -eq 0 ] && echo 通过 || echo 失败)"; \
@@ -171,7 +177,8 @@ _run: all
 	 printf "  %-34s %s\n" "按键注入"            "$$([ $$k -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "WebSocket 握手"       "$$([ $$w -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "文件路径边界"         "$$([ $$f -eq 0 ] && echo 通过 || echo 失败)"; \
-	 exit $$(( u + i + c + a + j + k + w + f ))
+	 printf "  %-34s %s\n" "SHA-256"                 "$$([ $$s -eq 0 ] && echo 通过 || echo 失败)"; \
+	 exit $$(( u + i + c + a + j + k + w + f + s ))
 
 clean:
 	rm -rf $(WEBP_OBJ)
