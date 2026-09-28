@@ -142,7 +142,27 @@ curl -H "Authorization: Bearer <令牌>" http://host:8088/api/v1/config
 
 ---
 
-## 版本
+## 支持的 Android 版本
+
+**Android 11（API 30）及以上。** 这是实测出来的硬下限：
+
+```bash
+API=30 bash tools/build-ndk.sh   # ✓
+API=29 bash tools/build-ndk.sh   # ✗ memfd_create / AndroidBitmap_compress
+```
+
+两个 API 都是 `__INTRODUCED_IN(30)`，API 28/26 报同样两条。
+
+低于 Android 11 的设备**没有实测过**；理论上能压到 Android 8/9
+（两处改动，见 [`docs/03-reference.md`](../03-reference.md) 的
+「最低支持的 Android 版本」），但现在没做。
+
+> 这与**协议版本**是两件事，别混：协议 v6 说的是接口形态，
+> API 30 说的是能跑在哪些设备上。
+
+---
+
+## 协议版本
 
 当前协议 **v6**，32 条命令。每条命令带 `since` 字段标明它从哪个版本开始存在：
 

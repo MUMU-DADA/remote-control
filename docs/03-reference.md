@@ -6,6 +6,54 @@
 
 ---
 
+## 最低支持的 Android 版本
+
+**Android 11（API 30）。这是实测出来的硬下限，不是估计。**
+
+```bash
+$ API=30 bash tools/build-ndk.sh     # ✓ 编译通过
+$ API=29 bash tools/build-ndk.sh     # ✗ 两处硬阻断
+  dispatch.cpp:69:  use of undeclared identifier 'memfd_create'
+  image_encoder.cpp:144: 'AndroidBitmap_compress' is unavailable:
+                         introduced in Android 30
+```
+
+API 28 / 26 报的是同样两条。拦路的都是 `__INTRODUCED_IN(30)`：
+
+| API | 用在哪 | 为什么拦得住 |
+|---|---|---|
+| `memfd_create` | 所有截图路径、JSON 应答回传 | **bionic 从 API 30 才导出**这个包装。不是内核问题 —— 系统调用 Linux 3.17+ 就有，但动态链接器在 Android 10 上找不到这个符号 |
+| `AndroidBitmap_compress` | `image_encoder`（JPEG/WebP 编码） | `__INTRODUCED_IN(30)`，在 `libjnigraphics.so` 里 |
+
+其余用到的 API 都远低于这道线：`accept4` = API 21，
+设备命令行的 `cmd` = Android 7，`/dev/uinput` 是内核特性。
+
+### 这道线是可以降低的（但现在没做）
+
+两处改动就能把下限压到 **Android 8/9**：
+
+1. **`memfd_create` → `syscall(SYS_memfd_create, ...)`**
+   绕开 bionic 包装，直接用系统调用。内核 3.17+ 都有，
+   而 Android 8 的内核是 4.4。
+
+2. **`AndroidBitmap_compress` → 回退到 `png_encoder`**
+   已有的 dlopen zlib 那条路本来就能用，只是现在 `#ifdef __ANDROID__`
+   把它限制在非 Android 构建上。改成"运行时探测、有就用"即可 ——
+   代价是失去 JPEG/WebP（只剩 PNG，流带宽大一个数量级）。
+
+再往下就要看别的了：`cmd`（Android 7）、`dumpsys activity lru` 的输出格式、
+`/dev/uinput` 的属主（Android 11 起是 `0660 uhid:uhid`，更早是 `system:input`）。
+
+**⚠️ 低于 Android 11 的设备没有实测过。** 上表是编译期与源码层面的分析。
+
+### SurfaceFlinger 直连那条路更低
+
+上面说的是 **NDK 构建**（走 `screencap` exec，任何 root 设备都能跑）。
+AOSP 构建走 SF 直连，它依赖平台私有 API，签名逐版本变化 ——
+那个的版本下限是**编译目标**决定的，不是运行时探测。见下面的逐版本差异。
+
+---
+
 # 第一部分 · Android 版本 API 差异
 
 ## 1. Android 12（本项目目标，已对照 `android-12.0.0_r34` 源码逐项核实）
