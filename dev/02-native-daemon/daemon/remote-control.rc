@@ -13,7 +13,7 @@
 #
 # 完整设计见 docs/09-deployment-and-update.md。
 
-service remote-control /system/bin/remote-control --init-socket remote-control --config /data/misc/remote-control/remote-control.conf
+service remote-control /system/bin/remote-control --init-socket remote-control --config /data/misc/remote-control/remote-control.conf --log /data/misc/remote-control/remote-control.log
     class core
 
     # ── 运行身份：shell，不是 system ──────────────────────────────────────

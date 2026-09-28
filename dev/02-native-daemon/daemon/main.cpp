@@ -72,6 +72,7 @@ void PrintUsage(const char* argv0) {
   --socket-mode <8进制>  socket 文件权限，默认 0660
                         放宽到 0666 可让上位应用以自己的 UID 连入；
                         但那意味着同设备任何进程都能控制本服务，请自行权衡
+  --log <路径>         日志落盘路径，默认与配置文件同目录
   --ready-file <路径>   就绪后把**自身二进制的 sha256** 写进这个文件。
                         启动壳（remote-control-launch）靠它判断载荷起没起来，
                         也靠它确认"跑的就是我选的那一份"。
@@ -141,8 +142,20 @@ int main(int argc, char** argv) {
     std::string httpToken;
     // 显式给了 CLI 标志就以 CLI 为准（见下面配置合并那段）
     std::string configPath = ConfigFile::DefaultPath();
-    // 日志落盘路径。与配置文件同目录 —— 上位应用（无 root）也要能读它。
-    std::string logPath = "/sdcard/remote-control.log";
+    // 日志落盘路径。**默认跟配置文件同目录**（下面解析完参数再算）。
+    //
+    // ⚠️ 以前这里是写死的 "/sdcard/remote-control.log"，在 SELinux
+    //    Enforcing 下服务**根本起不来**：实测
+    //        avc: denied { search } ... tcontext=u:object_r:mnt_user_file:s0
+    //        init: Service 'remote-control' (pid 2213) exited with status 1
+    //    /sdcard 是 FUSE（storage 层）挂载，走它要额外的域权限；
+    //    而日志写不出去时进程直接退出 —— 于是 init 每 5 秒拉一次、崩一次。
+    //    （计划 §4.4 说 "user shell → /sdcard 可读写"，那是在 permissive 下测的，
+    //      过不了 Enforcing。）
+    //
+    //    服务自己的状态统一放 /data/misc/remote-control/，和配置、载荷槽一起。
+    std::string logPath;                 // 空 = 用配置文件同目录
+    bool        cliLog = false;
     // 就绪标记文件。空 = 不写（开发期手工跑不需要）。
     std::string readyFile;
     bool cliBind = false, cliPort = false, cliToken = false;
@@ -162,6 +175,7 @@ int main(int argc, char** argv) {
         kOptHttpToken,
         kOptReadyFile,
         kOptVersion,
+        kOptLog,
     };
     static const option kLongOptions[] = {
         {"socket",      required_argument, nullptr, kOptSocket},
@@ -176,6 +190,7 @@ int main(int argc, char** argv) {
         {"http-bind",   required_argument, nullptr, kOptHttpBind},
         {"http-port",   required_argument, nullptr, kOptHttpPort},
         {"http-token",  required_argument, nullptr, kOptHttpToken},
+        {"log",         required_argument, nullptr, kOptLog},
         {"ready-file",  required_argument, nullptr, kOptReadyFile},
         {"version",     no_argument,       nullptr, kOptVersion},
         {"foreground",  no_argument,       nullptr, 'f'},
@@ -229,6 +244,10 @@ int main(int argc, char** argv) {
             case kOptHttpToken:
                 httpToken = optarg;
                 cliToken = true;
+                break;
+            case kOptLog:
+                logPath = optarg;
+                cliLog = true;
                 break;
             case kOptReadyFile:
                 readyFile = optarg;
@@ -440,6 +459,14 @@ int main(int argc, char** argv) {
     // 线程**不在这里启动** —— 第一个画面流订阅者到来时才启，
     // 最后一个离开时停。没人看画面的时候一次都不抓。
     FrameHub::Instance().Configure(&dispatcher);
+
+    // 日志默认放配置文件同目录（见上面 logPath 的说明）。
+    if (!cliLog) {
+        const size_t slash = configPath.find_last_of('/');
+        logPath = (slash == std::string::npos ? std::string(".")
+                                              : configPath.substr(0, slash)) +
+                  "/remote-control.log";
+    }
 
     // ── HTTP/JSON API ──
     //

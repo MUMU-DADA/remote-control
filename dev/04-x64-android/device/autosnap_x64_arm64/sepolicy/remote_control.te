@@ -113,6 +113,20 @@ init_daemon_domain(remote_control)
 
 binder_use(remote_control)
 
+# HTTP/JSON API 要监听 TCP。
+#
+# ⚠️ 光加 `allow ... self:tcp_socket { bind }` 不够：绑定端口还要
+#    name_bind 权限，实测报
+#        avc: denied { name_bind } ... src=8088 tcontext=u:object_r:port:s0
+#    AOSP 把端口标成 port_type / node 之类，逐个 portcon 太脆 ——
+#    而我们的端口是**配置项**（/data/misc/remote-control/remote-control.conf
+#    里可以改），写死一个 portcon 等于把"改端口"变成"改 sepolicy 重编镜像"。
+#
+#    正解是 net_domain()：public/net.te 里有
+#        allow {netdomain -ephemeral_app} port_type:tcp_socket name_bind;
+#    进了 netdomain 属性就能绑任意端口，同时拿到标准的网络权限。
+net_domain(remote_control)
+
 # -----------------------------------------------------------------------------
 # 截图：调 SurfaceFlinger
 # -----------------------------------------------------------------------------
@@ -193,8 +207,19 @@ allow remote_control remote_control_exec:file { read open execute execute_no_tra
 allow remote_control remote_control_data_file:dir {
     open read search write add_name remove_name create getattr setattr
 };
+# ⚠️ append 不能漏 —— 日志是**追加**写的。少了它实测报
+#     avc: denied { append } ... tcontext=u:object_r:remote_control_data_file:s0
+#    而写不出日志时进程直接退出，init 每 5 秒拉一次、崩一次。
 allow remote_control remote_control_data_file:file {
-    create read write open getattr unlink rename setattr map
+    create read write append open getattr unlink rename setattr map
+};
+
+# HTTP / JSON API 的 TCP 监听。
+#
+# 少了这条实测报 avc: denied { create } ... tclass=tcp_socket，
+# 服务起不来（HTTP 是主要入口之一）。
+allow remote_control self:tcp_socket {
+    create bind listen accept read write getattr setopt shutdown
 };
 
 # 壳要 fork 载荷、等它退出（sigchld）、起不来时杀掉它（signal）

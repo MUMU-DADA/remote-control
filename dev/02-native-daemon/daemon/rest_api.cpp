@@ -326,9 +326,16 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
             ALOGI("收到上传的 APK（落盘）: %s（%zu 字节）",
                   path.c_str(), req.bodySize);
         } else {
-        // 放 /sdcard 而不是 /data/local/tmp：installer 对两者都能读，
-        // 但 /sdcard 上的文件用户自己也能看见 —— 出问题时好排查。
-        path = "/sdcard/remote-control-upload-" + std::to_string(getpid()) + ".apk";
+        // ⚠️ 落盘位置改成**服务自己的目录**（与配置、日志同处），不再放 /sdcard。
+        //
+        //    /sdcard 是 FUSE（storage 层），SELinux Enforcing 下我们的域
+        //    过不去（实测 avc denied { search } mnt_user_file），
+        //    上传会直接 500。
+        //
+        //    不需要 installer 能读到这个文件：`pm install <路径>` 是
+        //    **调用者进程**（我们，shell 身份）自己读文件再流给
+        //    package installer 的，所以只要我们自己读得到就行。
+        path = "/data/misc/remote-control/upload-" + std::to_string(getpid()) + ".apk";
 
         const int wfd = open(path.c_str(),
                              O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0660);
