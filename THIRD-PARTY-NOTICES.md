@@ -30,11 +30,15 @@ BSD 3-Clause 要求分发时保留版权声明和许可原文，因此：
 
 | | |
 |---|---|
-| 位置 | `dev/02-native-daemon/daemon/vendor/jpeg/` |
+| 位置 | `dev/02-native-daemon/daemon/vendor/jpeg/`（设备侧）<br>`dev/02-native-daemon/tools/bench/vendor-jpeg/`（主机侧基准工具） |
 | 来源 | AOSP `external/libjpeg-turbo`（android-12.0.0_r34） |
 | 上游 | https://github.com/libjpeg-turbo/libjpeg-turbo |
 | 许可 | **BSD-style**（三套兼容许可，见同目录 `LICENSE.md`） |
 | 范围 | **仅头文件**（7 个），没有内置任何 `.c` |
+
+> ⚠️ 头文件有**两份**（设备侧 `daemon/vendor/jpeg/` 与主机侧
+> `tools/bench/vendor-jpeg/`，内容相同）。本节原来只提了前者 ——
+> 后者随仓库分发、许可声明却没写，属漏项，已补。
 
 **注意**：这里**只 vendor 了头文件**。实际的编码器是运行时
 `dlopen("libjpeg.so")` 用系统自带的那个 —— 设备上一直有，
@@ -65,6 +69,28 @@ BSD 3-Clause 要求分发时保留版权声明和许可原文，因此：
 
 ---
 
+## 本项目的许可
+
+**MIT**，见根目录 [`LICENSE`](LICENSE)。
+
+选 MIT 而不是 GPL 的依据是**上面这份清单里没有任何 copyleft 代码**：
+
+| 内置的 | 许可 | 是否传染 |
+|---|---|---|
+| libwebp | BSD 3-Clause | 否 |
+| libjpeg-turbo（仅头文件 ×2 份） | BSD-style（IJG + BSD-3 + zlib） | 否 |
+
+其余依赖是运行时 `dlopen` 设备上的系统库（libjpeg / libz / libcurl /
+libjnigraphics），**不随本项目分发**。AOSP 源码树与 Google 的翻译层载荷
+都在 `.gitignore` 里，不在本仓库中。
+
+BSD 系是宽松许可，可以并入 MIT 作品 —— 代价是要**保留它们的版权声明**，
+这正是本文件存在的意义。反过来，如果哪天内置了 GPL/LGPL 的代码，
+本项目就不能再以 MIT 分发，得整体换成 GPL（这也是 LICENSE 里那条
+"更新第三方代码时"要一起检查的原因）。
+
+---
+
 ## 更新第三方代码时
 
 重新拷源码之后要确认：
@@ -72,3 +98,5 @@ BSD 3-Clause 要求分发时保留版权声明和许可原文，因此：
 1. 对应的 `LICENSE` 文件还在（`vendor/*/LICENSE*`）
 2. 本文件的「来源」一栏的版本号对得上
 3. 如果新增了别的第三方代码，在这里加一节
+4. **确认新依赖不是 GPL/LGPL/AGPL** —— 是的话本项目的 MIT 就失效了，
+   要么换依赖，要么整体改 GPL（见上一节）

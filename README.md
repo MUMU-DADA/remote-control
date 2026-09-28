@@ -136,3 +136,18 @@ Java-only AIDL。`autod` 用 `/dev/uinput` 绕开 —— 代价是会创建一�
 - 触控：`frameworks/base/cmds/input/src/com/android/commands/input/Input.java` + `core/java/android/hardware/input/IInputManager.aidl`
 - 版本限制：[Restricted screen reading](https://source.android.com/docs/core/permissions/restricted-screen-reading)
 - GKI 模块约束：[Android 内核 ABI 监控](https://source.android.com/docs/core/architecture/kernel/abi-monitor)
+
+---
+
+## 许可
+
+**MIT** —— 见 [LICENSE](LICENSE)。
+
+内置的第三方代码只有 libwebp（BSD 3-Clause）和 libjpeg-turbo 的头文件
+（BSD-style），都是宽松许可，**没有任何 copyleft**，所以 MIT 成立。
+逐项清单和判定依据在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+> ⚠️ 两样东西**不在**本仓库里，别以为 MIT 覆盖了它们：
+> AOSP 源码树（`.gitignore` 的 `/aosp/`，那 314 个 git 项目各自有许可），
+> 以及 Google 的 arm64 翻译层载荷（`dev/04-x64-android/payload/system/`，
+> 专有二进制，由 `fetch-payload.sh` 现拉、不得再分发）。
