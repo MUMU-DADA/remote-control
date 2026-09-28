@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include "protocol.h"
+
 namespace autod {
 
 struct HttpRequest {
@@ -117,7 +119,8 @@ class HttpServer {
         // —— 真正的约束是磁盘，不是内存。
         // ⚠️ 但非落盘的那条路仍然全量进内存，所以这个值不能当成
         //    "随便多大都行"：超过 spoolThresholdBytes 的会自动走落盘。
-        size_t      maxBodyBytes = 4ull << 30;        // 4GB
+        // 和安装路径共用同一个常量，见 protocol.h —— 两处分开写会漂移。
+        size_t      maxBodyBytes = kMaxUploadBytes;
 
         // 超过这个大小就落盘，不留在内存里。
         // 4MB 是个折中：小于它的请求（JSON、剪贴板文本）走内存更快，

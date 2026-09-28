@@ -602,7 +602,10 @@ ReplyPacket Dispatcher::HandleInstallApp(const Request& req, int reqFd) {
              static_cast<long>(time(nullptr)));
     const std::string tmp = dir + nameBuf;
 
-    constexpr int64_t kMaxApk = 2LL << 30;   // 2 GB
+    // 上限和 HTTP 层共用同一个常量 —— 见 protocol.h 里的说明。
+    // 以前这里是写死的 2GB，而 HTTP 层放行 4GB：用户传完 3GB 的 APK
+    // 才在这里被拒，报错还像是传输出了问题。
+    constexpr int64_t kMaxApk = static_cast<int64_t>(kMaxUploadBytes);
 
     // ── 空间预检：装不下就**别落盘**，直接说清楚 ──
     //
