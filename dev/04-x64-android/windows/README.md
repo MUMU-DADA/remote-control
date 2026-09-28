@@ -27,6 +27,21 @@ cd windows
 .\run-windows.ps1        # 4. 启动 + 验收（abilist / 翻译层 / arm64 应用）
 ```
 
+> 日常开机关机用 **`emulator.ps1`**（`run-windows.ps1` 是"启动 + 验收"的
+> 一次性流程，`emulator.ps1` 管实例的整个生命周期）：
+
+```powershell
+.\emulator.ps1 list                    # 有哪些实例、在不在跑、占多大
+.\emulator.ps1 start  default          # 起（不存在会自动创建）
+.\emulator.ps1 stop   default          # 优雅关机（等进程真的退出）
+.\emulator.ps1 kill   default          # 卡住了才用：强杀
+.\emulator.ps1 clone  default  dev2    # 复制一台（连已装应用一起）
+.\emulator.ps1 delete dev2             # 停掉并删光
+```
+
+命令表和注意事项与 Linux 侧**完全对应**，见
+[`../docs/12-emulator-control.md`](../docs/12-emulator-control.md)。
+
 > **必需文件里最容易漏的是 `-qemu` 家族**（`system/vendor/product-qemu.img` + `ramdisk-qemu.img`）：
 > 前者是带 GPT 分区表的包装版，后者是「系统 ramdisk + vendor ramdisk」的合并版
 > （first-stage 的 `fstab.ranchu` 在里面）。只给裸 `*.img` 会以
@@ -35,6 +50,24 @@ cd windows
 
 前置：OpenSSH 客户端（Win10 1809+ 自带）、≥15 GB 磁盘、≥8 GB 内存、
 **BIOS 里开启虚拟化**（WHPX 需要；若用 Hyper-V/WSL2 已开启则天然满足）。
+
+---
+
+## 硬件参数：和 Linux 侧同一份 config.ini
+
+`emulator.ps1` / `run-windows.ps1` 都从 `..\emulator\config.ini` 读，
+不在这两个脚本里写死默认值：
+
+| 项 | 默认 |
+|---|---|
+| 屏幕 | 1280x720 横屏 @320dpi |
+| CPU / 内存 | 4 核 / 8192 MB |
+| 数据分区 | 32G |
+| GPU | `auto`（自适应：有真显卡就 `host`，否则 `swiftshader_indirect`；`host` 起不来还会再退一次） |
+
+> ⚠️ 以前这两个脚本的参数默认值是写死的（`-MemoryMB 4096`、`-Gpu
+> swiftshader_indirect`），而命令行**优先于** config.ini —— 于是
+> config.ini 里改内存根本没用。现在只在**显式传参**时才覆盖。
 
 ---
 

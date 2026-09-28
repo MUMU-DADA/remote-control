@@ -1,6 +1,18 @@
 # 12 · 模拟器实例控制
 
-`scripts/emulator.sh` —— 建 / 起 / 停 / 强杀 / 重启 / 重置 / 删除 / 复制。
+**Linux 和 Windows 各一套**，命令名、语义、配置来源完全对应：
+
+| | Linux | Windows |
+|---|---|---|
+| 控制脚本 | `scripts/emulator.sh` | `windows/emulator.ps1` |
+| 唯一配置源 | `emulator/config.ini` | **同一份** `emulator/config.ini` |
+| 实例目录 | `.run/`（在 `dev/04-x64-android/` 下） | `windows/.run/` |
+| 加速 | KVM | WHPX |
+| 镜像来源 | `artifacts/rom-<product>/` | `windows/images/`（`fetch-images.ps1` 拉的同一份） |
+| 网络 | 可桥接到物理 LAN（`-net-tap`） | 只有用户态 NAT（`-net-tap` 只在 Linux 实现） |
+
+本文以 Linux 侧为例写；Windows 侧把 `./scripts/emulator.sh` 换成
+`.\windows\emulator.ps1`、`--xxx` 换成 `-Xxx` 即可（选项表见下）。
 
 ## 速览
 
@@ -25,7 +37,9 @@
 | `--memory MB` / `--cores N` | 覆盖 config.ini 里的值 |
 | `--no-wait` | 启动后不等开机 |
 | `--gui` | 带窗口启动（默认 `-no-window`，服务器上用） |
-| `--bridge` / `--nat` | 强行桥接 / 强行 NAT（默认自动，见 §6） |
+| `--bridge` / `--nat` | **仅 Linux**：强行桥接 / 强行 NAT（默认自动，见 §6） |
+
+Windows 侧对应 `-Port` / `-Gpu` / `-Memory` / `-Cores` / `-NoWait` / `-Gui` / `-Yes`。
 | `-y` / `--yes` | `reset` / `delete` 跳过二次确认 |
 
 ---
@@ -180,6 +194,40 @@ reset 一次，新参数就全生效**（尤其是 `disk.dataPartition.size` —
 | 硬件参数 | 从 config.ini 读 | 同左 |
 
 两边共用同一套工作目录与硬件参数，可以混着用。
+
+---
+
+## 7. Windows 侧怎么验的（在没有 Windows 的机器上）
+
+`emulator.ps1` 是在 Linux 上用 PowerShell 7 实跑验证的：
+
+```bash
+bash tools/test-windows-emulator.sh      # 55 项，全在 Linux 上跑
+```
+
+做法是搭一个沙箱（把 `windows/` 整个复制到 `.tmp/` 下），放几个假的
+"镜像"文件和假的 `adb.exe`，然后真跑 `create / list / status / clone /
+reset / delete`，断言文件系统层面的结果 —— **绝不碰真的 `images/` 和实例**。
+
+能在 Linux 上验的是**文件与生命周期逻辑**（链镜像、复制、重置、删除，
+这些出错会直接毁数据）；验不了的是进程管理（`Get-CimInstance` /
+`Start-Process` 是 Windows 专有）。
+
+这个测试一上来就抓到两个真问题：
+
+1. **`New-Item -ItemType Junction` 在非 Windows 上既不报错也不建东西**
+   —— 命令"成功"、`Test-Path` 却是 false。原来那版直接 `return "junction"`
+   就走了，结果工作目录里**静默少了一个目录**，要等模拟器起来报
+   "文件找不到"才发现。现在每一档链接都**读回确认**，并且
+   `Build-SysDir` 收尾会核对 `images\` 里每一项都在。
+2. **`run-windows.ps1` 有一处语法错误，那个脚本从来没能运行过**：
+   `Write-Host "... $(((& $adb ...) -join "").Trim())"` —— 双引号字符串里的
+   `$( )` 里再套 `""`，PowerShell 词法分析直接崩。语法分析不需要 Windows，
+   所以测试的第 [0] 节会解析 `windows/*.ps1` 下的每一个文件。
+
+> 教训和本项目其它地方一样：**"命令没报错"不等于"事情做成了"，
+> 要读回结果**。还有 —— 写完的脚本得有个不用目标平台就能跑的检查，
+> 否则它会一直躺在那里没人知道是坏的。
 
 ---
 

@@ -14,9 +14,13 @@ param(
     [string]$ImagesDir   = "$PSScriptRoot\images",
     [string]$DataDir     = "$PSScriptRoot\data",
     [int]$Port           = 5580,
-    [int]$MemoryMB       = 4096,
-    [int]$Cores          = 4,
-    [string]$Gpu         = "swiftshader_indirect",
+    # 0 / "" = 从 ..\emulator\config.ini 读（那份才是唯一真源）。
+    # ⚠️ 别在这里写死默认值：命令行**优先于** config.ini，
+    #    写死了 config.ini 里改什么都没用（Linux 侧 -memory 4096 就是这么
+    #    把 hw.ramSize 架空的，两边都改过了）。
+    [int]$MemoryMB       = 0,
+    [int]$Cores          = 0,
+    [string]$Gpu         = "",
     [string]$Apk         = "",
     [switch]$Headless,
     [switch]$NoSnapshot,
@@ -50,6 +54,32 @@ function Find-Adb {
     throw "找不到 adb.exe"
 }
 
+function Get-ConfigValue {
+    param([string]$Key, [string]$Default = "")
+    $cfg = Join-Path $PSScriptRoot "..\emulator\config.ini"
+    if (-not (Test-Path $cfg)) { return $Default }
+    $pat = "^\s*" + [regex]::Escape($Key) + "\s*=\s*(.+?)\s*$"
+    $hit = Select-String -Path $cfg -Pattern $pat -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($hit) { return $hit.Matches[0].Groups[1].Value }
+    return $Default
+}
+
+# GPU 自适应：宿主有真显卡（不是 Microsoft Basic/Remote 兜底适配器）就用 host。
+function Test-HostGpu {
+    try {
+        $g = @(Get-CimInstance Win32_VideoController -ErrorAction Stop |
+               Where-Object { $_.Name -and $_.Name -notmatch 'Microsoft\s+(Basic|Remote)' })
+        return ($g.Count -gt 0)
+    } catch { return $false }
+}
+function Resolve-GpuMode {
+    param([string]$Want)
+    if ([string]::IsNullOrWhiteSpace($Want) -or $Want -eq "auto") {
+        if (Test-HostGpu) { return "host" } else { return "swiftshader_indirect" }
+    }
+    return $Want
+}
+
 $adb = Find-Adb
 
 if ($Stop) {
@@ -72,16 +102,25 @@ if (-not $Verify) {
     # 构建模式：模拟器需要 ANDROID_PRODUCT_OUT 才会认 -sysdir
     $env:ANDROID_PRODUCT_OUT = $ImagesDir
 
-    # 屏幕尺寸/密度：与 Linux 侧同源（..\emulator\config.ini），覆盖 ROM 自带的
-    # goldfish config.ini.xl（1440x2960 @560dpi → 720x1280 @320dpi）。
+    # 屏幕/内存/核数/GPU：与 Linux 侧**同一份** ..\emulator\config.ini。
+    # ROM 自带的是 goldfish 的 config.ini.xl（1440x2960 @560dpi），这里覆盖掉。
     # 不参与 AOSP 构建，改完不用重编 ROM。
     $cfg = Join-Path $PSScriptRoot "..\emulator\config.ini"
     if (Test-Path $cfg) {
         Copy-Item $cfg (Join-Path $ImagesDir "config.ini") -Force
-        Write-Host "==> 显示配置：720x1280 @320dpi（..\emulator\config.ini）"
+        $lw = Get-ConfigValue "hw.lcd.width" "1280"
+        $lh = Get-ConfigValue "hw.lcd.height" "720"
+        Write-Host ("==> 显示配置：{0}x{1} @{2}dpi（..\emulator\config.ini）" -f `
+                    $lw, $lh, (Get-ConfigValue "hw.lcd.density" "320"))
     } else {
         Write-Host "==> 未找到 ..\emulator\config.ini，沿用 ROM 自带显示配置" -ForegroundColor Yellow
     }
+    if ($MemoryMB -le 0) { $MemoryMB = [int](Get-ConfigValue "hw.ramSize" "8192") }
+    if ($Cores    -le 0) { $Cores    = [int](Get-ConfigValue "hw.cpu.ncore" "4") }
+    $gpuAuto = [string]::IsNullOrWhiteSpace($Gpu)
+    $Gpu = Resolve-GpuMode $Gpu
+    Write-Host ("==> 硬件：-memory {0} -cores {1} -gpu {2}{3}" -f $MemoryMB, $Cores, $Gpu,
+                $(if ($gpuAuto) { "（自适应）" } else { "（命令行指定）" }))
 
     $args = @("-sysdir", $ImagesDir, "-datadir", $DataDir, "-port", $Port,
               "-gpu", $Gpu, "-accel", "on",          # on = WHPX/Hyper-V
@@ -181,7 +220,14 @@ if (Test-Path $Apk) {
 }
 
 Write-Host ""
-Write-Host "==> ROM 指纹： $(((& $adb -s $serial shell getprop ro.build.fingerprint) -join "").Trim())"
+# ⚠️ 这里原来是写成一行的：
+#     Write-Host "==> ROM 指纹： $(((& $adb ... ) -join "").Trim())"
+#    双引号字符串里的 $( ) 里再出现 ""，PowerShell 的词法分析会当场崩
+#    （The string is missing the terminator）—— 也就是说这个脚本
+#    **从来没能运行过**。先取到变量再拼字符串就没这个问题。
+#    现在 tools/test-windows-emulator.sh 会解析所有 .ps1，这类错不会再溜过去。
+$fp = ((& $adb -s $serial shell getprop ro.build.fingerprint) -join "").Trim()
+Write-Host "==> ROM 指纹： $fp"
 Write-Host "    与 Linux 侧对照这个值 + images\system.img 的 sha256，即可证明是同一份 ROM"
 if ($fails -eq 0) { Write-Host "==> 验收全部通过 ✓" -ForegroundColor Green }
 else { Write-Host "==> 有 $fails 项未通过" -ForegroundColor Red; exit 1 }

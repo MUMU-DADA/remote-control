@@ -78,16 +78,20 @@ dev/04-x64-android/
 │   ├── build-rom.sh                ← 容器内 lunch + m（后台 + 日志 + --status）
 │   ├── package-rom.sh              ← 打包可交付 ROM 目录（SHA256SUMS + MANIFEST.txt）
 │   ├── run-linux.sh                ← Linux/KVM 启动 + 验收（含 arm64 应用）
-│   ├── emulator.sh                 ← 实例生命周期：建/起/停/强杀/重启/重置/删除/复制
+│   ├── emulator.sh                 ← 实例生命周期（Linux）：建/起/停/强杀/重启/重置/删除/复制
 │   └── status.sh                   ← 一眼看清 载荷/注入/构建/产物/设备
 ├── tools/
 │   ├── build-probe-apk.sh          ← 自建 arm64 探针 APK（纯 arm64-v8a，16 KB）
 │   ├── arm64-probe/                ← 探针源码（manifest / Activity / JNI）
 │   ├── check-bridge-symbols.sh     ← 翻译层动态依赖自检（启动前发现版本错配）
 │   ├── verify-clone-independent.sh ← 证明 clone 出来的实例和原实例数据互不影响
+│   ├── test-windows-emulator.sh    ← 在 Linux 上用 pwsh 实跑 windows\emulator.ps1（55 项）
 │   ├── net-bridge.sh               ← 桥接模式：建 br0 把上行网卡桥进去（带自动回滚）
 │   └── net-bridge-ifup.sh          ← 模拟器拉起 TAP 时的回调，把它挂进桥
 ├── windows/                        ← Windows 侧（同一份镜像）
+│   ├── emulator.ps1                ← 实例生命周期（Windows）：命令与语义和 emulator.sh 一一对应
+│   ├── run-windows.ps1             ← 启动 + 验收（WHPX）
+│   └── fetch-*.ps1 / preflight.ps1 ← 拉模拟器与镜像、前置检查
 ├── docs/                           ← 设计记录与实测结论
 ├── artifacts/                      ← 产物软链与构建清单
 └── .run/                           ← 运行期（datadir、日志、截图）
@@ -139,7 +143,8 @@ cd dev/04-x64-android
 ```
 
 **日常开机关机用 `emulator.sh`**（`run-linux.sh` 是"启动 + 验收"的一次性流程，
-`emulator.sh` 管的是实例的整个生命周期）：
+`emulator.sh` 管的是实例的整个生命周期）。**Windows 侧有一模一样的一套**
+（`windows\emulator.ps1`，同一份 config.ini、同一套命令名）：
 
 ```bash
 ./scripts/emulator.sh list                    # 有哪些实例、在不在跑、占多大
@@ -150,7 +155,15 @@ cd dev/04-x64-android
 ./scripts/emulator.sh delete dev2             # 停掉并删光
 ```
 
-完整命令表和每个命令的注意事项见
+```powershell
+# Windows 侧（windows\ 下）
+.\emulator.ps1 list                  # 同一套命令
+.\emulator.ps1 start  default
+.\emulator.ps1 clone  default  dev2
+```
+
+完整命令表、每个命令的注意事项、以及 Windows 侧是怎么在 Linux 上验证的
+（`tools/test-windows-emulator.sh`，55 项）见
 [`docs/12-emulator-control.md`](docs/12-emulator-control.md)。
 
 Windows 侧：同一份打包产物 + `emulator.exe` + WHPX，见 [`windows/README.md`](windows/README.md)。
