@@ -94,6 +94,16 @@ if [ "$VERIFY_ONLY" = 0 ]; then
     [ -x "$AOSP_EMU" ] && [ "$AOSP_EMU" != "$EMULATOR_BIN" ] && CANDIDATES+=("$AOSP_EMU")
 
     launch() {   # $1 = emulator
+        # 桥接模式：宿主侧那座桥就绪时（tools/net-bridge.sh up），给模拟器挂 TAP 网卡，
+        # guest 的 eth0 就直接落在局域网的二层域里、从真实 DHCP 拿 IP。
+        # 桥没起时**不加**参数 —— 指向不存在的桥会让模拟器直接起不来，
+        # 所以这里按"桥在不在"自动决定，而不是靠开关。
+        local tap_args=()
+        if [ -n "$NET_BRIDGE_IF" ] && [ -d "/sys/class/net/$NET_BRIDGE_IF/bridge" ]; then
+            tap_args=(-net-tap "$NET_TAP_IF"
+                      -net-tap-script-up "$X64_DIR/tools/net-bridge-ifup.sh")
+            log "桥接模式：$NET_TAP_IF → $NET_BRIDGE_IF（guest 的 eth0 走物理局域网）"
+        fi
         : > "$RUN_DIR/emulator-$EMULATOR_PORT.log"
         # ⚠️ 两个变量都要给：
         #   ANDROID_PRODUCT_OUT —— 模拟器靠它进"不用 AVD、直接从构建产物启动"的模式
@@ -104,6 +114,7 @@ if [ "$VERIFY_ONLY" = 0 ]; then
             -sysdir "$PRODUCT_OUT" -datadir "$RUN_DIR/datadir" -port "$EMULATOR_PORT" \
             -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -no-audio \
             -accel on -memory 4096 -cores 4 \
+            "${tap_args[@]}" \
             $([ "$SHOW_KERNEL" = 1 ] && printf '%s' "-show-kernel") \
             >> "$RUN_DIR/emulator-$EMULATOR_PORT.log" 2>&1 < /dev/null &
         EMU_PID=$!

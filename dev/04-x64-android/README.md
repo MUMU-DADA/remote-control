@@ -82,7 +82,9 @@ dev/04-x64-android/
 ├── tools/
 │   ├── build-probe-apk.sh          ← 自建 arm64 探针 APK（纯 arm64-v8a，16 KB）
 │   ├── arm64-probe/                ← 探针源码（manifest / Activity / JNI）
-│   └── check-bridge-symbols.sh     ← 翻译层动态依赖自检（启动前发现版本错配）
+│   ├── check-bridge-symbols.sh     ← 翻译层动态依赖自检（启动前发现版本错配）
+│   ├── net-bridge.sh               ← 桥接模式：建 br0 把上行网卡桥进去（带自动回滚）
+│   └── net-bridge-ifup.sh          ← 模拟器拉起 TAP 时的回调，把它挂进桥
 ├── windows/                        ← Windows 侧（同一份镜像）
 ├── docs/                           ← 设计记录与实测结论
 ├── artifacts/                      ← 产物软链与构建清单
@@ -149,6 +151,7 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 | API 31 镜像**纯 64 位** | `abilist32` 为空 → `armeabi-v7a` 应用装不上 | 需要 32 位 ARM 就走 §5 的 arm32 方案（G5） |
 | 串行浮点退化 | 依赖链 double 运算实测 21~23× 慢（整数/哈希 ~1.1×） | 目标应用先做性能验收 |
 | 翻译层与 Android 版本绑定 | 载荷的 ARM 侧 bionic 与框架版本配套 | **API 31 的载荷只能配 API 31 的 ROM** |
+| **桥接模式要动宿主网络** | 建 `br0` 会把上行网卡的 IP/默认路由搬走；若那正是 SSH 网卡，会短暂断链 | 用 `tools/net-bridge.sh`（自带 systemd 自动回滚）；不桥接则一切照旧 —— 见 §6 的桥接文档 |
 
 **arm32 下放方案（G5，未做）**：Google 的 API 30（Android 11）镜像是**四 ABI**
 （`x86_64,x86,arm64-v8a,armeabi-v7a,armeabi`，`/system/lib/arm` 59 个 32 位 ARM 库），
