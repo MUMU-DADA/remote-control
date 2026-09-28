@@ -343,3 +343,49 @@ $ADB -s emulator-5554 logcat -s autod:*
    而模拟器这条路 AOSP 自带、零额外依赖。
 
 代价是慢（TCG）。但 `autod` 的验证目标是"能拿到帧、能点中"，慢不影响结论。
+
+---
+
+## 第 3 轮进展：又清掉一个阻塞，并定位到新的（宿主侧）阻塞
+
+### 修复 ✓：`Rebooting into recovery`（启动被踢进 recovery）
+
+症状（自制 A12 与成品 A11/A12 **三个镜像完全一致** → 说明是环境问题，不是镜像问题）：
+
+```
+init: Failed to set encryption policy of /data/misc ...: Directory not empty
+avc: denied { execute_no_trans } for comm="init" path="/vendor/bin/toybox_vendor"
+init: ls -laZ /data/misc returned failure: 255
+init: Setting <policy> on /data/misc failed!
+init: Rebooting into recovery
+```
+
+`ENOTEMPTY` 本身是**正常**的（vold 会先建 `/data/misc/vold`，而 fscrypt 策略只能设在空目录上），
+AOSP 的兜底逻辑会去跑 `ls -laZ`（`libfs_mgr` 的诊断输出）——这里那条 `ls`
+（PATH 里的 `/vendor/bin/ls → toybox_vendor`）执行失败，于是 init.rc 第 657 行的
+`mkdir /data/misc 01771 system misc encryption=Require` 被判定失败 → recovery。
+
+**解法**：把 system 镜像 `init.rc` 第 657 行的 `encryption=Require` 改成
+**`encryption=Attempt`**（init.rc 的标准取值：尽力而为、失败不致命）。
+→ **`Rebooting into recovery` 归零** ✓，启动继续走到 APEX 解压、各 HAL、`zygote` 阶段。
+
+（同时把构建产物里的 `root/init.environ.rc` 补进了模拟器实际加载的 `initrd` —— 原本缺失。）
+
+### 当前阻塞 ✗（新，在宿主侧）
+
+guest 跑到 **~50–70 秒（HAL 阶段）** 时 **QEMU 自身段错误**，模拟器随之退出：
+
+```
+dmesg: qemu-system-aar[...]: segfault at 0 ip 0000000000dd68b1 / 0000000000dc6cbb
+```
+
+两个 IP 相邻 → 同一处代码，确定性复现；此时 **guest 侧零崩溃**（不是 guest 的问题）。
+
+已试：`-feature -VirtioInput,-VirtioMouse,-VirtioWifi,-VirtioVsockPipe,-VirtconsoleLogcat`
+（关掉 11 个多点触控 + 鼠标 + wifi + vsock + 串口）→ **仍崩** ✗。
+
+判断：这是为了绕开"ranchu 无 PCI"而硬换 `virt` 板的代价 —— 模拟器给 arm 板挂的 PCI
+设备（其中 `-soundhw hda` 无法用 feature 关掉）在 `virt` 上跑到某个操作时把 QEMU 弄崩。
+
+**下一步**：① 用 `-verbose` 列出 `virt` 下实际保留的 PCI 设备逐个 bisect；
+② 或换用真正带 PCI 的 arm 机器（如 `sbsa-ref`）来承载这些设备。
