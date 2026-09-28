@@ -72,6 +72,17 @@ if (-not $Verify) {
     # 构建模式：模拟器需要 ANDROID_PRODUCT_OUT 才会认 -sysdir
     $env:ANDROID_PRODUCT_OUT = $ImagesDir
 
+    # 屏幕尺寸/密度：与 Linux 侧同源（..\emulator\config.ini），覆盖 ROM 自带的
+    # goldfish config.ini.xl（1440x2960 @560dpi → 720x1280 @320dpi）。
+    # 不参与 AOSP 构建，改完不用重编 ROM。
+    $cfg = Join-Path $PSScriptRoot "..\emulator\config.ini"
+    if (Test-Path $cfg) {
+        Copy-Item $cfg (Join-Path $ImagesDir "config.ini") -Force
+        Write-Host "==> 显示配置：720x1280 @320dpi（..\emulator\config.ini）"
+    } else {
+        Write-Host "==> 未找到 ..\emulator\config.ini，沿用 ROM 自带显示配置" -ForegroundColor Yellow
+    }
+
     $args = @("-sysdir", $ImagesDir, "-datadir", $DataDir, "-port", $Port,
               "-gpu", $Gpu, "-accel", "on",          # on = WHPX/Hyper-V
               "-memory", $MemoryMB, "-cores", $Cores)

@@ -63,6 +63,14 @@ rm -rf "$DEST"; mkdir -p "$DEST/system"
 for f in $REQUIRED $OPTIONAL; do
     [ -s "$PRODUCT_OUT/$f" ] && cp -f "$PRODUCT_OUT/$f" "$DEST/$f"
 done
+
+# 屏幕尺寸/密度：交付目录里那份 config.ini 用本项目 emulator/config.ini 覆盖。
+# ROM 构建产出的是 goldfish 的 config.ini.xl（1440x2960 @560dpi）；统一成 720x1280 @320dpi。
+# ⚠️ 必须在算 SHA256SUMS/MANIFEST 之前写，否则清单和实物对不上。
+if [ -s "$EMULATOR_CONFIG" ]; then
+    cp -f "$EMULATOR_CONFIG" "$DEST/config.ini"
+    log "显示配置： $(grep -E '^(skin\.name|hw\.lcd\.density)=' "$EMULATOR_CONFIG" | paste -sd' ' -)"
+fi
 # initrd：模拟器 -initrd 指向它。AOSP 产物不一定生成这个文件；
 # 缺了就用 ramdisk.img 生成（QEMU 拿到不存在的 initrd 会「主循环立刻结束且不报错」，很难查）。
 if [ ! -s "$DEST/initrd" ]; then

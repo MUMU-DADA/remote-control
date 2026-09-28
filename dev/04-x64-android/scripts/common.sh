@@ -44,6 +44,16 @@ BUILDER_AOSP_PATH="${BUILDER_AOSP_PATH:-/aosp}"
 ADB="${ADB:-$AOSP_DIR/out/host/linux-x86/bin/adb}"
 EMULATOR_BIN="${EMULATOR_BIN:-}"
 EMULATOR_PORT="${EMULATOR_PORT:-5580}"
+
+# 模拟器运行配置（屏幕尺寸/密度等）。**本项目唯一真源** —— ROM 构建产物里那份
+# config.ini 是 goldfish 的 1440x2960@560，由 run-linux.sh / package-rom.sh /
+# run-windows.ps1 三处统一覆盖成这里的内容。不参与 AOSP 构建，改完无需重编 ROM。
+EMULATOR_CONFIG="${EMULATOR_CONFIG:-$X64_DIR/emulator/config.ini}"
+
+# 桥接（-net-tap）：宿主机上已就绪的桥接口名。留空 = 用模拟器默认的用户态 NAT。
+#   ./tools/net-bridge.sh up   建 br0（把 ens33 桥进去）→ 之后启动即自动走桥接
+NET_BRIDGE_IF="${NET_BRIDGE_IF:-br0}"
+NET_TAP_IF="${NET_TAP_IF:-tap0}"
 JOBS="${JOBS:-12}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }

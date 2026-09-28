@@ -61,11 +61,28 @@ if [ "$VERIFY_ONLY" = 0 ]; then
             # initrd 不链接：模拟器会**重写**它（把自己的 ramdisk-qemu + dtb 写进去），
             # 链接过去会改到交付目录里的文件（实测过，SHA256SUMS 会对不上）。
             # 让它落在工作目录里即可——模拟器本来就会自己生成。
-            [ "$b" = "initrd" ] && continue
+            #
+            # config.ini 同理不链接：下面要用 emulator/config.ini 覆盖它，
+            # 写穿符号链接会直接改到交付目录里那份。
+            case "$b" in initrd|config.ini) continue ;; esac
             ln -sf "$f" "$SCRATCH/$b"
         done
         log "验收对象：打包目录 ${PACKAGED#"$PROJECT_ROOT"/}（工作目录用符号链接：.run/sysdir-$EMULATOR_PORT）"
         PRODUCT_OUT="$SCRATCH"
+    fi
+
+    # ---------------------------------------------------------------------------
+    # 屏幕尺寸/密度：用本项目 emulator/config.ini 覆盖 ROM 自带那份。
+    # ROM 里装的是 goldfish 的 config.ini.xl（1440x2960 @560dpi，Pixel 3 XL 尺寸），
+    # 配 swiftshader_indirect 纯软件光栅化是这套配置里最贵的一项；这里统一成
+    # 720x1280 @320dpi（像素量约 1/4.6，逻辑尺寸 360x640 dp）。
+    # ⚠️ 必须先 rm 再 cp：交付目录那条路径下 config.ini 是符号链接，直接 cp 会写穿。
+    if [ -s "$EMULATOR_CONFIG" ]; then
+        rm -f "$PRODUCT_OUT/config.ini"
+        cp -f "$EMULATOR_CONFIG" "$PRODUCT_OUT/config.ini"
+        log "显示配置： $(grep -E '^(skin\.name|hw\.lcd\.density)=' "$EMULATOR_CONFIG" | paste -sd' ' -)  （源：${EMULATOR_CONFIG#"$PROJECT_ROOT"/}）"
+    else
+        warn "没有 $EMULATOR_CONFIG，沿用 ROM 自带的显示配置"
     fi
     for img in system.img vendor.img ramdisk.img kernel-ranchu; do
         [ -s "$PRODUCT_OUT/$img" ] || die "产物缺失：$PRODUCT_OUT/$img

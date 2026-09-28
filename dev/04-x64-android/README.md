@@ -69,6 +69,8 @@ dev/04-x64-android/
 │   ├── system/etc/init/ndk_translation.rc
 │   ├── system/etc/ld.config.arm{,64}.txt
 │   └── MANIFEST.sha256
+├── emulator/
+│   └── config.ini                  ← 模拟器显示配置（720x1280 @320dpi），本项目唯一真源
 ├── scripts/
 │   ├── common.sh
 │   ├── fetch-payload.sh            ← 从官方镜像取翻译层（下载 → 启动 → adb pull → 校验）
@@ -86,6 +88,16 @@ dev/04-x64-android/
 ├── artifacts/                      ← 产物软链与构建清单
 └── .run/                           ← 运行期（datadir、日志、截图）
 ```
+
+> **屏幕分辨率 / 密度**：模拟器不读 `build.prop` 里的密度，只认自己的 `config.ini` ——
+> 首次启动时由它生成 `<sysdir>/hardware-qemu.ini` 的 `hw.lcd.width/height/density`。
+> ROM 构建装进去的是 goldfish 的 `data/etc/config.ini.xl`（**1440x2960 @560dpi**，
+> Pixel 3 XL 尺寸）；`emulator/config.ini` 把它统一覆盖成 **720x1280 @320dpi**
+> —— 配 `-gpu swiftshader_indirect`（纯 CPU 软件光栅化）时像素量约降到 1/4.6，
+> 是这套配置里最省的一项。三个生效点都取同一份文件：
+> `run-linux.sh`（写进 `.run/sysdir-<port>/`）、`package-rom.sh`（写进交付目录）、
+> `windows/run-windows.ps1`（写进 `windows/images/`）。
+> **不参与 AOSP 构建，改完不需要重编 ROM。**
 
 ---
 
