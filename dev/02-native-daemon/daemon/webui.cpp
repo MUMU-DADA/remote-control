@@ -55,13 +55,20 @@ const std::string& WebUiHtml() {
   body.nopanel .panel { display:none; }
   body.nopanel .screen { flex:1 1 100%; }
 
-  /* 铺满模式：画面**拉伸**填满整个显示区（默认是保持比例，会有黑边）。
-     ⚠️ 拉伸会改变宽高比，画面会变形 —— 但**坐标不会错**：
-        toScreen() 走 getBoundingClientRect()，按渲染后的尺寸换算，
-        拉伸多少它就跟着算多少。改这里不用动触控那条路。
-     选拉伸而不是裁剪：设备控制台上"看不到边角"比"略微变形"严重得多
-     —— 裁剪掉的部分既看不到也点不到。 */
-  body.fillmode #screen { width:100%; height:100%; }
+  /* 铺满模式：画面**保持宽高比**放大到显示区里能完整放下的最大值 ——
+     不裁切、不溢出、也不变形。用的就是 object-fit:contain。
+
+     ⚠️ 这里**故意**让浏览器做缩放，而不是用 JS 算好尺寸写上去。
+        曾经用 JS 写过一版（--fw/--fh），失败模式正是用户报的那个：
+        JS 没跑到 / 自定义属性没生效时，width 退回 auto，
+        再被基类的 max-width:100% + max-height:100% **分别**钳一下 ——
+        两个方向各钳各的，比例就没了，画面被拉伸。
+        object-fit:contain 最坏情况也只是留黑边，永远不会变形。
+
+     ⚠️ 代价：元素盒子是整个显示区，黑边那块也归 canvas 收事件。
+        所以 toScreen() 走 contentRect() 算真正画着画面的那块矩形，
+        点在矩形外的一律当没点（见 toScreen 的调用方）。 */
+  body.fillmode #screen { width:100%; height:100%; object-fit:contain; }
   .card { background:#1b1b1b; border:1px solid #333; border-radius:6px;
           padding:10px; }
   .card h2 { font-size:12px; margin:0 0 8px; color:var(--dim);
@@ -1132,8 +1139,42 @@ function loadTouchRange() {
     .catch(() => {});   // 拿不到就退回图尺寸
 }
 
+// canvas 里**真正画着画面**的那块矩形（客户端坐标）。
+//
+//   适应（默认）  元素是 width/height:auto + max-width/height ——
+//                 盒子本身就是按比例缩过的画面，两者相等
+//   铺满          object-fit:contain —— 元素盒子是整个显示区，
+//                 画面缩在中间，四周是黑边
+//
+// 两种模式都能用同一个式子算：把 iw x ih 按 contain 塞进盒子。
+// 盒子比例本来就对的时候，结果就等于盒子本身 —— 所以不必分模式。
+//
+// ⚠️ 为什么不能直接拿 getBoundingClientRect()：
+//    铺满模式下它给的是**整个显示区**（100% x 100%），画面只占中间一块。
+//    拿它算比例，黑边会被当成画面的一部分，点得越靠边错得越多。
+//    只点正中央查不出来 —— 两种算法在中心点重合。
+function contentRect() {
+  const r = cvs.getBoundingClientRect();
+  const iw = cvs.width || 0, ih = cvs.height || 0;
+  if (iw <= 0 || ih <= 0 || r.width <= 0 || r.height <= 0) return r;
+  const s = Math.min(r.width / iw, r.height / ih);   // contain
+  const cw = iw * s, ch = ih * s;
+  if (Math.abs(cw - r.width) < 0.5 && Math.abs(ch - r.height) < 0.5) return r;
+  return { left: r.left + (r.width - cw) / 2,
+           top:  r.top  + (r.height - ch) / 2,
+           width: cw, height: ch };
+}
+
+// 这个 client 坐标在画面里吗？不在（点在黑边上）就别注入 ——
+// 否则会被钳成"点屏幕最边缘"，等于误触。
+function inContent(ev) {
+  const r = contentRect();
+  return ev.clientX >= r.left - 1 && ev.clientX <= r.left + r.width + 1 &&
+         ev.clientY >= r.top  - 1 && ev.clientY <= r.top  + r.height + 1;
+}
+
 function toScreen(ev) {
-  const rect = cvs.getBoundingClientRect();
+  const rect = contentRect();
   // ⚠️ 用**触控范围**，不是图尺寸 —— 见上面 touchW 那段。
   //    拿不到触控范围时才退回图尺寸（至少不崩）。
   const w = touchW || sw || cvs.width || 1;
@@ -1179,6 +1220,9 @@ function queueMove(slot, x, y) {
 
 cvs.addEventListener('pointerdown', (ev) => {
   ev.preventDefault();
+  // ⚠️ 铺满模式下 canvas 覆盖整个显示区，黑边那块也在里面。
+  //    点在黑边上就当没点 —— 不然会被钳成"点屏幕最边缘"，是误触。
+  if (!inContent(ev)) return;
   cvs.setPointerCapture(ev.pointerId);
   const p = toScreen(ev);
   const slot = slotFor(ev.pointerId);
@@ -1495,11 +1539,14 @@ function togglePanel() {
 
 // ── 铺满 / 适应 ──
 //
-// 适应（默认）：保持设备宽高比缩到能放下，窗口比例不匹配时四周留黑边。
-// 铺满：拉伸填满整个显示区，没有黑边，代价是画面按显示区比例变形。
+// 适应（默认）：保持设备宽高比，**只缩不放** —— 画面比显示区小的时候就
+//              按原始像素显示（1:1），大了才缩到放得下，四周留黑边。
+// 铺满：        同样保持比例，但**总是撑到显示区里能完整放下的最大值**
+//              （画面小于显示区时会放大）。不裁切、不溢出、不变形。
 //
-// 两者都**不影响触控坐标** —— toScreen() 按 canvas 的
-// getBoundingClientRect() 换算，拉伸多少它就跟着算多少。
+// ⚠️ 两种模式都**不影响触控坐标** —— 画面尺寸写在 canvas 上，
+//    坐标又从同一个 canvas 的 getBoundingClientRect() 读回来，
+//    渲染和换算永远同源。改这里不需要动触控那条路。
 function readFillPref() {
   try { return localStorage.getItem('autod.fill'); } catch (e) { return null; }
 }
@@ -1508,8 +1555,8 @@ function setFill(on, remember) {
   const b = $('fillsw');
   if (b) {
     b.textContent = on ? '铺满 ✓' : '适应';
-    b.title = on ? '当前：铺满整个显示区（按显示区比例拉伸）—— 点一下恢复保持比例'
-                 : '当前：保持设备宽高比（可能有黑边）—— 点一下铺满整个显示区';
+    b.title = on ? '当前：保持比例撑满显示区（放大到放得下的最大值，不变形也不裁切）'
+                 : '当前：按原始像素显示，过大才缩小（可能有黑边）';
   }
   if (remember) {
     try { localStorage.setItem('autod.fill', on ? '1' : '0'); } catch (e) {}
