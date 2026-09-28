@@ -252,7 +252,72 @@ reset / delete`，断言文件系统层面的结果 —— **绝不碰真的 `im
 
 ---
 
-## 6. 网络：默认不会让两台同时上物理 LAN
+## 6. 导出 / 导入：**导出可用，恢复未通过验证**
+
+```bash
+./scripts/emulator.sh export  default            # 打成一个归档
+./scripts/emulator.sh inspect default-xxx.tar    # 不解包，看里面是什么
+./scripts/emulator.sh import  default-xxx.tar -n newname --unsafe
+```
+
+| 命令 | 状态 |
+|---|---|
+| `export` | ✅ 归档**逐字节忠实**（qcow2 的 md5 与源完全一致，解出来也一致） |
+| `inspect` | ✅ 正常 |
+| `import` | ❌ **恢复出来的实例 `/data` 是空的**。已加安全闸：不加 `--unsafe` 直接拒绝执行 |
+
+### 归档格式
+
+```
+INSTANCE-MANIFEST.json   名字 / 时间 / ROM 指纹 / 需要哪些镜像
+sysdir/…                 实例状态（**不含**指向 ROM 的符号链接）
+datadir/…
+```
+
+两个设计要点：
+
+* **镜像不进归档**（5.7G 只读镜像没意义），只记下"要哪些"和 ROM 指纹，
+  恢复时按本地那份重新链；指纹不一致会警告。
+* **必须 `tar --sparse`**：`userdata-qemu.img` 表观 48G、实占 551M。
+  不加的话归档会从 1.5G 涨到 50G。GNU tar 的 `--sparse` 走 SEEK_HOLE，
+  空洞根本不读。
+
+### 为什么 `import` 被拦住了
+
+**实测（复现三次）**：
+
+| 实验 | 结果 |
+|---|---|
+| 原实例重启（对照组） | 标记文件**在** ✓ |
+| 归档解出来手工对比 | 与源**逐字节相同** ✓ |
+| 从归档恢复到新实例 → 开机 | 标记文件**没了** ✗ |
+
+也就是说：**归档是好的，恢复出来却不对**。已经排除的：
+
+* ❌ 归档不忠实 —— qcow2 的 md5 与源完全相同
+* ❌ 解包丢数据 —— 解开后的 qcow2 md5 与归档内一致
+* ❌ `hardware-qemu.ini` 被删（绝对路径指错机器）——
+  单独删掉它再启动原实例，数据**还在**
+* ❌ `--sparse` 本身有 bug —— 合成稀疏文件（3G 容器 8M 数据）往返逐字节一致
+
+**最可疑、还没证实的**：那个 32G 的稀疏 raw backing 文件。tar 解开后它的
+**实占块数**和源差 8 块（1126712 → 1126704），而文件系统的空洞布局对
+qcow2 覆盖层是有意义的 —— 覆盖层里没存的簇要去 backing 上读，
+空洞位置错了就可能读到错的内容。合成测试数据太少没暴露出来。
+
+**下一步该试的**：不要用 tar 装那两个文件，改用模拟器自带的 `qemu-img`
+把「raw backing + qcow2 覆盖层」**压平成一张自包含 qcow2**
+（`qemu-img convert -O qcow2 -c`），恢复时再 `convert -O raw` 转回去。
+这样只存已分配的簇，根本没有稀疏文件这回事，
+而且 Linux/Windows 两侧模拟器包里都自带 `qemu-img`。
+探针脚本已经写好了：`tools/diagnose-qemuimg-export.sh`。
+
+> ⚠️ 在查清之前，**不要把这个归档当备份用**。`export` 现在会主动打印
+> 这条警告，`import` 不加 `--unsafe` 会直接拒绝。
+
+---
+
+## 7. 网络：默认不会让两台同时上物理 LAN
 
 guest 的 `eth0` MAC 是 QEMU 的默认值 `52:54:00:12:34:56`，**所有实例一模一样**
 （模拟器没暴露改它的参数，见 [`11-snapshots-and-multi.md`](11-snapshots-and-multi.md) §4）。

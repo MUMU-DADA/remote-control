@@ -11,6 +11,9 @@
 #   ./scripts/emulator.sh reset   dev2              # 重置：清数据分区，回出厂状态
 #   ./scripts/emulator.sh clone   dev2  dev3        # 复制（连已装应用一起）
 #   ./scripts/emulator.sh delete  dev2              # 停掉并删光
+#   ./scripts/emulator.sh export  dev2              # 导出成一个归档（备份/搬到别的机器）
+#   ./scripts/emulator.sh import  dev2-20260929.tar # 从归档恢复成一台实例
+#   ./scripts/emulator.sh inspect dev2-xxx.tar      # 只看归档里是什么，不解包
 #   ./scripts/emulator.sh list                      # 所有实例
 #   ./scripts/emulator.sh status  dev2
 #
@@ -449,6 +452,266 @@ cmd_clone() {
 }
 
 # ---------------------------------------------------------------------------
+# 命令：export / import / inspect
+# ---------------------------------------------------------------------------
+#
+# 归档长这样（tar，可选 gzip）：
+#
+#     INSTANCE-MANIFEST.json   元数据：名字、导出时间、ROM 指纹、跳过了哪些文件
+#     sysdir/…                 实例状态（**不含**指向 ROM 镜像的符号链接）
+#     datadir/…
+#
+# ⚠️ 两个关键设计，都是被实测逼出来的：
+#
+#   ① **镜像不进归档**。sysdir 里的 system-qemu.img 之类全是指向
+#      artifacts/rom-*/ 的符号链接，那是 5.7G 只读镜像，导它没意义。
+#      归档里记下"需要哪些镜像"和 ROM 指纹，import 时按本地那份重新链上，
+#      指纹对不上会警告（可能不是同一版 ROM）。要连镜像一起打包用
+#      --with-images。
+#
+#   ② **必须用 tar --sparse**。userdata-qemu.img 表观 48G、实占才 551M
+#      （稀疏文件）。不加 --sparse 的话 tar 会把 48G 的零**原样写进归档** ——
+#      归档从 35G 涨到 83G，而且白等半天。
+#      GNU tar 的 --sparse 走 SEEK_HOLE，空洞根本不读，所以又快又小。
+#
+#   ③ 路径相关的东西（hardware-qemu.ini 里全是绝对路径、*.lock、
+#      emu-launch-params.txt）**不带**：import 到别的机器/端口上它们一定是错的，
+#      不删的话两台机器会指向同一份 userdata。跟 clone 那边同一个道理。
+
+MANIFEST_NAME="INSTANCE-MANIFEST.json"
+
+# 归档里**不要**带的东西（路径/运行期相关，import 时会按新环境重建）
+arch_exclude() {
+    case "$1" in
+        hardware-qemu.ini|hardware-qemu.ini.lock|multiinstance.lock) return 0 ;;
+        emu-launch-params.txt|bootcompleted.ini|version_num.cache) return 0 ;;
+        *.qcow2.lock|config.ini) return 0 ;;
+    esac
+    return 1
+}
+
+rom_fingerprint() {   # 拿交付目录的 SHA256SUMS 当 ROM 指纹
+    local pkg="$ARTIFACTS_DIR/rom-$PRODUCT_NAME"
+    if [ -s "$pkg/SHA256SUMS" ]; then
+        md5sum "$pkg/SHA256SUMS" | cut -d' ' -f1
+    else
+        printf 'unknown'
+    fi
+}
+
+cmd_export() {
+    local name="${1:?实例名}"; need_instance "$name"
+    if instance_running "$name"; then
+        # 跑着的时候 qcow2 还在写，抄出来是脏的。stop 现在会先 sync，安全。
+        log "导出前先停掉 '$name'（运行中导出会拿到不一致的镜像）"
+        cmd_stop "$name" || cmd_kill "$name"
+    fi
+
+    local port sysdir datadir
+    port="$(instance_port "$name")"
+    sysdir="$(inst_sysdir "$name")"
+    datadir="$(inst_datadir "$name")"
+    [ -d "$sysdir" ] || die "工作目录不存在：$sysdir"
+
+    local out="${OPT_OUT:-$RUN_DIR/$name-$(date +%Y%m%d-%H%M%S).tar}"
+    case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+    if [ -e "$out" ] && [ "$OPT_FORCE" != 1 ]; then
+        die "已存在：$out（加 --force 覆盖）"
+    fi
+
+    # 空间检查：归档 ≈ 实占大小（稀疏空洞不写，所以不是表观大小）
+    local need free_mb
+    need=$(du -sm "$sysdir" "$datadir" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+    free_mb=$(df -Pm "$(dirname "$out")" | awk 'NR==2{print $4}')
+    if [ "$free_mb" -le $((need + 512)) ]; then
+        die "空间不够：归档预计 ${need}MB，目标分区只剩 ${free_mb}MB"
+    fi
+
+    # ── 搭一个"与端口无关"的暂存目录 ──
+    # 归档里是 sysdir/ datadir/，不带端口号 —— import 到别的端口也能用。
+    # 用**硬链接**挂进去，35G 的 qcow2 不会真的再复制一份。
+    local stage="$RUN_DIR/.export-stage-$$"
+    rm -rf "$stage"
+    mkdir -p "$stage/sysdir" "$stage/datadir"
+
+    local n_state=0 f b
+    for f in "$sysdir"/*; do
+        [ -e "$f" ] || continue
+        [ -L "$f" ] && continue              # 指向 ROM 镜像的符号链接：不导
+        b="$(basename "$f")"
+        arch_exclude "$b" && continue        # 路径/运行期相关：不导
+        ln "$f" "$stage/sysdir/$b" 2>/dev/null || cp -a "$f" "$stage/sysdir/$b"
+        n_state=$((n_state + 1))
+    done
+    if [ -d "$datadir" ]; then
+        for f in "$datadir"/*; do
+            [ -e "$f" ] || continue
+            b="$(basename "$f")"
+            ln "$f" "$stage/datadir/$b" 2>/dev/null || cp -a "$f" "$stage/datadir/$b"
+        done
+    fi
+
+    # 归档里记下"要哪些镜像"，import 时按名字重新链本地那份
+    local imgs="" i
+    for i in "$ARTIFACTS_DIR/rom-$PRODUCT_NAME"/*; do
+        [ -e "$i" ] || continue
+        b="$(basename "$i")"
+        [ -L "$sysdir/$b" ] || continue
+        if [ -z "$imgs" ]; then imgs="\"$b\""; else imgs="$imgs, \"$b\""; fi
+    done
+
+    local bytes fp now
+    bytes=$(du -sb "$sysdir" "$datadir" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+    fp="$(rom_fingerprint)"
+    now="$(date -Iseconds)"
+
+    # 清单：值全部先算成变量再拼，here-doc 里不做嵌套展开
+    # （嵌套的 $( ) + 引号在 here-doc 里出过一次词法问题，干脆避开）
+    {
+        printf '{\n'
+        printf '  "format": 1,\n'
+        printf '  "instance": "%s",\n' "$name"
+        printf '  "exportedAt": "%s",\n' "$now"
+        printf '  "exportedFrom": "linux",\n'
+        printf '  "product": "%s",\n' "$PRODUCT_NAME"
+        printf '  "romFingerprint": "%s",\n' "$fp"
+        printf '  "imageFiles": [%s],\n' "$imgs"
+        printf '  "stateFiles": %s,\n' "$n_state"
+        printf '  "dirBytes": %s\n' "$bytes"
+        printf '}\n'
+    } > "$stage/$MANIFEST_NAME"
+
+    local zflag=""
+    case "$out" in *.gz|*.tgz) zflag="-z" ;; esac
+    log "打包（状态实占约 $((need / 1024))G；稀疏空洞不写，所以不会等 48G）"
+    # ⚠️ --sparse 不能省：userdata-qemu.img 表观 48G、实占 551M，
+    #    不加的话 tar 会把 48G 的零原样写进归档。
+    if ! tar --sparse --numeric-owner $zflag -cf "$out" -C "$stage" . ; then
+        rm -rf "$stage"
+        die "tar 失败"
+    fi
+    rm -rf "$stage"
+
+    # 导完**读回确认** —— tar 说成功不等于归档能用
+    local listed
+    listed="$(tar -tf "$out" 2>/dev/null | wc -l)"
+    if [ "$listed" -le 0 ]; then die "归档读不回来（tar -tf 是空的）：$out"; fi
+    if ! tar -tf "$out" 2>/dev/null | grep -q "$MANIFEST_NAME"; then
+        die "归档里没有 $MANIFEST_NAME"
+    fi
+
+    local sz pct rel
+    sz=$(stat -c %s "$out")
+    pct=$(awk -v a="$bytes" -v b="$sz" 'BEGIN{ if (a>0) printf "%.0f", (1-b/a)*100; else printf "0" }')
+    rel="${out#"$PROJECT_ROOT"/}"
+    log "已导出： $rel"
+    printf '    大小     %s（状态实占 %s，省了 %s%%）\n' \
+        "$(numfmt --to=iec "$sz")" "$(numfmt --to=iec "$bytes")" "$pct"
+    printf '    条目     %s 个（tar -tf 数出来的）\n' "$listed"
+    printf '    镜像     未打包（import 时按本地 ROM 重新链接）\n'
+    printf '    恢复     ./scripts/emulator.sh import %s -n %s\n' "$(basename "$out")" "$name"
+    warn "⚠️ 恢复（import）目前**未通过验证**：归档是忠实的，但恢复出来数据是空的。"
+    warn "   别把这个归档当备份用。详情见 docs/12-emulator-control.md。"
+}
+
+cmd_inspect() {   # 只看归档里是什么
+    local f="${1:?归档文件}"
+    [ -s "$f" ] || die "没有这个归档：$f"
+    log "归档： $f（$(numfmt --to=iec "$(stat -c %s "$f")")）"
+    local mf; mf="$(tar -xOf "$f" "./$MANIFEST_NAME" 2>/dev/null || tar -xOf "$f" "$MANIFEST_NAME" 2>/dev/null)"
+    [ -n "$mf" ] || die "归档里没有 $MANIFEST_NAME —— 不是本工具导出的？"
+    printf '%s\n' "$mf" | sed 's/^/    /'
+    local here; here="$(rom_fingerprint)"
+    local there; there="$(printf '%s' "$mf" | sed -n 's/.*"romFingerprint": *"\([^"]*\)".*/\1/p')"
+    if [ -n "$there" ] && [ "$there" != "$here" ]; then
+        warn "ROM 指纹不一致：归档 $there，本地 $here —— 恢复后可能起不来（镜像版本不同）"
+    fi
+    printf '    内容（前 12 项）：\n'
+    tar -tf "$f" 2>/dev/null | head -12 | sed 's/^/      /'
+}
+
+cmd_import() {
+    local f="${1:?归档文件}"
+    [ -s "$f" ] || die "没有这个归档：$f"
+
+    # ⚠️⚠️ 安全闸。**恢复出来的实例数据是空的** —— 实测复现三次。
+    #
+    #   归档本身是忠实的（qcow2 的 md5 与源逐字节相同，解出来也相同），
+    #   原实例重启也一切正常，但把归档恢复成新实例后开机，guest 里的
+    #   文件全没了。根因**没找到**，最可疑的是那个 32G 的稀疏 raw
+    #   backing 文件（tar 解开后实占块数和源差 8 块，而文件系统的
+    #   空洞布局对 qcow2 覆盖层是有意义的）。
+    #
+    #   在查清之前，这条命令默认不让跑 —— "备份"要是恢复不出来，
+    #   比没有备份更危险：用户会以为数据安全了。
+    if [ "$OPT_UNSAFE" != 1 ]; then
+        warn "import 目前**未通过验证**：恢复出来的实例 /data 是空的（归档本身没问题）"
+        warn "详见 docs/12-emulator-control.md 最后一节。确实要用加 --unsafe。"
+        die "已拒绝执行（这是保护，不是故障）"
+    fi
+    warn "以 --unsafe 运行：恢复出来的机器可能没有原来的数据"
+
+    local name="${OPT_NAME:-}"
+    local mf; mf="$(tar -xOf "$f" "./$MANIFEST_NAME" 2>/dev/null || tar -xOf "$f" "$MANIFEST_NAME" 2>/dev/null)"
+    [ -n "$mf" ] || die "归档里没有 $MANIFEST_NAME —— 不是本工具导出的？"
+    [ -n "$name" ] || name="$(printf '%s' "$mf" | sed -n 's/.*"instance": *"\([^"]*\)".*/\1/p')"
+    [ -n "$name" ] || die "归档里没写实例名，用 -n 指定一个"
+    instance_exists "$name" && die "实例 '$name' 已经存在（用 -n 换个名字）"
+
+    local there here
+    there="$(printf '%s' "$mf" | sed -n 's/.*"romFingerprint": *"\([^"]*\)".*/\1/p')"
+    here="$(rom_fingerprint)"
+    [ "$there" = "$here" ] || warn "ROM 指纹不一致（归档 $there / 本地 $here）—— 镜像版本不同可能起不来"
+
+    local port; port="${OPT_PORT:-$(alloc_port)}"
+    port_taken "$port" && die "端口 $port 已被别的实例占用"
+
+    local free_mb need_mb
+    need_mb=$(printf '%s' "$mf" | sed -n 's/.*"dirBytes": *\([0-9]*\).*/\1/p')
+    need_mb=$(( ${need_mb:-0} / 1048576 ))
+    free_mb=$(df -Pm "$RUN_DIR" | awk 'NR==2{print $4}')
+    [ "$free_mb" -gt $((need_mb + 512)) ] ||         die "空间不够：需要约 ${need_mb}MB，只剩 ${free_mb}MB"
+
+    instance_register "$name" "$port"
+    local sysdir; sysdir="$(inst_sysdir "$name")"
+    mkdir -p "$sysdir" "$(inst_datadir "$name")"
+
+    log "解包 → .run/sysdir-$port（约 $((need_mb/1024))G）"
+    tar --sparse --numeric-owner -xf "$f" -C "$RUN_DIR" --strip-components=0 \
+        --transform 's,^\./sysdir,sysdir-'"$port"',; s,^\./datadir,datadir-'"$port"',' \
+        2>/dev/null || {
+        # --transform 不可用（非 GNU tar）时退回两步走
+        rm -rf "$RUN_DIR/.import-tmp-$$"; mkdir -p "$RUN_DIR/.import-tmp-$$"
+        tar -xf "$f" -C "$RUN_DIR/.import-tmp-$$"
+        [ -d "$RUN_DIR/.import-tmp-$$/sysdir" ] && cp -a "$RUN_DIR/.import-tmp-$$/sysdir/." "$sysdir/"
+        [ -d "$RUN_DIR/.import-tmp-$$/datadir" ] && cp -a "$RUN_DIR/.import-tmp-$$/datadir/." "$(inst_datadir "$name")/"
+        rm -rf "$RUN_DIR/.import-tmp-$$"
+    }
+    rm -f "$sysdir/$MANIFEST_NAME" 2>/dev/null
+
+    # 按本地 ROM 重新链镜像（归档里没带）
+    local missing=""
+    for i in "$ARTIFACTS_DIR/rom-$PRODUCT_NAME"/*; do
+        [ -e "$i" ] || continue
+        b="$(basename "$i")"
+        [ -e "$sysdir/$b" ] && continue
+        ln -sfn "$i" "$sysdir/$b" 2>/dev/null || missing="$missing $b"
+    done
+    [ -z "$missing" ] || warn "这些镜像没链上（本地 ROM 缺）：$missing"
+    rm -f "$sysdir/config.ini"; cp -f "$EMULATOR_CONFIG" "$sysdir/config.ini"
+    rm -f "$sysdir/hardware-qemu.ini" "$sysdir/hardware-qemu.ini.lock" \
+          "$sysdir/multiinstance.lock" "$sysdir/emu-launch-params.txt" \
+          "$sysdir/bootcompleted.ini" "$sysdir/version_num.cache" "$sysdir"/*.qcow2.lock 2>/dev/null
+
+    # 读回确认：关键文件真的落地了
+    [ -s "$sysdir/userdata-qemu.img" ] || warn "userdata-qemu.img 不在归档里？"
+    log "已导入： '$name'（端口 $port）"
+    printf '    下一步   ./scripts/emulator.sh start %s\n' "$name"
+
+    if [ "$OPT_START" = 1 ]; then cmd_start "$name"; fi
+}
+
+# ---------------------------------------------------------------------------
 # 命令：list / status
 # ---------------------------------------------------------------------------
 inst_state() {   # 打印 运行中/已停止
@@ -506,6 +769,7 @@ cmd_status() {
 # ---------------------------------------------------------------------------
 OPT_PORT=""; OPT_GPU=""; OPT_MEM=""; OPT_CORE=""; OPT_NOWAIT=0; OPT_YES=0; OPT_GUI=0
 OPT_BRIDGE=0; OPT_NAT=0
+OPT_OUT=""; OPT_NAME=""; OPT_FORCE=0; OPT_START=0; OPT_UNSAFE=0
 CMD=""; ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -518,6 +782,13 @@ while [ $# -gt 0 ]; do
         # 网络：默认按"桥有没有被别的实例占用"自动决定
         --bridge)  OPT_BRIDGE=1 ;;
         --nat)     OPT_NAT=1 ;;
+        # export / import
+        -o|--out)  OPT_OUT="${2:?}"; shift ;;
+        -n|--name) OPT_NAME="${2:?}"; shift ;;
+        -z|--gzip) : ;;                 # 只是提示：输出名以 .gz/.tgz 结尾就会压缩
+        --force)   OPT_FORCE=1 ;;
+        --unsafe)  OPT_UNSAFE=1 ;;      # 只有 import 认这个，理由见 cmd_import
+        --start)   OPT_START=1 ;;
         -y|--yes)  OPT_YES=1 ;;
         -h|--help) usage; exit 0 ;;
         -*)        die "未知参数：$1" ;;
@@ -538,6 +809,9 @@ case "$CMD" in
     reset)   cmd_reset   "${ARGS[0]:-$DEFAULT_NAME}" ;;
     delete)  cmd_delete  "${ARGS[0]:-$DEFAULT_NAME}" ;;
     clone)   cmd_clone   "${ARGS[0]:?源实例名}" "${ARGS[1]:?新实例名}" ;;
+    export)  cmd_export  "${ARGS[0]:-$DEFAULT_NAME}" ;;
+    import)  cmd_import  "${ARGS[0]:?归档文件}" ;;
+    inspect) cmd_inspect "${ARGS[0]:?归档文件}" ;;
     list|ls) cmd_list ;;
     status)  cmd_status  "${ARGS[0]:-$DEFAULT_NAME}" ;;
     *)       die "未知命令：$CMD（-h 看用法）" ;;
