@@ -650,6 +650,11 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
             .Field("served", h.served)
             .Field("misses", h.misses)
             .Field("running", h.running)
+            // 停检省下了多少：抓了 frames 帧，其中只有 changeGen 代
+            // 内容是新的，其余都跟上一帧一模一样。
+            // unchangedRatio 高 = 画面基本静止，停检正在起作用。
+            .Field("changeGen", h.changeGen)
+            .Field("unchanged", h.unchanged)
             // 每个订阅者的明细。
             //
             // 光有 activeFps 不够用：抓帧节奏由**最高需求**决定，所以只要
@@ -947,16 +952,6 @@ void DownscaleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
     }
 }
 
-// FNV-1a。判断画面有没有变 —— 比编码便宜得多。
-uint64_t HashBytes(const uint8_t* p, size_t n) {
-    uint64_t h = 1469598103934665603ULL;
-    for (size_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
 }  // namespace
 
 // 取一帧、降采样、编码。
@@ -1017,6 +1012,23 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
         return {};
     }
 
+    // ── 停检：内容跟上次发的一模一样就直接走 ──
+    //
+    // ⚠️ 必须放在**所有像素操作之前**。抓帧层已经比过一次了
+    //    （见 SharedFrame::changeGen），这里只比一个整数。
+    //
+    //    以前是放在降采样之后、对降采样缓冲区做 FNV 逐字节哈希：
+    //    720p 下 3.66 ms/帧 一个客户端，60fps 就是 22% 一个核 ——
+    //    一个"用来省性能"的开关反而成了最贵的一环。更糟的是它排在
+    //    BGRA 转换和降采样**后面**，所以那些活儿在白干的帧上照样全做。
+    if (p.skipUnchanged && st->haveChangeGen &&
+        f->changeGen == st->lastChangeGen) {
+        *unchanged = true;
+        return {};
+    }
+    st->lastChangeGen = f->changeGen;
+    st->haveChangeGen = true;
+
     const uint32_t w = f->width, h = f->height;
     const size_t size = f->size;
     const uint8_t* src = f->data;
@@ -1046,17 +1058,6 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
     }
     st->outW = dw;
     st->outH = dh;
-
-    // 变化检测放在降采样之后：降采样本来就是平均，顺带把传感器噪声
-    // 这类微小抖动滤掉了，跳过率更高。
-    const size_t encBytes = static_cast<size_t>(dw) * dh * 4;
-    const uint64_t hash = HashBytes(enc, encBytes);
-    if (p.skipUnchanged && st->haveLast && hash == st->lastHash) {
-        *unchanged = true;
-        return {};
-    }
-    st->lastHash = hash;
-    st->haveLast = true;
 
     // ── H.264：不走 ImageEncoder ──
     //
@@ -1364,7 +1365,7 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                                     static_cast<ImageFormat>(p.codec));
                             p.level = ClampInt(std::to_string(v.num("v", p.level)),
                                                qr.min, qr.max, p.level);
-                            st.haveLast = false;
+                            st.haveChangeGen = false;
                             WsWriteText(fd, "{\"t\":\"ack\",\"quality\":" +
                                                 std::to_string(p.level) + "}");
                         } else if (t == "format") {
@@ -1378,21 +1379,21 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                                 p.codec = static_cast<int>(nf);
                                 p.level = (nf == ImageFormat::kJpeg) ? 75
                                         : (nf == ImageFormat::kWebp) ? 80 : 1;
-                                st.haveLast = false;   // 换了格式，缓存作废
+                                st.haveChangeGen = false;   // 换了格式，缓存作废
                                 WsWriteText(fd,
                                     std::string("{\"t\":\"ack\",\"format\":\"") +
                                         ImageEncoder::Name(nf) + "\"}");
                             }
                         } else if (t == "skipUnchanged") {
                             p.skipUnchanged = (v.num("v", 1) != 0);
-                            st.haveLast = false;   // 重新开始判定
+                            st.haveChangeGen = false;   // 重新开始判定
                             WsWriteText(fd, std::string("{\"t\":\"ack\","
                                     "\"skipUnchanged\":") +
                                     (p.skipUnchanged ? "true" : "false") + "}");
                         } else if (t == "refresh") {
                             // 客户端主动要求"下一帧无论变没变都发"，
                             // 用于页面重新可见时立刻刷新一次。
-                            st.haveLast = false;
+                            st.haveChangeGen = false;
                             nextFrameAt = NowMs();
                         }
                     }

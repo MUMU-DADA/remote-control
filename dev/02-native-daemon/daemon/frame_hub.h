@@ -62,6 +62,17 @@ struct SharedFrame {
     uint64_t seq          = 0;         // 单调递增，从 1 开始
     int64_t  capturedAtMs = 0;         // 单调时钟
 
+    // 「这是第几代**不同**的画面」—— 内容变了才 +1。
+    //
+    // 为什么放在这一层：变化检测以前是每个客户端各自对降采样后的
+    // 缓冲区做一遍 FNV 逐字节哈希。720p 是 3.52 MB，实测 3.66 ms/帧，
+    // 60fps 下单客户端就吃掉 22% 一个核，而且 N 个客户端算 N 遍。
+    //
+    // 改成在源头比一次（memcmp 全等 0.081 ms，快 45 倍；一变就
+    // 首字节退出），客户端只比一个整数 —— 静态画面下连 BGRA 转换
+    // 和降采样都不必做。
+    uint64_t changeGen    = 0;
+
     // 显存格式归一化成 RGBA 需要转换吗（BGRA 要）
     bool needsBgraSwap() const { return pixelFormat == 5; }
 };
@@ -162,6 +173,8 @@ class FrameHub {
         int64_t  lastCaptureMs = 0;       // 最近一次抓帧耗时
         uint64_t served        = 0;       // 取帧直接命中（没等）的次数
         uint64_t misses        = 0;       // 没等到新帧（超时）的次数
+        uint64_t changeGen     = 0;       // 当前是"第几代不同的画面"
+        uint64_t unchanged     = 0;       // 内容与上一帧相同而省下的帧数
     };
     Stats GetStats() const;
 
@@ -189,8 +202,11 @@ class FrameHub {
     // 抓一帧（会走 Dispatcher，即持那把操作锁）。
     // 静态成员是因为抓帧线程的 lambda 需要调它。
     // seq 由调用方分配后传进来 —— CaptureOnce 是静态的，拿不到 impl_。
+    // prev 用来做源头变化检测（见 SharedFrame::changeGen）；没有上一帧
+    // 就传 nullptr。genIfChanged 是"内容变了的话该用哪个代数"。
     static FramePtr CaptureOnce(Dispatcher* dispatcher, uint64_t seq,
-                                uint32_t targetWidth);
+                                uint32_t targetWidth, const FramePtr& prev,
+                                uint64_t genIfChanged);
 
     struct Impl;
     Impl* impl_ = nullptr;   // 懒创建，避免静态初始化顺序问题

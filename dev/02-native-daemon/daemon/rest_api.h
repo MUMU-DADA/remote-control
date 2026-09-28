@@ -39,8 +39,6 @@ struct StreamParams {
 
 // 每条流各自持有一份（跳过未变化帧的判断是有状态的）
 struct StreamState {
-    uint64_t lastHash = 0;
-    bool     haveLast = false;
     uint64_t frameNo  = 0;
     uint32_t outW     = 0;
     uint32_t outH     = 0;
@@ -66,6 +64,14 @@ struct StreamState {
     bool     needKeyFrame = false;   // 下一个输出要是关键帧
     uint64_t hubSeq = 0;          // 本连接已经消费到哪一帧
     uint64_t hubTimeouts = 0;     // 等新帧超时的次数（诊断用）
+
+    // ── 停检 ──
+    //
+    // 比的是抓帧层给的"第几代不同的画面"（见 SharedFrame::changeGen），
+    // 只比一个整数。以前这里是自己对降采样后的缓冲区做 FNV 逐字节哈希，
+    // 720p 下 3.66 ms/帧 —— 停检本来是为了省性能，结果它自己最贵。
+    uint64_t lastChangeGen = 0;
+    bool     haveChangeGen = false;
 };
 
 class Dispatcher;

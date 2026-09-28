@@ -245,7 +245,13 @@ curl http://host:8088/api/v1/describe
 | `served` | 取帧时「最新帧已备好」的次数 |
 | `misses` | 没等到新帧的次数。**这个高 = 抓帧跟不上需求，客户端在等** |
 | `running` | 抓帧线程活着吗 |
+| `changeGen` | 当前是「第几代**不同**的画面」。内容变了才 +1 |
+| `unchanged` | 与上一帧完全相同而**省下**的帧数 |
 | `subscriberList` | 每个订阅者的明细，见下 |
+
+`unchanged / frames` 高 = 画面基本静止，停检正在起作用。
+静止画面上这个比例能到 99% —— 也就是说绝大多数抓帧都是白抓的
+（这是「按时抓帧换低延迟」的固有代价，见 `docs/06-capture-performance.md`）。
 
 `subscriberList` 的每一项：
 

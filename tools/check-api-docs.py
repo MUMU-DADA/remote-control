@@ -99,7 +99,8 @@ pm = api("/params")
 cap = pm.get("capture", {})
 t = open(os.path.join(DOCS, "01-http.md"), encoding="utf-8").read()
 for f in ("activeFps", "subscribers", "frames", "lastCaptureMs",
-          "captureWidth", "served", "misses", "running", "subscriberList"):
+          "captureWidth", "served", "misses", "running", "subscriberList",
+          "changeGen", "unchanged"):
     chk(f in cap, f"capture.{f} 存在", f"实际字段 {sorted(cap)}")
     chk(f in t, f"01-http.md 里写了 capture.{f}")
 chk(isinstance(cap.get("subscriberList"), list),
