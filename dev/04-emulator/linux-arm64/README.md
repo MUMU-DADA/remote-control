@@ -830,3 +830,57 @@ super 总量 3.01GB，四个分区合计 2.48GB，**还有 0.53GB 未分配** �
 2. **彻底路线**：`resize2fs` 把 system 的 ext4 扩容 128MB → 注入 `/lib64/arm64/` →
    `lpmake` 按原布局重建 super（四个分区 + `emulator_dynamic_partitions` 组）→
    写回 `system.img` 的 2MB 处 → 启动（仍需 `-writable-system` 关 verity）。
+
+---
+
+## 第 15 轮：镜像手术全流程跑通 —— 最后卡在 AVB 校验
+
+### 一、发现 `/tmp` 是 tmpfs（这解释了好几个怪现象）
+
+`/tmp` 是 **16GB 的内存盘**，只剩 6.1GB；而我的镜像（system 1.4G + product 1.45G +
+system_ext 0.13G + vendor 0.17G）已经占了 3.2G —— 再写一个 3.2G 的新 super 就 **ENOSPC**，
+`lpmake` 因此静默失败、`dd skip` 也读出 0 字节。**把手术目录挪到 `.run/surgery/`（磁盘盘，
+剩 151G）后一切正常**。教训：临时工作目录不要用 `/tmp`。
+
+### 二、完整手术流程（已验证可行）
+
+1. **扩容 system 的 ext4**：把文件补齐到 1.35GB 后 `resize2fs` —— 成功
+   （258969 → 353894 块，**空闲 373MB**）；
+2. **注入 161 个 arm64 库**：`debugfs -w -f`（一条命令文件里 161 条 `write`）把库写进
+   **`/lib64/arm64/`**（system-as-root 布局里它就是 `/system/lib64/arm64`）；
+3. **提取其余分区**：`system_ext` 131,895,296 / `product` 1,452,154,880 / `vendor` 165,437,440；
+4. **`lpmake` 重建 super**（3,229,614,080 字节，与原 super 等大）：
+   ```
+   lpmake --device-size 3229614080 --metadata-size 65536 --metadata-slots 2 \
+     --group emulator_dynamic_partitions:4294967296 \
+     --partition system:readonly:1449549824:emulator_dynamic_partitions --image system=sys3.img \
+     ... (system_ext / product / vendor 同理) --out newsuper.img
+   ```
+   注意：**不能再显式给 `--group default`**（lpmake 会报 "Group already exists: default"）；
+5. **写回 `system.img` 的 2MB 处**；启动后内核日志确认
+   **`Created logical partition product/system_ext/vendor`** ✓ —— 说明新 super 被正确解析。
+
+### 三、卡点：AVB 校验
+
+```
+init: Failed to open AvbHandle: No such file or directory
+init: Failed to setup verity for '/system': No such file or directory
+init: Failed to mount /system: No such file or directory
+init: Failed to mount required partitions early ...
+init: InitFatalReboot: signal 6        → 启动循环（7 次）
+```
+
+原因明确：**`vbmeta` 分区（system.img 里 1MB 的那个）里存的是各分区的 AVB 摘要**，
+我改了 `system` 的 ext4，摘要自然对不上 ✗；`-writable-system` 并没有传
+`androidboot.veritymode=disabled`（内核 cmdline 里只看到 `vbmeta.digest/size`），
+所以第一阶段 init 仍按 AVB 去挂 `/system`。
+
+### 四、下一轮的两条修法（都很具体）
+
+1. **重建 vbmeta**：用 AOSP 树里的 `external/avb/avbtool`，对新的
+   system/system_ext/product/vendor 生成 hashtree 描述符并 `make_vbmeta_image`
+   写回那个 1MB 分区；
+2. **更省事**：**把 guest 的 fstab 里 `system` 的 `avb` 标志去掉** —— 第一阶段 fstab
+   在 ramdisk（`initrd`＝`ramdisk.img`）里，改完重新打包即可，这样根本不走 AVB。
+
+任一条做完，就能启动带 161 个 arm64 框架库的系统，直接跑 `autod` 收尾。
