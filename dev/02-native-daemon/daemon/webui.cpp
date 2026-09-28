@@ -60,12 +60,26 @@ const std::string& WebUiHtml() {
   .app button { padding:2px 7px; font-size:11px; }
   #apps { max-height:240px; overflow:auto; }
   #apps input[type=text] { margin-bottom:6px; }
+  .app button { padding:2px 7px; font-size:11px; }
+  #logbox { margin-top:6px; height:220px; overflow:auto; background:#0d0d0d;
+            border:1px solid #333; border-radius:4px; padding:5px;
+            font:11px/1.45 ui-monospace,Menlo,Consolas,monospace;
+            white-space:pre-wrap; word-break:break-all; }
+  .lg-I { color:#9cf; } .lg-W { color:#fc6; } .lg-E { color:#f88; }
+  .lg-D { color:#888; } .lg-T { color:#666; }
 </style>
 </head>
 <body>
 <header>
   <h1>autod 控制台</h1>
   <span class="dim" id="meta">连接中…</span>
+  <!-- 服务对外开关。放在最显眼的位置：它是"这台设备还能不能被控制"
+       的总闸，而不是某个功能的设置。 -->
+  <label id="svcwrap" style="margin-left:auto; display:flex; align-items:center;
+         gap:6px; font-size:12px; color:#4a9">
+    <input type="checkbox" id="svcsw" onchange="toggleService(this.checked)">
+    <span id="svctext">服务对外可用</span>
+  </label>
 </header>
 
 <!-- 令牌条。开启鉴权后才需要填，平时隐藏（display:none）——
@@ -102,6 +116,13 @@ const std::string& WebUiHtml() {
         <button onclick="setCodec('jpeg',90)">JPEG 清</button>
         <button onclick="setCodec('webp',75)">WebP</button>
         <button onclick="setCodec('png',1)">PNG 无损</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label style="font-size:12px; display:flex; align-items:center; gap:5px">
+          <input type="checkbox" id="skipsw" checked
+                 onchange="setSkipUnchanged(this.checked)">
+          画面停止检测（静止时不重发）
+        </label>
       </div>
     </div>
 
@@ -154,6 +175,34 @@ const std::string& WebUiHtml() {
       <div id="apps" class="dim" style="margin-top:6px;font-size:12px">
         （点「刷新列表」加载）
       </div>
+    </div>
+
+    <div class="card">
+      <h2>运行中的应用</h2>
+      <div class="row">
+        <button onclick="loadRunning()">刷新</button>
+        <label style="font-size:12px;align-self:center">
+          <input type="checkbox" id="runAuto" onchange="setRunAuto(this.checked)">
+          自动刷新
+        </label>
+      </div>
+      <div id="running" class="dim" style="margin-top:6px;font-size:12px">
+        （点「刷新」加载）
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>日志</h2>
+      <div class="row">
+        <button onclick="logClear()">清屏</button>
+        <button onclick="logHistory()">读历史文件</button>
+        <label style="font-size:12px;align-self:center">
+          <input type="checkbox" id="logAuto" checked
+                 onchange="setLogAuto(this.checked)">
+          实时
+        </label>
+      </div>
+      <div id="logbox"></div>
     </div>
 
     <div class="card">
@@ -270,6 +319,13 @@ function api(path, opts) {
   const o = Object.assign({}, opts || {});
   o.headers = authHeaders(o.headers);
   return fetch('/api/v1' + path, o).then(r => {
+    if (r.status === 503) {
+      // 服务被关了。这不是错误，是用户自己按的 —— 把开关状态同步过来，
+      // 而不是弹一堆失败提示。
+      serving = false;
+      updateServiceUi('服务已关闭对外能力');
+      throw new Error('服务已关闭');
+    }
     if (r.status === 401) {
       // 令牌缺失或不对 —— 把输入条亮出来，别让用户对着一个
       // 什么都点不动的页面猜
@@ -323,7 +379,7 @@ function streamUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   return withToken(proto + '//' + location.host + '/api/v1/stream'
        + '?fps=' + fps + '&format=' + codec + '&quality=' + quality
-       + '&maxWidth=' + maxW);
+       + '&maxWidth=' + maxW + '&skipUnchanged=' + (skipUnchanged ? 1 : 0));
 }
 
 function startStream() {
@@ -722,10 +778,187 @@ function power(action) {
     .catch(e => setStatus(label + '失败：' + e, true));
 }
 
+// ── 画面流停止检测 ──
+//
+// "停止检测"= 画面没变时整帧跳过编码。静止画面下能省掉全部编码开销，
+// 但刚打开页面时如果画面一直不动，会让人以为流挂了 —— 所以给个开关。
+let skipUnchanged = true;
+
+function setSkipUnchanged(on) {
+  skipUnchanged = on;
+  if (streamReady) {
+    // 走 WS 命令，不用重连
+    sendStream({t: 'skipUnchanged', v: on ? 1 : 0});
+  }
+  setStatus(on ? '已开启画面停止检测（静止时不重发）' : '已关闭 —— 每帧都会发送');
+}
+
+function sendStream(obj) {
+  if (streamReady && streamWs) {
+    streamWs.send(JSON.stringify(obj));
+    return true;
+  }
+  return false;
+}
+
+// ── 服务对外开关 ──
+let serving = true;
+
+function toggleService(on) {
+  api('/service', { method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({on: on}) })
+    .then(d => {
+      serving = d.serving;
+      updateServiceUi(d.note || '');
+    })
+    .catch(e => setStatus('切换服务开关失败：' + e, true));
+}
+
+function refreshService() {
+  api('/service').then(d => {
+    serving = d.serving;
+    updateServiceUi('');
+  }).catch(() => {});
+}
+
+function updateServiceUi(note) {
+  $('svcsw').checked = serving;
+  $('svctext').textContent = serving ? '服务对外可用' : '服务已关闭';
+  $('svcwrap').style.color = serving ? '#4a9' : '#c55';
+  if (note) setStatus(note);
+}
+
+// ── 运行中的应用 ──
+let runTimer = null;
+
+function loadRunning() {
+  const box = $('running');
+  api('/running').then(d => {
+    box.textContent = '';
+    box.className = '';
+    const apps = d.apps || [];
+    if (!apps.length) {
+      box.innerHTML = '<span class="dim">（没有运行中的应用）</span>';
+      return;
+    }
+    // 前台和可见的排前面 —— 那才是用户关心的
+    const rank = st => st.startsWith('fg') ? 0 : st.startsWith('vis') ? 1
+                    : st.startsWith('prcp') ? 2 : 3;
+    apps.sort((a, b) => rank(a.state) - rank(b.state));
+    for (const a of apps) {
+      const row = document.createElement('div');
+      row.className = 'app';
+      const name = document.createElement('span');
+      name.className = 'pkg';
+      name.textContent = a.pid + '  [' + a.state + ']  ' + a.process;
+      name.title = a.process + '  uid=' + a.uid;
+      const bKill = document.createElement('button');
+      bKill.textContent = '关闭';
+      // 系统进程不给按钮：误点会重启系统 UI，而不是关掉一个应用
+      if (/^(android|com\.android\.systemui)$/.test(a.package)) {
+        bKill.disabled = true;
+        bKill.title = '系统进程，不提供关闭';
+      } else {
+        bKill.onclick = () => killApp(a.package);
+      }
+      row.append(name, bKill);
+      box.append(row);
+    }
+    setStatus('运行中 ' + apps.length + ' 个进程');
+  }).catch(e => setStatus('取运行状态失败：' + e, true));
+}
+
+function killApp(pkg) {
+  if (!confirm('强制停止 ' + pkg + '？')) return;
+  api('/apps/' + encodeURIComponent(pkg) + '/kill',
+      { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' })
+    .then(() => { setStatus('已停止 ' + pkg); setTimeout(loadRunning, 600); })
+    .catch(e => setStatus('停止失败：' + e, true));
+}
+
+function setRunAuto(on) {
+  if (runTimer) { clearInterval(runTimer); runTimer = null; }
+  if (on) runTimer = setInterval(loadRunning, 3000);
+}
+
+// ── 日志流 ──
+//
+// 用 WebSocket 增量推，而不是轮询 /api/v1/log：
+// 日志是"有就推、没有就没有"，轮询在没日志时纯属白问，
+// 有日志时又必然滞后一个轮询周期。
+let logWs = null;
+let logReady = false;
+let logSeen = 0;
+let logFilterLevel = -1;   // -1 = 不过滤
+
+function connectLog() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  try { logWs = new WebSocket(withToken(proto + '//' + location.host + '/api/v1/logstream')); }
+  catch (e) { return; }
+  logWs.onopen = () => { logReady = true; };
+  logWs.onclose = () => {
+    logReady = false; logWs = null;
+    setTimeout(connectLog, 2000);
+  };
+  logWs.onerror = () => { logReady = false; };
+  logWs.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m.t === 'lines') appendLogs(m.lines);
+  };
+}
+
+function appendLogs(lines) {
+  if (!lines || !lines.length) return;
+  const box = $('logbox');
+  if (!$('logAuto').checked) return;
+
+  // 只在贴近底部时自动滚动。用户往上翻看历史时把他拽回底部
+  // 是最招人烦的行为之一。
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+
+  const frag = document.createDocumentFragment();
+  for (const l of lines) {
+    logSeen = Math.max(logSeen, l.seq || 0);
+    const lv = 'IWED'[l.level] || '?';
+    const d = document.createElement('div');
+    d.className = 'lg-' + lv;
+    d.textContent = lv + ' ' + (l.text || '');
+    frag.append(d);
+  }
+  box.append(frag);
+  // 上限：日志流是持续的，DOM 不限行数的话开一天就能把标签页拖死
+  while (box.childElementCount > 500) box.removeChild(box.firstChild);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function logClear() {
+  $('logbox').textContent = '';
+  logSeen = 0;
+  if (logReady) logWs.send(JSON.stringify({t: 'clear'}));
+}
+
+function logHistory() {
+  api('/logfile').then(d => {
+    $('logbox').textContent = '';
+    const lines = (d.text || '').split('\n').filter(x => x);
+    for (const t of lines) {
+      const el = document.createElement('div');
+      el.className = 'lg-T';
+      el.textContent = t;
+      $('logbox').append(el);
+    }
+    setStatus('历史日志 ' + d.bytes + ' 字节（' + d.path + '）');
+  }).catch(e => setStatus('读历史日志失败：' + e, true));
+}
+
 // ── 启动 ──
 refresh();
+refreshService();
 startStream();
 connectTouch();
+connectLog();
+loadRunning();
+setRunAuto(true);
 setInterval(refresh, 10000);   // 定期刷状态，页面放着不动也不会显示过期信息
 </script>
 </body>

@@ -4,7 +4,11 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <fcntl.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 #include <time.h>
 
 #include <mutex>
@@ -51,17 +55,140 @@ void LogBuffer::Append(LogLevel level, const char* tag, const std::string& text)
     line.text   = text;
 
     if (lines_.size() < kCapacity) {
-        lines_.push_back(std::move(line));
+        lines_.push_back(line);        // 不 move —— 下面还要用它落盘
         head_ = lines_.size();
         if (head_ == kCapacity) head_ = 0;
         ++count_;
+        AppendToHistory(line);
         return;
     }
 
     // 满了：覆盖 head_ 位置
-    lines_[head_] = std::move(line);
+    lines_[head_] = line;          // 不 move —— 下面还要用它落盘
     head_ = (head_ + 1) % kCapacity;
     ++dropped_;
+    AppendToHistory(line);
+}
+
+// ── 落盘 ────────────────────────────────────────────────────────────────────
+//
+// 只保留最近 kHistoryMaxBytes 字节。
+// 做法是"追加到超过 kHistoryTrimAt 时裁一次"，而不是每行都裁 ——
+// 每行都读回 10KB 再写出去，日志一多就成了主要的 CPU 开销。
+//
+// 裁剪取的是**文件的尾部**：日志的价值在最近的，砍头留尾。
+void LogBuffer::AppendToHistory(const LogLine& line) {
+    if (historyPath_.empty()) return;
+
+    // 组装一行。时间用墙上时间 —— 排障时"几点发生的"比"开机后多久"有用；
+    // 内存缓冲里用单调时钟是为了排序稳定，这里没那个需求。
+    char ts[32];
+    const time_t now = time(nullptr);
+    struct tm tmv{};
+    localtime_r(&now, &tmv);
+    strftime(ts, sizeof(ts), "%m-%d %H:%M:%S", &tmv);
+
+    static const char* kLevelChar = "IWED";
+    const int li = static_cast<int>(line.level);
+    const char lc = kLevelChar[(li >= 0 && li < 4) ? li : 0];
+
+    std::string out;
+    out.reserve(line.text.size() + 48);
+    out += ts;
+    out += ' ';
+    out += lc;
+    out += ' ';
+    out += line.text;
+    out += '\n';
+
+    // 追加。用 O_APPEND 而不是自己维护偏移 —— 即使有别的写入者
+    // （比如用户手工 echo）也不会互相覆盖。
+    const int fd = open(historyPath_.c_str(),
+                        O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0660);
+    if (fd < 0) return;          // 写不了就算了，日志不该影响服务本身
+    ssize_t ig = write(fd, out.data(), out.size());
+    (void)ig;
+
+    // 超过阈值就裁。fstat 比每次自己记账可靠（文件可能被外部改过）。
+    struct stat st{};
+    if (fstat(fd, &st) == 0 &&
+        static_cast<size_t>(st.st_size) > kHistoryMaxBytes) {
+        close(fd);
+        TrimHistory();
+        return;
+    }
+    close(fd);
+}
+
+void LogBuffer::TrimHistory() {
+    // 读出整个文件，留下尾部 kHistoryMaxBytes，重写。
+    // 走临时文件 + rename：读的时候可能有人在看这个文件，
+    // 直接 truncate 会让他们看到半截内容。
+    const int fd = open(historyPath_.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    std::string all;
+    char buf[4096];
+    for (;;) {
+        const ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0) break;
+        all.append(buf, static_cast<size_t>(n));
+    }
+    close(fd);
+
+    if (all.size() <= kHistoryTrimTo) return;
+
+    size_t cut = all.size() - kHistoryTrimTo;
+    // 从行首开始，避免留下半行 —— 半行日志比少几行更难读
+    const size_t nl = all.find('\n', cut);
+    if (nl != std::string::npos) cut = nl + 1;
+
+    const std::string tmp = historyPath_ + ".tmp";
+    const int wfd = open(tmp.c_str(),
+                         O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0660);
+    if (wfd < 0) return;
+    size_t sent = 0;
+    const std::string keep = all.substr(cut);
+    while (sent < keep.size()) {
+        const ssize_t n = write(wfd, keep.data() + sent, keep.size() - sent);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        sent += static_cast<size_t>(n);
+    }
+    fsync(wfd);
+    close(wfd);
+    rename(tmp.c_str(), historyPath_.c_str());
+}
+
+void LogBuffer::SetHistoryPath(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    historyPath_ = path;
+    if (historyPath_.empty()) return;
+
+    // 启动时先裁一次：上次退出时可能刚好留了个大文件
+    TrimHistory();
+}
+
+std::string LogBuffer::HistoryPath() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return historyPath_;
+}
+
+std::string LogBuffer::ReadHistory() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (historyPath_.empty()) return {};
+    const int fd = open(historyPath_.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return {};
+    std::string all;
+    char buf[4096];
+    for (;;) {
+        const ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0) break;
+        all.append(buf, static_cast<size_t>(n));
+    }
+    close(fd);
+    return all;
 }
 
 std::vector<LogLine> LogBuffer::Since(uint64_t sinceSeq, size_t maxLines,

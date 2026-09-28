@@ -243,9 +243,18 @@ ReplyPacket Dispatcher::HandleCapture(const Request& req) {
     packet.fd             = frame.fd;
     frame.fd              = -1;   // 所有权转移给 packet
 
-    ALOGI("截图 %ux%u stride=%u format=0x%x size=%llu", frame.width,
-          frame.height, frame.stride, frame.format,
-          static_cast<unsigned long long>(frame.size));
+    // 只记第一次。
+    //
+    // 这条原本是每帧一条 —— 单次截图时无害，但画面流每秒要抓 20~30 帧，
+    // 于是日志被同一行刷屏：既看不清别的东西，10KB 的落盘历史几秒就被冲光。
+    // 帧尺寸这类信息在 /api/v1/config 和自检里都有，不需要每帧重复。
+    static bool loggedOnce = false;
+    if (!loggedOnce) {
+        loggedOnce = true;
+        ALOGI("截图 %ux%u stride=%u format=0x%x size=%llu（后续帧不再重复记录）",
+              frame.width, frame.height, frame.stride, frame.format,
+              static_cast<unsigned long long>(frame.size));
+    }
     return packet;
 }
 
@@ -351,6 +360,13 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleClipboard(req, args);
         case Cmd::Power:
             return HandlePower(req, args);
+
+        case Cmd::ServiceSwitch:
+            return HandleServiceSwitch(req, args);
+        case Cmd::RunningApps:
+            return HandleRunningApps(req);
+        case Cmd::LogFile:
+            return HandleLogFile(req);
 
         case Cmd::Describe:
             return HandleDescribe(req);
@@ -726,6 +742,9 @@ const CommandSpec kCommands[] = {
     {"DoubleTap",    32,  4, "x,y[,intervalMs]",        "双击"},
     {"Clipboard",    33,  4, "get|set\\0<文本>|info",    "剪贴板读写"},
     {"Power",        34,  5, "reboot|shutdown|reboot-*", "设备关机 / 重启"},
+    {"ServiceSwitch",35,  6, "on|off|status",           "服务对外开关（不真停进程）"},
+    {"RunningApps",  36,  6, "无",                      "正在运行的应用与进程状态"},
+    {"LogFile",      37,  6, "无",                      "落盘的历史日志（最近 10KB）"},
     {"Describe",     20,  3, "无",                      "本清单：有哪些命令、哪些可用"},
     {"GetConfig",    21,  3, "无",                      "当前配置与运行时状态"},
     {"SetConfig",    22,  3, "<key>\0<value>...",       "热改配置"},
@@ -766,6 +785,9 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
             .Field("screenStream", PngEncoder::Instance().Init(nullptr))
             .Field("webUi", true)
             .Field("power", true)
+            .Field("serviceSwitch", true)
+            .Field("runningApps", true)
+            .Field("logFile", LogBuffer::Instance().HistoryPath().empty() ? false : true)
             .Field("selfControl", true)
         .EndObj()
         .Key("commands").Arr();
@@ -1140,6 +1162,159 @@ ReplyPacket Dispatcher::HandlePower(const Request& req,
     }
 
     ALOGW("收到电源请求: %s（子进程 pid=%d 将在 0.5s 后执行）", what.c_str(), pid);
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+// ── v6：服务开关 / 运行状态 / 历史日志 ─────────────────────────────────────
+
+ReplyPacket Dispatcher::HandleServiceSwitch(
+        const Request& req, const std::vector<std::string>& args) {
+    const std::string op = args.empty() ? "status" : args[0];
+    ServiceState& st = ServiceState::Instance();
+
+    if (op == "on") {
+        st.SetServing(true);
+    } else if (op == "off") {
+        st.SetServing(false);
+    } else if (op != "status") {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "未知操作: " + op + "（可用 on|off|status）");
+    }
+
+    json::Writer w;
+    w.Obj()
+        .Field("ok", true)
+        .Field("serving", st.Serving())
+        .Field("note", st.Serving()
+                           ? "服务对外可用"
+                           : "服务已关闭对外能力（进程仍在运行，可用本接口重新开启）")
+     .EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleRunningApps(const Request& req) {
+    // 数据源用 `dumpsys activity lru`。
+    //
+    // 为什么不用 `ps`：ps 给的是 UID（u0_a105）不是包名，要额外查
+    // PackageManager 才能对上；而且 ps 里进程一堆内核线程，噪音大。
+    // lru 输出直接是 "<pid>:<包名>/<uid>"，还带前台/可见/缓存的状态，
+    // 正好是"应用运行状态"要的东西。
+    std::vector<std::string> argv = {
+        "/system/bin/dumpsys", "activity", "lru",
+    };
+    CommandResult r;
+    std::string err;
+    if (!RunCommand(argv, 15000, 1u << 20, &r, &err) || r.exitCode != 0) {
+        return MakeJsonError(req.cmd, kErrInternal,
+                             "取运行状态失败: " + (err.empty() ? r.err : err));
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true);
+    w.Key("apps").Arr();
+
+    // 行形如：
+    //   #21: fg     TOP  LCMN 32373:com.autod.controller/u0a105 act:activities
+    //   #17: cch+ 5 CEM  ---- 1683:com.android.permissioncontroller/u0a102
+    size_t pos = 0;
+    uint32_t count = 0;
+    const std::string& out = r.out;
+    while (pos < out.size() && count < 300) {
+        const size_t eol = out.find('\n', pos);
+        const std::string line = out.substr(
+                pos, eol == std::string::npos ? std::string::npos : eol - pos);
+        pos = (eol == std::string::npos) ? out.size() : eol + 1;
+
+        // 只认 "#<数字>:" 开头的行。
+        //
+        // ⚠️ dumpsys 的输出是**带缩进的**（"    #21: fg TOP ..."），
+        //    早先直接判断 line[0] == '#' 于是一行都匹配不上，
+        //    接口老老实实返回了 0 个进程 —— 这种"格式对但没数据"
+        //    的 bug 最难发现，因为不报错。
+        size_t lead = line.find_first_not_of(" \t");
+        if (lead == std::string::npos || line[lead] != '#') continue;
+        const size_t colon = line.find(':', lead);
+        if (colon == std::string::npos) continue;
+
+        // "#17: cch+ 5 CEM  ---- 1683:pkg/uid"
+        const std::string rest = line.substr(colon + 1);
+        const size_t digits = rest.find_first_not_of(" \t");
+        if (digits == std::string::npos) continue;
+        const size_t pidEnd = rest.find(':', digits);
+        if (pidEnd == std::string::npos) continue;
+
+        // pid 是**冒号前那一串的最后一个 token**。
+        //
+        // 冒号前是 "fg     TOP  LCMN 32373" —— 直接取整串会带上状态词，
+        // 然后"必须是纯数字"的检查就把它全滤掉了，接口老实地返回 0 个。
+        // 这种"格式对但解析错"的 bug 不报错，只能靠人对着真实输出核。
+        const std::string before = rest.substr(digits, pidEnd - digits);
+        size_t pe = before.find_last_not_of(" \t");
+        if (pe == std::string::npos) continue;
+        size_t pb = before.find_last_of(" \t");
+        const std::string pidStr =
+                before.substr(pb == std::string::npos ? 0 : pb + 1, pe - (pb == std::string::npos ? 0 : pb + 1) + 1);
+        if (pidStr.empty() ||
+            pidStr.find_first_not_of("0123456789") != std::string::npos) {
+            continue;
+        }
+
+        // 状态取**第一个** token（adj：fg / vis / cch / prcp / psvc）。
+        //
+        // 取最后一个会拿到标志位（LCMN / ----），那个对"应用在不在前台"
+        // 没有意义。adj 才是 Android 用来描述进程优先级的东西。
+        std::string state;
+        {
+            size_t sb = before.find_first_not_of(" \t");
+            if (sb != std::string::npos) {
+                size_t se = before.find_first_of(" \t", sb);
+                state = before.substr(sb, se == std::string::npos
+                                              ? std::string::npos : se - sb);
+            }
+        }
+
+        // pid 之后是 "pkg/uid"，再往后是可选的 " act:..."
+        std::string tail = rest.substr(pidEnd + 1);
+        const size_t sp = tail.find(' ');
+        if (sp != std::string::npos) tail = tail.substr(0, sp);
+        const size_t slash = tail.rfind('/');
+        const std::string proc = (slash == std::string::npos) ? tail : tail.substr(0, slash);
+        const std::string uid = (slash == std::string::npos) ? "" : tail.substr(slash + 1);
+        if (proc.empty()) continue;
+
+        // "com.android.webview:webview_service" 这种是子进程。
+        // 包名取冒号前那段（结束进程时用的是包名），完整进程名另存一个字段。
+        const size_t sub = proc.find(':');
+        const std::string pkg =
+                (sub == std::string::npos) ? proc : proc.substr(0, sub);
+
+        w.Obj()
+            .Field("package", pkg)
+            .Field("process", proc)
+            .Field("pid", static_cast<int64_t>(strtol(pidStr.c_str(), nullptr, 10)))
+            .Field("uid", uid)
+            .Field("state", state)
+         .EndObj();
+        ++count;
+    }
+    w.EndArr();
+    w.Field("count", static_cast<int64_t>(count));
+    w.EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleLogFile(const Request& req) {
+    const std::string path = LogBuffer::Instance().HistoryPath();
+    const std::string text = LogBuffer::Instance().ReadHistory();
+
+    json::Writer w;
+    w.Obj()
+        .Field("ok", true)
+        .Field("path", path)
+        .Field("bytes", static_cast<int64_t>(text.size()))
+        .Field("maxBytes", static_cast<int64_t>(LogBuffer::kHistoryMaxBytes))
+        .Field("text", text)
+     .EndObj();
     return MakeJsonReply(req.cmd, w.str());
 }
 

@@ -75,6 +75,12 @@ class Dispatcher {
     ReplyPacket HandleClipboard(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandlePower(const Request& req, const std::vector<std::string>& args);
 
+    // ── v6 ──
+    ReplyPacket HandleServiceSwitch(const Request& req,
+                                    const std::vector<std::string>& args);
+    ReplyPacket HandleRunningApps(const Request& req);
+    ReplyPacket HandleLogFile(const Request& req);
+
     Capture*  capture_;
     Injector* injector_;
     std::unique_ptr<AppOps>  appOps_;

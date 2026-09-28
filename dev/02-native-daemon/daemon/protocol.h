@@ -25,7 +25,8 @@ constexpr uint32_t kMagic = 0x44545541;
 //   3 = 服务自身控制（配置 / 自检 / 统计 / 日志 / 生命周期）
 //   4 = 手势（长按/拖拽/双击）、按键注入、剪贴板
 //   5 = 设备电源（关机 / 重启）
-constexpr uint32_t kProtocolVersion = 5;
+//   6 = 服务对外开关、运行中应用、历史日志、日志流
+constexpr uint32_t kProtocolVersion = 6;
 
 enum class Cmd : uint32_t {
     Info       = 1,   // 查询显示参数，不产生副作用
@@ -81,6 +82,17 @@ enum class Cmd : uint32_t {
 
     Clipboard     = 33,  // payload: "get" | "set\0<文本>" | "info"
 
+    // ── 服务开关 / 运行状态 / 日志（v6）────────────────────────────────────
+    //
+    // ServiceSwitch 是**软开关**：关掉之后进程照跑，只是不再对外提供服务。
+    //
+    // 为什么不真停进程：真停了就没人能把它开回来了 —— 网页打不开、
+    // 接口不通，只能跑到机器跟前。软开关则始终留着一个入口
+    // （见下面 kFlagForce 的说明）。
+    ServiceSwitch = 35,  // payload: "on" | "off" | "status"
+    RunningApps   = 36,  // 列出正在运行的应用（含进程状态）
+    LogFile       = 37,  // 落盘的历史日志（/sdcard/autod.log，只留最近 10KB）
+
     Power         = 34,  // payload: "reboot" | "shutdown" | "reboot-recovery"
                          //          | "reboot-bootloader" | "reboot-sideload"
                          // 走 `svc power reboot|shutdown`（= PowerManager.reboot/
@@ -134,6 +146,11 @@ enum Flags : uint32_t {
     kFlagReplace       = 1u << 5,  // InstallApp：-r 覆盖安装
     kFlagRecursive     = 1u << 6,  // FileOp delete：递归删除目录
     kFlagKeyLongPress  = 1u << 7,  // KeyEvent：长按（保持按下更久）
+    // 服务已关闭时仍然放行这条请求。
+    //
+    // 只给"重新开启服务"这一个命令用。没有它的话，关掉服务就等于
+    // 把自己锁在门外 —— 而这正是软开关想要避免的情况。
+    kFlagForce         = 1u << 8,
 };
 
 struct Request {

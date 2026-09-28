@@ -1,5 +1,6 @@
 // service_state.cpp — 服务的运行时状态与自身控制
 
+#include "config_file.h"
 #include "service_state.h"
 
 #include <stdio.h>
@@ -409,6 +410,45 @@ void ServiceState::RequestShutdown(bool restart) {
     std::lock_guard<std::mutex> lock(mutex_);
     shutdown_ = true;
     restart_  = restart;
+}
+
+// ── 服务对外开关 ────────────────────────────────────────────────────────────
+//
+// 软开关：关掉之后进程照跑，只是不再对外提供服务。
+// 做真停进程的话就没人能开回来了 —— 网页打不开、接口不通。
+
+bool ServiceState::Serving() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return serving_;
+}
+
+void ServiceState::SetServing(bool on) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (serving_ == on) return;
+        serving_ = on;
+        servingConfigPathSnapshot_ = servingConfigPath_;
+    }
+    ALOGW("服务对外开关: %s", on ? "开" : "关（进程继续运行，仅停止对外服务）");
+
+    // 持久化，让它跨重启。写失败不影响本次生效 —— 开关本身是运行时的。
+    const std::string path = servingConfigPathSnapshot_;
+    if (!path.empty()) {
+        PersistedConfig cfg;
+        std::string err;
+        if (ConfigFile::Load(path, &cfg, &err)) {
+            cfg.enabled = on;
+            std::string serr;
+            if (!ConfigFile::Save(path, cfg, &serr)) {
+                ALOGW("服务开关写回 %s 失败: %s", path.c_str(), serr.c_str());
+            }
+        }
+    }
+}
+
+void ServiceState::SetServingPersistPath(const std::string& configPath) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    servingConfigPath_ = configPath;
 }
 
 bool ServiceState::ShutdownRequested() const {

@@ -171,14 +171,14 @@ public class MainActivity extends Activity {
         title.setTextSize(19);
         title.setTypeface(null, Typeface.BOLD);
         title.setPadding(dp(16), dp(16), dp(16), dp(4));
-        title.setTextColor(0xFFFFFFFF);
+        title.setTextColor(0xFF111111);
         col.addView(title);
 
         TextView sub = new TextView(this);
         sub.setText("只管服务的启停、端口与鉴权\n（控制设备请用网页控制台）");
         sub.setTextSize(12);
         sub.setPadding(dp(16), 0, dp(16), dp(10));
-        sub.setTextColor(0xFF888888);
+        sub.setTextColor(0xFF666666);
         col.addView(sub);
 
         // ── 状态 ──
@@ -186,7 +186,7 @@ public class MainActivity extends Activity {
         statusView = new TextView(this);
         statusView.setTextSize(13);
         statusView.setPadding(dp(16), 0, dp(16), dp(8));
-        statusView.setTextColor(0xFFCCCCCC);
+        statusView.setTextColor(0xFF222222);
         statusView.setTypeface(Typeface.MONOSPACE);
         col.addView(statusView);
 
@@ -256,7 +256,7 @@ public class MainActivity extends Activity {
         tokenView = new TextView(this);
         tokenView.setTextSize(12);
         tokenView.setPadding(dp(16), 0, dp(16), dp(6));
-        tokenView.setTextColor(0xFFAACCAA);
+        tokenView.setTextColor(0xFF1A7A4A);
         tokenView.setTypeface(Typeface.MONOSPACE);
         tokenView.setTextIsSelectable(true);
         col.addView(tokenView);
@@ -276,11 +276,14 @@ public class MainActivity extends Activity {
                 + "看屏幕、点屏幕、按键、读剪贴板、装应用、删文件。");
         warn.setTextSize(11);
         warn.setPadding(dp(16), 0, dp(16), dp(20));
-        warn.setTextColor(0xFFCC7744);
+        warn.setTextColor(0xFFB45309);
         col.addView(warn);
 
         ScrollView sv = new ScrollView(this);
-        sv.setBackgroundColor(0xFF111111);
+        // 白底。早先用了深色（0xFF111111）配浅色文字，
+        // 但这个应用是"设备管理"性质的工具页，和系统设置一类；
+        // 浅色更符合用户对这类界面的预期，在强光下也更清楚。
+        sv.setBackgroundColor(0xFFFFFFFF);
         sv.addView(col);
         return sv;
     }
@@ -398,10 +401,10 @@ public class MainActivity extends Activity {
         boolean auth = "1".equals(c.get("auth"));
         if (!auth) {
             tokenView.setText("令牌：—（无鉴权模式）");
-            tokenView.setTextColor(0xFFCC7744);
+            tokenView.setTextColor(0xFFB45309);
         } else if (t == null || t.isEmpty()) {
             tokenView.setText("令牌：（重启服务后自动生成）");
-            tokenView.setTextColor(0xFFCCCC88);
+            tokenView.setTextColor(0xFF8A6D00);
         } else {
             tokenView.setText("令牌：" + t);
             tokenView.setTextColor(0xFFAACCAA);

@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "config_file.h"
+#include "thread_util.h"
 #include "autod_log.h"
 #include "autod_platform.h"
 
@@ -129,6 +130,8 @@ int main(int argc, char** argv) {
     std::string httpToken;
     // 显式给了 CLI 标志就以 CLI 为准（见下面配置合并那段）
     std::string configPath = ConfigFile::DefaultPath();
+    // 日志落盘路径。与配置文件同目录 —— 上位应用（无 root）也要能读它。
+    std::string logPath = "/sdcard/autod.log";
     bool cliBind = false, cliPort = false, cliToken = false;
 
     enum LongOpt {
@@ -396,6 +399,11 @@ int main(int argc, char** argv) {
     // 忽略之后 write 返回 EPIPE，流式回调据此正常退出。
     signal(SIGPIPE, SIG_IGN);
 
+    // 日志同时落盘（只留最近 10KB）。放 /sdcard：上位应用无 root 也能读。
+    LogBuffer::Instance().SetHistoryPath(logPath);
+    ALOGI("历史日志: %s（最多 %zu 字节）", logPath.c_str(),
+          LogBuffer::kHistoryMaxBytes);
+
     if (verbose) {
         ALOGI("autod: 就绪, socket=%s", server.path().c_str());
     }
@@ -459,9 +467,51 @@ int main(int argc, char** argv) {
                       configPath.c_str(), configPath.c_str());
             }
         }
+        // 服务对外开关也持久化在同一个文件里
+        ServiceState::Instance().SetServingPersistPath(configPath);
+        // enabled=0 表示"不对外提供服务"，而不是"别启动" ——
+        // 进程始终要跑，否则开关本身就没入口了。
+        ServiceState::Instance().SetServing(cfg.enabled);
+
         ALOGI("配置: %s | bind=%s port=%u auth=%s", configPath.c_str(),
               httpBind.empty() ? "(未启用)" : httpBind.c_str(), httpPort,
               httpToken.empty() ? "关" : "开");
+    }
+
+    // ── 配置文件监视 ──
+    //
+    // 上位应用（和任何编辑器）改的是文件，而守护进程只在启动时读一次。
+    // 不监视的话，"拨了开关但没反应"就是必然的 —— 实测踩过：
+    // 配置文件里 enabled=1，运行中的服务却还是关着的。
+    //
+    // 只处理 enabled（软开关）。bind/port/auth 这些改了必须重启进程，
+    // 由 supervisor 负责 —— 在这里热改会让正在看的画面流和触控连接
+    // 莫名其妙断掉。
+    if (!configPath.empty()) {
+        struct CfgWatchCtx { std::string path; };
+        static CfgWatchCtx ctx{configPath};
+        if (!SpawnDetached([]() {
+                int64_t lastMtime = 0;
+                while (true) {
+                    struct stat st{};
+                    if (stat(ctx.path.c_str(), &st) == 0) {
+                        const int64_t mt = static_cast<int64_t>(st.st_mtime);
+                        if (mt != lastMtime) {
+                            lastMtime = mt;
+                            PersistedConfig c;
+                            std::string err;
+                            if (ConfigFile::Load(ctx.path, &c, &err)) {
+                                // SetServing 内部会判断"值没变就不动"，
+                                // 所以不会因为我们自己写回文件而反复触发
+                                ServiceState::Instance().SetServing(c.enabled);
+                            }
+                        }
+                    }
+                    sleep(2);
+                }
+            })) {
+            ALOGW("起配置监视线程失败，配置文件改动不会实时生效");
+        }
     }
 
     if (!httpBind.empty()) {

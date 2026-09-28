@@ -59,13 +59,39 @@ class LogBuffer {
 
     void Clear();
 
+    // ── 落盘的历史日志 ──
+    //
+    // 内存环形缓冲关掉进程就没了，排障时最需要的恰恰是"上次为什么退出的"。
+    // 所以同时往共享存储写一份，**只保留最近 10KB** —— 常驻服务写的日志
+    // 没有上限的话，跑几天就能把 /sdcard 塞满。
+    //
+    // 放 /sdcard 而不是 /data/local/tmp：上位应用（无 root）也应当能读到它。
+    // 上限 10KB，**文件不会超过它 + 一行**。
+    //
+    // 裁剪留了滞回：超过 10KB 就裁到 7.5KB，而不是"裁到刚好 10KB"。
+    // 后者会让下一行又超、又裁一次 —— 每写一行就读写 20KB。
+    // 带滞回之后每 ~2.5KB 才裁一次，文件仍然满足"只留最近 10KB"。
+    static constexpr size_t kHistoryMaxBytes  = 10 * 1024;
+    static constexpr size_t kHistoryTrimTo    = 7680;
+
+    // 设置落盘路径。传空串则关闭落盘。启动时调一次。
+    void SetHistoryPath(const std::string& path);
+    std::string HistoryPath() const;
+
+    // 读回落盘的那份历史（可能为空）
+    std::string ReadHistory() const;
+
   private:
     LogBuffer() = default;
     // 容量：2048 行。按每行平均 120 字节算约 240KB，
     // 对一个常驻服务是可以接受的常量占用。
     static constexpr size_t kCapacity = 2048;
 
+    void AppendToHistory(const LogLine& line);
+    void TrimHistory();
+
     mutable std::mutex mutex_;
+    std::string historyPath_;
     std::vector<LogLine> lines_;      // 环形，逻辑顺序由 firstSeq_ 决定
     size_t   head_ = 0;               // 下一个写入位置
     size_t   count_ = 0;              // 当前有效条数

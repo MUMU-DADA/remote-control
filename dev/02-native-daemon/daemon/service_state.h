@@ -90,6 +90,19 @@ class ServiceState {
     // ── 生命周期 ────────────────────────────────────────────────────────────
     void RequestShutdown(bool restart);
     bool ShutdownRequested() const;
+
+    // ── 服务对外开关（软开关）──
+    //
+    // 关掉之后**进程照跑**，只是不再对外提供服务：HTTP 一律回 503，
+    // 唯一放行的是"把服务打开"这条请求（见 protocol.h 的 kFlagForce）。
+    //
+    // 为什么不做成真停进程：真停了就没人能开回来 —— 网页打不开、
+    // 接口不通，只能跑到机器跟前救。软开关始终留着一个入口。
+    //
+    // 状态同时持久化到配置文件，重启后保持。
+    bool Serving() const;
+    void SetServing(bool on);
+    void SetServingPersistPath(const std::string& configPath);
     bool RestartRequested() const;
 
     int64_t UptimeMs() const;
@@ -101,6 +114,9 @@ class ServiceState {
     ServiceState() = default;
 
     mutable std::mutex mutex_;
+    bool        serving_ = true;
+    std::string servingConfigPath_;
+    std::string servingConfigPathSnapshot_;   // 在锁外做文件 IO 用
     Config config_;
     InjectorConfig injectorConfig_;
     Capture*  capture_  = nullptr;

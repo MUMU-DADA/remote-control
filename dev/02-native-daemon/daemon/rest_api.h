@@ -73,6 +73,12 @@ class RestApi {
     HttpResponse HandleStream(const HttpRequest& req);
     HttpResponse HandleStreamWs(const HttpRequest& req, const StreamParams& p);
 
+    // 画面流的可调参数（让调用方能查到，而不是翻文档）
+    HttpResponse HandleStreamParams(const HttpRequest& req);
+
+    // 日志流（WebSocket，按序号增量推）
+    HttpResponse HandleLogStream(const HttpRequest& req);
+
     // 取一帧并编码。两条传输共用 —— 各写一遍的话，
     // "跳过未变化的帧"这类优化很容易只做在一条上。
     // 返回空表示这帧不用发，*unchanged 区分"画面没变"和"出错"。

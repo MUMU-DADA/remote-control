@@ -485,6 +485,134 @@ HttpResponse RestApi::HandleTouchStream(const HttpRequest& req) {
     return resp;
 }
 
+// ── 画面流的可调参数 ────────────────────────────────────────────────────────
+//
+// 让调用方能**查到**流支持哪些参数、当前默认值是什么，而不是去翻文档。
+HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
+    const StreamParams def;   // 内置默认
+    json::Writer w;
+    w.Obj()
+        .Field("ok", true)
+        .Field("endpoint", "/api/v1/stream")
+        .Field("transports", "WebSocket（带 Upgrade 头）/ MJPEG（不带）")
+        .Field("defaultFps", static_cast<int64_t>(def.fps))
+        .Field("defaultMaxWidth", static_cast<int64_t>(def.maxWidth))
+        .Field("defaultSkipUnchanged", def.skipUnchanged)
+        .Field("defaultFormat", ImageEncoder::Name(ImageEncoder::Instance().BestFormat()))
+        .Field("nativeCodecs", ImageEncoder::Instance().hasNativeCodecs())
+     .EndObj();
+    // 上面那串只是说明，真正的参数表在下面
+    std::string base = w.str();
+    base.pop_back();   // 去掉结尾的 }
+    base += ",\"params\":[";
+    base += "{\"name\":\"fps\",\"range\":\"1-60\",\"desc\":\"帧率\"},";
+    base += "{\"name\":\"quality\",\"range\":\"PNG 1-9 / JPEG,WebP 1-100\","
+            "\"desc\":\"画质\"},";
+    base += "{\"name\":\"format\",\"range\":\"auto|jpeg|webp|png\","
+            "\"desc\":\"编码格式\"},";
+    base += "{\"name\":\"maxWidth\",\"range\":\"0-8192（0=不缩放）\","
+            "\"desc\":\"降采样宽度\"},";
+    base += "{\"name\":\"skipUnchanged\",\"range\":\"0|1\","
+            "\"desc\":\"画面没变时跳过编码（停检）\"}";
+    base += "],\"wsCommands\":[";
+    base += "{\"t\":\"fps\",\"v\":\"1-60\"},";
+    base += "{\"t\":\"quality\",\"v\":\"1-100\"},";
+    base += "{\"t\":\"format\",\"v\":\"jpeg|webp|png\"},";
+    base += "{\"t\":\"skipUnchanged\",\"v\":\"0|1\"},";
+    base += "{\"t\":\"refresh\",\"desc\":\"立刻重发一帧\"},";
+    base += "{\"t\":\"ping\",\"s\":\"序号\"}";
+    base += "]}";
+    return HttpResponse::Json(200, base);
+}
+
+// ── 日志流（WebSocket）──────────────────────────────────────────────────────
+//
+// 把环形缓冲里的新行实时推给客户端。
+// 用序号做增量：客户端连上时先给一段历史（sinceSeq=0 就是全部），
+// 之后只在有新行时推 —— 而不是让客户端轮询 /api/v1/log。
+HttpResponse RestApi::HandleLogStream(const HttpRequest& req) {
+    std::string accept;
+    if (!WsComputeAccept(req.header("sec-websocket-key"), &accept)) {
+        return HttpResponse::Error(400, "Sec-WebSocket-Key 缺失或不合法");
+    }
+    // 起始序号：客户端可以带 since=<seq> 续上一次的进度
+    uint64_t since = 0;
+    {
+        const std::string s = req.queryParam("since", "");
+        if (!s.empty()) since = strtoull(s.c_str(), nullptr, 10);
+    }
+
+    HttpResponse resp = HttpResponse::WebSocket(accept);
+    // 不捕获 this：日志流只碰 LogBuffer 这个单例，没有成员要用。
+    // AOSP 是 -Werror，多捕获一个就是编译失败（-Wunused-lambda-capture）。
+    resp.streamer = [since](int fd) {
+        uint64_t cursor = since;
+        int64_t  lastSend = NowMs();
+        // 一次最多推这么多行：日志刷起来可能一秒几十行，
+        // 无节制地写会把这条连接变成瓶颈。
+        constexpr size_t kBatch = 200;
+
+        while (true) {
+            // 处理客户端消息（主要是 ping）
+            for (;;) {
+                pollfd pfd{};
+                pfd.fd = fd;
+                pfd.events = POLLIN;
+                if (poll(&pfd, 1, 0) <= 0) break;
+                WsFrame f;
+                std::string err;
+                if (!WsReadFrame(fd, &f, &err)) {
+                    if (!err.empty()) ALOGW("日志流异常结束: %s", err.c_str());
+                    return;
+                }
+                if (f.opcode != kWsText && f.opcode != kWsBinary) continue;
+                json::Value v;
+                std::string jerr;
+                if (!json::Parse(f.payload, &v, &jerr)) continue;
+                if (v.str("t") == "ping") {
+                    WsWriteText(fd, "{\"t\":\"pong\",\"s\":" +
+                                            std::to_string(v.num("s", 0)) + "}");
+                } else if (v.str("t") == "clear") {
+                    cursor = 0;      // 客户端要重新拉全部
+                }
+            }
+
+            uint64_t latest = 0;
+            std::vector<LogLine> lines =
+                    LogBuffer::Instance().Since(cursor, kBatch, &latest);
+
+            if (!lines.empty()) {
+                json::Writer w;
+                w.Obj().Field("t", "lines").Field("dropped",
+                        static_cast<int64_t>(LogBuffer::Instance().DroppedCount()));
+                w.Key("lines").Arr();
+                for (const LogLine& l : lines) {
+                    w.Obj()
+                        .Field("seq", static_cast<int64_t>(l.seq))
+                        .Field("ms", l.timeMs)
+                        .Field("level", static_cast<int64_t>(l.level))
+                        .Field("tag", l.tag)
+                        .Field("text", l.text)
+                     .EndObj();
+                    cursor = l.seq;
+                }
+                w.EndArr().EndObj();
+                if (!WsWriteText(fd, w.str())) return;
+                lastSend = NowMs();
+            }
+
+            // 没日志时也别空转。100ms 的粒度对"实时看日志"足够了，
+            // 而 CPU 占用可以忽略。
+            pollfd pfd{};
+            pfd.fd = fd;
+            pfd.events = POLLIN;
+            poll(&pfd, 1, 100);
+            (void)lastSend;
+        }
+    };
+    return resp;
+}
+
 // ── 实时画面流 ──────────────────────────────────────────────────────────────
 // ── 画面流：参数、取帧、两条传输 ────────────────────────────────────────────
 //
@@ -774,6 +902,9 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                 .Field("t", "hello")
                 .Field("format", ImageEncoder::Name(static_cast<ImageFormat>(p.codec)))
                 .Field("fps", static_cast<int64_t>(p.fps))
+                .Field("quality", static_cast<int64_t>(p.level))
+                .Field("maxWidth", static_cast<int64_t>(p.maxWidth))
+                .Field("skipUnchanged", p.skipUnchanged)
                 .Field("chrome", false)
              .EndObj();
             if (!WsWriteText(fd, w.str())) return;
@@ -857,6 +988,12 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                                     std::string("{\"t\":\"ack\",\"format\":\"") +
                                         ImageEncoder::Name(nf) + "\"}");
                             }
+                        } else if (t == "skipUnchanged") {
+                            p.skipUnchanged = (v.num("v", 1) != 0);
+                            st.haveLast = false;   // 重新开始判定
+                            WsWriteText(fd, std::string("{\"t\":\"ack\","
+                                    "\"skipUnchanged\":") +
+                                    (p.skipUnchanged ? "true" : "false") + "}");
                         } else if (t == "refresh") {
                             // 客户端主动要求"下一帧无论变没变都发"，
                             // 用于页面重新可见时立刻刷新一次。
@@ -898,6 +1035,27 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
 
 // ── 路由 ────────────────────────────────────────────────────────────────────
 HttpResponse RestApi::Handle(const HttpRequest& req) {
+    // ── 服务对外开关 ──
+    //
+    // 关掉之后一切请求都回 503，**只有服务开关本身除外**。
+    // 不放行它的话，关掉服务就等于把自己锁在门外 —— 而这正是
+    // 软开关想避免的情况。上位应用还能通过改配置文件开回来，
+    // 但网页和 API 客户端没有文件访问权。
+    if (!ServiceState::Instance().Serving()) {
+        const std::string p = req.path;
+        // 放行两类：
+        //   1. 网页本身 —— 不放行的话用户连开关都够不着（浏览器里
+        //      只会看到一个 503 的 JSON），只能靠上位应用或改配置文件
+        //   2. 开关接口 —— API 客户端重新开启的入口
+        const bool isPage = (p == "/" || p == "/index.html" || p == "/ui");
+        const bool isSwitch = (p == "/api/v1/service");
+        if (!isPage && !isSwitch) {
+            return HttpResponse::Error(
+                    503, "服务已关闭对外能力。用 POST /api/v1/service "
+                         "{\"on\":true} 重新开启");
+        }
+    }
+
     // 归一化尾斜杠：/api/v1/ 与 /api/v1 应当等价。
     // 不做这一步的话，浏览器里多打一个斜杠就 404 —— 而 Segments() 是
     // 容忍尾斜杠的，两边判断不一致。（实测就是这么暴露的。）
@@ -1006,6 +1164,34 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
     if (res == "clipboard" && (method == "GET" || method == "POST")) {
         return HandleClipboard(req);
     }
+    // 服务对外开关。GET 查询、POST 切换。
+    if (res == "service" && (method == "GET" || method == "POST")) {
+        if (method == "GET") {
+            return Call(Cmd::ServiceSwitch, PackArgs({"status"}), 0, -1);
+        }
+        json::Value b; HttpResponse err;
+        if (!ParseJsonBody(req, &b, &err)) return err;
+        const std::string op = b.has("on")
+                                   ? (b.flag("on") ? "on" : "off")
+                                   : b.str("action", "status");
+        // kFlagForce：服务已关时仍然放行（Handle 开头那段只放行路径，
+        // 这里是双保险，也覆盖 socket 侧）
+        return Call(Cmd::ServiceSwitch, PackArgs({op}), kFlagForce, -1);
+    }
+    if (res == "running" && method == "GET") {
+        return Call(Cmd::RunningApps, "", 0, -1);
+    }
+    if (res == "logfile" && method == "GET") {
+        return Call(Cmd::LogFile, "", 0, -1);
+    }
+    if (res == "logstream" && method == "GET") {
+        return HandleLogStream(req);
+    }
+    if (res == "params" && method == "GET") {
+        // 画面流的可调参数（第 2 项需求：能查到画质/停检/帧率）
+        return HandleStreamParams(req);
+    }
+
     // 电源。用 POST：它是有副作用的操作，GET 会被浏览器/爬虫预取。
     if (res == "power" && method == "POST") {
         json::Value b; HttpResponse err;
