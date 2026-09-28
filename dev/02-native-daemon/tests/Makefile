@@ -70,6 +70,7 @@ INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
              $(DAEMON)/config_file.cpp \
              $(DAEMON)/image_encoder.cpp \
              $(DAEMON)/frame_hub.cpp \
+             $(DAEMON)/encode_pool.cpp \
              $(DAEMON)/h264_encoder.cpp \
              $(DAEMON)/jpeg_encoder.cpp \
              $(DAEMON)/webp_encoder.cpp

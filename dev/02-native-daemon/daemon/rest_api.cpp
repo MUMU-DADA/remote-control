@@ -20,6 +20,7 @@
 #include "dispatch.h"
 #include "json_parser.h"
 #include "json_writer.h"
+#include "encode_pool.h"
 #include "frame_hub.h"
 #include "image_encoder.h"
 #include "png_encoder.h"
@@ -1025,6 +1026,12 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
             st->needKeyFrame = false;
         }
 
+        // 编码并发限制。拿不到名额就跳过这一帧 ——
+        // 堵在这里的话连客户端的 fps/画质控制消息都收不到
+        // （它们在同一个循环里处理）。
+        EncodePool::Guard guard(200);
+        if (!guard.acquired()) return {};
+
         std::vector<uint8_t> nal;
         if (!st->h264->EncodeRgba(enc, dw, dh, &nal, &herr)) {
             ALOGW("H.264 编码失败: %s", herr.c_str());
@@ -1039,6 +1046,18 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
         }
         ++st->frameNo;
         return std::string(reinterpret_cast<const char*>(nal.data()), nal.size());
+    }
+
+    // 编码并发限制。多个客户端共享同一帧，所以它们会**同时**开始编码 ——
+    // 10 个客户端在 4 核上就是 10 路并发抢 CPU，每个都变慢，
+    // 还挤占抓帧和触控注入。限制到核数之后，多的排队。
+    //
+    // 排队会让超额客户端的帧率下降，这是有意的取舍：与其 10 个都卡，
+    // 不如 4 个流畅 + 6 个慢一点。
+    EncodePool::Guard guard(200);
+    if (!guard.acquired()) {
+        *unchanged = true;   // 没编成 = 这一轮没新帧，调用方按"没变"处理
+        return {};
     }
 
     std::string perr;

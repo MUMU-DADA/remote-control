@@ -19,6 +19,7 @@
 
 #include "appops.h"
 #include "clipops.h"
+#include "encode_pool.h"
 #include "frame_hub.h"
 #include "image_encoder.h"
 #include "png_encoder.h"
@@ -946,6 +947,15 @@ ReplyPacket Dispatcher::HandleStats(const Request& req) {
     // 都只能靠猜 —— 而这两件事正是这次改造的核心。
     auto extra = [](json::Writer& w) {
         FrameHub::Stats h = FrameHub::Instance().GetStats();
+        EncodePool::Stats ep = EncodePool::Instance().GetStats();
+        w.Key("encodePool").Obj()
+             .Field("limit", static_cast<int64_t>(ep.limit))
+             .Field("inUse", static_cast<int64_t>(ep.inUse))
+             .Field("acquired", ep.acquired)
+             // timeouts：因为拿不到名额而跳过的帧数
+             .Field("timeouts", ep.timeouts)
+         .EndObj();
+
         w.Key("frameHub").Obj()
              .Field("running", h.running)
              .Field("subscribers", static_cast<int64_t>(h.subscribers))
