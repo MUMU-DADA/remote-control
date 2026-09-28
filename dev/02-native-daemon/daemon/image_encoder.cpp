@@ -92,8 +92,10 @@ bool ProbeJniGraphics() {
 
         g.handle = dlopen("libjnigraphics.so", RTLD_NOW | RTLD_LOCAL);
         if (g.handle == nullptr) {
+            // 同样：dlerror() 只能调一次（见 jpeg_encoder.cpp 的说明）
+            const char* e = dlerror();
             ALOGI("图像编码: libjnigraphics 不可用（%s）",
-                  dlerror() != nullptr ? dlerror() : "未知原因");
+                  e != nullptr ? e : "未知原因");
             return false;
         }
         *(void**)(&g.compress) = dlsym(g.handle, "AndroidBitmap_compress");

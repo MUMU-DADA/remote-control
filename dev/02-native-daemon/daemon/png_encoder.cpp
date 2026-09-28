@@ -120,7 +120,12 @@ bool PngEncoder::Init(std::string* error) {
     for (int i = 0; candidates[i] != nullptr; ++i) {
         h = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
         if (h != nullptr) break;
-        lastErr = dlerror() ? dlerror() : "unknown";
+        // ⚠️ dlerror() 只能调一次 —— 它取走错误后会清掉，第二次返回 nullptr。
+        //    写成 `dlerror() ? dlerror() : "…"` 在拼接/赋值时就会拿到
+        //    nullptr（std::string 会段错误，const char* 则得到一个空指针）。
+        //    实测：dlopen 失败时这里直接崩。
+        const char* dlErr = dlerror();
+        lastErr = dlErr ? dlErr : "unknown";
     }
     if (h == nullptr) {
         if (error) *error = "设备上没有可用的 zlib（" + lastErr + "）—— 无法编码 PNG";

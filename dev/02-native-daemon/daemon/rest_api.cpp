@@ -589,6 +589,18 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
         .Field("defaultSkipUnchanged", def.skipUnchanged)
         .Field("defaultFormat", ImageEncoder::Name(ImageEncoder::Instance().BestFormat()))
         .Field("nativeCodecs", ImageEncoder::Instance().hasNativeCodecs())
+        .Key("codecs").Obj()
+            // 这三个是**这台设备实际**能编的，不是"理论上支持的"。
+            //
+            // Android 8~10 上 webp=false（没有 AndroidBitmap_compress，
+            // 设备上也没有 libwebp）。客户端必须先问这个再决定
+            // 要不要提供 WebP 选项 —— 硬发 format=webp 只会拿到一个错误。
+            .Field("png",  ImageEncoder::Instance().Supports(ImageFormat::kPng))
+            .Field("jpeg", ImageEncoder::Instance().Supports(ImageFormat::kJpeg))
+            .Field("webp", ImageEncoder::Instance().Supports(ImageFormat::kWebp))
+            .Field("raw",  true)
+            .Field("backend", ImageEncoder::Instance().BackendSummary())
+        .EndObj()
      .EndObj();
     // 上面那串只是说明，真正的参数表在下面
     std::string base = w.str();
@@ -597,8 +609,17 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
     base += "{\"name\":\"fps\",\"range\":\"1-60\",\"desc\":\"帧率\"},";
     base += "{\"name\":\"quality\",\"range\":\"PNG 1-9 / JPEG,WebP 1-100\","
             "\"desc\":\"画质\"},";
-    base += "{\"name\":\"format\",\"range\":\"auto|jpeg|webp|png\","
-            "\"desc\":\"编码格式\"},";
+    // format 的取值范围按**实际能力**拼，不写死 ——
+    // 写死成 "auto|jpeg|webp|png" 的话，在 Android 8~10 上
+    // 等于告诉客户端"webp 可用"，而它并不可用。
+    {
+        std::string fmts = "auto";
+        if (ImageEncoder::Instance().Supports(ImageFormat::kJpeg)) fmts += "|jpeg";
+        if (ImageEncoder::Instance().Supports(ImageFormat::kWebp)) fmts += "|webp";
+        if (ImageEncoder::Instance().Supports(ImageFormat::kPng))  fmts += "|png";
+        base += "{\"name\":\"format\",\"range\":\"" + fmts +
+                "\",\"desc\":\"编码格式\"},";
+    }
     base += "{\"name\":\"maxWidth\",\"range\":\"0-8192（0=不缩放）\","
             "\"desc\":\"降采样宽度\"},";
     base += "{\"name\":\"skipUnchanged\",\"range\":\"0|1\","

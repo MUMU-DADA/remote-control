@@ -182,6 +182,7 @@ curl http://host:8088/api/v1/describe
 
 ### GET /params
 
+
 画面流的可调参数。**别去翻文档猜默认值，问它。**
 
 ```json
@@ -194,6 +195,8 @@ curl http://host:8088/api/v1/describe
   "defaultSkipUnchanged": true,
   "defaultFormat": "jpeg",
   "nativeCodecs": true,
+  "codecs": {"png": true, "jpeg": true, "webp": true, "raw": true,
+             "backend": "AndroidBitmap_compress"},
   "params": [
     {"name":"fps","range":"1-60","desc":"帧率"},
     {"name":"quality","range":"PNG 1-9 / JPEG,WebP 1-100","desc":"画质"},

@@ -19,6 +19,7 @@
 
 #include "appops.h"
 #include "clipops.h"
+#include "image_encoder.h"
 #include "png_encoder.h"
 #include "keyboard.h"
 #include "log_buffer.h"
@@ -784,6 +785,18 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
             .Field("keyInjection", access("/dev/uinput", W_OK) == 0)
             .Field("clipboard", ClipOps::Instance().Init(nullptr))
             .Field("screenStream", PngEncoder::Instance().Init(nullptr))
+            // 编码能力按**这台设备实际**能用的报。
+            //
+            // 以前这里只有 screenStream 一个布尔，客户端看不出
+            // "JPEG 有没有""WebP 有没有" —— 而 Android 8~10 上
+            // WebP 确实没有（没有 AndroidBitmap_compress，
+            // 设备上也没 libwebp）。只能靠试错是最糟的接口设计。
+            .Key("codecs").Obj()
+                .Field("png",  ImageEncoder::Instance().Supports(ImageFormat::kPng))
+                .Field("jpeg", ImageEncoder::Instance().Supports(ImageFormat::kJpeg))
+                .Field("webp", ImageEncoder::Instance().Supports(ImageFormat::kWebp))
+                .Field("backend", ImageEncoder::Instance().BackendSummary())
+            .EndObj()
             .Field("webUi", true)
             .Field("power", true)
             .Field("serviceSwitch", true)

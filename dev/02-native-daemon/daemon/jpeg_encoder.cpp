@@ -78,9 +78,17 @@ bool JpegEncoder::Init(std::string* error) {
     // /system/lib64 下）。硬写绝对路径会在 32 位设备上找错目录。
     handle_ = dlopen("libjpeg.so", RTLD_NOW | RTLD_LOCAL);
     if (handle_ == nullptr) {
+        // ⚠️ dlerror() **只能调一次**。
+        //
+        //    它取出错误之后会把它清掉，第二次调用返回 nullptr。
+        //    写成 `dlerror() != nullptr ? dlerror() : "…"` 就会在
+        //    拼接时拿到 nullptr —— std::string + nullptr 直接段错误。
+        //
+        //    实测后果：任何没有 libjpeg 的设备上，守护进程启动即崩。
+        const char* e = dlerror();
         if (error) {
             *error = std::string("加载 libjpeg.so 失败: ") +
-                     (dlerror() != nullptr ? dlerror() : "未知原因");
+                     (e != nullptr ? e : "未知原因");
         }
         return false;
     }
