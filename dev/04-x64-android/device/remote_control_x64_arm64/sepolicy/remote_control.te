@@ -166,8 +166,31 @@ hal_client_domain(remote_control, hal_graphics_composer)
 #    现象像 Java 层问题，实际是 binder 授权缺失，且**不留痕迹**。
 #
 #    app_api_service 是 AOSP 给"应用可见系统服务"的分组属性。
+# 双向都要：我们的域调它（发起），它也要调回我们（`cmd`/`dumpsys` 的实现
+# 是**回调**式的 —— system_server 拿到结果后反向往我们的 binder 上送）。
+# 实测：补完 fd use + fifo write 之后，请求不再立刻报错而是**挂住**，
+# denial 变成
+#     avc: denied { call } for comm="Binder:543_3"
+#         scontext=u:r:system_server:s0 tcontext=u:r:remote_control:s0 tclass=binder
+binder_call(system_server, remote_control)
 binder_call(remote_control, system_server)
-allow remote_control servicemanager:service_manager find;
+
+# ⚠️ system_server 会**替我们跑子进程**（`cmd` / `dumpsys` 都是这么实现的：
+#    它 fork 一个子进程，并继承我们传过去的 stdout/stderr 管道 fd），
+#    于是它需要对我们那些 fd 有 use 权限。实测：
+#        avc: denied { use } for comm="cmd" path="/dev/null"
+#            scontext=u:r:system_server:s0 tcontext=u:r:remote_control:s0 tclass=fd
+#    少了这条，`pm list packages` 从退出码 20（找不到服务）变成退出码 2 ——
+#    也就是"服务找到了、命令进去了、但输出管道用不了"。
+allow system_server remote_control:fd use;
+# 光能 use 还不够，它要往管道里**写**（那就是命令的输出）。
+# 实测：补了 fd use 之后退出码仍是 2，denial 换成
+#     avc: denied { write } ... tclass=fifo_file scontext=system_server
+allow system_server remote_control:fifo_file { write read getattr open };
+# ⚠️ 不要写 `allow ... servicemanager:service_manager find;` ——
+#    public/service.te:280 有 neverallow 专门挡它（servicemanager 本身不该被
+#    普通域直接 find）。按**服务**授权才对，app_api_service 是 AOSP 给
+#    "应用可见系统服务"的分组属性。
 allow remote_control app_api_service:service_manager find;
 
 binder_call(remote_control, surfaceflinger)
