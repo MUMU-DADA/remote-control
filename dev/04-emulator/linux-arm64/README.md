@@ -488,3 +488,35 @@ AVD 模式理论上会**以 AVD 的 config.ini 为准**，所以值得一试（�
 - 补丁生效后 `ranchu` 可启动，guest 拿到**真正的 goldfish 设备**，之前所有
   "访问缺失 MMIO 导致 QEMU 崩"的问题一并消失，**有望一路启动到底**。
 - 代价：同步 + 构建，量级为小时级；有一定不确定性（模拟器构建链较老）。
+
+---
+
+## 第 6 轮：镜像级就地打补丁的可行性与边界
+
+**新掌握的可靠手法（可复用）**：模拟器实际传给 QEMU 的 `vendor-qemu.img` / `system-qemu.img`
+是**整盘镜像**（GPT + 一个分区，分区起始 LBA 2048）。可以不解包整个 `super`，
+直接按 GPT 解析出分区偏移 → `dd` 出分区 → `debugfs` 改内容 → `dd` 写回，
+即可**在编译之外**修改 guest 看到的分区（已实测生效：删掉的 rc 文件在回读中确认消失）。
+
+**但本轮也撞到了两个硬边界**：
+
+1. **guest 的 `/vendor` 内容会被"还原"**：无论把 `vendor-qemu.img`、`vendor.img`
+   两份都打上补丁（确认两边都不再有 usb/wifi/sensors/thermal/health/media 的 rc），
+   guest 仍然会启动 `vendor.usb-hal-1.0`（74 s 处照样宿主段错误）。
+   说明这些服务定义来自**模拟器内部的设备/分区映射**，而不是我能直接改的那几个文件；
+   继续靠"删文件"来回避崩溃是打不赢的（这也印证了第 4/5 轮的结论）。
+
+2. **崩溃点随被删掉的组件"移动"**：usb → wifi → power/health（电池）→ …，
+   每次都是 guest 访问 ranchu 专有 MMIO 时把宿主 QEMU 弄崩（此时 guest 侧零崩溃）。
+
+**关于"从源码重建模拟器"这条唯一剩下的路，本轮把可行性摸清了**：
+
+- ✅ 本树用**清华 AOSP 镜像**同步（`mirrors.tuna.tsinghua.edu.cn/git/AOSP/...`，
+  `android-12.0.0_r34`），镜像上**有** `platform/external/qemu`（实测 HTTP 200）；
+- ⚠️ 但 AOSP manifest（1048 个项目）里**不含** `platform/external/qemu`，
+  且构建它所需的 `prebuilts/android-emulator-build` **不在树里**；
+- 结论：需要额外取 qemu 源码 + 构建工具链，属**小时级、且有不确定性**的工作；
+  补丁目标很明确（让音频设备按 `hw.audioOutput` 条件创建，或直接不创建），
+  一旦成功，`ranchu` 可启动、guest 拿到真设备，前面所有"访问缺失 MMIO 导致 QEMU 崩"的问题会一并消失。
+
+清理：`super.img` 已恢复，产物目录保持可用；无编译/模拟器残留。
