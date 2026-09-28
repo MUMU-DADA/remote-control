@@ -886,7 +886,9 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
     // **没人在看画面的时候完全不抓帧**。
     if (!st->hubSub) {
         std::string err;
-        st->hubSub = FrameHub::Instance().Subscribe(&err);
+        // 上报目标帧率 —— 抓帧线程按所有订阅者的**最高**需求跑。
+        // 消费者来了直接拿最新帧，不用等一次抓帧（那是"变卡"的根源）。
+        st->hubSub = FrameHub::Instance().Subscribe(p.fps, &err);
         if (!st->hubSub) {
             ALOGW("订阅共享抓帧失败: %s", err.c_str());
             return {};
@@ -904,7 +906,7 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
     const int waitMs = std::min(500, std::max(100, p.fps > 0 ? 2000 / p.fps : 200));
 
     uint64_t latestSeq = 0;
-    FramePtr f = FrameHub::Instance().WaitNext(st->hubSeq, waitMs, &latestSeq);
+    FramePtr f = st->hubSub->WaitNext(st->hubSeq, waitMs, &latestSeq);
     if (!f) {
         // 没等到新帧。两种可能：
         //   - 抓帧比帧间隔还慢（超时是正常的，不是错误）
@@ -1256,6 +1258,9 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                                                     1, 60, p.fps);
                             p.fps = nf;
                             nextFrameAt = NowMs();    // 立刻反映新帧率
+                            // 也告诉 FrameHub —— 抓帧节奏跟着最高需求走，
+                            // 不报的话"客户端降到 5fps 但服务端还在 30fps 抓"
+                            if (st.hubSub) st.hubSub->SetFps(nf);
                             WsWriteText(fd, "{\"t\":\"ack\",\"fps\":" +
                                                 std::to_string(nf) + "}");
                         } else if (t == "quality") {

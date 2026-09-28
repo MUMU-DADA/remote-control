@@ -9,8 +9,7 @@
 //     客户端C ──抓帧──┘
 //
 // 三个客户端看的是**同一块屏幕**，抓出来的帧完全一样。实测总抓帧
-// 吞吐被锁在 ~4.2 次/秒，然后被 N 个客户端瓜分 —— 1 个客户端 3.5fps，
-// 3 个客户端各 1.4fps。
+// 吞吐被锁住，然后被 N 个客户端瓜分。
 //
 // 现在改成一个抓帧线程 + 一份共享帧：
 //
@@ -18,18 +17,24 @@
 //     客户端A ──读最新帧── 降采样/编码（各自并行）
 //     客户端B ──读最新帧──
 //
-// ## 启停：**没有需求的时候完全不抓帧**
+// ## 抓帧节奏：按「所有订阅者的最高需求」，而不是按请求触发
 //
-// 抓帧是这件事里最贵的一步（SurfaceFlinger 23ms，screencap 120ms+）。
-// 没人在看的时候还每秒抓 30 次是纯浪费电。
+// 第一版是按需触发（消费者请求时才抓）。那样**省 CPU，但延迟很差**：
 //
-// 所以用**按需抓帧**而不是固定频率：
+//     消费者请求 → 这时才开始抓帧 → 等一整个抓帧周期（23~60ms）
+//                → 编码 → 发回
 //
-//   - 第一个订阅者到来 → 启线程
-//   - 最后一个订阅者离开 → 停线程并 join
-//   - 线程平时阻塞在条件变量上，**只有消费者要新帧时才抓**
+// 每帧都要从零等一次抓帧，而且拿到的画面已经是一个周期之前的。
+// 实测很卡 —— 这正是用户反馈的"改了自适应之后变卡了"。
 //
-// 这比"固定 30fps 抓帧、消费者各自取"更省：消费者要 5fps 就只抓 5 次/秒。
+// 现在改成**按时抓帧**：
+//
+//   - 抓帧线程按 `max(所有订阅者的目标帧率)` 持续抓
+//   - 消费者来了**直接拿最新帧**，延迟接近 0
+//   - 客户端改帧率 → 重算节奏（跟着最高需求走）
+//   - 没有订阅者 → 停线程，一次都不抓
+//
+// 既满足"消费端只要 10 帧就别抓 30 帧"，又没有按需触发的延迟。
 
 #pragma once
 
@@ -74,6 +79,17 @@ class FrameHub {
     //
     // 第一个订阅者会启动抓帧线程；最后一个离开会停掉它。
     // 用 RAII：持有 Sub 就代表"我要看画面"。
+    //
+    // ⚠️ 每个订阅者要**上报自己的目标帧率** —— 抓帧线程按所有订阅者里
+    //    最高的那个跑。这是"按需求抓帧"的正确形态：
+    //
+    //      错的（按请求触发）：消费者请求 → 这时才开始抓 → 等一整个
+    //                          抓帧周期 → 拿到的画面已经旧了一个周期。
+    //                          实测很卡，因为延迟 = 抓帧耗时。
+    //
+    //      对的（按时抓帧）：抓帧线程持续按最高需求跑，消费者来了直接
+    //                        拿最新帧，延迟接近 0。没人在看就停，
+    //                        最高需求降下来就跟着降。
     class Sub {
       public:
         ~Sub();
@@ -82,40 +98,44 @@ class FrameHub {
         Sub(const Sub&) = delete;
         Sub& operator=(const Sub&) = delete;
 
+        // 客户端改了帧率就调它（服务端会重算抓帧节奏）。
+        void SetFps(int fps);
+
+        // 等到比 afterSeq 更新的一帧。
+        //
+        // 已经有更新的帧 → **立刻返回**（正常情况：抓帧线程已经备好了）
+        // 否则等，最多 timeoutMs。timeoutMs < 0 表示一直等。
+        //
+        // 超时返回 nullptr，*outLastSeq 是当前最新序号（调用方据此判断
+        // "是我没跟上"还是"根本没在抓"）。
+        FramePtr WaitNext(uint64_t afterSeq, int timeoutMs, uint64_t* outLastSeq);
+
       private:
         friend class FrameHub;
         Sub() = default;
-        bool active_ = false;
+        uint64_t id_     = 0;
+        int      fps_    = 0;
+        bool     active_ = false;
     };
 
     // 返回 nullptr 表示抓帧不可用（没有 Dispatcher / 启动失败）。
-    // error 里是原因。
-    std::unique_ptr<Sub> Subscribe(std::string* error);
+    // error 里是原因。fps 是这个订阅者的目标帧率。
+    std::unique_ptr<Sub> Subscribe(int fps, std::string* error);
 
     // ── 取帧 ──
 
     // 最新一帧，不阻塞。没有就返回 nullptr。
     FramePtr Latest() const;
 
-    // 等到比 afterSeq 更新的一帧。
-    //
-    // 内部逻辑：
-    //   - 已经有更新的帧 → 立刻返回（多个消费者共享同一次抓帧）
-    //   - 否则请求一次抓帧并等待，最多 timeoutMs
-    //   - 超时返回 nullptr，*outLastSeq 是本线程上次看到的序号
-    //     （调用方据此判断"是我没跟上"还是"根本没在抓"）
-    //
-    // timeoutMs < 0 表示一直等。
-    FramePtr WaitNext(uint64_t afterSeq, int timeoutMs, uint64_t* outLastSeq);
-
     struct Stats {
-        bool     running        = false;   // 抓帧线程在跑吗
-        int      subscribers    = 0;
-        uint64_t frames         = 0;       // 一共抓了多少帧
-        uint64_t lastSeq        = 0;
-        int64_t  lastCaptureMs  = 0;       // 最近一次抓帧耗时
-        uint64_t sharedHits     = 0;       // 多少次"直接拿到别人抓的帧"
-        uint64_t waits          = 0;       // 多少次真的触发了抓帧
+        bool     running       = false;   // 抓帧线程在跑吗
+        int      subscribers   = 0;
+        int      maxFps        = 0;       // 当前按多少 fps 在抓（0 = 没需求）
+        uint64_t frames        = 0;       // 一共抓了多少帧
+        uint64_t lastSeq       = 0;
+        int64_t  lastCaptureMs = 0;       // 最近一次抓帧耗时
+        uint64_t served        = 0;       // 取帧直接命中（没等）的次数
+        uint64_t misses        = 0;       // 没等到新帧（超时）的次数
     };
     Stats GetStats() const;
 

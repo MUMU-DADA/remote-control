@@ -962,11 +962,15 @@ ReplyPacket Dispatcher::HandleStats(const Request& req) {
              .Field("frames", h.frames)
              .Field("lastSeq", h.lastSeq)
              .Field("lastCaptureMs", h.lastCaptureMs)
-             // waits: 真的触发了抓帧的次数
-             // sharedHits: 直接拿到别人抓的帧的次数
-             // 这个比值就是"共享抓帧"省下了多少
-             .Field("waits", h.waits)
-             .Field("sharedHits", h.sharedHits)
+             // maxFps: 当前按多少 fps 在抓（所有订阅者里的最高需求）
+             .Field("maxFps", static_cast<int64_t>(h.maxFps))
+             // served: 取帧直接命中（抓帧线程已经备好）的次数
+             // misses: 没等到新帧（超时）的次数
+             //
+             // 这个比值就是"卡不卡"的机器可读版本：
+             // 按需触发的那版每次都要等一个抓帧周期，misses 会很高。
+             .Field("served", h.served)
+             .Field("misses", h.misses)
          .EndObj();
     };
     return MakeJsonReply(req.cmd, ServiceState::Instance().StatsJson(extra));
