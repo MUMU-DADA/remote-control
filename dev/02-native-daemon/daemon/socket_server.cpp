@@ -205,14 +205,32 @@ void SocketServer::Run(const RequestHandler& handler) {
         return;
     }
 
+    // 连续失败计数：accept 失败如果**立刻**再来一次，就是一个 100% CPU 的
+    // 死循环 —— 实测踩过：接管 init 的 socket 时 accept 一直返回 EINVAL，
+    // 刷屏 + 把 HTTP 线程一起饿死，表现为"服务在跑但控制台打不开"，
+    // 而且日志刷得太快，真正的原因反而看不见。
+    //
+    // 所以：同一种错误连续出现就退避，并只报一次"这条路走不通"，
+    // 让失败**显式**而不是变成饥饿。
+    int consecutiveErrors = 0;
     while (!stop_) {
         int connFd = accept4(listenFd_, nullptr, nullptr, SOCK_CLOEXEC);
         if (connFd < 0) {
             if (errno == EINTR) continue;
             if (stop_) break;
-            ALOGE("remote-control: accept 失败: %s", strerror(errno));
+            if (++consecutiveErrors <= 3) {
+                ALOGE("remote-control: accept 失败: %s", strerror(errno));
+            } else if (consecutiveErrors == 4) {
+                ALOGE("remote-control: accept 持续失败（%s），退避等待；"
+                      "这个监听 fd 用不了 —— 若用的是 --init-socket，"
+                      "见 remote-control.rc 里为什么改成自己 bind",
+                      strerror(errno));
+            }
+            // 退避：连续失败时不要空转
+            usleep(200 * 1000);
             continue;
         }
+        consecutiveErrors = 0;
 
         // 给连接设个空闲超时 —— 防止连上来就不说话的客户端永久占着线程。
         timeval tv{};

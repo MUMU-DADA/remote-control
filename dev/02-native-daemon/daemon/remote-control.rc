@@ -13,7 +13,7 @@
 #
 # 完整设计见 docs/09-deployment-and-update.md。
 
-service remote-control /system/bin/remote-control --init-socket remote-control --config /data/misc/remote-control/remote-control.conf --log /data/misc/remote-control/remote-control.log
+service remote-control /system/bin/remote-control --socket /data/misc/remote-control/remote-control.sock --socket-mode 0666 --config /data/misc/remote-control/remote-control.conf --log /data/misc/remote-control/remote-control.log
     class core
 
     # ── 运行身份：shell，不是 system ──────────────────────────────────────
@@ -66,7 +66,23 @@ service remote-control /system/bin/remote-control --init-socket remote-control -
     #
     #    注意：init 模式下 `--socket-mode` 是**无效**的（fd 由 init 建好传进来），
     #    所以只能在这里定。
-    socket remote-control seqpacket 0666 system system
+    # ⚠️ **不用 init 的 socket**（原来这里是
+    #        socket remote-control seqpacket 0666 system system
+    #    外加启动参数 --init-socket remote-control）。
+    #
+    #    实测那条路是坏的：服务起来了、SELinux 也放行了，但
+    #        remote-control: accept 失败: Invalid argument
+    #    以 100% CPU 死循环刷屏，把 HTTP 线程一起饿死 —— 控制台打不开。
+    #    `--init-socket` 这条代码路径**从来没被真正跑过**（开发期一律用
+    #    `--socket` 自己 bind），所以这个 bug 一直潜伏着，第一次走正规形态才踩到。
+    #
+    #    改成让服务自己 bind 到自己的目录：走的是久经考验的那条路径，
+    #    而且 socket 落在我们自己的 remote_control_data_file 里，
+    #    SELinux 的 sock_file 权限也由我们自己给（见 .te）。
+    #
+    #    代价：socket 不再由 init 创建，`/dev/socket/remote-control` 不再存在。
+    #    它本来就只是"给其他进程连"的入口，而连进来的客户端（比如控制器应用）
+    #    走的是 HTTP API —— 那条一直是好的。
 
     # ⚠️ **不要写 oneshot**。
     #

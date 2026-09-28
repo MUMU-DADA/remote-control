@@ -214,6 +214,14 @@ allow remote_control remote_control_data_file:file {
     create read write append open getattr unlink rename setattr map
 };
 
+# 服务自己 bind 的 Unix socket（放在自己的目录里，见 remote-control.rc）。
+#
+# 不会撞 domain.te:773 那条"coredomain 不许开 file_type 的 socket"：
+# remote_control_data_file 带 core_data_file_type，正列在那条的排除项里。
+allow remote_control remote_control_data_file:sock_file {
+    create read write open getattr unlink
+};
+
 # HTTP / JSON API 的 TCP 监听。
 #
 # 少了这条实测报 avc: denied { create } ... tclass=tcp_socket，
