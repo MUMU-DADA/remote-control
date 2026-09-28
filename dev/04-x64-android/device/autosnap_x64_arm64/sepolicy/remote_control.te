@@ -134,6 +134,24 @@ net_domain(remote_control)
 # 对照 private/surfaceflinger.te：它自己 rw_file_perms 访问 gpu_device；
 # 我们作为客户端只需要能映射它给的 GraphicBuffer。
 
+# ── 当图形 HAL 的客户端 ──────────────────────────────────────────────────
+#
+# ⚠️ **这才是抓帧真正缺的那一块。**
+#
+# 抓帧要经过 gralloc / graphics allocator HAL：申请缓冲区、拿 fd、
+# 读 hwservicemanager 的属性去找服务。这些权限平时是**白来的** ——
+# `screencap` 以 shell 身份跑，而 shell 早就被声明成各种 HAL 的客户端了；
+# 我们自己的域没有，于是漏了一大片细碎的规则。
+#
+# 缺了它的表现极难查：抓帧线程在跑、订阅登记正常、/params 显示
+# activeFps/subscribers 都正常，唯独 **frames=0** —— CaptureOnce
+# **卡在** HAL 调用里出不来（不是失败，所以连错误都不打），页面全黑。
+# dmesg 里先是 `fd use` 被拒，补掉之后又冒出
+#     avc: denied { read } ... hwservicemanager_prop
+# 一条条补是补不完的 —— 正确做法是声明成 HAL 客户端，让宏把整套规则带进来。
+hal_client_domain(remote_control, hal_graphics_allocator)
+hal_client_domain(remote_control, hal_graphics_composer)
+
 binder_call(remote_control, surfaceflinger)
 # 抓帧是**回调**：SurfaceFlinger 拿到我们的 BufferQueue 之后要反向调回来。
 # 只给单向的话实测报
