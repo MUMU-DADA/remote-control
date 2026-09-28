@@ -276,6 +276,24 @@ FramePtr FrameHub::Sub::WaitNext(uint64_t afterSeq, int timeoutMs,
         return im->latest;
     }
     im->stats.misses++;
+    // ⚠️ 等到超时还没帧 —— 如果**从头到尾一帧都没有**，那不是"画面静止"，
+    //    是抓帧根本出不来。只报一次，别刷屏。
+    //
+    //    踩过一次，代价是一整轮排查：SELinux 少了条 `fd use`，CaptureOnce
+    //    **卡住**（不是失败，所以连"共享抓帧失败"都不打），于是
+    //    服务 running、订阅登记正常、编码器在初始化、/params 里
+    //    activeFps=60 subscribers=1 全都"正常"，唯独 frames=0，页面全黑。
+    {
+        static bool warned = false;
+        if (!warned && im->stats.frames == 0 && im->stats.running &&
+            !im->subFps.empty()) {
+            warned = true;
+            ALOGE("抓帧线程在跑但**一帧都没成功**（%d 个订阅者，目标 %d fps）"
+                  "—— 画面会是黑的。多半是抓帧路径被拦住了（SELinux？），"
+                  "查：adb shell dmesg | grep 'avc:.*remote_control'",
+                  static_cast<int>(im->subFps.size()), im->maxFps);
+        }
+    }
     return nullptr;
 }
 

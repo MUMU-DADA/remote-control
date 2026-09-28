@@ -227,6 +227,19 @@ allow remote_control remote_control_data_file:sock_file {
     create read write open getattr unlink setattr
 };
 
+# 抓帧的图形缓冲区是**跨域传 fd** 的：SurfaceFlinger / gralloc 把 buffer 的
+# fd 通过 binder 递给我们，内核要检查我们对那个 fd 的 use 权限。
+#
+# 少了这条实测的表现极具迷惑性：服务 running、订阅登记正常、编码器在初始化、
+# /params 显示 activeFps=60 subscribers=1 —— 但 **frames=0**，
+# 抓帧线程卡在 CaptureOnce 里出不来，一帧都不发，页面全黑。
+# dmesg 里才看得到：
+#     avc: denied { use } ... scontext=u:r:remote_control:s0
+#         tcontext=u:r:hal_graphics_allocator_default:s0 tclass=fd
+allow remote_control hal_graphics_allocator_default:fd use;
+allow remote_control surfaceflinger:fd use;
+allow remote_control gpu_device:fd use;
+
 # 应用管理（/api/v1/app* 那些接口）要跑 dumpsys。
 allow remote_control system_file:file {
     read open getattr map execute execute_no_trans
