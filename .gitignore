@@ -45,7 +45,9 @@
 /dev/04-emulator/windows-arm64/data/
 
 # --- AOSP 构建输出 ---
-# 正常情况下会落在 aosp/out/（已被上面的 /aosp/ 覆盖），这里只是留个记号
+# 正常情况下会落在 aosp/out/
+# 构建临时目录（TMPDIR 指过来用的，因为 /tmp 是 tmpfs 且经常被占满）
+/.tmp/（已被上面的 /aosp/ 覆盖），这里只是留个记号
 out/
 
 # 说明：.vscode/settings.json 是**要**入库的，它记录了"只监听本项目、
