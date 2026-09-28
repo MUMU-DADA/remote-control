@@ -26,7 +26,7 @@ constexpr uint32_t kMagic = 0x44545541;
 //   4 = 手势（长按/拖拽/双击）、按键注入、剪贴板
 //   5 = 设备电源（关机 / 重启）
 //   6 = 服务对外开关、运行中应用、历史日志、日志流
-constexpr uint32_t kProtocolVersion = 6;
+constexpr uint32_t kProtocolVersion = 7;
 
 enum class Cmd : uint32_t {
     Info       = 1,   // 查询显示参数，不产生副作用
@@ -92,6 +92,21 @@ enum class Cmd : uint32_t {
     ServiceSwitch = 35,  // payload: "on" | "off" | "status"
     RunningApps   = 36,  // 列出正在运行的应用（含进程状态）
     LogFile       = 37,  // 落盘的历史日志（/sdcard/autod.log，只留最近 10KB）
+
+    // ── 屏幕方向（v7）────────────────────────────────────────────────────
+    //
+    // payload: "0"|"90"|"180"|"270"|"portrait"|"landscape"|"free"|"status"
+    //
+    // 为什么要有退路：正规入口是 `cmd window user-rotation lock N`，
+    // 但有些精简 ROM 根本没有旋转支持（实测自编 x86_64 ROM 上命令返回
+    // 成功、设置项也写进去了，mRotation 死活不动）。那种设备上退到
+    // `cmd window size` 交换宽高 —— 应用照样按横屏重新布局。
+    //
+    // ⚠️ 两条路**不等价**：退路不改 mRotation，180° 也表达不出来。
+    //    走了哪条、结果如何，应答里如实报（method / applied）。
+    // → {"requested":90,"applied":true,"method":"user-rotation"|"wm-size"|"none",
+    //    "rotation":1,"free":false,"width":720,"height":1280,"note":".."}
+    Rotate        = 38,
 
     Power         = 34,  // payload: "reboot" | "shutdown" | "reboot-recovery"
                          //          | "reboot-bootloader" | "reboot-sideload"

@@ -34,14 +34,14 @@ def chk(cond, what, detail=""):
 d = api("/describe")
 cmds = d.get("commands", [])
 print("\n[1] 命令数 / 版本")
-chk(d.get("protocolVersion") == 6, "protocolVersion = 6", f"实际 {d.get('protocolVersion')}")
-chk(len(cmds) == 32, "命令 32 条", f"实际 {len(cmds)}")
+chk(d.get("protocolVersion") == 7, "protocolVersion = 7", f"实际 {d.get('protocolVersion')}")
+chk(len(cmds) == 33, "命令 33 条", f"实际 {len(cmds)}")
 # README 里写"32 条命令"
 for f in ("README.md","03-socket.md","01-http.md"):
     t = open(os.path.join(DOCS,f),encoding='utf-8').read()
     nums = set(re.findall(r'(\d+)\s*条命令', t))
     if nums:
-        chk(nums == {"32"}, f"{f} 里写的命令数与实际一致", f"文档写 {nums}")
+        chk(nums == {"33"}, f"{f} 里写的命令数与实际一致", f"文档写 {nums}")
 
 print("\n[2] 命令号表（03-socket.md）")
 t = open(os.path.join(DOCS,"03-socket.md"),encoding='utf-8').read()
@@ -59,7 +59,7 @@ live = set()
 for res in ["describe","config","selftest","stats","log","logfile","logstream","shutdown",
             "restart","capture","stream","touch","longpress","drag","doubletap","key",
             "clipboard","service","running","params","power","info","tap","swipe","apps",
-            "foreground","install","download","files"]:
+            "foreground","install","download","files","rotate"]:
     live.add(res)
 missing = sorted(live - doc_eps)
 chk(not missing, "活着的端点都写进了文档", f"缺 {missing}")
@@ -117,7 +117,38 @@ for f, want in (("png", (1, 9)), ("jpeg", (1, 100)),
         f"实际 {v.get('min')}-{v.get('max')}")
     chk(f in t, f"01-http.md 里写了 quality.{f}")
 
-print("\n[8] 编码器逐格式上报（01-http.md）")
+print("\n[8] 屏幕方向 /rotate（01-http.md）")
+# /rotate 是 POST（有副作用），不能用上面的 api() —— 那个是 GET
+def api_post(path, body):
+    req = urllib.request.Request(B + path, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except Exception as e:
+        return {"__err": str(e)}
+
+rot = api_post("/rotate", {"to": "status"})
+chk(rot.get("ok") is True, "Rotate 可用（POST /rotate）")
+for f in ("requested", "applied", "method", "rotation", "actualRotation",
+          "width", "height", "note"):
+    chk(f in rot, f"rotate.{f} 存在", f"实际字段 {sorted(rot)}")
+chk(rot.get("method") in ("user-rotation", "wm-size", "none"),
+    "rotate.method 是三选一", f"实际 {rot.get('method')!r}")
+t01 = open(os.path.join(DOCS, "01-http.md"), encoding="utf-8").read()
+for f in ("applied", "actualRotation", "wm-size"):
+    chk(f in t01, f"01-http.md 里写了 rotate 的 {f}")
+chk("/rotate" in t01, "01-http.md 里有 /rotate")
+
+print("\n[9] 触控坐标空间 == 注入器 ABS 范围")
+info = api("/info")
+chk(info.get("touchWidth", 0) > 0 and info.get("touchHeight", 0) > 0,
+    "info.touchWidth/Height 非零",
+    f"实际 {info.get('touchWidth')}x{info.get('touchHeight')}")
+chk("touchWidth" in t01 and "ABS" in t01,
+    "01-http.md 里说明了触控空间是 ABS 范围")
+
+print("\n[10] 编码器逐格式上报（01-http.md）")
 be = pm.get("codecs", {}).get("backend", "")
 chk("jpeg=" in be and "webp=" in be and "png=" in be,
     "codecs.backend 逐格式上报", f"实际 {be!r}")

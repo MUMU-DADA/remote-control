@@ -122,6 +122,23 @@ MediaCodec 本来把 SPS/PPS 作为单独一个 CODEC_CONFIG buffer 吐出来，
 变慢，是创建失败。当前默认 2，`GET /api/v1/params` 的
 `codecs.h264Max` / `h264Used` 能查到占用。
 
+### 尺寸消息 `{"t":"size"}`
+
+服务端在**尺寸变化时**发这条 —— 不只是第一帧之前：
+
+```json
+{"t":"size","w":480,"h":853}
+```
+
+什么时候会变：
+
+- 客户端改了 `maxWidth`
+- 设备转屏（`POST /rotate`）
+- 别的途径改了显示分辨率（`wm size`）
+
+只发一次是不够的：那样客户端画布会一直停在旧尺寸上。
+实测踩过 —— 改到 480 之后画布还是 720。
+
 ### 消息时序
 
 ```
@@ -146,6 +163,7 @@ ws.send(JSON.stringify({t:'fps',            v:10}));
 ws.send(JSON.stringify({t:'quality',        v:50}));
 ws.send(JSON.stringify({t:'format',         v:'webp'}));
 ws.send(JSON.stringify({t:'skipUnchanged',  v:0}));
+ws.send(JSON.stringify({t:'maxWidth',       v:480}));  // 中途改分辨率，不重连
 ws.send(JSON.stringify({t:'refresh'}));          // 立刻重发一帧（不管变没变）
 ws.send(JSON.stringify({t:'ping', s:1}));
 ```
@@ -157,10 +175,21 @@ ws.send(JSON.stringify({t:'ping', s:1}));
 {"t":"ack","quality":50}
 {"t":"ack","format":"webp"}
 {"t":"ack","skipUnchanged":false}
+{"t":"ack","maxWidth":480}
 {"t":"pong","s":1}
 ```
 
 `refresh` 用于页面重新可见时立刻刷新一次（标签页切回来时画面可能已经旧了）。
+
+`maxWidth` 是**降采样宽度**（`0` = 原始分辨率，不降采样）。
+它是 `FrameHub` 的抓帧宽度取所有订阅者里**最大的**那个 ——
+你改小了自己这一路，别的客户端不受影响；改大了会抬高整机的抓帧开销。
+
+> ⚠️ 改 `maxWidth` 之后画面尺寸就变了，服务端会重发一条 `size`
+> （见下面「尺寸消息」）。客户端必须据此调整画布，否则图会被拉伸。
+>
+> 它也**不影响触控坐标**：坐标始终按 `/info` 的 `touchWidth/Height`
+> 算，不是按图尺寸（见 `01-http.md` 的 `/info`）。
 
 ### 客户端渲染示例
 

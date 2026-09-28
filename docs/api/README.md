@@ -9,9 +9,9 @@
 
 | 文档 | 内容 |
 |---|---|
-| [01-http.md](01-http.md) | **HTTP/JSON API** —— 全部 29 个端点，逐个的参数与响应 |
+| [01-http.md](01-http.md) | **HTTP/JSON API** —— 全部端点，逐个的参数与响应 |
 | [02-websocket.md](02-websocket.md) | **WebSocket 流** —— 画面流、触控流、日志流 |
-| [03-socket.md](03-socket.md) | **Unix socket 二进制协议** —— 32 条命令的线格式 |
+| [03-socket.md](03-socket.md) | **Unix socket 二进制协议** —— 33 条命令的线格式 |
 | [04-config.md](04-config.md) | **配置与部署** —— 配置文件、命令行、supervisor、鉴权 |
 | [05-errors.md](05-errors.md) | **状态码与错误处理** |
 
@@ -45,7 +45,7 @@
 curl http://<设备IP>:8088/api/v1/describe
 ```
 
-返回 32 条命令的清单、各自的可用性，以及整体 `capabilities`。
+返回 33 条命令的清单、各自的可用性，以及整体 `capabilities`。
 **这是"这台设备上到底能做什么"的唯一权威答案** —— 不要假设，问它。
 
 ### 2. 截图
@@ -164,7 +164,7 @@ API=29 bash tools/build-ndk.sh   # ✗ memfd_create / AndroidBitmap_compress
 
 ## 协议版本
 
-当前协议 **v6**，32 条命令。每条命令带 `since` 字段标明它从哪个版本开始存在：
+当前协议 **v7**，33 条命令。每条命令带 `since` 字段标明它从哪个版本开始存在：
 
 ```bash
 curl -s http://host:8088/api/v1/describe | jq '.protocolVersion, (.commands|length)'

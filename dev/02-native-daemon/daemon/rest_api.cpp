@@ -735,6 +735,8 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
     base += "{\"t\":\"quality\",\"v\":\"1-100\"},";
     base += "{\"t\":\"format\",\"v\":\"jpeg|webp|png\"},";
     base += "{\"t\":\"skipUnchanged\",\"v\":\"0|1\"},";
+    base += "{\"t\":\"maxWidth\",\"v\":\"0-8192\","
+            "\"desc\":\"中途改降采样宽度，0=不缩放\"},";
     base += "{\"t\":\"refresh\",\"desc\":\"立刻重发一帧\"},";
     base += "{\"t\":\"ping\",\"s\":\"序号\"}";
     base += "]}";
@@ -1306,6 +1308,7 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
 
         int64_t  nextFrameAt = NowMs();
         uint64_t sent = 0;
+        uint32_t lastW = 0, lastH = 0;   // 上次告诉客户端的尺寸
         bool     codecSent = false;   // H.264 的 codec 串只发一次
 
         // 主循环用 poll 同时等两件事：客户端发来的控制消息、下一帧的时间点。
@@ -1390,6 +1393,23 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                             WsWriteText(fd, std::string("{\"t\":\"ack\","
                                     "\"skipUnchanged\":") +
                                     (p.skipUnchanged ? "true" : "false") + "}");
+                        } else if (t == "maxWidth") {
+                            // 中途换降采样宽度 —— 不用重连就能改分辨率。
+                            // 0 = 不降采样（原始分辨率）。
+                            const int nw = ClampInt(
+                                    std::to_string(v.num("v", p.maxWidth)),
+                                    0, 8192, p.maxWidth);
+                            p.maxWidth = nw;
+                            // 也要告诉 FrameHub：抓帧宽度取所有订阅者里
+                            // **最大的**那个，改小了别人不受影响。
+                            if (st.hubSub) st.hubSub->SetMaxWidth(nw);
+                            // 画面尺寸变了，但**像素内容**没变 ——
+                            // changeGen 不会动，不强制的话静止画面下
+                            // 客户端会一直停在旧尺寸上。
+                            st.haveChangeGen = false;
+                            nextFrameAt = NowMs();
+                            WsWriteText(fd, "{\"t\":\"ack\",\"maxWidth\":" +
+                                                std::to_string(nw) + "}");
                         } else if (t == "refresh") {
                             // 客户端主动要求"下一帧无论变没变都发"，
                             // 用于页面重新可见时立刻刷新一次。
@@ -1419,9 +1439,14 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
             }
             if (img.empty()) continue;      // 没变或出错，下一轮再看
 
-            // 二进制帧。第一帧附带尺寸信息（之后客户端就不用再解析了）——
-            // 单独发一条文本消息会让客户端在"有图没尺寸"的窗口里没法画。
-            if (sent == 0) {
+            // 二进制帧。尺寸信息单独发一条文本消息 ——
+            // 不然客户端在"有图没尺寸"的窗口里没法画。
+            //
+            // ⚠️ 不能只在第一帧发。尺寸是会**中途变**的：
+            //    · 客户端改 maxWidth
+            //    · 设备转屏 / 改分辨率
+            //    只发一次的话客户端画布会一直停在旧尺寸上。
+            if (st.outW != lastW || st.outH != lastH) {
                 json::Writer w;
                 w.Obj()
                     .Field("t", "size")
@@ -1429,6 +1454,8 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                     .Field("h", static_cast<int64_t>(st.outH))
                  .EndObj();
                 if (!WsWriteText(fd, w.str())) return;
+                lastW = st.outW;
+                lastH = st.outH;
             }
 
             // H.264 还要告诉客户端 **codec 串**（"avc1.42C029"）。
@@ -1645,6 +1672,13 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         const std::string what = b.str("action", "reboot");
         return Call(Cmd::Power, PackArgs({what}), 0, -1);
     }
+    // 屏幕方向。同样用 POST：有副作用。
+    if (res == "rotate" && method == "POST") {
+        json::Value b; HttpResponse err;
+        if (!ParseJsonBody(req, &b, &err)) return err;
+        const std::string what = b.str("to", b.str("action", "status"));
+        return Call(Cmd::Rotate, PackArgs({what}), 0, -1);
+    }
     if (res == "info" && method == "GET") {
         // ⚠️ 不能直接 `return Call(Cmd::Info, …)`。
         //
@@ -1676,6 +1710,14 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
             return HttpResponse::Error(500, StatusName(cp.reply.status));
         }
 
+        // 注入器的实际坐标范围。配置里为 0 表示"跟随显示"，那就用抓帧尺寸。
+        const InjectorConfig& inj =
+                ServiceState::Instance().GetInjectorConfig();
+        const uint32_t touchW = inj.touchWidth  > 0 ? inj.touchWidth
+                                                    : cp.reply.width;
+        const uint32_t touchH = inj.touchHeight > 0 ? inj.touchHeight
+                                                    : cp.reply.height;
+
         json::Writer w;
         w.Obj()
             .Field("ok", true)
@@ -1683,8 +1725,19 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
             .Field("primaryHeight", static_cast<int64_t>(cp.reply.height))
             .Field("primaryStride", static_cast<int64_t>(cp.reply.stride))
             .Field("primaryFormat", static_cast<int64_t>(cp.reply.format))
-            .Field("touchWidth", static_cast<int64_t>(p.reply.width))
-            .Field("touchHeight", static_cast<int64_t>(p.reply.height))
+            // ⚠️ 触控坐标空间报的是**注入器的实际 ABS 范围**，不是显示尺寸。
+            //
+            // 客户端必须按这个空间发坐标 —— 服务端把 x/y 直接当 ABS 值
+            // 写下去（inject_uinput.cpp 里没有缩放），而 Android 再把这个
+            // 范围按比例映射到当前显示。两者不一致就会点偏：
+            // 实测踩过，显示 720 宽而 ABS 范围是 1279，于是点正中央
+            // 只落在 56% 处。
+            //
+            // 注入器的范围是**创建时定死的**（ioctl 改不了），所以它天然
+            // 是一个稳定的归一化空间 —— 转屏、改分辨率都不影响它，
+            // 前提是客户端拿到的就是这个值。
+            .Field("touchWidth", static_cast<int64_t>(touchW))
+            .Field("touchHeight", static_cast<int64_t>(touchH))
          .EndObj();
         return HttpResponse::Json(200, w.str());
     }

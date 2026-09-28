@@ -147,6 +147,31 @@ const std::string& WebUiHtml() {
           画面停止检测（静止时不重发）
         </label>
       </div>
+
+      <!-- 分辨率（降采样宽度）。中途可改，不用重连 —— 走 WS 的 maxWidth 命令。
+           注意它和「触控坐标空间」是两回事：图变小了，但坐标仍按
+           触控范围算，否则点击会错位（见 toScreen 那段）。 -->
+      <div class="row" style="margin-top:6px">
+        <span class="dim" style="font-size:11px;align-self:center">分辨率</span>
+        <button id="mw0"   onclick="setMaxWidth(0)">原始</button>
+        <button id="mw720" onclick="setMaxWidth(720)">720</button>
+        <button id="mw480" onclick="setMaxWidth(480)">480</button>
+        <button id="mw360" onclick="setMaxWidth(360)">360</button>
+        <span id="mwval" class="dim" style="font-size:11px"></span>
+      </div>
+
+      <!-- 屏幕方向。0/90/180/270 —— 真的转设备方向（应用会重新布局）。
+           有的设备转不动（ROM 没有旋转支持），那时服务端会退到换显示尺寸，
+           并在应答里如实说走了哪条路；下面那行会把结果显示出来。 -->
+      <div class="row" style="margin-top:6px">
+        <span class="dim" style="font-size:11px;align-self:center">方向</span>
+        <button onclick="rotate('0')"   title="竖屏">0°</button>
+        <button onclick="rotate('90')"  title="横屏">90°</button>
+        <button onclick="rotate('180')" title="倒竖">180°</button>
+        <button onclick="rotate('270')" title="倒横">270°</button>
+        <button onclick="rotate('free')" title="跟随传感器">自动</button>
+      </div>
+      <div id="rotmsg" class="dim" style="font-size:11px;margin-top:4px"></div>
     </div>
 
     <div class="card">
@@ -462,7 +487,8 @@ function fallbackToJpeg() {
 let quality = 75;
 // 降采样宽度。设备屏幕往往比展示区域大得多，全分辨率纯属浪费带宽。
 let maxW = 720;
-let sw = 0, sh = 0;          // 屏幕真实尺寸
+let sw = 0, sh = 0;          // **流**的画面尺寸（降采样后）
+let dispW = 0, dispH = 0;    // 屏幕逻辑尺寸（/config 报的，二者不是一回事）
 let streamKey = 0;
 
 // 画面流的诊断信息。写进 DOM 而不是 console.log ——
@@ -535,8 +561,16 @@ function refresh() {
   api('/config').then(d => {
     const r = d.runtime;
     const cap = r.capture;
-    sw = cap.primaryWidth || sw;
-    sh = cap.primaryHeight || sh;
+    // ⚠️ 不要用**屏幕尺寸**覆盖 sw/sh —— 那是**流的尺寸**。
+    //
+    //    降采样之后两者不一样：maxWidth=360 时流是 360 宽，而屏幕是 720。
+    //    覆盖了的话，控制台显示的尺寸每 10 秒（refresh 的周期）就会跳回
+    //    720 一次，toScreen 的兜底值也会跟着错。
+    //    这是实测抓到的：改到 480 之后读数变成了 720。
+    dispW = cap.primaryWidth || dispW;
+    dispH = cap.primaryHeight || dispH;
+    // 还没有画面时用屏幕尺寸占位，有画面了就一切以流为准
+    if (!sw || !sh) { sw = dispW; sh = dispH; }
     updateMeta(d);
   }).catch(e => setStatus('取状态失败：' + e, true));
 }
@@ -686,12 +720,14 @@ function startStream() {
       dbg('text ' + ev.data.slice(0, 60));
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.t === 'size') {
-        // 服务端在第一帧之前告诉尺寸 —— 客户端据此建 canvas，
-        // 否则得等图到了才知道多大
+        // 服务端在尺寸**变化时**发这条 —— 第一帧之前、以及之后每次
+        // 改 maxWidth / 设备转屏 / 改分辨率都会发。
+        // 客户端据此建/改 canvas，否则得等图到了才知道多大。
         if (cvs.width !== m.w || cvs.height !== m.h) {
           cvs.width = m.w; cvs.height = m.h;
           sw = m.w; sh = m.h;
           updateMeta();
+          syncMaxWidthButtons();
         }
       } else if (m.t === 'codec') {
         // 服务端在**第一帧之前**告诉 codec 串 —— WebCodecs 必须要它，
@@ -989,10 +1025,36 @@ setInterval(ping, 2000);
 // 坐标换算必须按**渲染后的显示尺寸**，不能用 naturalWidth：
 // 画面会被 CSS 缩放过。换算后还要夹到屏幕范围内，
 // 否则边缘点击会越界（设备侧的注入会失败或落到屏幕外）。
+// 触控坐标空间 —— **不是图尺寸**。
+//
+// 服务端把 x/y 直接当 uinput 的 ABS 值写下去（inject_uinput.cpp 里
+// 没有缩放），范围是启动时定的 touchWidth×touchHeight（默认 = 屏幕分辨率）。
+// Android 再把这个范围映射到当前显示尺寸 —— 也就是说它是一个
+// **归一化坐标空间**，换分辨率/转屏之后依然成立。
+//
+// 所以预览被降采样（maxWidth=360）之后，图是 360 宽，
+// 但坐标仍要按 720 算。按图尺寸算的话，点画面正中央会落到
+// 左上角四分之一处（实测 ABS 收到 180,320 而不是 360,640）。
+let touchW = 0, touchH = 0;
+
+function loadTouchRange() {
+  fetch(withToken('/api/v1/info'))
+    .then(r => r.json())
+    .then(d => {
+      if (d && d.touchWidth > 0 && d.touchHeight > 0) {
+        touchW = d.touchWidth; touchH = d.touchHeight;
+        dbg('触控坐标空间: ' + touchW + 'x' + touchH);
+      }
+    })
+    .catch(() => {});   // 拿不到就退回图尺寸
+}
+
 function toScreen(ev) {
   const rect = cvs.getBoundingClientRect();
-  const w = sw || cvs.width || 1;
-  const h = sh || cvs.height || 1;
+  // ⚠️ 用**触控范围**，不是图尺寸 —— 见上面 touchW 那段。
+  //    拿不到触控范围时才退回图尺寸（至少不崩）。
+  const w = touchW || sw || cvs.width || 1;
+  const h = touchH || sh || cvs.height || 1;
   const x = Math.round((ev.clientX - rect.left) / rect.width * w);
   const y = Math.round((ev.clientY - rect.top) / rect.height * h);
   return {
@@ -1195,6 +1257,60 @@ function setSkipUnchanged(on) {
     sendStream({t: 'skipUnchanged', v: on ? 1 : 0});
   }
   setStatus(on ? '已开启画面停止检测（静止时不重发）' : '已关闭 —— 每帧都会发送');
+}
+
+// ── 分辨率（降采样宽度）──
+//
+// 走 WS 的 maxWidth 命令，**不用重连**：连接时带 ?maxWidth= 那种做法
+// 要断开重来，画面会闪一下，而且中途改的需求本来就很常见。
+function setMaxWidth(w) {
+  maxW = w;
+  syncMaxWidthButtons();
+  if (streamReady) {
+    sendStream({t: 'maxWidth', v: w});
+  }
+  setStatus(w === 0 ? '分辨率：原始（不降采样）' : ('分辨率：宽 ' + w + 'px'));
+}
+
+function syncMaxWidthButtons() {
+  for (const [id, v] of [['mw0', 0], ['mw720', 720],
+                         ['mw480', 480], ['mw360', 360]]) {
+    const el = $(id);
+    if (el) el.className = (v === maxW) ? 'on' : '';
+  }
+  const lab = $('mwval');
+  if (lab) lab.textContent = sw ? (sw + '×' + sh) : '';
+}
+
+// ── 屏幕方向 ──
+//
+// ⚠️ 服务端可能**转不动**（ROM 没有旋转支持），那时它会退到换显示尺寸，
+//    并在应答里如实说走了哪条路。所以这里把结果显示出来 ——
+//    假装成功的话，用户看到的是"按了没反应"，只会怀疑服务坏了。
+function rotate(to) {
+  setStatus('正在切换方向…');
+  fetch(withToken('/api/v1/rotate'), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({to: to})
+  }).then(r => r.json()).then(d => {
+    const el = $('rotmsg');
+    const ok = d.applied !== false;
+    let msg = ok ? '方向已切换' : '方向没切成';
+    if (d.method === 'wm-size') {
+      msg = '这台设备不支持真旋转，已改用显示尺寸（应用会按' +
+            (d.width > d.height ? '横屏' : '竖屏') + '重新布局）';
+    } else if (d.method === 'none' && !ok) {
+      msg = '这台设备转不动：' + (d.note || '');
+    }
+    if (el) {
+      el.textContent = msg + '  当前 ' + d.width + '×' + d.height
+                     + ' · mRotation=' + d.actualRotation;
+      el.style.color = ok ? '' : '#e0a020';
+    }
+    setStatus(msg);
+    setTimeout(refresh, 600);      // 尺寸变了，状态行也要跟着更新
+  }).catch(e => setStatus('切方向失败：' + e, true));
 }
 
 function sendStream(obj) {
@@ -1437,6 +1553,8 @@ function logHistory() {
 //    ?format=h264 要等下一次重连才生效。
 applyUrlParams();
 loadQualityRange();      // 不阻塞启动，拿到之后自己更新拖动条
+loadTouchRange();        // 触控坐标空间（跟图尺寸不是一回事）
+syncMaxWidthButtons();
 setInterval(pollCadence, 2000);
 applyCollapsed();
 refresh();

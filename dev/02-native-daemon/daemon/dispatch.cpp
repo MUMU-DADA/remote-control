@@ -387,6 +387,9 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleKeyEvent(req, args);
         case Cmd::Clipboard:
             return HandleClipboard(req, args);
+        case Cmd::Rotate:
+            return HandleRotate(req, args);
+
         case Cmd::Power:
             return HandlePower(req, args);
 
@@ -774,6 +777,7 @@ const CommandSpec kCommands[] = {
     {"ServiceSwitch",35,  6, "on|off|status",           "服务对外开关（不真停进程）"},
     {"RunningApps",  36,  6, "无",                      "正在运行的应用与进程状态"},
     {"LogFile",      37,  6, "无",                      "落盘的历史日志（最近 10KB）"},
+    {"Rotate",       38,  7, "0|90|180|270|free|status","屏幕方向（有退路，见应答的 method）"},
     {"Describe",     20,  3, "无",                      "本清单：有哪些命令、哪些可用"},
     {"GetConfig",    21,  3, "无",                      "当前配置与运行时状态"},
     {"SetConfig",    22,  3, "<key>\0<value>...",       "热改配置"},
@@ -827,6 +831,11 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
             .EndObj()
             .Field("webUi", true)
             .Field("power", true)
+            // 旋转**能力**要如实报：正规入口在，不代表这台设备转得动。
+            // 实测有的 ROM 上 user-rotation 返回成功但 mRotation 不变。
+            // 这里只报"这条命令实现了"，能不能真转见命令应答的 applied。
+            .Field("rotate", true)
+            .Field("rotateMethod", "user-rotation|wm-size")
             .Field("serviceSwitch", true)
             .Field("runningApps", true)
             .Field("logFile", LogBuffer::Instance().HistoryPath().empty() ? false : true)
@@ -1238,6 +1247,262 @@ ReplyPacket Dispatcher::HandlePower(const Request& req,
 
     ALOGW("收到电源请求: %s（子进程 pid=%d 将在 0.5s 后执行）", what.c_str(), pid);
     return MakeJsonReply(req.cmd, w.str());
+}
+
+// ── v7：屏幕方向 ────────────────────────────────────────────────────────────
+
+namespace {
+
+// `cmd window user-rotation` 的输出形如 "lock 0" / "free"。
+bool ParseUserRotation(const std::string& s, int* rot, bool* isFree) {
+    if (s.find("free") != std::string::npos) {
+        *isFree = true;
+        return true;
+    }
+    const size_t p = s.find("lock");
+    if (p == std::string::npos) return false;
+    for (size_t i = p + 4; i < s.size(); ++i) {
+        if (s[i] >= '0' && s[i] <= '9') {
+            *rot = s[i] - '0';
+            *isFree = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+// `cmd window size` 输出两行：
+//     Physical size: 720x1280
+//     Override size: 1280x720      ← 只有存在覆盖时才有这一行
+//
+// 取覆盖值优先 —— 那才是**当前实际生效**的尺寸。只看 Physical 的话，
+// 改过尺寸之后会读到面板原始分辨率，据此算横屏尺寸就会算错。
+bool ParseOneSize(const std::string& s, const char* key,
+                  uint32_t* w, uint32_t* h) {
+    const size_t p = s.find(key);
+    if (p == std::string::npos) return false;
+    size_t i = p + strlen(key);
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    uint64_t a = 0, b = 0;
+    size_t n = 0;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') { a = a * 10 + (s[i++] - '0'); ++n; }
+    if (n == 0 || i >= s.size() || s[i] != 'x') return false;
+    ++i; n = 0;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') { b = b * 10 + (s[i++] - '0'); ++n; }
+    if (n == 0 || a == 0 || b == 0 || a > 65535 || b > 65535) return false;
+    *w = static_cast<uint32_t>(a);
+    *h = static_cast<uint32_t>(b);
+    return true;
+}
+
+// 从 dumpsys window 里读**真实**方向（0..3）。
+//
+// ⚠️ 必须读这个，不能只读 `cmd window user-rotation`。
+//    后者报的是**设置项**，写什么它就读出什么 —— 永远等于我们刚设的值，
+//    证明不了屏幕真的转了。实测踩过：设置项 lock 1，而 mRotation 仍是
+//    ROTATION_0，于是接口报 applied=true 而画面纹丝不动。
+//
+// dumpsys window 在这台设备上只有 32KB，mRotation 在第 104 行，24ms。
+// 返回 -1 表示读不到。
+int ParseRealRotation(const std::string& s) {
+    static const char kKey[] = "mRotation=ROTATION_";
+    const size_t p = s.find(kKey);
+    if (p == std::string::npos) return -1;
+    const size_t i = p + sizeof(kKey) - 1;
+    if (i >= s.size() || s[i] < '0' || s[i] > '9') return -1;
+    return s[i] - '0';
+}
+
+bool ParseWmSize(const std::string& s, uint32_t* w, uint32_t* h) {
+    if (ParseOneSize(s, "Override size:", w, h)) return true;
+    return ParseOneSize(s, "Physical size:", w, h);
+}
+
+// 跑一条 `cmd window ...` 并取回 stdout。
+bool RunWindowCmd(const std::vector<std::string>& tail, std::string* out,
+                  std::string* error) {
+    std::vector<std::string> argv = {"/system/bin/cmd", "window"};
+    argv.insert(argv.end(), tail.begin(), tail.end());
+    CommandResult r;
+    if (!RunCommand(argv, 8000, 64 * 1024, &r, error)) return false;
+    if (r.exitCode != 0) {
+        if (error) {
+            *error = "cmd window 退出码 " + std::to_string(r.exitCode) +
+                     (r.err.empty() ? "" : ("：" + r.err));
+        }
+        return false;
+    }
+    if (out) *out = r.out;
+    return true;
+}
+
+}  // namespace
+
+ReplyPacket Dispatcher::HandleRotate(const Request& req,
+                                     const std::vector<std::string>& args) {
+    const std::string what = args.empty() ? "status" : args[0];
+
+    // 每一步都以**读回的值**为准，绝不假定命令生效了。
+    //
+    // 这不是过度防御：实测自编的 x86_64 ROM 上 `cmd window user-rotation
+    // lock 1` 返回成功、设置项也写进去了，但 mRotation 死活不动 ——
+    // 那台设备根本没有旋转支持。假装成功的话，用户会看到一个
+    // 转了 90° 的按钮和一张没转的画面，然后怀疑是服务坏了。
+    auto snapshot = [&](int* rot, bool* isFree, uint32_t* w, uint32_t* h,
+                        int* actual) {
+        std::string e;
+        std::string out;
+        if (RunWindowCmd({"user-rotation"}, &out, &e)) {
+            ParseUserRotation(out, rot, isFree);
+        }
+        out.clear();
+        if (RunWindowCmd({"size"}, &out, &e)) {
+            ParseWmSize(out, w, h);
+        }
+        // 真实方向单独读一次 —— 见 ParseRealRotation 上面那段。
+        CommandResult r;
+        if (RunCommand({"/system/bin/dumpsys", "window"}, 8000, 256 * 1024,
+                       &r, &e) && r.exitCode == 0) {
+            *actual = ParseRealRotation(r.out);
+        }
+    };
+
+    int      rot = 0;
+    bool     isFree = true;
+    uint32_t w = 0, h = 0;
+    int      actual = -1;
+    snapshot(&rot, &isFree, &w, &h, &actual);
+
+    auto reply = [&](bool applied, const std::string& method,
+                     int requested, const std::string& note) {
+        json::Writer jw;
+        jw.Obj()
+            .Field("ok", true)
+            .Field("requested", static_cast<int64_t>(requested))
+            .Field("applied", applied)
+            .Field("method", method)
+            // rotation = 设置项；actualRotation = 系统实际的 mRotation。
+            // 两者不一致就说明**这台设备转不动**，applied 会是 false。
+            .Field("rotation", static_cast<int64_t>(rot))
+            .Field("actualRotation", static_cast<int64_t>(actual))
+            .Field("free", isFree)
+            .Field("width", static_cast<int64_t>(w))
+            .Field("height", static_cast<int64_t>(h))
+            .Field("note", note)
+         .EndObj();
+        return MakeJsonReply(req.cmd, jw.str());
+    };
+
+    if (what == "status") {
+        return reply(true, "none", -1,
+                     isFree ? "方向未锁定（跟随传感器）" : "方向已锁定");
+    }
+
+    if (what == "free") {
+        std::string e;
+        if (!RunWindowCmd({"user-rotation", "free"}, nullptr, &e)) {
+            return MakeJsonError(req.cmd, kErrInternal, e);
+        }
+        usleep(600 * 1000);
+        snapshot(&rot, &isFree, &w, &h, &actual);
+        return reply(isFree, "user-rotation", -1,
+                     isFree ? "已解除方向锁定，跟随传感器"
+                            : "user-rotation free 没有生效，方向仍被锁定");
+    }
+
+    int deg = -1;
+    if (what == "0")        deg = 0;
+    else if (what == "90")  deg = 90;
+    else if (what == "180") deg = 180;
+    else if (what == "270") deg = 270;
+    else if (what == "portrait")  deg = 0;
+    else if (what == "landscape") deg = 90;
+    if (deg < 0) {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "未知方向: " + what +
+                                 "（可用 0|90|180|270|portrait|landscape|"
+                                 "free|status）");
+    }
+    const int n = deg / 90;
+
+    // ── 第一条路：WindowManager 的正规入口 ──
+    std::string err;
+    if (RunWindowCmd({"user-rotation", "lock", std::to_string(n)}, nullptr,
+                     &err)) {
+        usleep(600 * 1000);          // 等窗口管理器把配置变更发下去
+        snapshot(&rot, &isFree, &w, &h, &actual);
+
+        // 两个条件都满足才算真的切过去了：
+        //   · 系统实际方向 == 目标（不是设置项 —— 见 ParseRealRotation）
+        //   · 显示**几何**也对：0/180 竖直、90/270 横向
+        //
+        // ⚠️ 只判方向会误判：在不支持旋转的设备上，转 0° 时
+        //    actualRotation 本来就是 0，于是"成功"返回，而上一轮
+        //    退路设的横屏尺寸**永远不会被还原**。
+        //    实测踩到：to=0 之后显示还停在 1280x720。
+        const bool wantLandscape = (n == 1 || n == 3);
+        const bool geomOk = wantLandscape ? (w > h) : (h >= w);
+        if (actual == n && geomOk) {
+            return reply(true, "user-rotation", deg,
+                         "已通过 WindowManager 锁定方向并生效");
+        }
+    }
+
+    // ── 第二条路：wm size 交换宽高 ──
+    //
+    // 有些 ROM 没有旋转支持（见上面那段）。那种设备上换显示尺寸照样
+    // 能让应用重新布局成横屏 —— 已实测有效（截图里快捷面板是横向排的）。
+    //
+    // ⚠️ 它和真旋转**不等价**：mRotation 不变，所以按方向（而不是按尺寸）
+    //    判断横竖的应用看不出来；180° 也没法表达。
+    if (n == 2) {
+        return reply(false, "none", deg,
+                     "这台设备不支持旋转，而 180° 没法用显示尺寸模拟"
+                     "（wm size 只能交换宽高，表达不出上下颠倒）");
+    }
+
+    if (n == 0) {
+        std::string e;
+        if (!RunWindowCmd({"size", "reset"}, nullptr, &e)) {
+            return MakeJsonError(req.cmd, kErrInternal, e);
+        }
+        usleep(400 * 1000);
+        snapshot(&rot, &isFree, &w, &h, &actual);
+        return reply(true, "wm-size", deg,
+                     "这台设备不支持旋转（mRotation 不动），"
+                     "已用 wm size 还原原始显示尺寸");
+    }
+
+    // 横屏：从**物理**尺寸算，别用当前（可能已经被覆盖过的）尺寸
+    uint32_t pw = 0, ph = 0;
+    {
+        std::string out, e;
+        if (RunWindowCmd({"size"}, &out, &e) &&
+            ParseOneSize(out, "Physical size:", &pw, &ph)) {
+            // 用到了
+        }
+    }
+    if (pw == 0 || ph == 0) { pw = w; ph = h; }
+    if (pw == 0 || ph == 0) {
+        return MakeJsonError(req.cmd, kErrInternal, "读不到显示尺寸");
+    }
+    const uint32_t lw = std::max(pw, ph);
+    const uint32_t lh = std::min(pw, ph);
+    const std::string sz = std::to_string(lw) + "x" + std::to_string(lh);
+
+    std::string e;
+    if (!RunWindowCmd({"size", sz}, nullptr, &e)) {
+        return MakeJsonError(req.cmd, kErrInternal, e);
+    }
+    usleep(400 * 1000);
+    snapshot(&rot, &isFree, &w, &h, &actual);
+
+    const bool ok = (w == lw && h == lh);
+    return reply(ok, "wm-size", deg,
+                 ok ? ("这台设备不支持旋转（mRotation 不变），已改用 wm size "
+                       "把显示尺寸设成 " + sz + "，应用会按横屏重新布局")
+                    : ("wm size " + sz + " 没有生效，当前仍是 " +
+                       std::to_string(w) + "x" + std::to_string(h)));
 }
 
 // ── v6：服务开关 / 运行状态 / 历史日志 ─────────────────────────────────────

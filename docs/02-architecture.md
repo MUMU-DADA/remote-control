@@ -198,7 +198,7 @@ assert REPLY_SIZE == 40
 
 ### 4.4 命令集
 
-当前协议 **v6**，共 **32 条命令**，完整清单见 [`api/03-socket.md`](api/03-socket.md)。运行中的服务也能自己报出来：
+当前协议 **v7**，共 **33 条命令**，完整清单见 [`api/03-socket.md`](api/03-socket.md)。运行中的服务也能自己报出来：
 
 ```bash
 curl -s http://host:8088/api/v1/describe | jq '.protocolVersion, (.commands|length)'

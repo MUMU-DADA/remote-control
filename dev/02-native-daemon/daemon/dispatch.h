@@ -74,6 +74,8 @@ class Dispatcher {
     ReplyPacket HandleKeyEvent(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandleClipboard(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandlePower(const Request& req, const std::vector<std::string>& args);
+    // v7：屏幕方向。args[0] = "0"|"90"|"180"|"270"|"free"|"status"
+    ReplyPacket HandleRotate(const Request& req, const std::vector<std::string>& args);
 
     // ── v6 ──
     ReplyPacket HandleServiceSwitch(const Request& req,

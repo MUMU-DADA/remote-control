@@ -82,7 +82,7 @@ curl http://host:8088/api/v1/describe
   },
   "commands": [
     {"name":"Info","cmd":1,"since":1,"available":true,"params":"无","desc":"…"},
-    …共 32 条
+    …共 33 条
   ]
 }
 ```
@@ -171,7 +171,67 @@ curl http://host:8088/api/v1/describe
 | `primaryWidth/Height` | 屏幕分辨率 |
 | `primaryStride` | 每行像素数（可能大于 width） |
 | `primaryFormat` | Android PixelFormat：1=RGBA_8888，2=RGBX，5=BGRA |
-| `touchWidth/Height` | 触控坐标范围。默认等于分辨率，`--touch-range` 可改 |
+| `touchWidth/Height` | **触控坐标空间**。客户端发坐标必须按这个空间算 |
+
+> ⚠️ `touchWidth/Height` 是**注入器的实际 ABS 范围**，不一定等于
+> `primaryWidth/Height`。
+>
+> 服务端把请求里的 `x`/`y` **直接当 ABS 值**写下去（`inject_uinput.cpp`
+> 里没有缩放），所以客户端必须按这个空间发坐标。而这个范围是
+> **设备创建时定死的**（ioctl 改不了），因此它天然是一个稳定的
+> 归一化空间 —— 转屏、改分辨率都不影响它，Android 会按比例映射到当前显示。
+>
+> 两者不一致就会点偏。实测踩过：显示 720 宽而 ABS 范围是 1279，
+> 于是点画面正中央只落在 56% 处。
+
+### POST /rotate
+
+旋转设备方向。**有副作用，所以是 POST。**
+
+```bash
+curl -X POST http://<设备IP>:8088/api/v1/rotate \
+     -H 'Content-Type: application/json' -d '{"to":"90"}'
+```
+
+`to` 可取 `0|90|180|270|portrait|landscape|free|status`。
+不传等于 `status`。
+
+```json
+{
+  "ok": true,
+  "requested": 90,
+  "applied": true,
+  "method": "wm-size",
+  "rotation": 1,
+  "actualRotation": 0,
+  "free": false,
+  "width": 1280,
+  "height": 720,
+  "note": "这台设备不支持旋转（mRotation 不变），已改用 wm size 把显示尺寸设成 1280x720，应用会按横屏重新布局"
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `applied` | **真的转过去了吗**。false 时看 `note` |
+| `method` | `user-rotation`（正规入口）/ `wm-size`（退路）/ `none` |
+| `rotation` | 方向**设置项**。写什么读出来就是什么 |
+| `actualRotation` | 系统**实际**的 `mRotation`（0-3）。跟 `rotation` 不一致 = 这台设备转不动 |
+| `width/height` | 切完之后实际的显示尺寸 |
+
+> ⚠️ **两条路不等价，所以要走哪条是运行时决定的。**
+>
+> 正规入口是 `cmd window user-rotation lock N`。但有些 ROM 根本没有
+> 旋转支持 —— 实测自编的 x86_64 ROM 上命令返回成功、设置项也写进去了，
+> 而 `mRotation` 死活不动。
+>
+> 那种设备上退到 `cmd window size WxH` 交换宽高：应用照样会按横屏
+> 重新布局（已实测），但 `mRotation` 不变，**180° 也表达不出来**
+> （`wm size` 只能交换宽高，说不出上下颠倒）—— 那时 `applied` 是 false。
+>
+> 所以判定用的是 `actualRotation` **加上**几何是否也对，而不是设置项：
+> 只判方向的话，在不支持旋转的设备上转 0° 时 `mRotation` 本来就是 0，
+> 会被误判成成功，而上一轮退路设的横屏尺寸**永远不会被还原**。
 
 > ⚠️ 这个端点在 v7 之前是坏的：它直接转发 `Cmd::Info`，
 > 而那条命令把结果填在 `Reply` **结构体的字段**里（socket 协议的表达
