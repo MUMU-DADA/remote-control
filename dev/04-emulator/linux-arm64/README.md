@@ -654,3 +654,39 @@ init: InitFatalReboot: signal 6
 阶段仍段错误退出 —— 说明 `virt` 上"guest 访问 ranchu 专有 MMIO"这一类问题会**逐个**
 暴露，属于平台层面的固有缺陷（ranchu 才是匹配的板子，但它被模拟器无条件的 PCI 音频
 设备卡死）。**要根治仍需从源码重建模拟器去掉那个音频设备**。
+
+---
+
+## 第 10 轮：直接改 QEMU 二进制让 ranchu 能启动 —— 部分奏效，但被串口卡住
+
+思路：既然 `ranchu` 只是被"模拟器无条件加的 PCI 设备"卡死，那就**在二进制里把这些设备名改掉**，
+让它创建 MMIO 版（ranchu 有 MMIO 没有 PCI）。
+
+**奏效的部分** ✓：把 QEMU 二进制里的字符串 `-soundhw` 改成同长度的 `-name`
+（命令行于是变成 `-name hda`，被 QEMU 当作机器名，无害）→ **音频设备不再创建** ✓，
+`PCI bus not available for hda` 报错消失 ✓。
+
+**卡住的部分** ✗：改完音频后，下一个 PCI 设备立刻顶上：
+
+```
+-device virtio-serial,ioeventfd=off: No 'PCI' bus found for device 'virtio-serial'
+```
+
+把 `virtio-serial-pci` 也改成 `virtio-serial` 后，报错变成
+`No 'PCI' bus found for device 'virtio-serial'` ✗ —— 说明 **`virtio-serial` 是 PCI 别名**，
+QEMU 解析后仍要求 PCI 总线；而这台串口设备是**调制解调器/RIL 必需**的，不能像
+触控/wifi/vsock 那样用 feature 关掉。
+
+⇒ **字符串级补丁到此为止**：ranchu 需要的串口设备在模拟器里只能是 PCI 形态。
+（已把两个 QEMU 二进制用 `.prepatch` 备份还原 ✓。）
+
+**源码重建的可行性复核**（清华镜像）：
+
+| 项目 | 结果 |
+|---|---|
+| `platform/external/qemu`（模拟器+QEMU 源码） | **HTTP 200 ✓ 可取** |
+| `platform/external/qemu-pc-bios` | HTTP 200 ✓ |
+| `platform/prebuilts/android-emulator-build`（官方构建工具链） | **HTTP 404 ✗ 镜像上没有** |
+
+⇒ 源码本身可取，但官方构建工具链缺失；**要么用系统工具自行拼构建链（不确定），
+要么继续在二进制里做代码级补丁（把"选择 PCI 串口"的那段代码改掉）**。
