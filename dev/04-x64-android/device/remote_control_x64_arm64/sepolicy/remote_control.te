@@ -274,6 +274,35 @@ allow remote_control shell_exec:file {
     read open getattr map execute execute_no_trans
 };
 
+# ── 让 pm / am / svc 的子进程跑在 shell 域里 ─────────────────────────────
+#
+# ⚠️ 这一条是**整类问题的正解**，别再去一条条补 allow。
+#
+# `pm` / `am` / `svc` 都是 shell 脚本，脚本由 `/system/bin/sh` 解释执行；
+# 而它们真正干的事是 `app_process` 起一个 Java VM 去调系统服务 ——
+# 那等于要求我们的域具备一整套"普通 shell 环境"的权限：
+#
+#     device_config_runtime_native_prop / odsign_prop 之类的属性读
+#     /mnt/user/0、fuse 之类的路径遍历
+#     /data/local/tmp、各种设备节点……
+#
+# 一条条补就是打地鼠（实测补完一批又冒一批）。而且其中有些属性是
+# **平台私有类型**，设备树的策略编在 vendor 分区，压根写不了。
+#
+# 正解是让解释器 exec 时**转入 shell 域** —— 也就是 adb shell 走的那条路。
+#   · 没有 neverallow 挡（public/domain.te:1186 对 shell 是 -shell 豁免）
+#   · 安全上也不越界：服务本来就以 **shell UID** 运行，子进程拿 shell 域
+#     只是让 SELinux 身份跟上 POSIX 身份，与它的职责一致
+#   · 服务**本体**仍然是 remote_control 专属域，只有它主动 exec 的那些
+#     命令行工具落在 shell 里
+#
+# 副作用：`sh -c "..."` 也会跑在 shell 域 —— 这正是"服务能跑 shell 命令"
+# 的语义，符合它的功能定位（文件管理、应用管理都依赖这一点）。
+# ⚠️ 这里本来想用 domain_auto_trans(remote_control, shell_exec, shell)
+#    一劳永逸 —— 实测**不行**：public/domain.te:1179 规定只有
+#    adbd / init / runas / zygote 能转换进 shell 域。
+#    所以还是得显式补权限（下面那些 get_prop 与路径权限）。
+
 # ── 跑 Java 命令行工具（pm / am / svc 都靠 app_process）──────────────────
 #
 # 补齐 exec sh + zygote_exec 之后，app_process 能起来了（denial 的 comm
@@ -281,8 +310,27 @@ allow remote_control shell_exec:file {
 #     avc: denied { read } ... device_config_runtime_native_boot_prop
 #     avc: denied { read } ... odsign_prop
 # 这两类属性 AOSP 本来是给"会跑 app_process 的域"的，我们的域得自己声明。
-allow remote_control device_config_runtime_native_boot_prop:file r_file_perms;
-allow remote_control odsign_prop:file r_file_perms;
+# ⚠️ 必须走 get_prop() 宏，**不能**自己写 r_file_perms。
+#
+# private/property.te 里有 neverallow domain property_type:file { ioctl lock }，
+# 它自己的注释就写着：「多半是策略直接用了 r_file_perms 而不是 get_prop() 宏」。
+# 属性访问在 AOSP 是一套宏 + neverallow 强制的白名单机制，
+# 自己写 allow 一定撞上。实测报的就是这条 + odsign_prop 的 unknown type
+# （私有属性类型在设备树里看不见，宏会替你处理）。
+get_prop(remote_control, device_config_runtime_native_boot_prop)
+
+# ⚠️ `device_config_runtime_native_prop` 与 `odsign_prop` **写不了**：
+#    它们是平台私有属性类型，而本策略编进 **vendor** 分区，看不见平台私有类型。
+#    要靠它们就得把策略挪到 system_ext —— 但那会丢掉 vendor 侧的 HAL 类型
+#    （抓帧要用），一个分区拿不到两边。见 BoardConfig 那段。
+#    影响：app_process 起 Java VM 时这两个属性读不到。
+#    目前先接受：应用管理可能不完整，抓帧（立身之本）优先。
+
+# ⚠️ odsign_prop 这里**不能写**：它是**平台私有**属性类型
+#    （定义在 system/sepolicy/private/），而设备树的策略编进 **vendor** 分区，
+#    看不到平台私有类型 —— 实测报 `unknown type odsign_prop`。
+#    属性本来就有分区边界，这是设计如此，不是缺什么。
+#    app_process 那条 read 若确实致命，再说 —— 目前它只是噪音。
 
 # ── /sdcard（文件管理功能要用）─────────────────────────────────────────────
 #

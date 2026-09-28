@@ -216,10 +216,24 @@ if set_ok:
 
 # ── 旋转 ──
 print("\n\033[1;34m[8] 屏幕方向\033[0m")
-st, d = req("/api/v1/rotate", "POST", {"rotation": 1})
+# NOTE: body is {"to": "<v>"}, values 0/90/180/270/portrait/landscape.
+# {"rotation":1} is treated as a STATUS query - returns applied:true but
+# changes nothing. Same "API says ok, device did not move" trap as before.
+st, d = req("/api/v1/rotate", "POST", {"to": "90"})
 rot_ok = st == 200 and d.get("ok") is not False
-check("旋转到 90°", rot_ok, str(d)[:70])
-time.sleep(2)
+check("rotate to 90", rot_ok, str(d)[:90])
+if rot_ok:
+    time.sleep(2.5)
+    st, info2 = req("/api/v1/info")
+    check("rotate really applied (size flips)",
+          info2.get("primaryWidth") == info.get("primaryHeight") and
+          info2.get("primaryHeight") == info.get("primaryWidth"),
+          f"{info.get('primaryWidth')}x{info.get('primaryHeight')} -> {info2.get('primaryWidth')}x{info2.get('primaryHeight')}")
+    req("/api/v1/rotate", "POST", {"to": "0"})
+    time.sleep(2.5)
+    st, info3 = req("/api/v1/info")
+    check("rotate back", info3.get("primaryWidth") == info.get("primaryWidth"),
+          f"{info3.get('primaryWidth')}x{info3.get('primaryHeight')}")
 st, info2 = req("/api/v1/info")
 check("旋转后显示尺寸反过来",
       info2.get("primaryWidth") == info.get("primaryHeight"),

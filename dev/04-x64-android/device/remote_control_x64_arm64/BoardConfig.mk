@@ -45,7 +45,39 @@ BOARD_SEPOLICY_DIRS += device/generic/goldfish/sepolicy/x86
 #     "Only in system/sepolicy/private: ..."，整个 ninja 停在那里）。
 #    设备/产品自己的策略本来就该走 BOARD_SEPOLICY_DIRS ——
 #    goldfish 的 x86 策略就是这么接的（上一行）。
+#
+# ⚠️⚠️ 用 **SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS**，不是 BOARD_SEPOLICY_DIRS。
+#
+#    两者都能避开 sepolicy_freeze_test（那只管 system/sepolicy/{public,private}），
+#    但**分区不同**：
+#      · BOARD_SEPOLICY_DIRS        → 编进 **vendor** 策略
+#      · SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS → 编进 **system_ext** 策略（属平台侧）
+#
+#    这个区别是实测撞出来的：服务要跑 `pm`/`am`/`svc`（都是 shell 脚本 →
+#    app_process 起 Java VM），而 app_process 要读的属性里有**平台私有类型**
+#    （如 odsign_prop，定义在 system/sepolicy/private/property.te）。
+#    vendor 策略**看不见**平台私有类型，写就报 `unknown type odsign_prop` ——
+#    这是分区可见性规则，不是缺什么。
+#
+#    换成 system_ext 之后，设备树的策略回到平台侧，平台私有类型就能用了。
+#    （顺带：get_prop() 这类宏也才在正确的可见性上下文里。）
 BOARD_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
+
+# ⚠️⚠️ **策略分区是个双向取舍，实测两头都撞过**：
+#
+#   BOARD_SEPOLICY_DIRS              → vendor 策略
+#        ✅ 看得见 vendor 侧类型（hal_graphics_allocator_default 等 HAL）
+#        ❌ 看不见平台私有类型（odsign_prop → unknown type）
+#
+#   SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS → system_ext 策略
+#        ✅ 看得见平台私有类型
+#        ❌ 看不见 vendor 侧类型（hal_graphics_allocator_default → unknown type）
+#
+#   一个分区拿不到两边。当前选 **vendor**：抓帧那条链依赖 HAL 类型，
+#   而它是这个服务的立身之本；app_process 需要的平台私有属性只能另想办法。
+#
+#   （两者都能避开 sepolicy_freeze_test —— 那只管 system/sepolicy/{public,private}。）
+# SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
 
 # Wifi.
 BOARD_WLAN_DEVICE           := emulator
