@@ -727,7 +727,19 @@ function applyUrlParams() {
   if (!isNaN(wantFps) && wantFps >= 1 && wantFps <= 60) fps = wantFps;
 
   const wantQ = parseInt(q.get('quality') || '', 10);
-  if (!isNaN(wantQ) && wantQ >= 1 && wantQ <= 100) quality = wantQ;
+  if (!isNaN(wantQ) && wantQ >= 1 && wantQ <= 100) {
+    quality = wantQ;
+  } else if (wantFmt) {
+    // ⚠️ 换了格式必须配套调整 quality —— 各格式的量纲完全不同：
+    //      PNG 是 zlib 级别 1-9，JPEG/WebP 是 1-100，
+    //      而 H.264 那边 quality 会被换算成码率。
+    //
+    //    不调的话就会出现"URL 指定 h264、但 quality 还是页面默认的 1"
+    //    → 码率算出 35kbps → 钳到下限 200kbps
+    //    → 720x1480 在这个码率下几乎没有输出，客户端一帧都收不到。
+    //    （实测踩过：hello 收到了、codec 消息也发了，就是没有画面。）
+    quality = (codec === 'png') ? 1 : (codec === 'webp') ? 80 : 75;
+  }
 
   const wantW = parseInt(q.get('maxWidth') || '', 10);
   if (!isNaN(wantW) && wantW >= 0) maxW = wantW;

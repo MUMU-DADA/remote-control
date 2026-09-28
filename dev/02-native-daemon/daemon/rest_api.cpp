@@ -1003,8 +1003,17 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
             // 是"看得过去"的量级，再按 quality/75 缩放。
             const int q = (p.level > 0 && p.level <= 100) ? p.level : 75;
             uint64_t br = static_cast<uint64_t>(dw) * dh * cfg.fps / 10 * q / 75;
-            if (br < 200000) br = 200000;          // 再低就全是块了
-            if (br > 20000000) br = 20000000;
+
+            // 下限**跟着分辨率走**，不是固定值。
+            //
+            // 固定 200kbps 在小分辨率下够用，但 720x1480 这种尺寸下
+            // 意味着每像素每帧只有 0.0075 bit —— 编码器基本不输出，
+            // 客户端一帧都收不到（实测踩过）。
+            // w*h*fps/50 相当于每像素每帧 0.02 bit，是"能看出画面"的底线。
+            const uint64_t floorBr =
+                    static_cast<uint64_t>(dw) * dh * cfg.fps / 50;
+            if (br < floorBr) br = floorBr;
+            if (br > 40000000) br = 40000000;      // 40Mbps，再高没意义
             cfg.bitrate = static_cast<uint32_t>(br);
 
             if (!st->h264->Start(cfg, &herr)) {
