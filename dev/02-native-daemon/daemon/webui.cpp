@@ -54,6 +54,14 @@ const std::string& WebUiHtml() {
   /* 面板收起 —— 横屏设备默认收，把宽度全让给画面 */
   body.nopanel .panel { display:none; }
   body.nopanel .screen { flex:1 1 100%; }
+
+  /* 铺满模式：画面**拉伸**填满整个显示区（默认是保持比例，会有黑边）。
+     ⚠️ 拉伸会改变宽高比，画面会变形 —— 但**坐标不会错**：
+        toScreen() 走 getBoundingClientRect()，按渲染后的尺寸换算，
+        拉伸多少它就跟着算多少。改这里不用动触控那条路。
+     选拉伸而不是裁剪：设备控制台上"看不到边角"比"略微变形"严重得多
+     —— 裁剪掉的部分既看不到也点不到。 */
+  body.fillmode #screen { width:100%; height:100%; }
   .card { background:#1b1b1b; border:1px solid #333; border-radius:6px;
           padding:10px; }
   .card h2 { font-size:12px; margin:0 0 8px; color:var(--dim);
@@ -112,6 +120,12 @@ const std::string& WebUiHtml() {
   <!-- 面板开关。横屏设备最缺宽度，收起面板就能让画面占满整屏。 -->
   <button id="panelsw" onclick="togglePanel()" title="收起/展开右侧控制面板"
           style="font-size:12px; padding:3px 8px">面板</button>
+  <!-- 铺满开关。默认"适应"：保持设备宽高比，四周可能有黑边。
+       "铺满"则拉伸填满整个显示区 —— 没有黑边，代价是画面按显示区
+       比例轻微变形（设备 16:9 而窗口 16:10 时约 11%）。 -->
+  <button id="fillsw" onclick="toggleFill()"
+          title="铺满整个显示区（会按显示区比例拉伸）/ 恢复保持比例"
+          style="font-size:12px; padding:3px 8px">适应</button>
 </header>
 
 <!-- 令牌条。开启鉴权后才需要填，平时隐藏（display:none）——
@@ -1479,6 +1493,32 @@ function togglePanel() {
   setPanel(document.body.classList.contains('nopanel'), true);
 }
 
+// ── 铺满 / 适应 ──
+//
+// 适应（默认）：保持设备宽高比缩到能放下，窗口比例不匹配时四周留黑边。
+// 铺满：拉伸填满整个显示区，没有黑边，代价是画面按显示区比例变形。
+//
+// 两者都**不影响触控坐标** —— toScreen() 按 canvas 的
+// getBoundingClientRect() 换算，拉伸多少它就跟着算多少。
+function readFillPref() {
+  try { return localStorage.getItem('autod.fill'); } catch (e) { return null; }
+}
+function setFill(on, remember) {
+  document.body.classList.toggle('fillmode', on);
+  const b = $('fillsw');
+  if (b) {
+    b.textContent = on ? '铺满 ✓' : '适应';
+    b.title = on ? '当前：铺满整个显示区（按显示区比例拉伸）—— 点一下恢复保持比例'
+                 : '当前：保持设备宽高比（可能有黑边）—— 点一下铺满整个显示区';
+  }
+  if (remember) {
+    try { localStorage.setItem('autod.fill', on ? '1' : '0'); } catch (e) {}
+  }
+}
+function toggleFill() {
+  setFill(!document.body.classList.contains('fillmode'), true);
+}
+
 // 画面尺寸变了就重新决定默认值 —— 转屏之后该收该放会反过来。
 // 只在用户没手动选过的时候动。
 function applyPanelForAspect() {
@@ -1821,6 +1861,7 @@ syncMaxWidthButtons();
 setInterval(pollCadence, 2000);
 applyCollapsed();
 setPanel(readPanelPref() === '0' ? false : true, false);
+setFill(readFillPref() === '1', false);
 refresh();
 refreshService();
 startStream();
