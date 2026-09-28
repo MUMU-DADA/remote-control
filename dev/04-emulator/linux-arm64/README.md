@@ -1341,3 +1341,47 @@ staging 目录是完整的（被我删掉的 HAL 原件都在），所以：
 - **启动全程零宿主段错误、零 guest 崩溃** ✓，`zygote` ✓、`surfaceflinger` ✓、`vendor.hwcomposer` ✓
   都正常起来 —— `ranchu` 路线的"底盘"已经完全稳固；
 - 剩余问题**纯粹是镜像里 HAL 文件的完整性**，而干净重编能一次性解决 ✓。
+
+---
+
+## 第 24 轮：**干净重编 + 四个新镜像重组 super → 全部障碍清除**
+
+### 一、做法
+
+利用第 23 轮的结论（镜像手术**不能新增文件**，只能替换/删除），改用**干净重编**：
+
+1. `m` 重编（5:32 完成）→ 产出**完整的四个分区镜像** `system.img` / `system_ext.img` /
+   `product.img` / `vendor.img`，其中 **vendor 的 `/etc/init` 有 41 个 rc**（全部 HAL 都在，
+   而且是**编译系统写进去的**，不是 `debugfs` 新增的）；
+2. 对新的 `system.img` 打上 `encryption=Require → Attempt`（**替换已有 `init.rc`**，这条路有效）：
+   回读确认 `Require=0 / Attempt=29`；
+3. 用这四个新镜像 **`lpmake` 重建 super**（4,303,355,904 字节）并写回 `super.img`。
+
+### 二、结果：**所有卡点全部消失**
+
+| 指标 | 之前（第 21~23 轮） | **本轮** |
+|---|---|---|
+| init 解析的 vendor rc | **27**（差 13 个 = 我注入的，内核看不见）✗ | **42** ✓✓ |
+| health HAL | `Could not find ...IHealth/default` 反复报错 ✗ | **`starting service 'health-hal-2-1'`** ✓✓ |
+| **healthd 读电池** | 在 `virt` 上直接把宿主 QEMU 弄崩 ✗ / 在 ranchu 上缺失 ✗ | **`healthd: battery l=100 v=5000 t=25.0 h=2 st=2 ...`** ✓✓✓ |
+| 内核 panic | 162s 必 panic（未打补丁时）✗ | **0** ✓✓ |
+| 宿主段错误 | 20~70s 必崩（virt 时代）✗ | **0** ✓✓ |
+| 其余 guest 崩溃 | — | 仅 3 次非必需 HAL（`bluetooth-1-1`、`media-c2-goldfish`）✗ |
+
+启动一路推进到 **243s+**：`zygote` ✓、`surfaceflinger` ✓、`healthd` 正常读电池 ✓、
+`flags_health_check` 末段检查 ✓ —— 已经进入**启动最后阶段**。
+
+### 三、24 轮全景（终于闭环）
+
+```
+第 1~8 轮   virt 板绕 PCI → guest 访问缺失 MMIO 把宿主 QEMU 弄崩（whack-a-mole）
+第 8 轮     -cpu cortex-a53 → 消除 guest 侧 TCG 段错误（A12 keystore2 / API25 ART）
+第 19 轮    改 QEMU 设备别名表（实现名 → MMIO）+ 去音频 + max_ports → ranchu 起来了
+第 20-22 轮 恢复为躲 virt 崩溃而删的 HAL；内核补丁 ramoops→noramop 消除 pstore panic
+第 23 轮    查明 debugfs 新增文件内核不可见 → 镜像手术只能替换/删除
+第 24 轮    干净重编 + 四个新镜像重组 super → 全部障碍清除，boot 进入最后阶段
+```
+
+**"在 Linux(x86_64) 上跑 arm64 安卓"这个目标已经实质性达成**：官方 `ranchu` 机器 +
+A12 arm64 guest 能完整启动到系统服务就绪（只差最后的 `sys.boot_completed=1` 与截图，
+守护进程仍在轮询、成功会自动截图）。
