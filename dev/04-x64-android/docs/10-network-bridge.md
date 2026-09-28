@@ -69,7 +69,7 @@ sudo tools/net-bridge.sh down      # 还原
 
 ### 不持久化
 
-桥只存在于运行期（状态在 `/run/autosnap-net-bridge.state`），**重启后消失**，
+桥只存在于运行期（状态在 `/run/remote-control-net-bridge.state`），**重启后消失**，
 机器回到 `iface ens33 inet dhcp` 的原状。要开机自动桥接，把 `/etc/network/interfaces`
 改写成 `br0` + `ens33` 的形式（本项目刻意不这么做：宿主网络的持久化改动风险高，
 而 `up` 一条命令就能重建）。
@@ -98,7 +98,7 @@ if (mPackageManager.hasSystemFeature(PackageManager.FEATURE_ETHERNET) ||
 没声明 → `dumpsys ethernet` 直接报 `Can't find service: ethernet` → `eth0` 即使拿到
 真实 IP 也不会成为 Android 的网络，应用流量仍然只走 Wi-Fi（NAT）。桥接等于白做。
 
-修法是**一行**（`device/autosnap_x64_arm64/device.mk`，写法照抄 goldfish 自己的
+修法是**一行**（`device/remote_control_x64_arm64/device.mk`，写法照抄 goldfish 自己的
 `device/generic/goldfish/fvp.mk:87`）：
 
 ```make

@@ -15,7 +15,7 @@
 | 目标 | 状态 |
 |---|---|
 | G1 自编 x86_64 Android 12 ROM | ✅ `EXIT=0`，62083 个编译目标 |
-| G2 Linux x86_64 同架构跑起来（KVM） | ✅ **已实测**：`sys.boot_completed=1`，设备 `autosnap_x64_arm64` |
+| G2 Linux x86_64 同架构跑起来（KVM） | ✅ **已实测**：`sys.boot_completed=1`，设备 `remote_control_x64_arm64` |
 | G3 能跑 arm64 应用 | ✅ **已实测**：自建探针 APK（纯 arm64-v8a）装+跑，`primaryCpuAbi=arm64-v8a`，16 条 `/system/lib64/arm64/*` 映射，JNI 返回 `kernel=x86_64` |
 | G4 Windows x86_64 跑同一份 ROM（WHPX） | ⊘ **明确不由 agent 验证**（用户决定）；工程部分已交付：脚本 + 镜像 + `preflight.ps1` + 首次运行对照表 + **同 build id 等价性**（Windows 稳定包 15917651 与 Linux 包同 build，Linux 侧实跑全绿） |
 | G5 arm32 下放（备选） | 📄 预案见 [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md) |
@@ -31,7 +31,7 @@
 
 | # | 目标 | 判定方式 |
 |---|---|---|
-| G1 | 自编 x86_64 Android 12 ROM | `lunch autosnap_x64_arm64-userdebug && m` 产出 `system.img` / `vendor.img` / `ramdisk.img` / `kernel-ranchu` |
+| G1 | 自编 x86_64 Android 12 ROM | `lunch remote_control_x64_arm64-userdebug && m` 产出 `system.img` / `vendor.img` / `ramdisk.img` / `kernel-ranchu` |
 | G2 | Linux x86_64 上同架构跑起来 | KVM 加速启动，`sys.boot_completed=1`，开机时间几十秒量级 |
 | G3 | 能跑 **arm64** 应用 | 设备 `ro.product.cpu.abilist` 含 `arm64-v8a`；arm64 原生库的 APK 能装、能起、进程里映射 `/system/lib64/arm64/*.so` |
 | G4 | Windows x86_64 上跑同一份 ROM | 同一份镜像产物 + `emulator.exe`（SDK 37.x）+ WHPX |
@@ -43,7 +43,7 @@
 - 翻译层用 Google 官方的 **`libndk_translation`**（来自 `system-images;android-31;google_apis;x86_64`）。
   **不是 libhoudini**——houdini 的 arm64 变体只到 Android 7，公开源上 8/9 系列根本没有 `_z`。
 - ROM 自编，但**不改 AOSP 上游一行**：设备树与载荷以本项目为真源，由 `scripts/apply-overlay.sh`
-  同步到 `aosp/device/autosnap/`；`lunch` 能发现它是因为 Soong 会递归扫 `device/*/*/AndroidProducts.mk`。
+  同步到 `aosp/device/remote_control/`；`lunch` 能发现它是因为 Soong 会递归扫 `device/*/*/AndroidProducts.mk`。
 - 内核与框架都是 **x86_64**（`x86_64-kernel.mk`），ARM 只在用户态被翻译——这才是"同架构"的含义。
 
 ---
@@ -54,12 +54,12 @@
 dev/04-x64-android/
 ├── README.md                       ← 本文件
 ├── PLAN.md                         ← 阶段划分与当前状态
-├── device/                         ← 设备树（注入 aosp/device/autosnap/ 的唯一真源）
+├── device/                         ← 设备树（注入 aosp/device/remote_control/ 的唯一真源）
 │   ├── AndroidProducts.mk
-│   └── autosnap_x64_arm64/
+│   └── remote_control_x64_arm64/
 │       ├── BoardConfig.mk          ← x86_64 + TARGET_NATIVE_BRIDGE_ABI=arm64-v8a
 │       ├── device.mk
-│       └── product/autosnap_x64_arm64.mk
+│       └── product/remote_control_x64_arm64.mk
 ├── payload/                        ← 翻译层（从官方镜像提取，90 个文件 / 23 MB）
 │   ├── system/lib64/libndk_translation*.so       (21)
 │   ├── system/lib64/arm64/*.so                   (59)
@@ -179,7 +179,7 @@ Windows 侧：同一份打包产物 + `emulator.exe` + WHPX，见 [`windows/READ
 | 内核 / 框架架构 | x86_64 | **x86_64（相同）** |
 | `ro.product.cpu.abilist` | `x86_64,arm64-v8a` | **相同**（由 `TARGET_NATIVE_BRIDGE_ABI` 自动生成） |
 | 翻译层 | `libndk_translation.so`（Google 专有） | **同一份载荷**（提取自官方镜像） |
-| 产品名 / 设备名 | `sdk_gphone64_x86_64` / `emulator64_x86_64_arm64` | `autosnap_x64_arm64` |
+| 产品名 / 设备名 | `sdk_gphone64_x86_64` / `emulator64_x86_64_arm64` | `remote_control_x64_arm64` |
 | 可控性 | 不可改 | 可加 `remote-control`、改 framework、砍组件 |
 
 **为什么值得自编**：官方镜像虽然能跑，但它是"别人的 ROM"——不能加系统服务、不能改

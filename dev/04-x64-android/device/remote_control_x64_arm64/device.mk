@@ -1,5 +1,5 @@
 #
-# AutoSnap x86_64 + ARM64 桥 · 设备配置
+# remote-control x86_64 + ARM64 桥 · 设备配置
 #
 # 直接继承 Google 的 arm64 桥设备目录，再补两件 sdk_phone64_x86_64 里有、
 # 而它没有的东西。

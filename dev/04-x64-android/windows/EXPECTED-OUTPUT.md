@@ -14,7 +14,7 @@
 | 磁盘 | 可用 ≥ 20 GB（镜像 5.7 GB + 解包与覆盖层） | 换盘或清理 |
 | 必需镜像 | `system-qemu.img / vendor-qemu.img / product-qemu.img / ramdisk-qemu.img / kernel-ranchu / encryptionkey.img / userdata.img / advancedFeatures.ini / config.ini / system\build.prop` 全部 `[OK]` | 缺哪个重跑 `fetch-images.ps1` |
 | `SHA256SUMS` | `校验通过（N 个文件）` | 传输损坏 → 重跑 `fetch-images.ps1 -Force` |
-| 指纹行 | `ro.system.build.fingerprint = AutoSnap/autosnap_x64_arm64/...` | 与 Linux 侧不一致说明不是同一份 ROM |
+| 指纹行 | `ro.system.build.fingerprint = remote-control/remote_control_x64_arm64/...` | 与 Linux 侧不一致说明不是同一份 ROM |
 
 ---
 
@@ -28,7 +28,7 @@
 | 启动加速 | `-accel on`（WHPX）；日志里不应出现 `falling back to TCG` |
 | 开机耗时 | **几十秒**（Linux 侧实测 41.2 秒；WHPX 同量级） |
 | `ro.build.version.sdk` | `31` |
-| `ro.product.device` | `autosnap_x64_arm64` |
+| `ro.product.device` | `remote_control_x64_arm64` |
 | `ro.product.cpu.abilist` | `x86_64,arm64-v8a` |
 | `ro.dalvik.vm.native.bridge` | `libndk_translation.so` |
 | `ro.enable.native.bridge.exec` | `1` |
@@ -40,7 +40,7 @@
 | `ro.build.fingerprint` | 与 Linux 侧**完全一致** |
 
 > 最后一条是"两边跑的是同一份 ROM"的硬证据：
-> `AutoSnap/autosnap_x64_arm64/autosnap_x64_arm64:12/SP1A.210812.016.C2/root09280236:userdebug/test-keys`
+> `remote-control/remote_control_x64_arm64/remote_control_x64_arm64:12/SP1A.210812.016.C2/root09280236:userdebug/test-keys`
 
 ---
 

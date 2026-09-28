@@ -4,14 +4,14 @@
 
 ---
 
-## 1. `device/autosnap/.../autosnap_x64_arm64.mk produces files inside ... artifact path requirement`
+## 1. `device/remote_control/.../remote_control_x64_arm64.mk produces files inside ... artifact path requirement`
 
 **现象**（第一次构建 1 分 53 秒后失败）：
 
 ```
 FAILED:
 build/make/core/artifact_path_requirements.mk:26: warning:
-  device/autosnap/autosnap_x64_arm64/product/autosnap_x64_arm64.mk produces files inside
+  device/remote_control/remote_control_x64_arm64/product/remote_control_x64_arm64.mk produces files inside
   build/make/target/product/generic_system.mks artifact path requirement.
 Offending entries:
   system/bin/arm64/linker64

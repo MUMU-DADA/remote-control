@@ -112,7 +112,7 @@ SELinux 标识符是 `[A-Za-z0-9_]`。**修法：`.rc` 改成 `u:r:remote_contro
 
 ### 4.3 产品清单里没有模块 → 根本不会进 `system.img`
 
-`dev/04-x64-android/device/autosnap_x64_arm64/product/autosnap_x64_arm64.mk` 里
+`dev/04-x64-android/device/remote_control_x64_arm64/product/remote_control_x64_arm64.mk` 里
 `grep PRODUCT_PACKAGES` **命中 0** `[源码]`。文档 `05-adding-components.md:39` 已给出写法：
 
 ```make
@@ -308,7 +308,7 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 
 1. **策略不能放 `system/sepolicy/private/`**。放进去 sepolicy_freeze_test 必挂
    （它 diff 当前树与 `prebuilts/api/31.0/`，多一个文件就 `Only in ...`），
-   ninja 直接停。**正确落点是设备树**：`device/autosnap_x64_arm64/sepolicy/`
+   ninja 直接停。**正确落点是设备树**：`device/remote_control_x64_arm64/sepolicy/`
    + `BoardConfig.mk` 的 `BOARD_SEPOLICY_DIRS`（同一份 BoardConfig 里
    goldfish 的 x86 策略就是这么接的）。脚本已改成这个落点。
 2. **`remote_control_controller.te` 里有三个东西在 Android 12 上不存在**：

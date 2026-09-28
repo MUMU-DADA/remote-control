@@ -11,7 +11,7 @@
 #include <sys/utsname.h>
 
 JNIEXPORT jstring JNICALL
-Java_org_autosnap_arm64probe_MainActivity_abiInfo(JNIEnv *env, jclass clazz) {
+Java_org_remote_control_arm64probe_MainActivity_abiInfo(JNIEnv *env, jclass clazz) {
     char buf[256];
     struct utsname u;
     uname(&u);

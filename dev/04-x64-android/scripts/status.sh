@@ -24,15 +24,15 @@ else
 fi
 
 hr "2. AOSP 注入"
-if [ -f "$DEVICE_DST/autosnap_x64_arm64/bridge/bridge-copy.mk" ]; then
+if [ -f "$DEVICE_DST/remote_control_x64_arm64/bridge/bridge-copy.mk" ]; then
     printf '   %s ✓（拷贝规则 %s 条）\n' "${DEVICE_DST#"$PROJECT_ROOT"/}" \
-        "$(grep -c 'TARGET_COPY_OUT_SYSTEM' "$DEVICE_DST/autosnap_x64_arm64/bridge/bridge-copy.mk")"
+        "$(grep -c 'TARGET_COPY_OUT_SYSTEM' "$DEVICE_DST/remote_control_x64_arm64/bridge/bridge-copy.mk")"
 else
     printf '   \033[1;33m未注入\033[0m（先跑 ./apply-overlay.sh）\n'
 fi
 
 hr "3. 构建"
-LOG_FILE="$AOSP_DIR/out/autosnap-build.log"
+LOG_FILE="$AOSP_DIR/out/remote-control-build.log"
 if docker ps --format '{{.Names}}' | grep -qx "$BUILDER_CONTAINER"; then
     # 以**日志里的 EXIT 标记**为准（容器里可能有别人的构建在跑，单看进程会误判）
     if grep -q '^EXIT=0' "$LOG_FILE" 2>/dev/null; then

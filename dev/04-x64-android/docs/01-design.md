@@ -137,7 +137,7 @@ AOSP 默认**禁止**用 `PRODUCT_COPY_FILES` 拷贝 ELF（`build/make/core/Make
 
 ## 4. 不碰 AOSP 上游
 
-`scripts/apply-overlay.sh` 把所有东西同步到 `aosp/device/autosnap/` 一个目录：
+`scripts/apply-overlay.sh` 把所有东西同步到 `aosp/device/remote_control/` 一个目录：
 
 - 能 `lunch` 到我们的产品，是因为 Soong 的 finder 会递归扫描
   `device/`、`vendor/`、`product/` 下的 `AndroidProducts.mk`
@@ -151,7 +151,7 @@ AOSP 默认**禁止**用 `PRODUCT_COPY_FILES` 拷贝 ELF（`build/make/core/Make
 | 编号 | 检查 | 期望 |
 |---|---|---|
 | A1 | `ro.build.version.sdk` | 31 |
-| A2 | `ro.product.device` | `autosnap_x64_arm64` |
+| A2 | `ro.product.device` | `remote_control_x64_arm64` |
 | A3 | `ro.product.cpu.abilist` | `x86_64,arm64-v8a` |
 | B1 | `ro.dalvik.vm.native.bridge` | `libndk_translation.so` |
 | B2 | `ro.enable.native.bridge.exec` | 1 |

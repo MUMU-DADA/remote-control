@@ -14,8 +14,8 @@ ADB=../aosp/out/host/linux-x86/bin/adb
 
 ```bash
 ./scripts/status.sh                      # 载荷/注入/构建/产物/设备
-ls -la ../aosp/out/target/product/autosnap_x64_arm64/{system.img,vendor.img,ramdisk.img,kernel-ranchu}
-grep "^EXIT=" ../aosp/out/autosnap-build.log   # EXIT=0 才算编完
+ls -la ../aosp/out/target/product/remote_control_x64_arm64/{system.img,vendor.img,ramdisk.img,kernel-ranchu}
+grep "^EXIT=" ../aosp/out/remote-control-build.log   # EXIT=0 才算编完
 ```
 
 ---
@@ -76,7 +76,7 @@ $ADB -s $S shell 'ls -l /system/bin/ndk_translation_program_runner_binfmt_misc_a
 
 | 症状 | 原因 | 处置 |
 |---|---|---|
-| `native.bridge` 是 `0` | 属性没进 vendor 分区 | 查 `device/.../product/autosnap_x64_arm64.mk` 的 `PRODUCT_VENDOR_PROPERTIES`（放 system 会被 `runtime_libart.mk` 的强赋值挡住） |
+| `native.bridge` 是 `0` | 属性没进 vendor 分区 | 查 `device/.../product/remote_control_x64_arm64.mk` 的 `PRODUCT_VENDOR_PROPERTIES`（放 system 会被 `runtime_libart.mk` 的强赋值挡住） |
 | `binfmt_misc` 是空的 | `ndk_translation.rc` 没进镜像，或内核没 `CONFIG_BINFMT_MISC` | 查产物 `system/etc/init/ndk_translation.rc`；内核用构建自带的 `kernel-ranchu`（实测带该配置） |
 | 执行器不是 0755 | 拷贝时丢了可执行位 | `PRODUCT_COPY_FILES` 用 `cp`（非 `cp -p`），源文件必须是 0755；`apply-overlay.sh` 会断言这一点 |
 

@@ -163,7 +163,7 @@ function Chk([string]$label, [string]$actual, [string]$pattern) {
 
 Write-Host "==> 验收 1/4：镜像身份与 ABI"
 Chk "ro.build.version.sdk"   (Get-Prop "ro.build.version.sdk")   '^31$'
-Chk "ro.product.device"      (Get-Prop "ro.product.device")      'autosnap_x64_arm64'
+Chk "ro.product.device"      (Get-Prop "ro.product.device")      'remote_control_x64_arm64'
 Chk "ro.product.cpu.abilist" (Get-Prop "ro.product.cpu.abilist") 'x86_64,arm64-v8a'
 
 Write-Host "==> 验收 2/4：翻译层接线"
@@ -185,7 +185,7 @@ if (-not $Apk) {
     if (-not (Test-Path $probe)) { $probe = "$PSScriptRoot\arm64-probe.apk" }
     if (Test-Path $probe) {
         # 首选项目自建探针：只含 arm64-v8a 一个 ABI
-        $Apk = $probe; $Pkg = "org.autosnap.arm64probe"
+        $Apk = $probe; $Pkg = "org.remotecontrol.arm64probe"
         Write-Host "==> 用自建 arm64 探针 APK"
     } else {
         $Apk = "$PSScriptRoot\com.oF2pks.kalturadeviceinfos_24.apk"; $Pkg = "com.oF2pks.kalturadeviceinfos"
@@ -195,7 +195,7 @@ if (-not $Apk) {
         }
     }
 } else {
-    $Pkg = "org.autosnap.arm64probe"
+    $Pkg = "org.remotecontrol.arm64probe"
 }
 if (Test-Path $Apk) {
     & $adb -s $serial shell "pm uninstall $Pkg" 2>$null | Out-Null
@@ -210,7 +210,7 @@ if (Test-Path $Apk) {
         $n = ((& $adb -s $serial shell "grep -c '/system/lib64/arm64/' /proc/$pid/maps") -join "").Trim()
         Chk "映射的 arm64 库条数" $n '^[1-9]\d*$'
     }
-    if ($Pkg -eq "org.autosnap.arm64probe") {
+    if ($Pkg -eq "org.remotecontrol.arm64probe") {
         Start-Sleep -Seconds 2
         $line = ((& $adb -s $serial logcat -d -s ARM64PROBE) -join " ")
         Chk "探针原生返回值" $line 'arm64-v8a native ok'

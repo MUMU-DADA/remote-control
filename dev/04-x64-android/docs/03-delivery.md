@@ -8,7 +8,7 @@
 ## 1. 产物是什么
 
 ```bash
-./scripts/package-rom.sh          # → artifacts/rom-autosnap_x64_arm64/
+./scripts/package-rom.sh          # → artifacts/rom-remote_control_x64_arm64/
 ```
 
 | 文件 | 作用 | 缺了会怎样 |
@@ -38,7 +38,7 @@ cd dev/04-x64-android
 
 | 组 | 检查 | 期望 |
 |---|---|---|
-| 1 | `ro.build.version.sdk` / `ro.product.device` / `ro.product.cpu.abilist` | `31` / `autosnap_x64_arm64` / `x86_64,arm64-v8a` |
+| 1 | `ro.build.version.sdk` / `ro.product.device` / `ro.product.cpu.abilist` | `31` / `remote_control_x64_arm64` / `x86_64,arm64-v8a` |
 | 2 | `ro.dalvik.vm.native.bridge` / `ro.enable.native.bridge.exec` / binfmt 注册 | `libndk_translation.so` / `1` / 含 `arm64_exe` |
 | 3 | 自建 aarch64 静态 ELF 直接执行 | 打印 `ARM64_OK` |
 | 4 | 自建探针 APK（纯 arm64-v8a）：装 → 起 → `primaryCpuAbi` → 映射 arm64 库 → logcat 原生返回值 | 全绿 |
@@ -80,7 +80,7 @@ cd dev\04-x64-android\windows
 ```bash
 # Linux
 adb -s emulator-5580 shell getprop ro.build.fingerprint
-sha256sum artifacts/rom-autosnap_x64_arm64/system.img
+sha256sum artifacts/rom-remote_control_x64_arm64/system.img
 ```
 
 ```powershell

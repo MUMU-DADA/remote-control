@@ -20,7 +20,7 @@ export LC_ALL=C
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/common.sh"
 
 SYS="${1:-$PRODUCT_OUT/system}"
-BRIDGE="$DEVICE_DST/autosnap_x64_arm64/bridge/system"
+BRIDGE="$DEVICE_DST/remote_control_x64_arm64/bridge/system"
 [ -d "$SYS/lib64" ] || die "找不到 system/lib64：$SYS"
 [ -d "$BRIDGE/lib64" ] || die "找不到翻译层：$BRIDGE（先 ./apply-overlay.sh）"
 command -v readelf >/dev/null || die "缺 readelf（binutils）"

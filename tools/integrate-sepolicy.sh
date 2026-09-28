@@ -4,13 +4,13 @@
 #
 # 策略的**唯一真源在设备树**：
 #
-#     dev/04-x64-android/device/autosnap_x64_arm64/sepolicy/
+#     dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/
 #       ├── remote_control.te             主服务域
 #       ├── remote_control_controller.te  控制器应用域
 #       └── file_contexts                 文件标签
 #
 # 生效路径：
-#     apply-overlay.sh 把它同步到 aosp/device/autosnap/autosnap_x64_arm64/sepolicy/
+#     apply-overlay.sh 把它同步到 aosp/device/remote_control/remote_control_x64_arm64/sepolicy/
 #     BoardConfig.mk 的 BOARD_SEPOLICY_DIRS 引用上面那个路径
 #
 # ⚠️⚠️ **不要放 system/sepolicy/private/**（这个脚本原来就是往那拷的）。
@@ -31,10 +31,10 @@
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TE_SRC="$PROJECT_DIR/dev/04-x64-android/device/autosnap_x64_arm64/sepolicy"
+TE_SRC="$PROJECT_DIR/dev/04-x64-android/device/remote_control_x64_arm64/sepolicy"
 AOSP="$PROJECT_DIR/aosp"
 CONTAINER=${CONTAINER:-remote-control-builder}
-TARGET=${TARGET:-autosnap_x64_arm64-userdebug}
+TARGET=${TARGET:-remote_control_x64_arm64-userdebug}
 
 TE_FILES=(remote_control.te remote_control_controller.te)
 

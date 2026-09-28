@@ -45,7 +45,7 @@ log "2/6 javac（用 AOSP 自带 JDK，宿主不需要装 java）"
 "$JDK/bin/javac" -source 8 -target 8 -nowarn \
     -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" \
     -d "$BUILD/classes" "$SRC/MainActivity.java" 2>&1 | grep -v "bootstrap class path" || true
-[ -f "$BUILD/classes/org/autosnap/arm64probe/MainActivity.class" ] || die "javac 没产出 class"
+[ -f "$BUILD/classes/org/remote_control/arm64probe/MainActivity.class" ] || die "javac 没产出 class"
 
 log "3/6 d8 → classes.dex"
 "$JDK/bin/java" -cp "$D8_JAR" com.android.tools.r8.D8 \
@@ -78,7 +78,7 @@ log "6/6 签名"
 KS="$BUILD/debug.keystore"
 if [ ! -f "$KS" ]; then
     "$JDK/bin/keytool" -genkeypair -keystore "$KS" -storepass android -keypass android \
-        -alias androiddebugkey -dname "CN=AutoSnap Debug,O=AutoSnap,C=CN" \
+        -alias androiddebugkey -dname "CN=remote-control Debug,O=remote-control,C=CN" \
         -keyalg RSA -keysize 2048 -validity 10000 >/dev/null 2>&1
 fi
 PATH="$JDK/bin:$PATH" "$APKSIGNER" sign \

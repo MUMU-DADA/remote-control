@@ -39,7 +39,7 @@
 - `device/`：完整设备树（BoardConfig / device.mk / product mk / AndroidProducts.mk）
 - `payload/`：90 个文件的翻译层 + `MANIFEST.sha256`（可校验）
 - `scripts/`：`fetch-payload.sh` / `apply-overlay.sh` / `build-rom.sh` / `run-linux.sh` / `common.sh`
-- 注入后 AOSP 侧落点：`aosp/device/autosnap/`（**不改上游任何文件**，`--revert` 可清）
+- 注入后 AOSP 侧落点：`aosp/device/remote_control/`（**不改上游任何文件**，`--revert` 可清）
 
 ---
 
@@ -48,11 +48,11 @@
 | 时间 | 动作 | 结果 |
 |---|---|---|
 | 本轮 | `apply-overlay.sh` 注入 90 个载荷文件 + 生成 90 条拷贝规则 | ✅ |
-| 本轮 | `lunch autosnap_x64_arm64-userdebug` | ✅ `TARGET_ARCH=x86_64`、`abilist=x86_64,arm64-v8a` |
+| 本轮 | `lunch remote_control_x64_arm64-userdebug` | ✅ `TARGET_ARCH=x86_64`、`abilist=x86_64,arm64-v8a` |
 | 本轮 | 第 1 次 `m`：artifact path 检查拦下载荷 | ❌ → 加 `PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST`（坑 1） |
 | 本轮 | 第 2 次 `m`：残留 `out/.lock` | ❌ → 清锁（坑 2） |
 | 本轮 | 第 3 次 `m`：AOSP 树里 `remote-control` 模块 `libwebp_vendored` 变体不匹配 | ❌ → 本侧开 `ALLOW_MISSING_DEPENDENCIES`（坑 3，属别人在途改动） |
-| 本轮 | 第 4 次 `m` 全量构建（`-j12`，容器 `remote-control-builder`） | ⏳ 编译中（`[2% 1544/62183]`，0 error）日志 `aosp/out/autosnap-build.log` |
+| 本轮 | 第 4 次 `m` 全量构建（`-j12`，容器 `remote-control-builder`） | ⏳ 编译中（`[2% 1544/62183]`，0 error）日志 `aosp/out/remote-control-build.log` |
 | 本轮 | 自建 arm64 探针 APK（`tools/build-probe-apk.sh`） | ✅ `artifacts/arm64-probe.apk`（16 KB，纯 arm64-v8a，已签名） |
 
 ## 第 2 轮（本轮）
@@ -150,14 +150,14 @@
 ## ⭐ 里程碑：自编 ROM 编译通过 + Linux/KVM 验收全绿（第 9 轮）
 
 ```
-镜像   AutoSnap/autosnap_x64_arm64/autosnap_x64_arm64:12/SP1A.210812.016.C2/...:userdebug/test-keys
+镜像   remote-control/remote_control_x64_arm64/remote_control_x64_arm64:12/SP1A.210812.016.C2/...:userdebug/test-keys
 启动   KVM 加速，adb 可见设备，sys.boot_completed=1
-属性   ro.product.device = autosnap_x64_arm64
+属性   ro.product.device = remote_control_x64_arm64
        ro.product.cpu.abilist = x86_64,arm64-v8a        ← 声明支持 arm64
        ro.dalvik.vm.native.bridge = libndk_translation.so
        ro.enable.native.bridge.exec = 1
 
-验收 1/4  SDK=31 / device=autosnap_x64_arm64 / abilist=x86_64,arm64-v8a            ✓✓✓
+验收 1/4  SDK=31 / device=remote_control_x64_arm64 / abilist=x86_64,arm64-v8a            ✓✓✓
 验收 2/4  native.bridge=libndk_translation.so / exec=1 / binfmt arm64_exe+arm64_dyn ✓✓✓
 验收 3/4  自建 aarch64 静态 ELF 直接执行 → ARM64_OK                                ✓
 验收 4/4  自建探针 APK（纯 arm64-v8a）：装 Success / 进程活 / 16 条 arm64 库映射 /
@@ -193,9 +193,9 @@
 ### 交付清单（两边对照用）
 
 ```
-指纹     AutoSnap/autosnap_x64_arm64/autosnap_x64_arm64:12/SP1A.210812.016.C2/root09280236:userdebug/test-keys
+指纹     remote-control/remote_control_x64_arm64/remote_control_x64_arm64:12/SP1A.210812.016.C2/root09280236:userdebug/test-keys
 system   system.img sha256 = 243298b2fb1aa4d9631ddd1435ef8bc8b0a2266cdf65d67bf00e11382622eec2
-目录     artifacts/rom-autosnap_x64_arm64/（5.7 GB，SHA256SUMS + MANIFEST.txt）
+目录     artifacts/rom-remote_control_x64_arm64/（5.7 GB，SHA256SUMS + MANIFEST.txt）
 ```
 
 

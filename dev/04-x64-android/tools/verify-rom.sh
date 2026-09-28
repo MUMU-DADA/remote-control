@@ -15,7 +15,7 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/common.sh"
 
 SYS="$PRODUCT_OUT/system"
-BRIDGE="$DEVICE_DST/autosnap_x64_arm64/bridge/system"
+BRIDGE="$DEVICE_DST/remote_control_x64_arm64/bridge/system"
 fails=0; warns=0
 
 ok()   { printf '  \033[1;32m[✓]\033[0m %s\n' "$*"; }

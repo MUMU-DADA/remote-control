@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 编译 AutoSnap x86_64 + ARM64 桥 ROM（在 remote-control-builder 容器里跑 AOSP 构建）。
+# 编译 remote-control x86_64 + ARM64 桥 ROM（在 remote-control-builder 容器里跑 AOSP 构建）。
 #
-#   ./build-rom.sh              # 全量构建（droid），后台跑，日志 aosp/out/autosnap-build.log
+#   ./build-rom.sh              # 全量构建（droid），后台跑，日志 aosp/out/remote-control-build.log
 #   ./build-rom.sh --wait       # 前台等它结束（几十分钟~几小时）
 #   ./build-rom.sh --modules remote-control   # 只编模块（分钟级）
 #   ./build-rom.sh --status     # 看进度
@@ -10,7 +10,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-LOG_FILE="$AOSP_DIR/out/autosnap-build.log"
+LOG_FILE="$AOSP_DIR/out/remote-control-build.log"
 PID_FILE="$RUN_DIR/build.pid"
 mkdir -p "$RUN_DIR"
 
@@ -55,7 +55,7 @@ docker ps --format '{{.Names}}' | grep -qx "$BUILDER_CONTAINER" \
     || die "容器 $BUILDER_CONTAINER 不在跑（docker start $BUILDER_CONTAINER）"
 [ -f "$DEVICE_DST/AndroidProducts.mk" ] \
     || die "AOSP 里没有注入设备树。先跑： ./apply-overlay.sh"
-[ -f "$DEVICE_DST/autosnap_x64_arm64/bridge/bridge-copy.mk" ] \
+[ -f "$DEVICE_DST/remote_control_x64_arm64/bridge/bridge-copy.mk" ] \
     || die "载荷拷贝规则缺失，重跑： ./apply-overlay.sh"
 
 if [ "$(build_status)" = running ]; then
@@ -90,6 +90,6 @@ if [ "${WAIT:-0}" = 1 ]; then
     in_container "$CMD" 2>&1 | tee "$LOG_FILE"
 else
     docker exec -d "$BUILDER_CONTAINER" bash -lc \
-        "$CMD > $BUILDER_AOSP_PATH/out/autosnap-build.log 2>&1; echo \"EXIT=\$?\" >> $BUILDER_AOSP_PATH/out/autosnap-build.log"
+        "$CMD > $BUILDER_AOSP_PATH/out/remote-control-build.log 2>&1; echo \"EXIT=\$?\" >> $BUILDER_AOSP_PATH/out/remote-control-build.log"
     log "已在后台开跑。进度： ./build-rom.sh --status"
 fi

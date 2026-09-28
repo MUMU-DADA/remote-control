@@ -23,8 +23,8 @@ export TMPDIR="${TMPDIR_OVERRIDE:-$RUN_DIR/tmp}"
 mkdir -p "$TMPDIR"
 
 # AOSP 内的落点（由 apply-overlay.sh 同步过去）
-DEVICE_DST="$AOSP_DIR/device/autosnap"
-PRODUCT_NAME="autosnap_x64_arm64"
+DEVICE_DST="$AOSP_DIR/device/remote_control"
+PRODUCT_NAME="remote_control_x64_arm64"
 LUNCH_TARGET="$PRODUCT_NAME-userdebug"
 PRODUCT_OUT="${PRODUCT_OUT:-$AOSP_DIR/out/target/product/$PRODUCT_NAME}"
 # 想拿别的镜像做彩排（例如官方 google_apis 镜像）时直接覆盖：

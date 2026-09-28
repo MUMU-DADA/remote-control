@@ -6,6 +6,7 @@
 #include "dispatch.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -1280,24 +1281,28 @@ ReplyPacket Dispatcher::HandlePower(const Request& req,
     // 客户端只会看到连接被重置，无从判断命令是否被受理。
     //
     // 做法：fork 一个子进程延迟 500ms 再执行。父进程立刻返回。
-    json::Writer w;
-    w.Obj()
-        .Field("ok", true)
-        .Field("action", what)
-        .Field("method", "svc power")
-        .Field("note", isShutdown
-                           ? "设备将在约 0.5 秒后开始关机"
-                           : "设备将在约 0.5 秒后重启")
-     .EndObj();
+    // ── 用一条管道把"真的执行失败了"传回来 ──
+    //
+    // ⚠️ 这里以前是**无条件**返回 ok:true，而子进程里的失败没有任何人知道。
+    //    实测踩过：SELinux 少了 exec `sh` 的权限（`svc` 是 shell 脚本），
+    //    `svc power reboot` 当场 EACCES，退路 `/system/bin/reboot` 也没权限，
+    //    于是接口回 ok、设备纹丝不动 —— 用户只能反复点按钮，日志里也看不出名堂。
+    //    宁可多等两秒，也不要报一个假的成功。
+    int failPipe[2] = {-1, -1};
+    if (pipe(failPipe) != 0) {
+        failPipe[0] = failPipe[1] = -1;   // 管道建不起来就退回旧行为
+    }
 
     const pid_t pid = fork();
     if (pid == 0) {
         // 子进程：脱离父进程，延迟后执行
+        if (failPipe[0] >= 0) close(failPipe[0]);
         setsid();
         usleep(500 * 1000);
 
         CommandResult r;
-        if (!RunCommand(argv, 30000, 4096, &r, nullptr) || r.exitCode != 0) {
+        bool ok = RunCommand(argv, 30000, 4096, &r, nullptr) && r.exitCode == 0;
+        if (!ok) {
             // svc 不可用就退回 reboot 二进制
             std::vector<std::string> fallback;
             if (isShutdown) {
@@ -1308,12 +1313,51 @@ ReplyPacket Dispatcher::HandlePower(const Request& req,
                     fallback.push_back(what.substr(7));
                 }
             }
-            RunCommand(fallback, 30000, 4096, &r, nullptr);
+            ok = RunCommand(fallback, 30000, 4096, &r, nullptr) && r.exitCode == 0;
+        }
+        if (!ok && failPipe[1] >= 0) {
+            const char c = 'F';
+            const ssize_t n = write(failPipe[1], &c, 1);
+            (void)n;
         }
         _exit(0);
     }
 
+    // 父进程：等子进程回话（它先 sleep 0.5s 再跑命令）
+    bool failed = false;
+    if (failPipe[1] >= 0) close(failPipe[1]);
+    if (pid > 0 && failPipe[0] >= 0) {
+        pollfd pfd{};
+        pfd.fd = failPipe[0];
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, 3000) > 0) {
+            char c = 0;
+            if (read(failPipe[0], &c, 1) == 1 && c == 'F') failed = true;
+        }
+        close(failPipe[0]);
+    }
+
     ALOGW("收到电源请求: %s（子进程 pid=%d 将在 0.5s 后执行）", what.c_str(), pid);
+
+    if (failed) {
+        ALOGE("电源命令执行失败 —— 设备不会%s", isShutdown ? "关机" : "重启");
+        return MakeJsonError(
+                req.cmd, kErrInternal,
+                std::string("电源命令执行失败，设备不会") +
+                    (isShutdown ? "关机" : "重启") +
+                    "。多半是没有执行 /system/bin/svc 的权限（它是 shell 脚本，"
+                    "需要 exec sh）。查：adb shell dmesg | grep 'avc:.*remote_control'");
+    }
+
+    json::Writer w;
+    w.Obj()
+        .Field("ok", true)
+        .Field("action", what)
+        .Field("method", "svc power")
+        .Field("note", isShutdown
+                           ? "设备将在约 0.5 秒后开始关机"
+                           : "设备将在约 0.5 秒后重启")
+     .EndObj();
     return MakeJsonReply(req.cmd, w.str());
 }
 

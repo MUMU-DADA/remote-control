@@ -258,6 +258,28 @@ allow remote_control hal_graphics_allocator_default:fd use;
 allow remote_control surfaceflinger:fd use;
 allow remote_control gpu_device:fd use;
 
+# ⚠️⚠️ **`svc` / `pm` / `am` 都是 shell 脚本**（不是二进制！），跑它们要
+#      exec `/system/bin/sh`。少了这条，一整类功能**静默失效**：
+#       · 电源重启/关机（svc power reboot）
+#       · 装应用 / 卸载（pm install|uninstall）
+#       · 启动应用（am start）
+#     接口全都返回 ok:true，设备却什么都没发生 —— 因为 exec 在子进程里
+#     失败，而父进程早就把成功应答发出去了。
+#     实测 denial：
+#         avc: denied { execute } for comm="remote-control" name="sh"
+#             tcontext=u:object_r:shell_exec:s0
+#     shell_exec 是 system_file_type，coredomain 本来就有资格执行 ——
+#     只是没人写过这条 allow。服务本来就是设计来跑这些命令的，加上。
+allow remote_control shell_exec:file {
+    read open getattr map execute execute_no_trans
+};
+
+# svc / pm / am 是 shell 脚本，脚本里调的是 `app_process64`（Java 层），
+# 所以还要能 exec zygote_exec。AOSP 给 shell 的就是这一条
+# （public/shell.te:64 `allow shell zygote_exec:file rx_file_perms;`），
+# 我们照抄 —— 没有 neverallow 挡。
+allow remote_control zygote_exec:file rx_file_perms;
+
 # 应用管理（/api/v1/app* 那些接口）要跑 dumpsys。
 allow remote_control system_file:file {
     read open getattr map execute execute_no_trans

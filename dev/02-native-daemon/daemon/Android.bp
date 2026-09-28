@@ -282,7 +282,7 @@ cc_binary {
 // 前置条件（两个都要做，否则跑不起来）：
 //   1. 产品配置里加：PRODUCT_PACKAGES += virtual_touchpad
 //      它默认不在 aosp_arm64 的产品包里（是 VR 专用）
-//   2. sepolicy 按 device/autosnap_x64_arm64/dev/04-x64-android/device/autosnap_x64_arm64/sepolicy/remote_control.te 里「启用 vtp 后端」一节改
+//   2. sepolicy 按 device/remote_control_x64_arm64/dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/remote_control.te 里「启用 vtp 后端」一节改
 //
 // 限制：官方实现只有 2 个触控槽位，做不了 3 指以上手势。
 cc_binary {

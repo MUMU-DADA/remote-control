@@ -30,7 +30,7 @@ $ ./scripts/build-rom.sh --status
 镜像指纹：
 
 ```
-AutoSnap/autosnap_x64_arm64/autosnap_x64_arm64:12/SP1A.210812.016.C2/root09280236:userdebug/test-keys
+remote-control/remote_control_x64_arm64/remote_control_x64_arm64:12/SP1A.210812.016.C2/root09280236:userdebug/test-keys
 ```
 
 ### 2.2 ROM 自检（`tools/verify-rom.sh`）
@@ -51,7 +51,7 @@ AutoSnap/autosnap_x64_arm64/autosnap_x64_arm64:12/SP1A.210812.016.C2/root0928023
 
 ```
 [✓] ro.build.version.sdk = 31
-[✓] ro.product.device = autosnap_x64_arm64
+[✓] ro.product.device = remote_control_x64_arm64
 [✓] ro.product.cpu.abilist = x86_64,arm64-v8a
 [✓] ro.dalvik.vm.native.bridge = libndk_translation.so ；exec=1
 [✓] binfmt: arm64_exe / arm64_dyn 已注册
@@ -65,7 +65,7 @@ AutoSnap/autosnap_x64_arm64/autosnap_x64_arm64:12/SP1A.210812.016.C2/root0928023
 ### 2.4 交付物
 
 ```
-artifacts/rom-autosnap_x64_arm64/   5.7 GB
+artifacts/rom-remote_control_x64_arm64/   5.7 GB
   system-qemu.img vendor-qemu.img product-qemu.img system_ext-qemu.img ramdisk-qemu.img   ← 模拟器必需（GPT 包装 + 合并 ramdisk）
   system.img vendor.img product.img ramdisk.img                                          ← 裸 ext4，留作挂载检视
   kernel-ranchu encryptionkey.img userdata.img advancedFeatures.ini config.ini source.properties
@@ -100,7 +100,7 @@ cd dev\04-x64-android\windows
 ```
 
 然后对照 `EXPECTED-OUTPUT.md`：开机几十秒、四组验收全绿、`ro.build.fingerprint` 与 Linux 侧一致
-（`AutoSnap/autosnap_x64_arm64/autosnap_x64_arm64:12/...:userdebug/test-keys`）。
+（`remote-control/remote_control_x64_arm64/remote_control_x64_arm64:12/...:userdebug/test-keys`）。
 
 ---
 

@@ -26,7 +26,7 @@ export EMULATOR_PORT
 if pgrep -f "/aosp/out/soong_ui" >/dev/null 2>&1; then
     die "构建还在跑（./scripts/build-rom.sh --status）；等它结束再验收"
 fi
-LOG="$AOSP_DIR/out/autosnap-build.log"
+LOG="$AOSP_DIR/out/remote-control-build.log"
 if [ -s "$LOG" ]; then
     if grep -q '^EXIT=0' "$LOG"; then
         log "构建结束且 EXIT=0 ✓"

@@ -327,7 +327,7 @@ adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock ta
 原型通了之后再补：
 
 1. `init/remote-control.rc` → 编进 `/system/etc/init/`
-2. `dev/04-x64-android/device/autosnap_x64_arm64/dev/04-x64-android/device/autosnap_x64_arm64/sepolicy/remote_control.te` → 用 `permissive remote-control;` 定位，再逐条加 allow
+2. `dev/04-x64-android/device/remote_control_x64_arm64/dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/remote_control.te` → 用 `permissive remote-control;` 定位，再逐条加 allow
 3. 改成 `system` UID 开机自启
 
 **这是工作量最大、最容易卡住的部分。**

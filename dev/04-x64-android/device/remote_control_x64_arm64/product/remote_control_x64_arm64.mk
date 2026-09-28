@@ -1,8 +1,8 @@
 #
-# AutoSnap x86_64 + ARM64 桥 · 产品定义
+# remote-control x86_64 + ARM64 桥 · 产品定义
 #
-#   lunch autosnap_x64_arm64-userdebug
-#   产物目录 out/target/product/autosnap_x64_arm64/
+#   lunch remote_control_x64_arm64-userdebug
+#   产物目录 out/target/product/remote_control_x64_arm64/
 #
 # 目标：**同架构**（x86_64 guest 跑在 x86_64 宿主上，KVM/WHPX 硬件加速）
 #       的自编 Android 12 ROM，同时能跑 arm64 应用（走 libndk_translation 翻译层）。
@@ -64,7 +64,7 @@ $(call inherit-product, device/generic/goldfish/64bitonly/product/emulator64_ven
 #
 # 设备
 #
-$(call inherit-product, device/autosnap/autosnap_x64_arm64/device.mk)
+$(call inherit-product, device/remote_control/remote_control_x64_arm64/device.mk)
 
 # Define the host tools and libs that are parts of the SDK.
 $(call inherit-product-if-exists, sdk/build/product_sdk.mk)
@@ -76,10 +76,10 @@ $(call inherit-product-if-exists, development/build/product_sdk.mk)
 #
 # 1) 载荷文件：由 x64-android/scripts/apply-overlay.sh 从 Google 官方
 #    `system-images;android-31;google_apis;x86_64` 镜像里提取，落到
-#    device/autosnap/autosnap_x64_arm64/bridge/ 下，并生成 bridge-copy.mk
+#    device/remote_control/remote_control_x64_arm64/bridge/ 下，并生成 bridge-copy.mk
 #    （显式列出 80+ 条 PRODUCT_COPY_FILES，避免用 shell 在 make 里遍历目录）。
 #
-include device/autosnap/autosnap_x64_arm64/bridge/bridge-copy.mk
+include device/remote_control/remote_control_x64_arm64/bridge/bridge-copy.mk
 
 # 2) 属性。分两处放，是为了**照抄官方镜像的落位**（见评估文档 §2.6）：
 #      /system/build.prop  ← isa 映射 + 放行 exec
@@ -109,7 +109,7 @@ PRODUCT_VENDOR_PROPERTIES += \
 #    可镜像里根本没有这个二进制（见 docs/09-deployment-and-update.md §4.3）。
 #
 # ⚠️ 光写 PRODUCT_PACKAGES 还不够 —— 还会撞上 artifact path requirement：
-#        device/autosnap_.../autosnap_x64_arm64.mk produces files inside
+#        device/remote_control_.../remote_control_x64_arm64.mk produces files inside
 #        build/make/target/product/generic_system.mk's artifact path requirement
 #        Offending entries: system/bin/remote-control ...
 #    因为 generic_system.mk 规定了 system 镜像里哪些路径算"合规"，
@@ -133,7 +133,7 @@ PRODUCT_PACKAGES += \
     rcctl
 
 # Overrides
-PRODUCT_BRAND := AutoSnap
-PRODUCT_NAME := autosnap_x64_arm64
-PRODUCT_DEVICE := autosnap_x64_arm64
-PRODUCT_MODEL := AutoSnap x86_64 with ARM64 bridge
+PRODUCT_BRAND := remote-control
+PRODUCT_NAME := remote_control_x64_arm64
+PRODUCT_DEVICE := remote_control_x64_arm64
+PRODUCT_MODEL := remote-control x86_64 with ARM64 bridge

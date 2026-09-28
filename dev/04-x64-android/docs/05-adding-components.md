@@ -32,7 +32,7 @@ aosp/frameworks/native/cmds/remote-control/daemon/Android.bp   → 模块名 rem
 
 ### 2.2 加进产品
 
-编辑 `dev/04-x64-android/device/autosnap_x64_arm64/product/autosnap_x64_arm64.mk`，在末尾加：
+编辑 `dev/04-x64-android/device/remote_control_x64_arm64/product/remote_control_x64_arm64.mk`，在末尾加：
 
 ```make
 # ---- 自制系统组件 ----
@@ -53,7 +53,7 @@ cd dev/04-x64-android
 验证二进制真的进了镜像：
 
 ```bash
-ls -la ../aosp/out/target/product/autosnap_x64_arm64/system/bin/remote-control
+ls -la ../aosp/out/target/product/remote_control_x64_arm64/system/bin/remote-control
 ```
 
 ### 2.3 开机自启 + SELinux
@@ -63,7 +63,7 @@ ls -la ../aosp/out/target/product/autosnap_x64_arm64/system/bin/remote-control
 SELinux domain 按 `dev/02-native-daemon/` 的 sepolicy 清单接进产品即可：
 
 ```make
-BOARD_SEPOLICY_DIRS += device/autosnap/autosnap_x64_arm64/sepolicy
+BOARD_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
 ```
 
 装完 `init.rc` 后**必须验证**：

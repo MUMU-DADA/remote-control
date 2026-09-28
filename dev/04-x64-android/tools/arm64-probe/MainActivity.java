@@ -1,4 +1,4 @@
-package org.autosnap.arm64probe;
+package org.remotecontrol.arm64probe;
 
 import android.app.Activity;
 import android.os.Bundle;

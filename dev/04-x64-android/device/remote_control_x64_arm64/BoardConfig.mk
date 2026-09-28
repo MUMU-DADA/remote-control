@@ -1,11 +1,11 @@
 #
-# AutoSnap x86_64 + ARM64 桥 · BoardConfig
+# remote-control x86_64 + ARM64 桥 · BoardConfig
 #
 # 来源：AOSP 12 `device/generic/goldfish/emulator64_x86_64_arm64/BoardConfig.mk`
 #       （Google 官方 `google_apis;android-31;x86_64` 镜像就是这块板编出来的：
 #        设备名 emulator64_x86_64_arm64，abilist = x86_64,arm64-v8a）
 #
-# 与上游的差异只有文件末尾「AutoSnap 增量」一节，其余逐行照抄，便于和官方对照。
+# 与上游的差异只有文件末尾「remote-control 增量」一节，其余逐行照抄，便于和官方对照。
 #
 
 TARGET_CPU_ABI := x86_64
@@ -45,7 +45,7 @@ BOARD_SEPOLICY_DIRS += device/generic/goldfish/sepolicy/x86
 #     "Only in system/sepolicy/private: ..."，整个 ninja 停在那里）。
 #    设备/产品自己的策略本来就该走 BOARD_SEPOLICY_DIRS ——
 #    goldfish 的 x86 策略就是这么接的（上一行）。
-BOARD_SEPOLICY_DIRS += device/autosnap/autosnap_x64_arm64/sepolicy
+BOARD_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
 
 # Wifi.
 BOARD_WLAN_DEVICE           := emulator
@@ -59,7 +59,7 @@ WIFI_DRIVER_FW_PATH_STA     := "/dev/null"
 WIFI_DRIVER_FW_PATH_AP      := "/dev/null"
 
 # ===========================================================================
-# AutoSnap 增量（唯一与上游不同的地方）
+# remote-control 增量（唯一与上游不同的地方）
 # ===========================================================================
 #
 # 翻译层载荷是「预编译 ELF + PRODUCT_COPY_FILES」。AOSP 默认会拦下这种写法并提示

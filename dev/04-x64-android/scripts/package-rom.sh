@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 把构建产物打成一个可直接交付/拷贝的 ROM 目录（Linux 与 Windows 共用同一份）。
 #
-#   ./package-rom.sh              # → artifacts/rom-autosnap_x64_arm64/
+#   ./package-rom.sh              # → artifacts/rom-remote_control_x64_arm64/
 #   ./package-rom.sh --list       # 只看会打哪些文件
 #
 # 产物里同时写两份清单：
@@ -89,12 +89,12 @@ cp -f "$PRODUCT_OUT/system/build.prop" "$DEST/system/build.prop"
 # AOSP 产物没有 source.properties；SDK 版模拟器（Windows 侧用的那个）更认它，
 # 补一份最小可用的，AOSP 自带模拟器也不受影响。
 cat > "$DEST/source.properties" <<EOF
-Pkg.Desc=AutoSnap x86_64 with ARM64 bridge
+Pkg.Desc=remote-control x86_64 with ARM64 bridge
 Pkg.Revision=1
 AndroidVersion.ApiLevel=31
 SystemImage.Abi=x86_64
-SystemImage.TagId=autosnap
-SystemImage.TagDisplay=AutoSnap x86_64 + ARM64 bridge
+SystemImage.TagId=remote_control
+SystemImage.TagDisplay=remote-control x86_64 + ARM64 bridge
 EOF
 for f in system_ext/build.prop vendor/build.prop product/build.prop; do
     [ -s "$PRODUCT_OUT/$f" ] && { mkdir -p "$DEST/$(dirname $f)"; cp -f "$PRODUCT_OUT/$f" "$DEST/$f"; }
@@ -127,7 +127,7 @@ prop_of() {
 }
 
 {
-    echo "# AutoSnap x86_64 + ARM64 桥 ROM"
+    echo "# remote-control x86_64 + ARM64 桥 ROM"
     echo "# 生成时间：$(date '+%Y-%m-%d %H:%M:%S %z')"
     echo "# lunch 目标：$LUNCH_TARGET"
     echo
@@ -143,7 +143,7 @@ prop_of() {
     printf '%-32s = %s\n' "system.img sha256" "$(cd "$DEST" && sha256sum system.img 2>/dev/null | cut -d' ' -f1 || true)"
     echo
     echo "## 翻译层（随 ROM 一起编进 /system）"
-    bridge="$DEVICE_DST/autosnap_x64_arm64/bridge/system"
+    bridge="$DEVICE_DST/remote_control_x64_arm64/bridge/system"
     echo "翻译器库：  $(ls "$bridge/lib64"/libndk_translation*.so 2>/dev/null | wc -l) 个"
     echo "arm64 系统库：$(ls "$bridge/lib64/arm64" 2>/dev/null | wc -l) 个"
     echo "载荷清单：  payload/MANIFEST.sha256"

@@ -270,7 +270,7 @@ chk() {  # chk <描述> <实际值> <期望匹配>
 
 log "验收 1/4：镜像身份与 ABI"
 chk "ro.build.version.sdk"   "$("$ADB" -s "$SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')"      '^31$'
-chk "ro.product.device"      "$("$ADB" -s "$SERIAL" shell getprop ro.product.device | tr -d '\r')"         'autosnap_x64_arm64'
+chk "ro.product.device"      "$("$ADB" -s "$SERIAL" shell getprop ro.product.device | tr -d '\r')"         'remote_control_x64_arm64'
 chk "ro.product.cpu.abilist" "$("$ADB" -s "$SERIAL" shell getprop ro.product.cpu.abilist | tr -d '\r')"    'x86_64,arm64-v8a'
 
 log "验收 2/4：翻译层接线"
@@ -310,7 +310,7 @@ PKG=""
 if [ -z "$APK" ]; then
     if [ -s "$PROBE_APK" ]; then
         # 首选项目自建的探针 APK：只含 arm64-v8a 一个 ABI，能装能跑就是翻译层在工作
-        APK="$PROBE_APK"; PKG=org.autosnap.arm64probe
+        APK="$PROBE_APK"; PKG=org.remotecontrol.arm64probe
         log "  用自建探针 APK（tools/build-probe-apk.sh 产出，纯 arm64-v8a）"
     else
         APK="$RUN_DIR/com.oF2pks.kalturadeviceinfos_24.apk"; PKG=com.oF2pks.kalturadeviceinfos
@@ -339,7 +339,7 @@ if [ -s "$APK" ] && [ -n "$PKG" ]; then
     fi
     chk "primaryCpuAbi"         "$("$ADB" -s "$SERIAL" shell "pm dump $PKG 2>/dev/null | grep -m1 primaryCpuAbi" | tr -d '\r')" 'arm64-v8a'
     # 自建探针：再从 logcat 里确认原生方法真的返回了结果
-    if [ "$PKG" = org.autosnap.arm64probe ]; then
+    if [ "$PKG" = org.remotecontrol.arm64probe ]; then
         sleep 2
         chk "探针原生返回值"    "$("$ADB" -s "$SERIAL" logcat -d -s ARM64PROBE 2>/dev/null | grep -m1 PROBE_RESULT | tr -d '\r')" 'arm64-v8a native ok'
     fi

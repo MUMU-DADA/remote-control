@@ -29,8 +29,8 @@
 set -uo pipefail
 
 SCRIPT="$(readlink -f "${BASH_SOURCE[0]}")"
-STATE=/run/autosnap-net-bridge.state
-REVERT_UNIT=autosnap-bridge-revert
+STATE=/run/remote-control-net-bridge.state
+REVERT_UNIT=remote_control-bridge-revert
 
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -73,7 +73,7 @@ EOF
     systemctl reset-failed "$REVERT_UNIT.service" 2>/dev/null || true
     if systemd-run --quiet --collect --unit="$REVERT_UNIT" \
                    --on-active="${CONFIRM_WINDOW}s" \
-                   --description="AutoSnap 桥接自动回滚" \
+                   --description="remote-control 桥接自动回滚" \
                    "$SCRIPT" down >/dev/null 2>&1; then
         log "自动回滚已武装：${CONFIRM_WINDOW}s 后自动 down（除非 confirm）"
     else

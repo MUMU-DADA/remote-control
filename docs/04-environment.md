@@ -330,8 +330,8 @@ ARM 用户态翻译层**，同架构运行、KVM/WHPX 加速，能跑 arm64 应�
 
 | 项 | 值 |
 |---|---|
-| lunch 目标 | **`autosnap_x64_arm64-userdebug`** |
-| 产物 / 交付目录 | `out/target/product/autosnap_x64_arm64/`；打包产物见 `dev/04-x64-android/artifacts/rom-autosnap_x64_arm64/` |
+| lunch 目标 | **`remote_control_x64_arm64-userdebug`** |
+| 产物 / 交付目录 | `out/target/product/remote_control_x64_arm64/`；打包产物见 `dev/04-x64-android/artifacts/rom-remote_control_x64_arm64/` |
 | 加速 | Linux **KVM** / Windows **WHPX**（同架构虚拟化），开机几十秒 |
 | 跑 arm64 应用 | `ro.product.cpu.abilist = x86_64,arm64-v8a`，用 Google 官方 `libndk_translation` 做用户态翻译 |
 | 宿主额外依赖 | `apt-get install -y libpulse0 libgl1`（模拟器二进制的动态依赖，缺了起不来） |

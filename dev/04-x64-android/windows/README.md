@@ -1,7 +1,7 @@
 # windows · 在 x64 Windows 上跑同一份 ROM
 
 > 宿主：Windows 10 1809+ / 11（x64）
-> Guest：**Linux 侧编出来的同一份镜像**（`out/target/product/autosnap_x64_arm64/`）
+> Guest：**Linux 侧编出来的同一份镜像**（`out/target/product/remote_control_x64_arm64/`）
 > 加速：**WHPX（Windows Hypervisor Platform）** —— 同架构才有加速，这正是本项目的意义
 
 ---

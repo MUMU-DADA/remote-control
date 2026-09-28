@@ -32,7 +32,7 @@
 | 步骤 | 说明 |
 |---|---|
 | 1 | `repo init -b android-11.0.0_r48` 拉一份 Android 11 树（~85 GB，数小时） |
-| 2 | 设备树照抄本项目（`device/autosnap*/`），BoardConfig 用 **4 ABI** 版：`TARGET_2ND_ARCH := x86` + `TARGET_NATIVE_BRIDGE_2ND_ARCH := arm` + `TARGET_NATIVE_BRIDGE_2ND_ABI := armeabi-v7a armeabi`（AOSP 里 `build/make/target/board/emulator_x86_64_arm64/BoardConfig.mk` 就是这个形状） |
+| 2 | 设备树照抄本项目（`device/remote_control*/`），BoardConfig 用 **4 ABI** 版：`TARGET_2ND_ARCH := x86` + `TARGET_NATIVE_BRIDGE_2ND_ARCH := arm` + `TARGET_NATIVE_BRIDGE_2ND_ABI := armeabi-v7a armeabi`（AOSP 里 `build/make/target/board/emulator_x86_64_arm64/BoardConfig.mk` 就是这个形状） |
 | 3 | 载荷改成从 **API 30** 镜像提取（`fetch-payload.sh --api 30`） |
 | 4 | 验收：`abilist32` 含 `armeabi-v7a` → 装一个**纯 armeabi-v7a** 的 APK → 起 → 映射 `/system/lib/arm/*` |
 

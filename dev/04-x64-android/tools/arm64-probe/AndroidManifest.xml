@@ -5,7 +5,7 @@
   由 tools/build-probe-apk.sh 打包。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="org.autosnap.arm64probe">
+    package="org.remotecontrol.arm64probe">
 
     <application android:label="ARM64 Probe" android:extractNativeLibs="true">
         <activity android:name=".MainActivity" android:exported="true">
