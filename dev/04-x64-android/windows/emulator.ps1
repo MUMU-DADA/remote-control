@@ -466,8 +466,21 @@ function Invoke-Stop {
     $procs = @(Get-EmuProcess $p)
     if ($procs.Count -eq 0) { Write-Warn "实例 '$N' 没在跑"; return $true }
 
-    Write-Log "请 guest 自己关机（adb emu kill）"
+    # ⚠️⚠️ 关机前先让 guest 把脏页落盘。
+    #
+    #    `adb emu kill` **不是优雅关机，是硬断电** —— QEMU 收到信号就立刻终止，
+    #    guest 没机会卸载文件系统或提交日志。
+    #    实测（Linux 侧 tools/verify-kill-is-hard-poweroff.sh，同一台实例
+    #    三组对照）：sync 后再关 → 数据在；不 sync 直接关 → 数据没了；
+    #    不 sync 等 15 秒再关 → **还是没了**。
+    #    后果不是"丢最后一点"，而是最近写的东西整个没，且毫无征兆 ——
+    #    项目早期那条"模拟器 /data 不持久（根因未查明）"就是它。
     $adb = Find-Adb
+    Write-Log "让 guest 把脏页落盘（sync）"
+    & $adb -s (Get-Serial $N) shell sync 2>$null | Out-Null
+    Start-Sleep -Seconds 1
+
+    Write-Log "请 guest 自己关机（adb emu kill）"
     & $adb -s (Get-Serial $N) emu kill 2>$null | Out-Null
 
     # ⚠️ 等的是**进程真的退出**，不是"命令返回了"。emu kill 只是递个关机请求，
@@ -489,9 +502,11 @@ function Invoke-Kill {
     if ($procs.Count -eq 0) { Write-Warn "实例 '$N' 没在跑"; return }
 
     Write-Log "强制关闭 '$N'（Stop-Process -Force）"
-    # 先请它关再强杀：正常路径能把 qcow2 元数据落盘，直接杀会丢一点写入。
-    # 强杀是为了"现在就关掉"，差那 1~2 秒不值当。
+    # 先**落盘**、再请它关、最后强杀。emu kill 本身已经是硬断电
+    # （见 stop 里那段实测），SIGKILL 只会更狠 —— 不 sync 的话
+    # 最近写入的数据会静默消失。多花一秒换数据安全，值。
     $adb = Find-Adb
+    & $adb -s (Get-Serial $N) shell sync 2>$null | Out-Null
     & $adb -s (Get-Serial $N) emu kill 2>$null | Out-Null
     Start-Sleep -Seconds 2
     foreach ($pr in @(Get-EmuProcess $p)) { Stop-Process -Id $pr.ProcessId -Force -ErrorAction SilentlyContinue }

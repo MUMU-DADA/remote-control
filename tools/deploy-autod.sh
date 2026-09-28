@@ -105,7 +105,24 @@ fi
 cat <<'EOF'
 
 ───────────────────────────────────────────────────────────────
-已知问题：模拟器 /data 不持久（根因未查明）
+关于模拟器 /data 的持久性（根因已查明）
+
+  早年记的"模拟器 /data 不持久"其实是两件事叠在一起，现在都清楚了：
+
+  1. **run-linux.sh 不带 --reuse 会 rm -rf 工作目录** —— 那是设计如此
+     （"每次都是一台全新机器"），不是 bug。日常开关机请用
+     dev/04-x64-android/scripts/emulator.sh，它从不删工作目录。
+
+  2. **`adb emu kill` 是硬断电，不是优雅关机** —— 它让 QEMU 立刻终止，
+     guest 没机会卸载文件系统。实测（同一台实例三组对照，
+     见 dev/04-x64-android/tools/verify-kill-is-hard-poweroff.sh）：
+
+       写入后 sync 再关      → 重启后文件在
+       写入后不 sync 直接关  → 重启后文件没了
+       写入后等 15 秒再关    → 还是没了（guest 回写比想象中懒）
+
+     所以现在的 stop/kill 都会**先 sync 再 kill**。手动关机的话，
+     记得先 `adb -s <序列号> shell sync`。
 
   · run-linux.sh **不加 --reuse** 会 rm -rf 工作目录
     （脚本注释：「每次都是一台全新机器」，是设计如此）

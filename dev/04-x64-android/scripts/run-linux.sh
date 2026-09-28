@@ -36,7 +36,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-wait)     WAIT=0 ;;
         --verify)      VERIFY_ONLY=1 ;;
-        --stop)        "$ADB" -s "emulator-$EMULATOR_PORT" emu kill >/dev/null 2>&1 && log "已停" || warn "没在跑"; exit 0 ;;
+        # ⚠️ emu kill 是**硬断电**（不是优雅关机），不先 sync 会丢掉
+        #    最近写入的数据 —— 实测见 tools/verify-kill-is-hard-poweroff.sh
+        --stop)        "$ADB" -s "emulator-$EMULATOR_PORT" shell sync >/dev/null 2>&1 || true
+                       "$ADB" -s "emulator-$EMULATOR_PORT" emu kill >/dev/null 2>&1 && log "已停" || warn "没在跑"; exit 0 ;;
         --apk)         APK="${2:?}"; shift ;;
         --from-product-out) FORCE_PRODUCT_OUT=1 ;;
         --show-kernel) SHOW_KERNEL=1 ;;

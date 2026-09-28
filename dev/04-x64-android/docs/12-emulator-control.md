@@ -123,7 +123,28 @@ ERROR | Could not start renderer
 
 ## 4. 各命令的注意事项
 
-### `stop` —— 等的是**进程退出**，不是"命令返回"
+### `stop` —— 先 `sync`，再 kill
+
+> ⚠️ **`adb emu kill` 不是优雅关机，是硬断电。** 它给 QEMU 发信号让它立刻
+> 终止，guest 根本没机会卸载文件系统或提交日志。
+>
+> 实测（`tools/verify-kill-is-hard-poweroff.sh`，同一台实例三组对照）：
+>
+> | 做法 | 重启后 |
+> |---|---|
+> | 写入后 `sync` 再关 | **在** |
+> | 写入后不 sync 直接关 | **没了** |
+> | 写入后等 **15 秒**再关 | **还是没了** |
+>
+> 后果不是"丢最后一点"，而是**最近写的东西整个没**，而且毫无征兆。
+> 项目早期那条悬案「模拟器 `/data` 不持久（根因未查明）」就是它
+> （另一半原因是 `run-linux.sh` 不带 `--reuse` 会 `rm -rf` 工作目录，
+> 那是设计如此）。
+>
+> 所以 `stop` / `kill` 都会**先 `adb shell sync` 再 kill**。手动关机的话
+> 记得自己先 `adb -s <序列号> shell sync`。
+
+### `stop` 等的是**进程退出**，不是"命令返回"
 
 `adb emu kill` 只是递个关机请求，guest 还要走完关机流程（卸载 `/data`、
 收 qcow2）。这时候就重启会撞上 `multiinstance.lock`，第二台报

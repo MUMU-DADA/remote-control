@@ -268,6 +268,22 @@ cmd_stop() {
     local pids; pids="$(emu_pid_for_port "$port")"
     [ -n "$pids" ] || { warn "实例 '$name' 没在跑"; return 0; }
 
+    # ⚠️⚠️ 关机前**必须让 guest 把脏页落盘**。
+    #
+    #    `adb emu kill` **不是优雅关机，是硬断电** —— 它给 QEMU 发信号让它
+    #    立刻终止，guest 根本没机会卸载文件系统或提交日志。
+    #    实测（tools/verify-kill-is-hard-poweroff.sh，同一台实例三组对照）：
+    #
+    #      写入后 sync 再关      → 重启后文件**在**
+    #      写入后不 sync 直接关  → 重启后文件**没了**
+    #      写入后等 15 秒再关    → **还是没了**（guest 的回写比想象中懒）
+    #
+    #    后果不是"丢最后一点"，而是**最近写的东西整个没**，而且毫无征兆 ——
+    #    项目早期那条"模拟器 /data 不持久（根因未查明）"就是它。
+    log "让 guest 把脏页落盘（sync）"
+    "$ADB" -s "$serial" shell sync >/dev/null 2>&1 || true
+    sleep 1
+
     log "请 guest 自己关机（adb emu kill）"
     "$ADB" -s "$serial" emu kill >/dev/null 2>&1 || true
 
@@ -292,9 +308,10 @@ cmd_kill() {
 
     log "强制关闭 '$name'（SIGKILL）"
     local p
-    # ⚠️ 先把 "请它关" 的路径也走一遍：正常路径能落盘 qcow2，直接 SIGKILL
-    #    会让上一次的写入丢一点（qcow2 的元数据在进程里缓存着）。
-    #    强杀是为了"现在就关掉"，不是为了更快 —— 差那 1~2 秒不值当。
+    # ⚠️ 强杀之前先把脏页落盘。`adb emu kill` 本身就已经是硬断电了
+    #    （见 stop 里那段实测，三组对照），SIGKILL 只会更狠 ——
+    #    不做这一步，最近写入的数据会静默消失。多花一秒换数据安全，值。
+    "$ADB" -s "$(inst_serial "$name")" shell sync >/dev/null 2>&1 || true
     "$ADB" -s "$(inst_serial "$name")" emu kill >/dev/null 2>&1 || true
     sleep 2
     for p in $(emu_pid_for_port "$port"); do kill -9 "$p" 2>/dev/null || true; done
