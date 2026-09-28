@@ -113,3 +113,83 @@ JPEG image data, JFIF standard 1.01, baseline, precision 8, 320x480, components 
 
 ⚠️ 一个诚实的保留：0.5 ms 是在合成图上测的，而 Skia 的 1.2 ms 是在
 真实抓帧上测的 —— **两者不可直接比较**。要比较得用同一张图。
+
+---
+
+# jpeg_paths_compare —— 改造会不会把高版本改坏
+
+问题：为了让 Android 8~10 用上 JPEG 要加 dlopen 这条路，
+但高版本现在走 AndroidBitmap（Skia）。**换过去会不会降级？**
+
+答案：**不会。两条路是同一个编码器。**
+
+## 证据链
+
+**1. 同一个库**
+`external/skia/Android.bp` 里 `"libjpeg"` 是依赖 —— Skia 的 JPEG
+编码器底层就是 libjpeg-turbo。设备上那个 `libjpeg.so` 就是它。
+
+**2. 第一版差 5%，原因是参数没对齐**
+
+```
+AndroidBitmap (Skia)    1.3 ms    24,341 B
+dlopen libjpeg          0.5 ms    25,583 B   ← 又快又大
+```
+
+快而大 = 没开 `optimize_coding`。查 Skia 源码：
+
+```c
+// SkJpegEncoder.cpp:160-163
+// Tells libjpeg-turbo to compute optimal Huffman coding tables
+// for the image. This improves compression at the cost of slower encode.
+fCInfo.optimize_coding = TRUE;      ← Skia 开了
+// 而 libjpeg 默认是 FALSE（jcparam.c:229）
+```
+
+**3. 补上之后，时间和大小都对上了**
+
+```
+AndroidBitmap (Skia)    1.1 ms    24,341 B
+dlopen libjpeg          1.1 ms    23,787 B
+```
+
+**4. 剩下 554 字节的差 = Skia 嵌的 ICC 色彩配置文件**
+
+```
+Skia 段序列:  APP0  APP2(ICC_PROFILE, 550 字节)  DQT DQT SOF0 DHT×4 SOS
+我们的:       无 ICC 段
+差 554 = ICC 载荷 550 + 段头 4        ✓
+```
+
+截图是 sRGB 的，这个 ICC 是冗余的。**我们的输出反而小 550 字节。**
+
+## 结论
+
+| | 高版本用 AndroidBitmap | 换成 dlopen libjpeg |
+|---|---|---|
+| 编码器 | libjpeg-turbo | **同一个** |
+| 耗时（同参数） | 1.1 ms | 1.1 ms |
+| 体积 | 24,341 B | 23,787 B（少一个冗余 ICC） |
+| 画面 | 一致 | 一致 |
+
+**换过去不是降级。** 但也没有必要强行换 —— 见下面"零风险设计"。
+
+## 零风险设计
+
+改造应该做成**运行时探测 + 保持现状优先**：
+
+```
+API ≥ 30  →  AndroidBitmap（JPEG / WebP / PNG）  ← 一行代码都不变
+API < 30  →  dlopen libjpeg（JPEG） / zlib（PNG）
+```
+
+高版本走的还是原来那条路，**行为完全不变**；探测只在启动时做一次。
+
+代价：多一条代码路径要维护。收益：老设备也有 JPEG。
+
+## 附带确认
+
+`dlopen("libwebp.so")` 失败 —— 设备上没有这个库。
+**WebP 只有 AndroidBitmap 能出**，所以：
+- 高版本：WebP 保留 ✅
+- 老版本：没有 WebP（可选格式，不是默认）
