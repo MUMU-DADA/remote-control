@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -186,7 +187,9 @@ int CmdCapture(int sockFd, const char* outPath, bool raw) {
             fprintf(stderr, "已写入 %s (PPM)\n", outPath);
         }
     } else {
-#ifdef __ANDROID__
+// AndroidBitmap_compress 是 API 30 才有的。编到更低版本时走下面的 PPM 分支 ——
+// autodctl 是调试工具，输出格式降级无所谓，**编不过才是问题**。
+#if defined(__ANDROID__) && __ANDROID_API__ >= 30
         // 用 AndroidBitmap_compress 编码成 PNG，和 AOSP 的 screencap 同一条路
         AndroidBitmapInfo info;
         memset(&info, 0, sizeof(info));
@@ -220,10 +223,11 @@ int CmdCapture(int sockFd, const char* outPath, bool raw) {
             }
         }
 #else
-        // 主机上没有 AndroidBitmap_compress，退回到 PPM。
-        // 这条分支只为让本文件在开发机上能编译自检 —— 设备上永远走上面的 PNG 路径。
+        // 没有 AndroidBitmap_compress 时退回 PPM（主机，或 Android < 11）。
+        // PPM 是无压缩的，文件会大 —— 但它编得过、看得见，调试够用。
         fprintf(stderr,
-                "提示: 主机构建无 PNG 编码，改为输出 PPM\n");
+                "提示: 这台设备/这个构建没有 AndroidBitmap_compress，"
+                "改为输出 PPM（无压缩，文件较大）\n");
         const int fd = open(outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) {
             fprintf(stderr, "打开 %s 失败: %s\n", outPath, strerror(errno));
@@ -552,7 +556,11 @@ int CmdInstall(int sockFd, const char* apkPath, bool replace) {
         return 1;
     }
 
-    const int memFd = memfd_create("apk", MFD_CLOEXEC);
+    // ⚠️ 用系统调用而不是 bionic 包装：memfd_create() 是 API 30 才导出的，
+    //    而系统调用 Linux 3.17+ 就有。和 daemon 侧同样的理由 ——
+    //    不改的话这个客户端编不到 Android 8。
+    const int memFd = static_cast<int>(
+            syscall(SYS_memfd_create, "apk", static_cast<unsigned>(MFD_CLOEXEC)));
     if (memFd < 0) {
         fprintf(stderr, "memfd_create 失败: %s\n", strerror(errno));
         close(fileFd);

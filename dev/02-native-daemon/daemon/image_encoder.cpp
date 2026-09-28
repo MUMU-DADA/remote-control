@@ -54,6 +54,17 @@ namespace autod {
 namespace {
 
 #ifdef AUTOD_HAS_JNIGRAPHICS
+
+// ⚠️ 自己声明写回调的类型，**不用头文件里的 `AndroidBitmap_CompressWriteFunc`**。
+//
+//    那个 typedef 被标了 `__INTRODUCED_IN(30)`，编到 API < 30 时
+//    引用它就是编译错误（-Werror 直接拦下），哪怕我们只是想拿它
+//    声明一个函数指针、根本不链接那个符号。
+//
+//    签名一字不差地抄过来即可。
+using CompressWriteFn = bool (*)(void* userContext, const void* data,
+                                 size_t size);
+
 // libjnigraphics 的运行时函数表。
 //
 // 只探一个符号就够：`AndroidBitmap_compress` 是随 API 30 一起进来的，
@@ -62,7 +73,7 @@ struct JniGraphics {
     void* handle = nullptr;
     // 函数指针用真实签名存，调用处不用重复转型
     int (*compress)(const AndroidBitmapInfo*, int32_t, const void*, int32_t,
-                    int32_t, void*, AndroidBitmap_CompressWriteFunc) = nullptr;
+                    int32_t, void*, CompressWriteFn) = nullptr;
 };
 
 JniGraphics& Jni() {
