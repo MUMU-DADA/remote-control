@@ -112,6 +112,39 @@ class HttpServer {
     void Run(const HttpHandler& handler);   // 阻塞
     void Stop();
 
+    // 请求踢掉所有**其它**连接，但**不立刻执行**。
+    //
+    // 为什么不能立刻踢：发起请求的那条连接此刻还没收到响应 ——
+    // 在 handler 里 shutdown 自己，客户端只会看到一个断掉的连接，
+    // 而不是 "{"ok":true,"serving":false}"。
+    //
+    // 所以这里只登记，等 ServeConnection 把响应写完再执行。
+    void RequestKickAll(const char* reason);
+
+    // 执行 RequestKickAll 登记的那次踢连接（如果有）。
+    //
+    // 由 ServeConnection 在**响应写完、作用域退出时**调用 ——
+    // 用 RAII 而不是在每个 return 前手写：那个函数有好几个提前
+    // return 的分支，漏一个就会出现"关了服务但连接还在"。
+    void RunPendingKick(int exceptFd);
+
+    // 终止所有**活跃**连接，但不关监听 fd。
+    //
+    // 用在两个地方：
+    //   - 服务被软开关关掉 —— 已经连上的客户端不该继续享受服务
+    //   - 开启了鉴权 —— 之前无鉴权连进来的人不该继续免费用
+    //
+    // 等它们真的退出（最多 timeoutMs），返回实际等了多久。
+    // exceptFd：跳过这条连接（发起请求的那条）。
+    int KickAllConnections(const char* reason, int timeoutMs = 600,
+                           int exceptFd = -1);
+
+    // 令牌来源改成**回调**，这样鉴权可以热改。
+    //
+    // 原来 token_ 是 Start() 时定死的，改鉴权只能重启进程 ——
+    // 而重启会连带断掉所有连接，那不是"开启鉴权"，那是"重启"。
+    void SetTokenProvider(std::function<std::string()> fn);
+
     bool     running() const { return listenFd_ >= 0; }
     uint16_t port() const { return port_; }
     const std::string& bindAddr() const { return bindAddr_; }
@@ -124,7 +157,10 @@ class HttpServer {
     //    的回调还在那些线程里跑着 —— 表现是
     //      FORTIFY: pthread_mutex_lock called on a destroyed mutex
     //    Stop() 因此要主动 shutdown 掉这些连接，并等它们真的退出。
-    std::mutex              connMutex_;
+    // mutable：CheckAuth 是 const，但它要读 tokenProvider_
+    mutable std::mutex      connMutex_;
+    // 非空 = 有一条待执行的"踢掉其它连接"请求（见 RequestKickAll）
+    std::string             pendingKick_;
     std::set<int>           connFds_;
 
     void ServeConnection(int connFd, const HttpHandler& handler);
@@ -137,6 +173,8 @@ class HttpServer {
     uint16_t    port_ = 0;
     std::string bindAddr_;
     std::string token_;
+    // 非空时优先用它 —— 让鉴权可以运行时改变
+    std::function<std::string()> tokenProvider_;
     size_t      maxBody_ = 0;
     bool        stop_ = false;
 };

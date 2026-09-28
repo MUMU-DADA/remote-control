@@ -430,6 +430,20 @@ int main(int argc, char** argv) {
     // 就让 HTTP 请求排队。
     HttpServer httpServer;
     RestApi    restApi(&dispatcher);
+
+    // 让"关闭服务 / 开启鉴权"能踢掉已经连上的客户端。
+    //
+    // 不给它的话，`{"on":false}` 只挡得住**新**请求 —— 一个正在拉流
+    // 的网页会一直拿画面，对用户来说"关掉服务"等于没关。
+    restApi.SetHttpServer(&httpServer);
+
+    // 令牌来源改成回调，这样改鉴权**不用重启进程**。
+    //
+    // 重启也能生效，但那会连带断掉所有连接 —— 那不叫"开启鉴权"，
+    // 那叫"重启服务"。而且重启是 supervisor 的事，API 不该依赖它。
+    httpServer.SetTokenProvider([]() {
+        return ServiceState::Instance().AuthToken();
+    });
     // 用 pthread 而不是 std::thread：后者创建失败会抛异常，
     // 而 AOSP 是 -fno-exceptions，抛出去就是整个进程 terminate。
     // 这里要 join，所以不能走 SpawnDetached（那个是 detached）。
@@ -489,6 +503,12 @@ int main(int argc, char** argv) {
               httpBind.empty() ? "(未启用)" : httpBind.c_str(), httpPort,
               httpToken.empty() ? "关" : "开");
     }
+
+    // 把令牌交给 ServiceState —— HttpServer 的 provider 从这里读。
+    //
+    // 放在**配置块之外**：CLI 的 --http-token 和配置文件都可能给出令牌，
+    // 上面的分支只处理了配置文件那条路。
+    ServiceState::Instance().SetAuthToken(httpToken);
 
     // ── 配置文件监视 ──
     //

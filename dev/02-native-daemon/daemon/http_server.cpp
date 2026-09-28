@@ -258,7 +258,13 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
 }
 
 bool HttpServer::CheckAuth(const HttpRequest& req) const {
-    if (token_.empty()) return true;      // 无鉴权模式
+    // 令牌优先从 provider 取（可以热改），没有就用手里的那份。
+    std::string tok = token_;
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        if (tokenProvider_) tok = tokenProvider_();
+    }
+    if (tok.empty()) return true;         // 无鉴权模式
 
     // 网页本身不校验：它只是个静态页面，不含秘密，
     // 而用户得先打开它才有地方输入令牌。
@@ -270,18 +276,85 @@ bool HttpServer::CheckAuth(const HttpRequest& req) const {
     // 1) Authorization: Bearer <token>  —— 标准做法
     const std::string auth = req.header("authorization");
     if (auth.size() > 7 && auth.compare(0, 7, "Bearer ") == 0 &&
-        auth.substr(7) == token_) {
+        auth.substr(7) == tok) {
         return true;
     }
     // 2) X-Autod-Token: <token>  —— 给不方便设 Authorization 的客户端
-    if (req.header("x-autod-token") == token_) return true;
+    if (req.header("x-autod-token") == tok) return true;
     // 3) ?token=<token>  —— 给 <img src="/api/v1/stream?..."> 这种
     //    没法自定义请求头的场景。
     //    ⚠️ 令牌会出现在 URL 里，可能被日志和浏览器历史记录留下。
     //    只在确实没法带头的场合用它。
-    if (req.queryParam("token") == token_) return true;
+    if (req.queryParam("token") == tok) return true;
 
     return false;
+}
+
+void HttpServer::RequestKickAll(const char* reason) {
+    std::lock_guard<std::mutex> lk(connMutex_);
+    // 已经有一条待执行的就别覆盖 —— 先来的原因更有说明性
+    if (pendingKick_.empty()) {
+        pendingKick_ = reason != nullptr ? reason : "";
+    }
+}
+
+void HttpServer::RunPendingKick(int exceptFd) {
+    std::string reason;
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        reason.swap(pendingKick_);
+    }
+    if (reason.empty()) return;
+    KickAllConnections(reason.c_str(), 600, exceptFd);
+}
+
+int HttpServer::KickAllConnections(const char* reason, int timeoutMs,
+                                   int exceptFd) {
+    // 先数一下，好在日志里说清楚"踢了几条" ——
+    // 不然调用方只能从"客户端好像断了"间接猜。
+    size_t n = 0;
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        for (int fd : connFds_) if (fd != exceptFd) ++n;
+        for (int fd : connFds_) {
+            if (fd == exceptFd) continue;   // 发起请求的那条，让它把响应发完
+            // shutdown 而不是 close：fd 还归连接线程所有，
+            // 我们只是让它上面的阻塞读写立刻失败。
+            shutdown(fd, SHUT_RDWR);
+        }
+    }
+    if (n == 0) return 0;
+
+    // 等它们真的退出。超时也继续往下走 —— 调用方可能是"关服务"，
+    // 卡在这里会让那个 API 请求一直不返回。
+    const int stepMs = 10;
+    int waited = 0;
+    while (waited < timeoutMs) {
+        {
+            std::lock_guard<std::mutex> lk(connMutex_);
+            if (connFds_.empty()) break;
+        }
+        usleep(stepMs * 1000);
+        waited += stepMs;
+    }
+
+    size_t left = 0;
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        left = connFds_.size();
+    }
+    ALOGI("终止了 %zu 条连接（%s），等了 %d ms%s", n - left,
+          reason != nullptr ? reason : "", waited,
+          left == 0 ? "" : "，仍有残留");
+    if (left != 0) {
+        ALOGW("仍有 %zu 条连接没退出", left);
+    }
+    return waited;
+}
+
+void HttpServer::SetTokenProvider(std::function<std::string()> fn) {
+    std::lock_guard<std::mutex> lk(connMutex_);
+    tokenProvider_ = std::move(fn);
 }
 
 void HttpServer::Stop() {
@@ -293,27 +366,7 @@ void HttpServer::Stop() {
     // write 失败为止。不主动 shutdown 的话，客户端不松手它们就永远
     // 不退出，而 main() 随后就会析构 Dispatcher —— 那些线程再去碰
     // 它的操作锁就是一个已销毁的互斥量。
-    {
-        std::lock_guard<std::mutex> lk(connMutex_);
-        for (int fd : connFds_) {
-            shutdown(fd, SHUT_RDWR);
-        }
-    }
-    // 等它们真的退出（最多 2 秒）。超时也继续往下走 ——
-    // 进程都要退了，卡在这里比带着一个残留线程更糟。
-    for (int i = 0; i < 200; ++i) {
-        {
-            std::lock_guard<std::mutex> lk(connMutex_);
-            if (connFds_.empty()) break;
-        }
-        usleep(10 * 1000);
-    }
-    {
-        std::lock_guard<std::mutex> lk(connMutex_);
-        if (!connFds_.empty()) {
-            ALOGW("关闭时仍有 %zu 条连接没退出", connFds_.size());
-        }
-    }
+    KickAllConnections("服务关闭");
 
     if (listenFd_ >= 0) {
         shutdown(listenFd_, SHUT_RDWR);
@@ -493,7 +546,22 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out, HttpResponse* errRepl
     return true;
 }
 
+namespace {
+// 作用域退出时跑一次回调。给"响应写完之后再执行待办"用。
+struct ScopeExit {
+    std::function<void()> fn;
+    ~ScopeExit() { if (fn) fn(); }
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    explicit ScopeExit(std::function<void()> f) : fn(std::move(f)) {}
+};
+}  // namespace
+
 void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
+    // 无论从哪条路径返回（出错 / 流式结束 / 正常写完），
+    // 都要执行一次待办的踢连接。
+    ScopeExit kickGuard([this, connFd]() { RunPendingKick(connFd); });
+
     HttpRequest req;
     HttpResponse errReply;
     if (!ReadRequest(connFd, &req, &errReply)) {

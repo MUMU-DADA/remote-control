@@ -108,6 +108,22 @@ class ServiceState {
     //
     // 状态同时持久化到配置文件，重启后保持。
     bool Serving() const;
+
+    // ── 访问令牌（可热改）──
+    //
+    // 放在 ServiceState 而不是 HttpServer：令牌是"服务自身的状态"，
+    // 而 HttpServer 只是消费方。它通过 SetTokenProvider 回调读，
+    // 这样改令牌不用重建服务器。
+    // 空串 = 无鉴权。
+    std::string AuthToken() const;
+    void SetAuthToken(const std::string& token);
+
+  private:
+    // 把令牌写回配置文件。改鉴权时必须调 —— 不然令牌只活在内存里，
+    // 重启就没了，用户也无从知道它是什么。
+    void PersistAuthToken(const std::string& token);
+
+  public:
     void SetServing(bool on);
     void SetServingPersistPath(const std::string& configPath);
     bool RestartRequested() const;
@@ -122,6 +138,7 @@ class ServiceState {
 
     mutable std::mutex mutex_;
     bool        serving_ = true;
+    std::string authToken_;   // 空 = 无鉴权（由 SetTokenProvider 读走）
     std::string servingConfigPath_;
     std::string servingConfigPathSnapshot_;   // 在锁外做文件 IO 用
     Config config_;

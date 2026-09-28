@@ -56,10 +56,17 @@ struct StreamState {
 };
 
 class Dispatcher;
+class HttpServer;
 
 class RestApi {
   public:
     explicit RestApi(Dispatcher* dispatcher) : dispatcher_(dispatcher) {}
+
+    // 让 RestApi 能踢掉活跃连接。
+    //
+    // 用在两处：**关闭服务**和**开启鉴权** —— 那两种情况下，
+    // 已经连上的客户端不该继续享受服务。main() 里注入。
+    void SetHttpServer(HttpServer* server) { httpServer_ = server; }
 
     HttpResponse Handle(const HttpRequest& req);
 
@@ -115,6 +122,8 @@ class RestApi {
     bool HandleTouchEvent(const std::string& text, std::string* reply);
 
     Dispatcher* dispatcher_;
+    // 可能为空（没启用 HTTP 时）
+    HttpServer* httpServer_ = nullptr;
 };
 
 }  // namespace autod

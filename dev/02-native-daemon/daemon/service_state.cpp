@@ -219,6 +219,40 @@ std::string ServiceState::RuntimeJson() const {
     return w.str();
 }
 
+void ServiceState::PersistAuthToken(const std::string& token) {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        path = servingConfigPath_;
+    }
+    if (path.empty()) return;
+
+    // 读-改-写：只动 token 一个字段，别把别的配置项冲掉
+    PersistedConfig cfg;
+    std::string err;
+    if (!ConfigFile::Load(path, &cfg, &err)) {
+        // 文件可能还不存在 —— 用默认值继续，Save 会创建它
+        cfg = PersistedConfig{};
+    }
+    cfg.token = token;
+    cfg.auth  = !token.empty();
+    if (!ConfigFile::Save(path, cfg, &err)) {
+        ALOGW("令牌写回 %s 失败: %s", path.c_str(), err.c_str());
+    } else {
+        ALOGI("令牌已写入 %s", path.c_str());
+    }
+}
+
+std::string ServiceState::AuthToken() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return authToken_;
+}
+
+void ServiceState::SetAuthToken(const std::string& token) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    authToken_ = token;
+}
+
 std::string ServiceState::StatsJson(
         const std::function<void(json::Writer&)>& extra) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -386,7 +420,51 @@ ServiceState::ApplyResult ServiceState::Apply(
             continue;
         }
 
-        result.rejected.emplace_back(key, "未知配置项");
+        else if (key == "auth") {
+            // 开启/关闭鉴权。**热改** —— 不用重启进程。
+            //
+            // 开启时若还没有令牌就生成一个（和启动时同一套逻辑）：
+            // 生成失败就明确拒绝，绝不降级成弱令牌。
+            const bool wantAuth = (val == "1" || val == "true" || val == "on");
+            // ⚠️ 走加锁的访问器 —— Apply 本身**不持锁**，
+            //    直接碰 authToken_ 是数据竞争（HttpServer 那边在读）。
+            if (wantAuth) {
+                if (AuthToken().empty()) {
+                    const std::string fresh = ConfigFile::GenerateToken();
+                    if (fresh.empty()) {
+                        result.rejected.emplace_back(
+                                key, "拿不到安全的随机数，拒绝开启鉴权"
+                                     "（用弱令牌比明说没开更危险）");
+                        continue;
+                    }
+                    SetAuthToken(fresh);
+                    result.applied.emplace_back("auth");
+                    result.applied.emplace_back("token");
+
+                    // ⚠️ 必须写回配置文件。
+                    //
+                    //    不写的话：令牌只活在内存里，重启就没了，
+                    //    而用户**没有任何地方能看到它** ——
+                    //    等于把自己锁在门外（下一个请求就 401，
+                    //    却不知道令牌是什么）。
+                    PersistAuthToken(fresh);
+                } else {
+                    result.applied.emplace_back("auth");
+                }
+            } else {
+                SetAuthToken("");
+                PersistAuthToken("");
+                result.applied.emplace_back("auth");
+            }
+        } else if (key == "token") {
+            // 直接设一个指定令牌。空串 = 关掉鉴权。
+            SetAuthToken(val);
+            PersistAuthToken(val);
+            result.applied.emplace_back("token");
+        }
+        else {
+            result.rejected.emplace_back(key, "未知配置项");
+        }
     }
 
     return result;

@@ -1295,7 +1295,20 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
                 first = false;
             }
             if (first) return HttpResponse::Error(400, "请求体里没有任何配置项");
-            return Call(Cmd::SetConfig, payload, 0, -1);
+
+            // 改鉴权相关的键要看看是不是"从无鉴权变成有鉴权"。
+            //
+            // 只让新连接受限是不够的：之前无鉴权连进来的人（尤其是
+            // 正在拉流的）会一直免费用下去。
+            const bool touchesAuth = body.has("auth") || body.has("token");
+
+            HttpResponse r = Call(Cmd::SetConfig, payload, 0, -1);
+
+            if (touchesAuth && r.status == 200 && httpServer_ != nullptr &&
+                !ServiceState::Instance().AuthToken().empty()) {
+                httpServer_->RequestKickAll("已开启鉴权");
+            }
+            return r;
         }
         return HttpResponse::Error(405, "config 只支持 GET / POST");
     }
@@ -1352,7 +1365,19 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
                                    : b.str("action", "status");
         // kFlagForce：服务已关时仍然放行（Handle 开头那段只放行路径，
         // 这里是双保险，也覆盖 socket 侧）
-        return Call(Cmd::ServiceSwitch, PackArgs({op}), kFlagForce, -1);
+        HttpResponse r = Call(Cmd::ServiceSwitch, PackArgs({op}), kFlagForce, -1);
+
+        // 关掉服务时，**已经连上的客户端也要断**。
+        //
+        // 只挡新请求是不够的：一个正在拉流的网页会一直拿画面，
+        // "关掉服务"对它等于没关。
+        //
+        // 这里只登记，真正的踢连接在响应写完之后（HttpServer 的
+        // RunPendingKick）—— 现在踢会把自己的响应也断掉。
+        if (op == "off" && r.status == 200 && httpServer_ != nullptr) {
+            httpServer_->RequestKickAll("服务已关闭");
+        }
+        return r;
     }
     if (res == "running" && method == "GET") {
         return Call(Cmd::RunningApps, "", 0, -1);
