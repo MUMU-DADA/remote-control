@@ -130,7 +130,24 @@ PRODUCT_VENDOR_PROPERTIES += \
 PRODUCT_PACKAGES += \
     remote-control-launch \
     remote-control \
-    rcctl
+    rcctl \
+    pm
+
+# ⚠️⚠️ **`pm` 必须显式加进来** —— 这是应用管理整类失效的真正根因。
+#
+#    /system/bin/pm 是个 shell 脚本，里面写着
+#        export CLASSPATH=/system/framework/pm.jar
+#        exec app_process /system/bin com.android.commands.pm.Pm "$@"
+#    而我们的 ROM **没有打包 pm.jar**（am.jar 有、pm.jar 没有 —— 实测）。
+#    于是 Java VM 找不到类，pm 退出码 20。
+#
+#    AOSP 的标准产品在 build/make/target/product/base_system.mk:228 里带着
+#    `pm`，我们的产品继承的是 generic_system.mk，没继承到这一项。
+#
+#    排查代价极大：报错是"退出码 20"/"bash arg: ..."，看着像 Java 层问题，
+#    于是往 SELinux 方向追了很多轮（补 exec sh、zygote_exec、属性、lock…），
+#    实际上**一条 denial 都没有** —— 就是少了个 jar 文件。
+#    教训：自定义产品清单漏项，症状会长得像权限问题。
 
 # Overrides
 PRODUCT_BRAND := remote-control

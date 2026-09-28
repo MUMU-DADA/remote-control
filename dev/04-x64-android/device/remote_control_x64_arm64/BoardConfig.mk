@@ -61,7 +61,7 @@ BOARD_SEPOLICY_DIRS += device/generic/goldfish/sepolicy/x86
 #
 #    换成 system_ext 之后，设备树的策略回到平台侧，平台私有类型就能用了。
 #    （顺带：get_prop() 这类宏也才在正确的可见性上下文里。）
-BOARD_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
+SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
 
 # ⚠️⚠️ **策略分区是个双向取舍，实测两头都撞过**：
 #

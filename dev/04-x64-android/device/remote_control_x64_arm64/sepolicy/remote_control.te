@@ -152,6 +152,24 @@ net_domain(remote_control)
 hal_client_domain(remote_control, hal_graphics_allocator)
 hal_client_domain(remote_control, hal_graphics_composer)
 
+# ── 和 system_server 打交道（pm / am / cmd / settings / content 全靠这条）──
+#
+# ⚠️ `/system/bin/pm` 的真实内容是：
+#        #!/system/bin/sh
+#        cmd package "$@"
+#    它走 **binder** 去 system_server 找 package 服务，不是起 Java VM
+#    （我一开始误判成缺 pm.jar，其实那个脚本根本不用 jar）。
+#
+#    没有这些权限时 `cmd` **静默返回退出码 20**（服务找不到/无权限），
+#    而 service_manager 的拒绝在 AOSP 里默认是 **dontaudit** 的 ——
+#    dmesg 里什么都看不到。这就是为什么这一条查了那么多轮：
+#    现象像 Java 层问题，实际是 binder 授权缺失，且**不留痕迹**。
+#
+#    app_api_service 是 AOSP 给"应用可见系统服务"的分组属性。
+binder_call(remote_control, system_server)
+allow remote_control servicemanager:service_manager find;
+allow remote_control app_api_service:service_manager find;
+
 binder_call(remote_control, surfaceflinger)
 # 抓帧是**回调**：SurfaceFlinger 拿到我们的 BufferQueue 之后要反向调回来。
 # 只给单向的话实测报
@@ -254,7 +272,11 @@ allow remote_control remote_control_data_file:sock_file {
 # dmesg 里才看得到：
 #     avc: denied { use } ... scontext=u:r:remote_control:s0
 #         tcontext=u:r:hal_graphics_allocator_default:s0 tclass=fd
-allow remote_control hal_graphics_allocator_default:fd use;
+# ⚠️ 这一行**去掉了**：`hal_graphics_allocator_default` 是 vendor 侧的实现类型，
+#    策略编在 system_ext 分区时看不见它（报 unknown type）。
+#    上面那条 hal_client_domain() 宏用的是 **attribute**（可见性规则不同），
+#    由它来提供 fd 权限。实测验证：去掉之后抓帧是否仍然正常。
+# allow remote_control hal_graphics_allocator_default:fd use;
 allow remote_control surfaceflinger:fd use;
 allow remote_control gpu_device:fd use;
 
@@ -317,7 +339,30 @@ allow remote_control shell_exec:file {
 # 属性访问在 AOSP 是一套宏 + neverallow 强制的白名单机制，
 # 自己写 allow 一定撞上。实测报的就是这条 + odsign_prop 的 unknown type
 # （私有属性类型在设备树里看不见，宏会替你处理）。
+# ⚠️⚠️ **这才是 app_process 起不来的真正原因**（追了很多轮）：
+#
+#     avc: denied { lock } for comm="app_process"
+#         path="/system/framework/x86_64/boot-ext.art"
+#         tcontext=u:object_r:system_file:s0
+#
+#    Java VM 启动时要给 ART 引导镜像（boot*.art / *.oat）**加锁**，
+#    而常规的 system_file 权限集（read/open/getattr/execute…）里**没有 lock**，
+#    所以既不是"读不到"也不是"执行不了"，而是这一条冷门权限缺了。
+#
+#    排查难点：它和 pm/am/属性全都不沾边，报错也只说"退出码 20"、
+#    "bash arg: ..."，看起来像 Java 层的事，实际卡在内核权限上。
+#    AOSP 里 netd 和 dex2oat 也是这么拿的（public/netd.te:41、private/dex2oat.te:21），
+#    唯一的 neverallow 只针对 all_untrusted_apps，与我们无关。
+allow remote_control system_file:file lock;
+allow remote_control apex_module_data_file:file lock;
+
 get_prop(remote_control, device_config_runtime_native_boot_prop)
+# 这两个是**平台私有**属性类型。策略编在 system_ext 分区时才看得见
+# （vendor 分区会报 unknown type）—— 这正是本次把落点从 BOARD_SEPOLICY_DIRS
+# 换到 SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS 的原因。
+# app_process 起 Java VM 要读它们，读不到就起不来（pm/am/剪贴板全废）。
+get_prop(remote_control, device_config_runtime_native_prop)
+get_prop(remote_control, odsign_prop)
 
 # ⚠️ `device_config_runtime_native_prop` 与 `odsign_prop` **写不了**：
 #    它们是平台私有属性类型，而本策略编进 **vendor** 分区，看不见平台私有类型。
