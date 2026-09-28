@@ -1407,3 +1407,63 @@ init: Command 'restart surfaceflinger' action=onrestart (<Service 'vendor.hwcomp
 2. **`-gpu off`**；
 3. 恢复被我 `-feature` 关掉的若干开关（`VirtconsoleLogcat/VirtioInput/...`）看是否与 goldfish 管道有关；
 4. 拿到 `vendor.hwcomposer` 的 abort 详细信息（需要 adbd 起来，或用 `-gpu guest` 绕过）。
+
+---
+
+## 第 25 轮：**hwcomposer abort 的根因找到了 —— vendor 缺两个依赖库**
+
+### 一、先排除 GPU 模式
+
+用 `-gpu guest`（guest 自己软件渲染）重跑，**hwcomposer 依然 abort**（129s 处 1 次 signal 6、
+`surfaceflinger` 随 `onrestart` 重启 1 次）✗ —— 所以与宿主 GPU 模式无关，是 guest 内的问题。
+
+顺带试了保留 `VirtconsoleLogcat`（想让 guest 的 logcat 出现在宿主输出里，好看到 abort 原因）：
+它走的是 **`-device virtio-serial-pci`** ✗ —— 我第 19 轮修的别名表只覆盖了**通用名**
+`virtio-serial`，显式写 `-pci` 的名字还是走 PCI（ranchu 没有）✗，于是 QEMU 直接退出。
+（记下来：若以后要 logcat 桥，需要把字符串 `virtio-serial-pci` 也换成 MMIO 名。）
+
+### 二、改用"依赖闭包"定位 —— 一针见血
+
+在宿主机上用 `llvm-readelf -d` 看 `hwcomposer.ranchu.so` 的 NEEDED，逐个到 vendor 里核对：
+
+| NEEDED | vendor 里有吗 |
+|---|---|
+| android.hardware.graphics.mapper@2.0.so | ✓ |
+| **android.hardware.graphics.mapper@4.0.so** | **✗ 缺失** |
+| **libgralloctypes.so** | **✗ 缺失** |
+| libcuttlefish_device_config/_utils/_fs.so | ✓ |
+| libdrm / libOpenglSystemCommon / lib_renderControl_enc | ✓ |
+
+而这两个库**只存在于 `/system/lib64`**（`system.img` 里确认有），
+**vendor 的 linker 命名空间看不到 `/system/lib64`** ⇒ vendor 里的 hwcomposer 加载失败 ⇒
+**服务 abort（signal 6）** ⇒ `init` 按 `onrestart` 重启 `surfaceflinger` ⇒ boot 无法收尾。
+
+**A12 的 `hwcomposer.ranchu` 其实是 cuttlefish 版**，它需要这两个库跟着装进 vendor，
+但 `device/generic/goldfish/vendor.mk` 的 `PRODUCT_PACKAGES` 里只有
+`android.hardware.graphics.mapper@3.0-impl-ranchu` 和 `hwcomposer.ranchu`，**没有把依赖带上** ✗。
+
+### 三、已落地的修法
+
+在 `device/generic/goldfish/vendor.mk` 的 `PRODUCT_PACKAGES` 中、
+`hwcomposer.ranchu` 之后补上两行：
+
+```make
+    hwcomposer.ranchu \
+    libgralloctypes \
+    android.hardware.graphics.mapper@4.0 \
+```
+
+重编后这两个库就会出现在 `vendor.img` 的 `/lib64` 里 ✓（这是**编译系统写入**的，
+不是 debugfs 新增的，所以 guest 的 linker 一定看得到 ✓）。
+
+> 注意：当前**有一个用户自己的 `m autod autodctl` 编译在跑**，不能并发，需等它结束再编。
+
+### 四、顺带产出的工具
+
+`assemble-and-boot.sh` —— 编译完成后一条命令完成收尾：
+
+1. 校验四个分区镜像；
+2. `system.img` 打 `encryption=Require→Attempt`（替换已有 `init.rc`）；
+3. `kernel-ranchu` 打 `ramoops→noramop`（消除 pstore panic）；
+4. 用四个镜像 `lpmake` 重建 super 并写回；
+5. 启动（ranchu + `-cpu cortex-a53` + 三个 QEMU 二进制补丁）并挂上会自动截图的守护。
