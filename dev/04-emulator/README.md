@@ -8,6 +8,10 @@
 | [`linux-arm64/`](linux-arm64/README.md) | 开发机（Debian 13 x86_64，无显示） | 本机编的 arm64 镜像：**原版**（验证 `autod`）/ **自制 ROM** | 开发内循环 + 本平台验证 |
 | [`windows-arm64/`](windows-arm64/README.md) | Windows x64 | **同一份 arm64 自制 ROM**（scp 过去） | 交付环境的整机运行验证 |
 
+> ⭐ **新方向评估（全部结论实测）** → [`X86_64-ARM64-BRIDGE-EVAL.md`](X86_64-ARM64-BRIDGE-EVAL.md)
+> 「x86_64 安卓 + ARM 翻译层」能否替代 arm64 TCG：**方向成立，但 libhoudini 的 arm64 变体止步于 Android 7**；
+> 正确工具是 Google 官方的 `libndk_translation`，官方 `google_apis;x86_64` 镜像 **34 秒开机且能跑 arm64 应用**。
+
 > **两个平台都要跑真实 ROM。** 镜像只编一次，两边共用；
 > 平台差异只有模拟器版本与显示方式，见下面「两个平台跑同一份 ROM」。
 

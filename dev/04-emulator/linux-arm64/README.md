@@ -520,3 +520,49 @@ AVD 模式理论上会**以 AVD 的 config.ini 为准**，所以值得一试（�
   一旦成功，`ranchu` 可启动、guest 拿到真设备，前面所有"访问缺失 MMIO 导致 QEMU 崩"的问题会一并消失。
 
 清理：`super.img` 已恢复，产物目录保持可用；无编译/模拟器残留。
+
+---
+
+## 第 7 轮：回答"安卓版本下探到多少能明确支持模拟 arm64"
+
+### 一、镜像层面：没有门槛
+
+从 Google 官方清单（`sys-img2-3.xml`，本机实测提取）：
+**arm64-v8a 系统镜像从 API 21 一直到 API 36 全都提供**（共 16 个）。
+各档声明的"最低模拟器版本"：
+
+| API | 21–25 | 26–28 | 29–30 | 31 | 32–35 | 36 |
+|---|---|---|---|---|---|---|
+| 最低 emulator | 无要求 | 31.1.1 | 无要求 | 31.2.7 | 29.1.11 | 35.4.9 |
+
+⇒ 所以"有没有 arm64 镜像"不是分水岭 —— **每个 Android 版本都有**。
+
+### 二、真正决定能否跑的是**模拟器版本 + 宿主机器模型**
+
+- **越新的模拟器越不支持**：34+ 起直接
+  `FATAL | QEMU2 emulator does not support arm64 CPU architecture`（实测 37.1.11）；
+  30.8.3 / 31.x 仍能把 arm64 guest 启到内核 + userspace + adb。
+- **`ranchu`（官方板）无法启动**：模拟器**无条件**挂 PCI 音频设备，而 ranchu 无 PCI 总线
+  → `PCI bus not available for hda` → QEMU 退出（`hw.audioOutput=false` + `chattr +i`
+  锁配置也无效，已实测）。
+- **`virt`（换板）能启动**，但 guest 访问 ranchu 专有 MMIO 就把宿主 QEMU 弄崩。
+
+### 三、各档实测结果（本机，逐档真跑）
+
+| Android | 结果 |
+|---|---|
+| API 31 / 30 | guest 内 keystore2 / zygote 段错误 ✗ → 进 recovery ✗ |
+| API 29 | 跑到很后段（`cameraserver`/`drm`/串口 `console:/ $`）→ **宿主 QEMU 段错误退出** ✗ |
+| **API 25 (7.1)** | **宿主零段错误 ✓、`adb devices` 显示 device（在线）✓、zygote 全量预加载 4158 个类 ✓、`surfaceflinger` running ✓、`mediaserver`/相机 HAL 起来 ✓** —— 但 logcat 里出现 `DEBUG ... /system/framework/arm64/boot-framework.oat` 的 tombstone ✗：**zygote 在 AOT 编译产物里段错误并循环重启**，`system_server` 起不来 ✗ |
+
+### 四、结论（明确回答）
+
+**"下探 Android 版本"解决不了这个问题。** 卡点是两件事，**都与 Android 版本无关**：
+
+1. **TCG 执行 guest 原生/AOT 代码时出错**（API 25 崩在 `boot-framework.oat`，A12 崩在
+   keystore2 的 `libpuresoftkeymasterdevice.so`）；
+2. **宿主机器模型缺设备**（ranchu 无 PCI 起不来 / virt 上访问缺失设备把 QEMU 弄崩）。
+
+**唯一能"明确支持 arm64"的组合是 arm64 宿主**（Google 的设计目标就是 arm64 宿主 + KVM），
+或真机 arm64。x86_64 上最多做到 API 25 这一档"开机到一半"（adb 可用、SurfaceFlinger 起来、
+但 Java 框架起不来）。日常 x86_64 开发请用 KVM 通道。
