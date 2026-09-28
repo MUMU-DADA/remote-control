@@ -690,3 +690,54 @@ QEMU 解析后仍要求 PCI 总线；而这台串口设备是**调制解调器/R
 
 ⇒ 源码本身可取，但官方构建工具链缺失；**要么用系统工具自行拼构建链（不确定），
 要么继续在二进制里做代码级补丁（把"选择 PCI 串口"的那段代码改掉）**。
+
+---
+
+## 第 11–12 轮：社区经验调研 + 路线确认
+
+### 一、社区对"Linux/x86_64 上跑 arm 安卓"的共识
+
+**核心结论：社区主流根本不模拟 arm64 系统，而是用 x86_64 系统 + ARM 转译。**
+
+| 方案 | 做法 | 社区评价 |
+|---|---|---|
+| A. 全 arm64 系统模拟（本项目前 10 轮走的路） | arm64 系统镜像 + QEMU TCG | 能跑但**极慢**；V2EX 实测"13900H 风扇全程咆哮，跑出树莓派 3B 水平"；问题多（黑屏/adb 超时/崩溃） |
+| B. x86_64 系统 + ARM 转译（主流） | x86_64 镜像 + `ndk_translation`/libhoudini | "基本都是 x86 guest + native_bridge，游戏都能玩"；官方支持、性能好得多 |
+
+**Google 官方原文**（emulator release notes）：
+
+> **Support for ARM binaries on Android 9 and 11 system images** — 可以用
+> **Android 9 的 x86 镜像或任意 Android 11 镜像**运行依赖 ARM 二进制的应用；
+> 这些镜像默认支持 ARM，且**性能相比全 ARM 模拟有巨大提升**。
+
+**社区对我遇到的那个具体报错的结论**（SO 69297141，14 赞）：
+`qemu-system-aarch64: PCI bus not available for hda` → **加 `-qemu -machine virt` 即可绕过**
+（与我第 1 轮独立发现的完全一致），但作者也提醒"有些情况下会黑屏"。
+另有回答引用官方："从 Android 11 起官方 VM 不再支持 arm/arm64，除非 arm64 宿主（如 M1）"。
+
+**社区给出的一个可用 arm64 配置**（SO 69710426，2025-07 更新）：模拟器 **34.2.16** +
+**API 27 arm64-v8a 镜像** + `-qemu -machine virt` + `-gpu swiftshader_indirect`，
+用于调试 arm64-v8a 的 NDK 原生代码；作者同样说"极慢、adb 常超时"。
+（注：本项目额外发现的 **`-cpu cortex-a53`** 是社区没有的关键点 —— 它消除了
+`cortex-a57` 下 TCG 执行 guest 原生代码的段错误。）
+
+### 二、本轮的本机验证
+
+- 正在运行的模拟器（5554，API 31 x86_64）：`abilist = x86_64`、`native.bridge = 0`
+  ⇒ **当前这套跑不了 arm64 二进制**。
+- 下载 **API 30 `default` x86_64** 官方镜像启动后：`abilist = x86_64,x86`、`native.bridge = 0`
+  ⇒ **AOSP 版（default tag）不含转译**，与官方文档说的"Android 11 镜像"不符 —— 需要
+  **`google_apis` 版**（社区例子里报错信息 `ndk_translation_program_runner_binfmt_misc_arm64`
+  也证明转译在 Google 版镜像里）。
+- **`google_apis` API30 x86_64 镜像已下载**（1.44GB，腾讯镜像 12MB/s）；
+  组装成 `-sysdir` 后可启动，本次 guest 停在 `pc_memory_init` 之后，**转译属性待下一轮确认**。
+- 备份还原：QEMU 二进制曾被二进制补丁改坏，已用**同目录未被改动的
+  `qemu-system-aarch64`**（原版 40MB）覆盖 `-headless` 版还原 ✓。
+
+### 三、下一轮
+
+1. 让 `google_apis` API30 x86_64 起来，确认 `abilist` 含 `arm64-v8a`、
+   `ro.dalvik.vm.native.bridge = libndk_translation.so`；
+2. 把**自编的 arm64 `autod`** 推进去跑 —— 这就是社区验证过的、
+   在 x86_64 Linux 上验证 arm64 二进制的正规做法；
+3. 若转译不可用，退路是 **API 28 x86（官方点名的那个）**（本轮已下载 ✓）。
