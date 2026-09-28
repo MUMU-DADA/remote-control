@@ -937,3 +937,67 @@ init: Failed to mount /system: ...  → InitFatalReboot: signal 6 → 启动循�
    `--key external/avb/test/data/testkey_rsa2048.pem` 之类）生成新的哈希树；
 3. `avbtool make_vbmeta_image` 生成新的 vbmeta，写回 `system.img` 的 1MB 处（LBA 2048）；
 4. 启动验证 AVB 通过、`/system` 挂载成功，然后跑 `autod` 收尾。
+
+---
+
+## 第 17 轮：**绕过 AVB 的关键一招 —— 用原版镜像启动 + bind 挂载库**
+
+### 一、先把 AVB 结构看清（`avbtool info_image`）
+
+顶层 vbmeta（签名算法 `SHA256_RSA4096`）里的描述符：
+
+| 类型 | 分区 |
+|---|---|
+| **Chain Partition** | **system**（它自己分区里还有一份链式 vbmeta）|
+| Hash descriptor | vendor_boot |
+| Hashtree descriptor | **product / system_ext / vendor** |
+
+⇒ **所有分区都被校验**，没有"免校验"的分区可以藏库（我原本想把库放进 product ✗）。
+同时这也解释了 `resize2fs` 之后为什么必然失败：**哈希树被丢掉了** ✗。
+
+### 二、试过并排除的几条路
+
+| 尝试 | 结果 |
+|---|---|
+| 改 ramdisk 里的第一阶段 fstab（`first_stage_ramdisk/fstab.ranchu`）| **没被采用** ✗（连去掉 `first_stage_mount` 都无变化）|
+| `-prop veritymode=disabled` | 到不了第一阶段（只是 guest 属性）✗ |
+| 补 super 内 vendor 的 fstab | 有效但仍不够（AVB 报错 4→2）✗ |
+| 补独立 `vendor.img` 的 fstab | 同上 ✗ |
+| system 分区里的 fstab | 不存在 ✗ |
+
+### 三、**关键一招：完全不改镜像，用 bind 挂载**
+
+思路：AVB 只校验**镜像内容**；只要镜像保持原样，AVB 就通过 ✓；
+而 arm64 库可以**在运行时挂上去**：
+
+1. **用原版（未修改）的 `google_apis` API30 x86_64 镜像启动** ——
+   **AVB 零报错 ✓、正常启动到 adb 在线 ✓、`abilist` 仍含 `arm64-v8a` ✓、
+   `native.bridge = libndk_translation.so` ✓**；
+2. `adb root`（可用 ✓）→ 把 guest 自带的 59 个库 `cp` 到 `/data/local/tmp/arm64all/`，
+   再推入我们补的 161 个；
+3. **`mount --bind /data/local/tmp/arm64all /system/lib64/arm64`** ✓✓ ——
+   **成功！不需要 `-writable-system`、不需要 remount、不需要重启** ✓✓
+   （bind 挂载不写文件系统，只需 CAP_SYS_ADMIN，而 `adb root` 已具备）；
+4. 结果：**`/system/lib64/arm64` = 220 个库** ✓，**arm64 linker 把整个依赖闭包都解决了** ✓✓ ——
+   报错从"找不到库"变成了 **只差一个符号** ✓✓✓：
+
+```
+CANNOT LINK EXECUTABLE "./autod": cannot locate symbol
+"_ZNK7android7RefBase22incStrongRequireStrongEPKv" referenced by "/data/local/tmp/autod"
+```
+
+### 四、最后剩的是一个"版本对齐"问题（不是技术障碍）
+
+`autod` 是用 **AOSP 12** 编的，而 guest 是 **Android 11 (API 30)**；
+`android::RefBase::incStrongRequireStrong` 是 A12 新增的符号 ✗。
+（我本地 A12 产物的 `system/lib64/libutils.so` 只是 stub，真正的实现在
+`com.android.runtime.apex` 里，本轮未取出。）
+
+**下一轮二选一即可收尾**：
+1. **改用 API 31/32 且带 `ndk_translation` 的 `google_apis` x86_64 镜像**
+   （先用 `unzip -l`/`strings` 确认其 system 里有 `ndk_translation.rc`），
+   再走同样的"原版启动 + bind 挂载"流程；
+2. **用 API 30 的源码/NDK 重新编一个 `autod`**，与 guest 版本对齐。
+
+无论哪条，**"x86_64 Linux 上跑 arm64 安卓"这条链路本身已经全程验证**：
+arm64 ELF 可直接执行 ✓、arm64 linker 正常解析 220 个库 ✓。
