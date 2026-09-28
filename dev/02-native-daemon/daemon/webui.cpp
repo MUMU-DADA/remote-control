@@ -16,23 +16,44 @@ const std::string& WebUiHtml() {
 <style>
   :root { --bg:#111; --fg:#eee; --dim:#888; --accent:#4a9; --warn:#c55; }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
+  /* body 用列布局撑满视口，main 拿 flex:1 —— 比 calc(100vh - 46px) 稳：
+     header 会换行、鉴权条会出现，写死减多少迟早对不上。 */
+  body { margin:0; background:var(--bg); color:var(--fg); height:100vh;
+         display:flex; flex-direction:column; overflow:hidden;
          font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
   header { padding:8px 12px; background:#1b1b1b; border-bottom:1px solid #333;
            display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
   header h1 { font-size:15px; margin:0; font-weight:600; }
   .dim { color:var(--dim); }
-  main { display:flex; gap:12px; padding:12px; align-items:flex-start;
-         flex-wrap:wrap; }
-  .screen { flex:0 0 auto; position:relative; background:#000;
+  main { display:flex; gap:10px; padding:10px; align-items:stretch;
+         flex:1 1 auto; min-height:0; overflow:hidden; }
+  /* 画面区**抢走所有剩余宽度**，面板固定宽。
+     早先这里是 flex-wrap + 画面写死 max-width:min(90vw,560px)，
+     而面板 flex:1 —— 结果一块 1280x720 的横屏设备被压成 560px 宽，
+     面板反而占了大半屏。横屏设备最需要的就是宽度。 */
+  .screen { flex:1 1 auto; min-width:0; position:relative; background:#000;
             border:1px solid #333; }
   /* 画面用 image-rendering:pixelated 保持原始比例 —— 默认的平滑
-     会让小屏截图糊成一团，坐标也难对准 */
-  #screen { display:block; max-width:min(90vw,560px); height:auto;
+     会让小屏截图糊成一团，坐标也难对准。
+
+     width/height 都是 auto + 同时给 max-width/max-height：
+     替换元素会按**保持宽高比**的方式缩到能塞进这个盒子 —— 也就是
+     "尽可能大但不裁切"。宽高比是流决定的（横屏 16:9、竖屏 9:16），
+     所以不能写死尺寸。 */
+  #screen { display:block; width:auto; height:auto;
+            max-width:100%; max-height:100%;
             image-rendering:pixelated; cursor:crosshair;
             touch-action:none; user-select:none; background:#000; }
-  .panel { flex:1 1 260px; min-width:260px; display:flex; flex-direction:column;
-           gap:10px; }
+  /* 画布要能在 .screen 里居中。.screen 是 flex 容器，
+     min-height:0 是为了让 max-height:100% 真的生效（flex 子项的默认
+     min-height:auto 会把盒子撑开，百分比高度就失去参照）。 */
+  .screen { display:flex; align-items:center; justify-content:center;
+            min-height:0; overflow:hidden; }
+  .panel { flex:0 0 300px; width:300px; display:flex; flex-direction:column;
+           gap:10px; max-height:100%; overflow-y:auto; }
+  /* 面板收起 —— 横屏设备默认收，把宽度全让给画面 */
+  body.nopanel .panel { display:none; }
+  body.nopanel .screen { flex:1 1 100%; }
   .card { background:#1b1b1b; border:1px solid #333; border-radius:6px;
           padding:10px; }
   .card h2 { font-size:12px; margin:0 0 8px; color:var(--dim);
@@ -88,6 +109,9 @@ const std::string& WebUiHtml() {
     <input type="checkbox" id="svcsw" onchange="toggleService(this.checked)">
     <span id="svctext">服务对外可用</span>
   </label>
+  <!-- 面板开关。横屏设备最缺宽度，收起面板就能让画面占满整屏。 -->
+  <button id="panelsw" onclick="togglePanel()" title="收起/展开右侧控制面板"
+          style="font-size:12px; padding:3px 8px">面板</button>
 </header>
 
 <!-- 令牌条。开启鉴权后才需要填，平时隐藏（display:none）——
@@ -563,13 +587,29 @@ function setStatus(t, err) {
 // 后两个才是用户"感觉卡不卡"的直接依据 —— 服务端说 30fps 不等于
 // 客户端真收到了 30 帧。
 let metaInfo = '';
+let lastCap = null, lastPid = 0, lastProto = '';
+// ⚠️ 每次都**重算** metaInfo，不能"第一次算好之后只拼后半段"。
+//
+//    早先的写法是 `updateMeta(r)` 传 r 时算一次 metaInfo，之后不带参数
+//    调用（画面尺寸变了就会调）就复用旧值 —— 于是顶栏一直显示**旧的**
+//    设备尺寸。实测：流已经是 1280x720，顶栏还写着 720x405（那是首次
+//    渲染时的降采样尺寸），看着像设备尺寸不对。
+//
+//    和之前 sw/sh 被屏幕尺寸覆盖是同一类问题：**派生值必须跟着源走**。
 function updateMeta(r) {
   if (r) {
     const cap = r.runtime ? r.runtime.capture : r.capture;
-    metaInfo = (sw || cap.primaryWidth || '?') + '×' + (sh || cap.primaryHeight || '?')
-             + ' · ' + cap.backend
-             + ' · pid ' + r.runtime.pid
-             + ' · 协议 v' + r.runtime.protocolVersion;
+    lastCap = cap;
+    lastPid = r.runtime.pid;
+    lastProto = r.runtime.protocolVersion;
+  }
+  if (lastCap) {
+    // 画面尺寸优先（sw/sh 是**流**的尺寸，降采样后可能小于屏幕）；
+    // 还没有画面时退回屏幕逻辑尺寸。
+    metaInfo = (sw || lastCap.primaryWidth || '?') + '×' + (sh || lastCap.primaryHeight || '?')
+             + ' · ' + lastCap.backend
+             + ' · pid ' + lastPid
+             + ' · 协议 v' + lastProto;
   }
   const stream = streamReady ? (' · ' + shownFps + 'fps') : ' · 画面流断开';
   const touch  = wsReady ? (' · ' + rtt + 'ms') : ' · 触控流断开';
@@ -748,6 +788,7 @@ function startStream() {
           sw = m.w; sh = m.h;
           updateMeta();
           syncMaxWidthButtons();
+          applyPanelForAspect();
           // ⚠️ 画面尺寸变了，**触控坐标空间多半也变了** —— 服务端转屏时会
           //    重建注入器让坐标范围跟着显示走。必须重取，否则之后的点击
           //    全按旧空间换算（转屏前能点中，转屏后全偏）。
@@ -1408,6 +1449,44 @@ function applyCollapsed() {
   }
 }
 
+// ── 面板收放 ──
+//
+// 横屏设备最缺的是**宽度**：1280x720 的画面配一个 300px 的面板，
+// 在 1600px 的窗口里画面只能占 1300px 宽 —— 而竖屏设备缺的是高度，
+// 面板放旁边反而不碍事。
+//
+// 所以：横屏流**默认收起**面板，把宽度全让给画面；竖屏流默认展开。
+// 用户手动切过一次之后就按他的选择走（记在 localStorage）。
+function readPanelPref() {
+  try { return localStorage.getItem('autod.panel'); } catch (e) { return null; }
+}
+function writePanelPref(v) {
+  try { localStorage.setItem('autod.panel', v); } catch (e) {}
+}
+
+function setPanel(open, remember) {
+  document.body.classList.toggle('nopanel', !open);
+  const b = $('panelsw');
+  if (b) {
+    b.textContent = open ? '面板 ✓' : '面板';
+    b.title = open ? '收起右侧控制面板（画面占满）'
+                   : '展开右侧控制面板';
+  }
+  if (remember) writePanelPref(open ? '1' : '0');
+}
+
+function togglePanel() {
+  setPanel(document.body.classList.contains('nopanel'), true);
+}
+
+// 画面尺寸变了就重新决定默认值 —— 转屏之后该收该放会反过来。
+// 只在用户没手动选过的时候动。
+function applyPanelForAspect() {
+  if (readPanelPref() !== null) return;
+  if (!sw || !sh) return;
+  setPanel(sh >= sw, false);      // 横屏（宽>高）→ 收起
+}
+
 // ── 上传安装 APK ──
 //
 // 直接把文件字节当请求体 POST，不用 multipart —— 服务端只收一个文件，
@@ -1741,6 +1820,7 @@ fetch(withToken('/api/v1/files?op=roots')).then(r=>r.json())
 syncMaxWidthButtons();
 setInterval(pollCadence, 2000);
 applyCollapsed();
+setPanel(readPanelPref() === '0' ? false : true, false);
 refresh();
 refreshService();
 startStream();

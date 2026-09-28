@@ -16,6 +16,12 @@ _ap.add_argument("--port", type=int, default=8088)
 _a = _ap.parse_args()
 BASE = f"http://{_a.host}:{_a.port}"
 
+def native_width():
+    """当前显示宽度 —— "不降采样"时画面就该是这个宽。"""
+    with urllib.request.urlopen(BASE + "/api/v1/info", timeout=8) as r:
+        return json.load(r)["primaryWidth"]
+
+
 def params():
     with urllib.request.urlopen(BASE + "/api/v1/params", timeout=8) as r:
         return json.load(r)["capture"]
@@ -62,7 +68,9 @@ with sync_playwright() as p:
 
     a = state()
     print(f"  改之前: 画布 {a['sw']}x{a['sh']}  抓帧宽 {a['srvW']}")
-    chk("初始 720", a["sw"] == 720)
+    # 初始是 URL 里指定的 maxWidth=720（不是原生宽度）——
+    # 测的是"改 maxWidth 能不能生效"，得从一个明确的值出发。
+    chk("初始按 URL 的 maxWidth=720", a["sw"] == 720, f"实际 {a['sw']}")
 
     # ── 中途改到 360 ──
     pg.evaluate("()=>{window.__log=[]; setMaxWidth(360);}")
@@ -90,7 +98,11 @@ with sync_playwright() as p:
     time.sleep(3)
     d = state()
     print(f"  改回原始: 画布 {d['sw']}x{d['sh']}  抓帧宽 {d['srvW']}")
-    chk("改回原始（不降采样）", d["sw"] == 720 and d["srvW"] == d["expectW"])
+    # ⚠️ 不写死 720 —— 设备分辨率会变（这台从竖屏 720x1280 改成了
+    #    横屏 1280x720）。"改回原始"的期望值是**显示宽度**，从 /info 取。
+    native = native_width()
+    chk("改回原始（不降采样）", d["sw"] == native and d["srvW"] == d["expectW"],
+        f"画布 {d['sw']}（期望 {native}），抓帧宽 {d['srvW']}")
 
     chk("页面无 JS 报错", not errs, str(errs[:1]))
     b.close()
