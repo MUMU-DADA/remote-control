@@ -193,3 +193,57 @@ API < 30  →  dlopen libjpeg（JPEG） / zlib（PNG）
 **WebP 只有 AndroidBitmap 能出**，所以：
 - 高版本：WebP 保留 ✅
 - 老版本：没有 WebP（可选格式，不是默认）
+
+---
+
+# h264_feasibility —— H.264 这条路走不走得通
+
+写任何 H.264 代码之前先跑这个。它回答三个前置问题：
+原生守护进程能不能创建 AVC 编码器、configure/start 过不过、能不能
+真的编出一帧。
+
+```bash
+$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang \
+    -o mc h264_feasibility.c -lmediandk
+adb push mc /data/local/tmp/ && adb shell /data/local/tmp/mc
+```
+
+## 实测（Android 12 / x86_64 模拟器）
+
+```
++ 编码器已创建
+configure: 0 +
+start: 0 +
+dequeueInputBuffer: 0 +
+输入缓冲: 230400 字节（正好是 320x480 YUV420 的大小）
+queueInputBuffer: 0 +
+dequeueOutputBuffer: -2          ← INFO_OUTPUT_FORMAT_CHANGED，正常
+第二次 dequeueOutputBuffer: 0
++ 编出了一帧: 31 字节, flags=0x2 (CODEC_CONFIG)
+  前 8 字节: 00 00 00 01 67 42 C0 29
+  起始码: Annex-B
+  首个 NAL 类型: 7（SPS）
+```
+
+**结论：可行。** `AMediaCodec` 是 `__INTRODUCED_IN(21)`，
+设备上有 `c2.android.avc.encoder`（模拟器是软编，真机通常是硬编）。
+
+几个容易踩的点：
+- 第一次 `dequeueOutputBuffer` 返回 **-2（格式变化）** 是正常的，
+  不是错误 —— 要再取一次
+- 输出是 **Annex-B**（`00 00 00 01` 起始码），不是 AVCC 长度前缀
+- 第一帧的 flags 是 `CODEC_CONFIG`（SPS/PPS），不是图像数据
+- `COLOR_FormatYUV420Flexible`(21) 下输入缓冲大小由编码器决定，
+  不能假设是 `w*h*3/2`（这次正好相等，但不能依赖）
+
+## ⚠️ 消费端的限制
+
+设备上的 WebView 是 **91.0.4472.114**，而 **WebCodecs
+（`VideoDecoder`）需要 Chrome/WebView 94+**。
+
+所以：
+- **桌面浏览器**（正常用法：`http://<本机IP>:8088/`）→ 能解 H.264 ✓
+- **设备内 WebView**（我现在用来截图验证的那个）→ 不能 ✗
+
+这意味着 H.264 必须**带自动回退**：探测不到 WebCodecs 就退回
+JPEG/MJPEG。不能假设客户端都能解。
