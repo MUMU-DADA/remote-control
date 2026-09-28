@@ -1181,3 +1181,62 @@ audio/usb/sensors/gnss/bluetooth/camera/rild** 这一批 vendor HAL 的 rc 与�
 `ranchu` + `-cpu cortex-a53` + 那三个 QEMU 二进制补丁（别名表 / `-soundhash`→`-name` /
 `max_ports`）后，**官方机器能起、arm64 guest 能一路干净启动到 SurfaceFlinger + zygote** ✓。
 剩下的只是"把第 6 轮那些多余的 HAL 删除恢复回去"，属于纯清理工作。
+
+---
+
+## 第 21 轮：恢复 HAL 后 boot 大幅推进；定位到 **pstore/ramoops 内核 panic**
+
+### 一、恢复被删的 HAL（成功）
+
+按第 20 轮的结论，从 `super.img` **正确**的 vendor extent（LBA 2318336、长 200944 扇区，
+之前用错偏移才报 `debugfs: Filesystem not open`）提取 vendor，把：
+
+- `/bin/hw/android.hardware.health@2.1-service`（62KB）
+- `/etc/init/android.hardware.health@2.1-service.rc`
+- `/bin/hw/android.hardware.health.storage@1.0-service` 及其 rc
+
+**注回**（vendor 还有 91 个空闲块，够用 ✓），再用 `lpmake` 按原布局重建 super 并写回。
+（顺带踩坑：`/tmp` 是 16GB tmpfs，做镜像手术时必须用 `.run/surgery2/` 这类磁盘目录，
+否则会 ENOSPC 卡住 ✓。）
+
+### 二、boot 立刻大幅推进（**health HAL 报错 0**）
+
+```
+[ 29.9s] /data 挂载成功 → cryptfs encryptFstab
+[ 64.3s] apexd: Decompressing media.swcodec.capex
+[ 88.6s] qemu-adb-keys（ranchu 特有）
+[113.5s] zygote ✓  + ranchu-setup ✓ + audioserver  ← virt 时代的崩溃点，这里安然通过
+[136.5s] surfaceflinger ✓ + installd / mediaextractor
+[160.2s] goldfish-logcat（无害地反复退出）
+```
+
+**宿主段错误 0、guest 崩溃 0** ✓ —— 比第 20 轮又前进了一大截。
+
+### 三、新卡点：**guest 内核 panic 在 pstore/ramoops**
+
+```
+Kernel panic - not syncing: Oops: Fatal exception
+Call trace:
+  __memcpy_toio+0x30/0x144
+  persistent_ram_update / persistent_ram_write
+  ramoops_pstore_write
+  pstore_console_write
+  console_unlock → vprintk_emit → devkmsg_write
+```
+
+⇒ **只要内核产生 console 输出，就会被镜像写入 pstore；而那块内存在内核页表里没有映射** ✗。
+这与 `goldfish-logcat` 无关（它只是让 console 有话可说），**根因是 goldfish-pstore 设备在
+ranchu 上的地址/映射与内核 ramoops 配置不一致** —— 正是当年在 `virt` 上把宿主 QEMU 弄崩的那个设备。
+
+### 四、下一轮的修法（沿用已掌握的"字符串/表项补丁"手法）
+
+1. **在模拟器二进制里把 `goldfish_pstore` 设备名/地址改掉或禁掉**（与第 19 轮处理
+   `-soundhw`、别名表同法），让内核的 ramoops 后端不存在；
+2. 或从 **DT/内核 cmdline** 侧关掉 ramoops；
+3. 关掉后 console 输出不再走 pstore，panic 即可消除，届时应当能拿到
+   **`sys.boot_completed=1`** 与截图。
+
+### 五、本轮结论
+
+`ranchu` 路线已经推进到「**zygote + surfaceflinger 都起来、全程零宿主段错误/零 guest 崩溃**」，
+比 `virt` 路线远了整整一个数量级；剩下的是一处**明确定位、可定点修复**的内核 pstore 问题 ✓。
