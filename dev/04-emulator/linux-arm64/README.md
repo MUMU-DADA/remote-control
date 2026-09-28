@@ -430,3 +430,34 @@ dmesg: qemu-system-aar[...]: segfault at 0 ip 0000000000dd68b1 / 0000000000dc6cb
 `hw.audioOutput = no` 有可能**真正**去掉音频设备 → 那么 `ranchu` 可用 → guest 拿到
 真设备 → 不再触碰缺失的 MMIO。需要在 SDK 布局里补 `package.xml` 元数据
 （之前 AVD 模式报的 `Package path is not valid` 正是缺它）。
+
+---
+
+## 第 5 轮：AVD 模式也试过了（结论不变，并补一条关键证据）
+
+**动机**：`-sysdir`（构建）模式会**重新生成**硬件配置，我改 `config.ini` 里的
+`hw.audioOutput = false` / `hw.audioInput = false` 都不影响 `-soundhw hda`。
+AVD 模式理论上会**以 AVD 的 config.ini 为准**，所以值得一试（顺带还能解决 `misc` 分区）。
+
+**做法**：手工搭了正规 SDK 布局 + AVD（`abi.type=arm64-v8a`、`image.sysdir.1`、
+`hw.audioInput/Output=no` 等），并把 `system-images/` 链到模拟器真正认的 SDK 根。
+
+**结果**：模拟器**始终拒绝**这个 AVD —— 依次遇到
+`Cannot find AVD system path` → `Broken AVD system path`（无论 sysdir 用相对/绝对、
+符号链接/硬链接、镜像用 Google 原版还是自制、元数据 `source.xml`/`package.xml` 补齐与否）。
+日志显示它把 `argv[0]` 的**真实路径**当作程序目录（
+`program directory: .../prebuilts/android-emulator/linux-x86_64`），
+因此在树外的镜像布局上反复判定失败 —— 30.8.3 的这个校验属于"只认标准 SDK 安装"的怪癖。
+
+**但核心问题已经在构建模式下得到答案**：同一个模拟器代码里，
+`hw.audioOutput=false` + `hw.audioInput=false` + `-no-audio` **都不能**阻止音频设备创建，
+而 30.8.3/31.x 的 QEMU 只提供 `ac97`/`es1370`/`hda` 三张声卡（**全是 PCI**），
+`-soundhw none` 不被接受 → **ranchu 板（无 PCI）永远起不来**。
+所以 AVD 模式即使能启动，也绕不开这一条。
+
+**至此定论（有完整证据链）**：这套 AOSP 模拟器在 **x86_64 宿主上无法运行 arm64 Android**；
+开源侧可行的 arm64 Android 模拟只有两条：**arm64 宿主**（AOSP 模拟器 / Cuttlefish + KVM）
+与 **真机 arm64**。日常 x86_64 开发用 KVM 通道（已验证可用）。
+
+清理：AOSP 树里临时加的 `system-images` 链接已移除；AVD 尝试物保留在
+`dev/04-emulator/linux-arm64/.run/asdk` 与 `/root/avd`（`.run/` 已 gitignore）供复现。
