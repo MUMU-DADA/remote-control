@@ -73,6 +73,7 @@ AutoSnapshotAndroid/
 │   ├── 06-capture-performance.md 抓帧与编码性能实测、调优、测量纪律
 │   ├── 07-dependencies.md        ⭐ 依赖清单：用了什么库、为什么不用手写
 │   ├── 08-input-injection.md     备选注入路径：Java 系统服务 / 特权 APK
+│   ├── 09-deployment-and-update.md  ⭐ 固化（开机自启/保活）+ 热替换通道【计划】
 │   ├── evidence/                 实机验证证据（截图 + 自检输出）
 │   └── api/                      ⭐ **接口权威文档**（HTTP / WebSocket / socket / 配置 / 错误码 / 调试）
 │
