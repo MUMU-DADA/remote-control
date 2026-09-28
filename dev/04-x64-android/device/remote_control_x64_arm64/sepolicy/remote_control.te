@@ -274,6 +274,24 @@ allow remote_control shell_exec:file {
     read open getattr map execute execute_no_trans
 };
 
+# ── /sdcard（文件管理功能要用）─────────────────────────────────────────────
+#
+# 实测现象：文件管理「列出 /sdcard」返回 **0 项**，dmesg 里是
+#     avc: denied { search } for comm="remote-control" name="0"
+#         tcontext=u:object_r:mnt_user_file:s0 tclass=dir
+# 即过不去 /mnt/user/0 这一层。
+#
+# AOSP 给 appdomain 的就是这两条（public/app.te:260-261），照抄。
+# /sdcard 上的文件本身是 media_rw_data_file（由 FUSE 提供）。
+#
+# ⚠️ 计划 §4.4 当时写「user shell → /sdcard 可读写」，那是在 **permissive**
+#    下测的；Enforcing 下这一层是 FUSE + sepolicy 双重把关，POSIX 身份对了
+#    也进不去。这类结论都得在 Enforcing 下重测。
+allow remote_control mnt_user_file:dir r_dir_perms;
+allow remote_control mnt_user_file:lnk_file r_file_perms;
+allow remote_control media_rw_data_file:dir { open read search getattr };
+allow remote_control media_rw_data_file:file { open read getattr };
+
 # svc / pm / am 是 shell 脚本，脚本里调的是 `app_process64`（Java 层），
 # 所以还要能 exec zygote_exec。AOSP 给 shell 的就是这一条
 # （public/shell.te:64 `allow shell zygote_exec:file rx_file_perms;`），
