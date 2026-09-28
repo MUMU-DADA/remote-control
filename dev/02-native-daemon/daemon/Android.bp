@@ -80,7 +80,6 @@ cc_defaults {
         //
         //    改成 dlopen + dlsym 之后，"这个函数不存在"变成一个
         //    可以处理的返回值 —— 见 image_encoder.cpp 的 ProbeJniGraphics。
-        "libwebp_vendored",
         "liblog",
         "libui",               // GraphicBuffer / PixelFormat
         "libutils",
@@ -133,6 +132,14 @@ cc_defaults {
 // 编码器的头文件里 include 了它们。
 cc_library_static {
     name: "libwebp_vendored",
+    // ⚠️ 必须和消费者一致。
+    //
+    //    autod_defaults 里有 `sdk_version: ""`（标记为非 NDK 的平台构建）。
+    //    这个库不写的话变体对不上，Soong 直接报
+    //    "dependency ... missing variant"。
+    sdk_version: "",
+    // 纯 C 代码，不掺 C++ 运行时
+    stl: "none",
     srcs: [
         "vendor/webp/src/enc/*.c",
         "vendor/webp/src/dsp/*.c",
