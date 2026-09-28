@@ -22,7 +22,20 @@ CXXFLAGS ?= -std=c++20 -O1 -g -Wall -Wextra -Wno-unused-parameter
 # ⚠️ 这个变量曾经是未定义的：规则里写了 $(INCLUDES) 但没人定义它，
 #    而当时 test_appops 二进制是手工编出来的，make 一直报"已是最新"，
 #    把这个错误整整掩盖了一轮。
+# json 解析用的是 AOSP 树内的 jsoncpp —— 主机上也要编它，
+# 否则测的就不是真正跑在设备上的那份实现。
+# 路径取 AOSP 树；树不在（没 sync）就退回一个占位，
+# 让 `make` 能给出清楚的报错而不是一堆找不到头文件。
+JSONCPP_DIR ?= ../../../aosp/external/jsoncpp
+JSONCPP_SRCS = $(JSONCPP_DIR)/src/lib_json/json_reader.cpp \
+               $(JSONCPP_DIR)/src/lib_json/json_value.cpp \
+               $(JSONCPP_DIR)/src/lib_json/json_writer.cpp
+JSONCPP_INC  = -I$(JSONCPP_DIR)/include
+
 INCLUDES = -I$(DAEMON) -I.
+# json 解析用 AOSP 树内的 jsoncpp（见 JSONCPP_DIR 那段）。
+# 头路径放全局：任何链了 json_parser.cpp 的目标都需要它。
+INCLUDES += $(JSONCPP_INC) -DJSON_USE_EXCEPTION=0
 DAEMON    = ../daemon
 
 # log_buffer 现在是所有用到 ALOG* 的模块的依赖（日志同时进环形缓冲），
@@ -65,6 +78,7 @@ INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
              $(DAEMON)/clipops.cpp \
              $(DAEMON)/png_encoder.cpp \
              $(DAEMON)/json_parser.cpp \
+             $(JSONCPP_SRCS) \
              $(DAEMON)/webui.cpp \
              $(DAEMON)/websocket.cpp \
              $(DAEMON)/config_file.cpp \
@@ -97,7 +111,8 @@ test_integration: $(INTEG_SRCS) $(COMMON_HDRS) $(WEBP_OBJS) \
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -I$(WEBP_DIR) -pthread -o $@ \
 	    $(INTEG_SRCS) $(WEBP_OBJS) -lm
 
-JSON_SRCS = test_json.cpp $(DAEMON)/json_parser.cpp $(DAEMON)/json_writer.h
+JSON_SRCS = test_json.cpp $(DAEMON)/json_parser.cpp $(DAEMON)/json_writer.h \
+            $(JSONCPP_SRCS)
 
 WS_SRCS = test_websocket.cpp $(DAEMON)/websocket.cpp $(DAEMON)/log_buffer.cpp
 
@@ -116,6 +131,9 @@ test_keyboard: $(KB_SRCS) test_util.h $(DAEMON)/keyboard.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(KB_SRCS)
 
 test_json: $(JSON_SRCS) test_util.h
+	@test -f $(JSONCPP_DIR)/include/json/json.h || \
+	  { echo "找不到 jsoncpp（$(JSONCPP_DIR)）。先跑 tools/repo-sync.sh，"; \
+	    echo "或 JSONCPP_DIR=<路径> make test_json"; exit 1; }
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(JSON_SRCS)
 
 test_appops: $(APPOPS_SRCS) test_util.h $(DAEMON)/appops.h $(DAEMON)/subprocess.h

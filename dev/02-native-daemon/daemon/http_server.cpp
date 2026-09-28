@@ -2,6 +2,8 @@
 
 #include "http_server.h"
 
+#include "secure_compare.h"
+
 #include "protocol.h"   // kErr* 协议状态码（Error 要把它写进 status 字段）
 
 #include <arpa/inet.h>
@@ -238,6 +240,7 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     token_    = opts.token;
     maxBody_  = opts.maxBodyBytes;
     spoolThreshold_ = opts.spoolThresholdBytes;
+    maxConns_ = opts.maxConns > 0 ? opts.maxConns : 128;
     spoolDir_ = opts.spoolDir;
 
     const bool loopbackOnly = (opts.bindAddr == "127.0.0.1" ||
@@ -319,18 +322,22 @@ bool HttpServer::CheckAuth(const HttpRequest& req) const {
     if (isPage) return true;
 
     // 1) Authorization: Bearer <token>  —— 标准做法
+    // ⚠️ 三处比较都必须用 ConstantTimeEquals，不能用 `==`。
+    //    std::string 的 == 是短路的（第一个不同的字节就返回），
+    //    攻击者可以靠测响应时间逐字节猜出令牌 —— 局域网里没有互联网
+    //    那种抖动噪声，这种攻击完全可行。见 secure_compare.h。
     const std::string auth = req.header("authorization");
     if (auth.size() > 7 && auth.compare(0, 7, "Bearer ") == 0 &&
-        auth.substr(7) == tok) {
+        ConstantTimeEquals(auth.substr(7), tok)) {
         return true;
     }
     // 2) X-Autod-Token: <token>  —— 给不方便设 Authorization 的客户端
-    if (req.header("x-autod-token") == tok) return true;
+    if (ConstantTimeEquals(req.header("x-autod-token"), tok)) return true;
     // 3) ?token=<token>  —— 给 <img src="/api/v1/stream?..."> 这种
     //    没法自定义请求头的场景。
     //    ⚠️ 令牌会出现在 URL 里，可能被日志和浏览器历史记录留下。
     //    只在确实没法带头的场合用它。
-    if (req.queryParam("token") == tok) return true;
+    if (ConstantTimeEquals(req.queryParam("token"), tok)) return true;
 
     return false;
 }
@@ -433,6 +440,33 @@ void HttpServer::Run(const HttpHandler& handler) {
             continue;
         }
 
+        // 并发连接上限。**每连接一线程** —— 没有上限的话，一个客户端
+        // 狂开连接就能把线程和 fd 耗光（实测原本确实没有上限）。
+        // 超限时明确回 503 再关，比默默排队或直接崩要好排查。
+        {
+            size_t n = 0;
+            {
+                std::lock_guard<std::mutex> lk(connMutex_);
+                n = connFds_.size();
+            }
+            if (n >= maxConns_) {
+                ALOGW("HTTP 连接数已达上限 %zu，拒绝新连接", maxConns_);
+                const char* body =
+                    "{\"ok\":false,\"error\":\"并发连接数已达上限，稍后重试\"}";
+                std::string head =
+                    std::string("HTTP/1.1 503 Service Unavailable\r\n"
+                                "Content-Type: application/json; charset=utf-8\r\n"
+                                "Retry-After: 1\r\n"
+                                "Content-Length: ") +
+                    std::to_string(strlen(body)) +
+                    "\r\nConnection: close\r\n\r\n" + body;
+                ssize_t ig = write(connFd, head.data(), head.size());
+                (void)ig;
+                close(connFd);
+                continue;
+            }
+        }
+
         timeval tv{};
         tv.tv_sec = kReadTimeoutSec;
         setsockopt(connFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -456,7 +490,10 @@ void HttpServer::Run(const HttpHandler& handler) {
     ALOGI("HTTP accept 循环退出");
 }
 
-bool HttpServer::ReadRequest(int connFd, HttpRequest* out, HttpResponse* errReply) {
+bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
+                            HttpResponse* errReply,
+                            const std::function<bool(const HttpRequest&)>&
+                                    onHeaders) {
     std::string buf;
     buf.reserve(4096);
 
@@ -547,6 +584,10 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out, HttpResponse* errRepl
         *errReply = HttpResponse::Error(400, "不支持 Transfer-Encoding: chunked");
         return false;
     }
+
+    // 头读完了，正文**还没读** —— 给调用方一个提前拒绝的机会
+    // （鉴权就走这里，见 ServeConnection）。
+    if (onHeaders && !onHeaders(*out)) return false;
 
     const std::string clStr = out->header("content-length");
     size_t contentLength = 0;
@@ -679,7 +720,52 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
 
     HttpRequest req;
     HttpResponse errReply;
-    if (!ReadRequest(connFd, &req, &errReply)) {
+    // 提前鉴权：在**读正文之前**判。
+    // 早先鉴权在 ReadRequest 之后，也就是先收完（并落盘）整个请求体
+    // 再拒 —— 未授权的客户端仅凭发大包就能占满磁盘和线程。
+    HttpResponse earlyDeny;
+    bool denied = false;
+    const bool headersOk = ReadRequest(
+            connFd, &req, &errReply, [&](const HttpRequest& h) -> bool {
+                if (CheckAuth(h)) return true;
+                denied = true;
+                earlyDeny = HttpResponse::Error(
+                        401, "需要访问令牌。请在页面顶部填入，或用 "
+                             "Authorization: Bearer <token> / X-Autod-Token: <token>");
+                return false;
+            });
+    if (denied) {
+        ALOGW("HTTP 拒绝（缺少或错误的令牌）: %s %s", req.method.c_str(),
+              RedactToken(req.rawPath).c_str());
+        std::string head =
+                "HTTP/1.1 401 Unauthorized\r\n"
+                "Content-Type: application/json; charset=utf-8\r\n"
+                "WWW-Authenticate: Bearer realm=\"autod\"\r\n"
+                "Content-Length: " + std::to_string(earlyDeny.body.size()) +
+                "\r\nConnection: close\r\n\r\n";
+        if (write(connFd, head.data(), head.size()) > 0) {
+            ssize_t ig = write(connFd, earlyDeny.body.data(),
+                               earlyDeny.body.size());
+            (void)ig;
+        }
+        // 正文没读。直接关会让对端收到 RST、可能看不到上面那个 401，
+        // 所以先把在途数据**限量**排掉（上限 1MB，超了就直接关）——
+        // 不能无限排，否则又变成"未授权也能让我们读 4GB"。
+        {
+            timeval tiny{};
+            tiny.tv_usec = 200 * 1000;
+            setsockopt(connFd, SOL_SOCKET, SO_RCVTIMEO, &tiny, sizeof(tiny));
+            char sink[16 * 1024];
+            size_t drained = 0;
+            while (drained < (1u << 20)) {
+                const ssize_t n = read(connFd, sink, sizeof(sink));
+                if (n <= 0) break;
+                drained += static_cast<size_t>(n);
+            }
+        }
+        return;
+    }
+    if (!headersOk) {
         // 读失败时也要把错误应答发回去，否则客户端只能看到连接被关
         const std::string head =
                 "HTTP/1.1 " + std::to_string(errReply.status) + " " +
@@ -692,36 +778,10 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
         return;
     }
 
-    // 鉴权。放在这里而不是各处理器里 —— 漏掉一个处理器就是一个
-    // 未授权的入口，而这种漏洞不会自己暴露出来。
-    if (!CheckAuth(req)) {
-        ALOGW("HTTP 拒绝（缺少或错误的令牌）: %s %s", req.method.c_str(),
-              req.rawPath.c_str());
-        const HttpResponse deny = HttpResponse::Error(
-                401, "需要访问令牌。请在页面顶部填入，或用 "
-                     "Authorization: Bearer <token> / X-Autod-Token: <token>");
-        std::string head =
-                "HTTP/1.1 401 Unauthorized\r\n"
-                "Content-Type: application/json; charset=utf-8\r\n"
-                "WWW-Authenticate: Bearer realm=\"autod\"\r\n"
-                "Content-Length: " + std::to_string(deny.body.size()) + "\r\n"
-                "Connection: close\r\n\r\n";
-        if (write(connFd, head.data(), head.size()) > 0) {
-            ssize_t ig = write(connFd, deny.body.data(), deny.body.size());
-            (void)ig;
-        }
-        return;
-    }
-
-    // 落盘的请求体，**这条连接处理完就删**。
-    //
-    // 用 RAII 而不是在每个 return 前面手写 unlink：这个函数后面还有
-    // 流式响应、WebSocket 升级好几条返回路径，漏一条就是往
-    // /data/local/tmp 里堆一个几百 MB 的废文件。
-    struct SpoolCleanup {
-        std::string path;
-        ~SpoolCleanup() { if (!path.empty()) unlink(path.c_str()); }
-    } spoolGuard{req.bodyFile};
+    // 鉴权已经在 ReadRequest 的 onHeaders 回调里做完了 —— 那时候
+    // 正文还没读，未授权的请求一个字节都不会落盘。
+    // **不留第二份检查**：两处并存的结果是改了一处以为生效了、
+    // 实际被另一处先拦下（这个坑本项目踩过一次）。
 
     // 直接调用，不包 try/catch。
     //

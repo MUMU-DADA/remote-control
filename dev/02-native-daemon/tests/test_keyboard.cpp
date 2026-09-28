@@ -32,8 +32,6 @@ void TestResolve() {
         {"KEY_HOME",   true,  102, "内核文档写法"},
         {"Key_Home",   true,  102, "混合大小写 + 前缀"},
         // 字符键
-        {"a",          true,   30, "KEY_A"},
-        {"z",          true,   55, "KEY_Z"},
         {"1",          true,    2, "KEY_1 —— 必须先按字符解释（见下）"},
         {"0",          true,   11, "KEY_0 不在 KEY_1..KEY_9 之后连续"},
         // 功能键：F1..F10 是 59..68，F11/F12 跳到 87/88
@@ -60,10 +58,47 @@ void TestResolve() {
     Check(true, "已知键名列表非空: %.60s...", Keyboard::KnownKeyNames());
 }
 
+// 26 个字母逐个核对。
+//
+// ⚠️ 这段是补出来的，因为原来的用例只写了 {"a", 30} 和 {"z", 55} ——
+//    而 55 **是错的**（KEY_Z 是 44）。55 正是错误公式
+//    `KEY_A + (c - 'a')` 算出来的值，也就是说测试把 bug 固化了：
+//    它验证的是"实现和自己一致"，不是"实现和内核一致"。
+//
+//    字母键码按 QWERTY **物理位置**编号，不是字母表顺序，
+//    所以除了 'a'，25 个字母全错。用户报的"传 d 出来 f"就是这个。
+//
+//    期望值一律来自内核头文件
+//    （bionic/libc/kernel/uapi/linux/input-event-codes.h），不手算。
+void TestLetters() {
+    printf("\n\033[1;34m[2] 26 个字母逐个核对\033[0m\n");
+    static const struct { char ch; uint32_t code; } kL[26] = {
+        {'a', 30}, {'b', 48}, {'c', 46}, {'d', 32}, {'e', 18}, {'f', 33},
+        {'g', 34}, {'h', 35}, {'i', 23}, {'j', 36}, {'k', 37}, {'l', 38},
+        {'m', 50}, {'n', 49}, {'o', 24}, {'p', 25}, {'q', 16}, {'r', 19},
+        {'s', 31}, {'t', 20}, {'u', 22}, {'v', 47}, {'w', 17}, {'x', 45},
+        {'y', 21}, {'z', 44},
+    };
+    for (const auto& l : kL) {
+        uint32_t got = 0;
+        const char name[2] = {l.ch, 0};
+        const bool ok = Keyboard::ResolveKeyCode(name, &got);
+        Check(ok && got == l.code, "'%c' → %u（期望 %u）", l.ch, got, l.code);
+    }
+    // 字母表顺序与键码顺序**不一致** —— 这条断言本身就是回归保护：
+    // 谁要是再想"优化"成 KEY_A + (c-'a')，这里会立刻红
+    uint32_t a = 0, b = 0;
+    Keyboard::ResolveKeyCode("a", &a);
+    Keyboard::ResolveKeyCode("b", &b);
+    Check(b != a + 1, "字母键码**不连续**（a=%u b=%u）—— 不能用加法算",
+          a, b);
+}
+
 }  // namespace
 
 int main() {
     printf("\033[1m=== 按键注入测试 ===\033[0m\n");
     TestResolve();
+    TestLetters();
     return Summary("按键");
 }

@@ -69,9 +69,18 @@ void TestParseErrors() {
     for (const auto& c : cases) {
         Check(!json::Parse(c.text, &v, &err), "拒绝: %s", c.what);
     }
-    // 错误信息要能定位
+    // 错误信息要能定位。
+    //
+    // 这里不能钉死措辞 —— 解析引擎换成 jsoncpp 之后格式变了
+    // （原来是「位置 N」，现在是 "Line 1, Column 6"）。
+    // 要钉的是「有没有定位信息」，不是「用的哪种写法」。
+    // 钉死措辞的测试会在换实现时红一次，然后被人随手改掉，从此失去意义。
     json::Parse("{\"a\":", &v, &err);
-    Check(err.find("位置") != std::string::npos, "错误信息带位置: %s", err.c_str());
+    const bool hasPos = err.find("Line") != std::string::npos ||
+                        err.find("Column") != std::string::npos ||
+                        err.find("位置") != std::string::npos;
+    Check(hasPos, "错误信息带位置: %s", err.c_str());
+    Check(!err.empty(), "错误信息非空");
 }
 
 void TestWriter() {

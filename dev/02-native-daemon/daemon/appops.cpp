@@ -565,6 +565,19 @@ bool AppOps::Install(const std::string& apkPath, bool replace,
     if (combined.find("Success") == std::string::npos) {
         if (error) {
             *error = "安装失败: " + Trim(combined.substr(0, 400));
+            // 「空间不足」这个报错特别容易把人带偏 —— 它经常不是真的没空间，
+            // 而是**之前失败的安装泄漏了空间**（详见 dispatch.cpp 里的预检注释）。
+            // 实测失败一次就少一个 APK 大小的可用空间，`df` 却显示还剩很多
+            // 因为那份文件被 system_server 持着（`/proc/<pid>/fd` 里能看到
+            // 一个 deleted 的 base.apk）。重试几次之后就真的什么都装不上了。
+            if (combined.find("INSTALL_FAILED_INSUFFICIENT_STORAGE") !=
+                std::string::npos) {
+                *error +=
+                    "\n【提示】这个错多半不是真的没空间，而是之前**失败的安装**"
+                    "占着空间没释放（每次失败留一份 APK 大小，要等下一次"
+                    "成功安装或重启才清）。用 df 看可用空间，若明显够，"
+                    "重启设备再试。";
+            }
         }
         return false;
     }

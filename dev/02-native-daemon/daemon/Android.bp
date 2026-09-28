@@ -76,6 +76,9 @@ cc_defaults {
     //    "dependency ... missing variant"（消费者要 link:shared）。
     static_libs: [
         "libwebp_vendored",
+        // JSON 解析用 AOSP 树内的 jsoncpp（MIT，1.9.4），不自己手写 ——
+        // 解析器是唯一直接处理**不可信输入**的组件，见 json_parser.cpp 的说明。
+        "libjsoncpp",
     ],
 
     shared_libs: [
@@ -106,6 +109,17 @@ cc_defaults {
         "-Wall",
         "-Werror",
         "-Wno-unused-parameter",
+
+        // jsoncpp 1.9.4 的头里有 `volatile pointer`（allocator.h:41）。
+        // 这在 C++20 下是 -Wdeprecated-volatile，而我们开了 -Werror
+        // —— 于是**只是 include 它的头**就会编不过。
+        //
+        // jsoncpp 自己编的时候没撞上，是因为它用旧标准（那里这个警告
+        // 默认不开）。AOSP 里不少模块都对它加过同样的豁免。
+        //
+        // 豁免范围故意收窄到这一个警告：换成 -Wno-error 之类的
+        // 会把我们自己代码里的真问题一起放过。
+        "-Wno-deprecated-volatile",
 
         // 平台构建：能调系统服务、能接管 init socket。
         // 不要用 __ANDROID__ 判断 —— NDK 构建时它同样是定义的。

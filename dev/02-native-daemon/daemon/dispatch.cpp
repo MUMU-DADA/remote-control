@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -158,6 +159,14 @@ bool SpillFdToTempFile(int fd, const std::string& path, int64_t maxBytes,
 }
 
 // 找一个可写的临时目录
+// 可用字节数。拿不到返回 -1。
+int64_t FreeBytes(const std::string& path) {
+    struct statvfs vfs{};
+    if (statvfs(path.c_str(), &vfs) != 0) return -1;
+    return static_cast<int64_t>(vfs.f_bavail) *
+           static_cast<int64_t>(vfs.f_frsize);
+}
+
 std::string TempDir() {
     const char* candidates[] = {"/data/local/tmp", "/data/tmp", "/tmp", nullptr};
     for (int i = 0; candidates[i] != nullptr; ++i) {
@@ -594,6 +603,40 @@ ReplyPacket Dispatcher::HandleInstallApp(const Request& req, int reqFd) {
     const std::string tmp = dir + nameBuf;
 
     constexpr int64_t kMaxApk = 2LL << 30;   // 2 GB
+
+    // ── 空间预检：装不下就**别落盘**，直接说清楚 ──
+    //
+    // 为什么必须在落盘之前判：一次失败的安装会**泄漏一份 APK 大小的空间**
+    // —— `/data/app/~~xxx/.../base.apk` 被 system_server 持着不放
+    // （实测：失败后 df 少 900MB，`/proc/<system_server>/fd` 里能看到
+    // 那个 deleted 的 base.apk；下一次**成功**的安装才会连带清理掉）。
+    //
+    // 于是失败会自我强化：装不下 → 失败 → 更装不下 → 再失败。用户看到的
+    // 是"重试几次之后什么都装不上了"。宁可在花掉空间之前就拒绝。
+    //
+    // 实测峰值是我们拿到的那份 + 落盘的副本 + pm 自己的 session 副本
+    // ≈ **3 倍** APK 大小。留 256MB 余量给系统。
+    {
+        struct stat fst{};
+        if (fstat(reqFd, &fst) == 0 && fst.st_size > 0) {
+            const int64_t need = static_cast<int64_t>(fst.st_size) * 3 +
+                                 256LL * 1024 * 1024;
+            const int64_t freeB = FreeBytes(dir);
+            if (freeB >= 0 && freeB < need) {
+                char buf[320];
+                snprintf(buf, sizeof(buf),
+                         "空间不足（预检）：APK %.0f MB，安装峰值约需 %.0f MB，"
+                         "当前可用 %.0f MB。\n"
+                         "⚠️ 每次**失败的**安装会占用一份 APK 大小的空间且不释放，"
+                         "直到下一次成功安装或重启 —— 这会让重试越来越装不下。"
+                         "先清出空间或重启设备再试。",
+                         fst.st_size / 1048576.0, need / 1048576.0,
+                         freeB / 1048576.0);
+                return MakeJsonError(req.cmd, kErrIo, buf);
+            }
+        }
+    }
+
     int64_t written = 0;
     if (!SpillFdToTempFile(reqFd, tmp, kMaxApk, &written, &error)) {
         return MakeJsonError(req.cmd, kErrIo, error);

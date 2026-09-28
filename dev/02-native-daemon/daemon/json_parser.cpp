@@ -1,251 +1,133 @@
-// json_parser.cpp — 极简 JSON 解析器
+// json_parser.cpp —— JSON 解析（**用 jsoncpp**，不再手写）
+//
+// ## 为什么换掉手写解析器
+//
+// 解析器是**唯一直接处理不可信输入**的组件：HTTP 请求体、socket 的
+// JSON 应答回传，内容完全由客户端决定。手写的递归下降解析器要自己
+// 处理深度、转义、UTF-8 边界、数字溢出 —— 每一条都是历史上出过事的
+// 地方，而我们没有任何第三方审计。
+//
+// 换成 **jsoncpp**（AOSP 树内 `external/jsoncpp`，
+// 版本 1.9.4，MIT）：社区用了十几年的实现，AOSP 自己也在用，
+// 而且是树内依赖 —— 不需要 vendor 源码，Soong 直接链。
+//
+// ## 为什么保留 Value 接口
+//
+// `Value` 是本项目自己的薄封装，调用方（rest_api / clipops）按它写的。
+// 换引擎不必连调用方一起换 —— 那样改动面和风险都大得多，
+// 而 Value 本身**不解析任何东西**，只是一棵已解析好的树。
+//
+// ⚠️ 真正有安全含义的只有 `Parse()`。json_writer 是纯输出，
+//    不碰不可信输入，所以留着。
+//
+// ## 两条纪律
+//
+//   1. **深度限制**。jsoncpp 的 reader 是递归的，默认 stackLimit=1000
+//      —— 深嵌套的请求体能把栈打穿。我们的请求体全是浅对象，
+//      压到 32 绰绰有余。
+//   2. **绝不把 jsoncpp 的断言变成崩溃**。AOSP 编 jsoncpp 时带
+//      `-DJSON_USE_EXCEPTION=0`，此时它的内部断言是 `abort()` 而不是
+//      抛异常。所以这里只走 `parse()` 的返回值这条路，
+//      不去碰任何可能触发断言的操作。
 
 #include "json_parser.h"
 
-#include <cstdlib>
-#include <cstring>
-#include <utility>
+#include <json/json.h>
+
+#include <cstdio>
 
 namespace autod {
 namespace json {
+
 namespace {
 
-class Parser {
-  public:
-    Parser(const std::string& s) : s_(s) {}
-
-    bool Run(Value* out) {
-        SkipWs();
-        if (!ParseValue(out)) return false;
-        SkipWs();
-        if (pos_ != s_.size()) return Fail("末尾有多余内容");
-        return true;
-    }
-
-    const std::string& error() const { return error_; }
-
-  private:
-    bool Fail(const char* why) {
-        if (error_.empty()) {
-            error_ = std::string(why) + "（位置 " + std::to_string(pos_) + "）";
-        }
-        return false;
-    }
-
-    void SkipWs() {
-        while (pos_ < s_.size()) {
-            const char c = s_[pos_];
-            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { ++pos_; continue; }
+// jsoncpp 的树 → 本项目的 Value。
+//
+// 类型映射是直白的；只有数字要留意：jsoncpp 区分 int/uint/real，
+// 我们统一收成 double（Value 内部就是 double，取值时再转 int64）。
+void FromJson(const Json::Value& src, Value* dst) {
+    switch (src.type()) {
+        case Json::nullValue:
+            dst->SetNull();
+            break;
+        case Json::booleanValue:
+            dst->SetBool(src.asBool());
+            break;
+        case Json::intValue:
+        case Json::uintValue:
+        case Json::realValue:
+            dst->SetNumber(src.asDouble());
+            break;
+        case Json::stringValue:
+            dst->SetString(src.asString());
+            break;
+        case Json::arrayValue: {
+            dst->SetArray();
+            for (const auto& e : src) {
+                Value child;
+                FromJson(e, &child);
+                dst->Push(std::move(child));
+            }
             break;
         }
-    }
-
-    bool Literal(const char* lit) {
-        const size_t n = strlen(lit);
-        if (s_.compare(pos_, n, lit) != 0) return false;
-        pos_ += n;
-        return true;
-    }
-
-    bool ParseValue(Value* out) {
-        if (pos_ >= s_.size()) return Fail("期待一个值，但已到末尾");
-        const char c = s_[pos_];
-        switch (c) {
-            case '{': return ParseObject(out);
-            case '[': return ParseArray(out);
-            case '"': {
-                std::string str;
-                if (!ParseString(&str)) return false;
-                out->SetString(std::move(str));
-                return true;
+        case Json::objectValue: {
+            dst->SetObject();
+            for (const auto& key : src.getMemberNames()) {
+                Value child;
+                FromJson(src[key], &child);
+                dst->Put(key, std::move(child));
             }
-            case 't':
-                if (Literal("true"))  { out->SetBool(true);  return true; }
-                return Fail("期待 true");
-            case 'f':
-                if (Literal("false")) { out->SetBool(false); return true; }
-                return Fail("期待 false");
-            case 'n':
-                if (Literal("null"))  { out->SetNull();      return true; }
-                return Fail("期待 null");
-            default:
-                return ParseNumber(out);
+            break;
         }
+        default:
+            dst->SetNull();
+            break;
     }
-
-    bool ParseObject(Value* out) {
-        ++pos_;                       // '{'
-        out->SetObject();
-        SkipWs();
-        if (pos_ < s_.size() && s_[pos_] == '}') { ++pos_; return true; }
-
-        for (;;) {
-            SkipWs();
-            if (pos_ >= s_.size() || s_[pos_] != '"') return Fail("对象的键必须是字符串");
-            std::string key;
-            if (!ParseString(&key)) return false;
-
-            SkipWs();
-            if (pos_ >= s_.size() || s_[pos_] != ':') return Fail("键之后期待 ':'");
-            ++pos_;
-
-            SkipWs();
-            Value v;
-            if (!ParseValue(&v)) return false;
-            out->Put(key, std::move(v));
-
-            SkipWs();
-            if (pos_ >= s_.size()) return Fail("对象没有闭合");
-            if (s_[pos_] == ',') { ++pos_; continue; }
-            if (s_[pos_] == '}') { ++pos_; return true; }
-            return Fail("对象里期待 ',' 或 '}'");
-        }
-    }
-
-    bool ParseArray(Value* out) {
-        ++pos_;                       // '['
-        out->SetArray();
-        SkipWs();
-        if (pos_ < s_.size() && s_[pos_] == ']') { ++pos_; return true; }
-
-        for (;;) {
-            SkipWs();
-            Value v;
-            if (!ParseValue(&v)) return false;
-            out->Push(std::move(v));
-
-            SkipWs();
-            if (pos_ >= s_.size()) return Fail("数组没有闭合");
-            if (s_[pos_] == ',') { ++pos_; continue; }
-            if (s_[pos_] == ']') { ++pos_; return true; }
-            return Fail("数组里期待 ',' 或 ']'");
-        }
-    }
-
-    // 读取一个 \uXXXX，返回码点；失败返回 -1
-    int ParseHex4() {
-        if (pos_ + 4 > s_.size()) return -1;
-        int v = 0;
-        for (int i = 0; i < 4; ++i) {
-            const char c = s_[pos_ + i];
-            int d;
-            if (c >= '0' && c <= '9')      d = c - '0';
-            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-            else return -1;
-            v = v * 16 + d;
-        }
-        pos_ += 4;
-        return v;
-    }
-
-    static void AppendUtf8(std::string* out, uint32_t cp) {
-        if (cp < 0x80) {
-            *out += static_cast<char>(cp);
-        } else if (cp < 0x800) {
-            *out += static_cast<char>(0xC0 | (cp >> 6));
-            *out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            *out += static_cast<char>(0xE0 | (cp >> 12));
-            *out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            *out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else {
-            *out += static_cast<char>(0xF0 | (cp >> 18));
-            *out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            *out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            *out += static_cast<char>(0x80 | (cp & 0x3F));
-        }
-    }
-
-    bool ParseString(std::string* out) {
-        ++pos_;                       // 开引号
-        out->clear();
-        while (pos_ < s_.size()) {
-            const unsigned char c = static_cast<unsigned char>(s_[pos_]);
-            if (c == '"') { ++pos_; return true; }
-
-            if (c != '\\') {
-                // 裸控制字符在 JSON 里非法。放过它会让产出的字符串
-                // 在别处出问题，不如当场报错。
-                if (c < 0x20) return Fail("字符串里有未转义的控制字符");
-                *out += static_cast<char>(c);
-                ++pos_;
-                continue;
-            }
-
-            ++pos_;                   // 反斜杠
-            if (pos_ >= s_.size()) return Fail("转义符后没有内容");
-            const char e = s_[pos_++];
-            switch (e) {
-                case '"':  *out += '"';  break;
-                case '\\': *out += '\\'; break;
-                case '/':  *out += '/';  break;
-                case 'b':  *out += '\b'; break;
-                case 'f':  *out += '\f'; break;
-                case 'n':  *out += '\n'; break;
-                case 'r':  *out += '\r'; break;
-                case 't':  *out += '\t'; break;
-                case 'u': {
-                    int cp = ParseHex4();
-                    if (cp < 0) return Fail("\\u 后面不是 4 位十六进制");
-                    // 代理对：高位 + 低位合成一个码点
-                    if (cp >= 0xD800 && cp <= 0xDBFF &&
-                        pos_ + 1 < s_.size() && s_[pos_] == '\\' &&
-                        s_[pos_ + 1] == 'u') {
-                        const size_t save = pos_;
-                        pos_ += 2;
-                        const int lo = ParseHex4();
-                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                        } else {
-                            pos_ = save;   // 不是合法低位，当作独立的 \u 处理
-                        }
-                    }
-                    AppendUtf8(out, static_cast<uint32_t>(cp));
-                    break;
-                }
-                default:
-                    return Fail("不认识的转义符");
-            }
-        }
-        return Fail("字符串没有闭合");
-    }
-
-    bool ParseNumber(Value* out) {
-        const size_t start = pos_;
-        if (pos_ < s_.size() && (s_[pos_] == '-' || s_[pos_] == '+')) ++pos_;
-        bool any = false;
-        while (pos_ < s_.size() && s_[pos_] >= '0' && s_[pos_] <= '9') { ++pos_; any = true; }
-        if (pos_ < s_.size() && s_[pos_] == '.') {
-            ++pos_;
-            while (pos_ < s_.size() && s_[pos_] >= '0' && s_[pos_] <= '9') { ++pos_; any = true; }
-        }
-        if (any && pos_ < s_.size() && (s_[pos_] == 'e' || s_[pos_] == 'E')) {
-            ++pos_;
-            if (pos_ < s_.size() && (s_[pos_] == '-' || s_[pos_] == '+')) ++pos_;
-            while (pos_ < s_.size() && s_[pos_] >= '0' && s_[pos_] <= '9') ++pos_;
-        }
-        if (!any) return Fail("不是一个合法的值");
-
-        const std::string numText = s_.substr(start, pos_ - start);
-        out->SetNumber(strtod(numText.c_str(), nullptr));
-        return true;
-    }
-
-    const std::string& s_;
-    size_t      pos_ = 0;
-    std::string error_;
-};
+}
 
 }  // namespace
 
 bool Parse(const std::string& text, Value* out, std::string* error) {
-    if (out == nullptr) return false;
-    *out = Value{};
-    Parser p(text);
-    if (p.Run(out)) return true;
-    if (error != nullptr) *error = p.error();
-    return false;
+    if (out == nullptr) {
+        if (error) *error = "输出参数为空";
+        return false;
+    }
+
+    Json::CharReaderBuilder builder;
+    // 深嵌套是典型的解析器攻击面，而我们的请求体都是浅对象。
+    builder.settings_["stackLimit"] = 32;
+    // 顶层必须是对象或数组 —— 一个裸字符串当请求体没有意义，
+    // 早先手写版也要求这一条，保持行为一致。
+    builder.settings_["strictRoot"] = true;
+    // 允许注释/尾逗号会放宽输入面，这里都要严格
+    builder.settings_["allowComments"] = false;
+    builder.settings_["allowTrailingCommas"] = false;
+    // 拒绝重复键：两个同名键谁赢取决于实现，不如直接报错
+    builder.settings_["rejectDups"] = true;
+    // 允许多个顶层值会让 "{} {}" 这种输入被静默接受一半
+    builder.settings_["failIfExtra"] = true;
+
+    Json::Value root;
+    std::string errs;
+    Json::CharReader* reader = builder.newCharReader();
+    if (reader == nullptr) {
+        if (error) *error = "无法创建 JSON 解析器";
+        return false;
+    }
+    // ⚠️ reader 的所有权在我们手里（newCharReader 返回裸指针），
+    //    这里手动 delete。jsoncpp 在 AOSP 带 -DJSON_USE_EXCEPTION=0，
+    //    所以更不能用依赖异常安全的写法。
+    const bool ok = reader->parse(text.data(),
+                                  text.data() + text.size(),
+                                  &root, &errs);
+    delete reader;
+
+    if (!ok) {
+        if (error) *error = errs.empty() ? "JSON 格式错误" : errs;
+        return false;
+    }
+    FromJson(root, out);
+    return true;
 }
 
 }  // namespace json

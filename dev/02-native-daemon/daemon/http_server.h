@@ -128,6 +128,9 @@ class HttpServer {
         // 要选一个 **installer 能读到** 的地方（pm install 用的是
         // 它自己的权限，不是我们的）。
         std::string spoolDir;
+
+        // 并发连接上限（每连接一个线程）
+        size_t      maxConns = 128;
     };
 
     HttpServer() = default;
@@ -198,7 +201,14 @@ class HttpServer {
 
     // 校验请求的令牌。token_ 为空时一律放行（无鉴权模式）。
     bool CheckAuth(const HttpRequest& req) const;
-    bool ReadRequest(int connFd, HttpRequest* out, HttpResponse* errReply);
+    // onHeaders：**头部解析完、正文还没读**时回调。
+    // 返回 false 表示"到此为止"，errReply 里是要回给客户端的应答。
+    //
+    // 为什么要有这个钩子：鉴权必须能在**读正文之前**做。
+    // 否则未授权的客户端可以让服务端先收完（并落盘）最多 4GB 的请求体
+    // 再被拒 —— 一个不需要任何凭据的磁盘打满 + 线程占用手段。
+    bool ReadRequest(int connFd, HttpRequest* out, HttpResponse* errReply,
+                     const std::function<bool(const HttpRequest&)>& onHeaders);
 
     int         listenFd_ = -1;
     uint16_t    port_ = 0;
@@ -207,6 +217,10 @@ class HttpServer {
     // 非空时优先用它 —— 让鉴权可以运行时改变
     std::function<std::string()> tokenProvider_;
     size_t      maxBody_ = 0;
+
+    // 并发连接上限。**每连接一个线程**，没有上限的话
+    // 一个客户端狂开连接就能把线程和 fd 耗光（实测没有上限）。
+    size_t      maxConns_ = 128;
     size_t      spoolThreshold_ = 4u << 20;   // 超过就落盘
     std::string spoolDir_;                     // 空 = /data/local/tmp
     bool        stop_ = false;

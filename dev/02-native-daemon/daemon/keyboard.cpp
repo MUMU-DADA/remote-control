@@ -103,7 +103,24 @@ bool Keyboard::ResolveKeyCode(const std::string& name, uint32_t* out) {
     if (key.size() == 1) {
         const char c = key[0];
         if (c >= 'a' && c <= 'z') {
-            *out = static_cast<uint32_t>(KEY_A + (c - 'a'));
+            // ⚠️ 字母键码**不是连续的**。
+            //
+            // 它们按 QWERTY 的**物理位置**编号，不是按字母表：
+            //     A=30  B=48  C=46  D=32  E=18  F=33  G=34  H=35
+            //     I=23  J=36  K=37  L=38  M=50  N=49  O=24  P=25
+            //     Q=16  R=19  S=31  T=20  U=22  V=47  W=17  X=45
+            //     Y=21  Z=44
+            //
+            // 原先写的是 `KEY_A + (c - 'a')`，只有 'a' 碰巧对 ——
+            // 传 "d" 会算出 33，而 33 是 KEY_F。用户报的"传 d 出来 f"
+            // 就是这么来的。实测除了 'a'，25 个字母全错。
+            static const uint32_t kLetters[26] = {
+                KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H,
+                KEY_I, KEY_J, KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P,
+                KEY_Q, KEY_R, KEY_S, KEY_T, KEY_U, KEY_V, KEY_W, KEY_X,
+                KEY_Y, KEY_Z,
+            };
+            *out = kLetters[c - 'a'];
             return true;
         }
         if (c >= '0' && c <= '9') {

@@ -509,4 +509,5 @@ adb shell dmesg | grep avc > avc.log
 - 硬件、磁盘预算、构建环境 → [`04-environment.md`](04-environment.md)
 - 设计与踩坑记录 → [`05-design-notes.md`](05-design-notes.md)
 - **抓帧与编码性能实测** → [`06-capture-performance.md`](06-capture-performance.md)
+- **依赖清单（用了什么库、为什么）** → [`07-dependencies.md`](07-dependencies.md)
 - 接口的权威说明 → [`api/README.md`](api/README.md)
