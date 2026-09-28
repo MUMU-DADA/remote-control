@@ -2,7 +2,7 @@
 
 > 目标：**x86_64 Linux + x86_64 Windows 上同架构运行的自编 Android ROM，可跑 arm64 应用**
 > （arm64 若不成立，下放到 arm32）
-> 位置：`/root/AutoSnapshotAndroid/dev/06-x64-android`（与 `04-emulator` 同级）
+> 位置：`/root/AutoSnapshotAndroid/dev/04-x64-android`（原 `dev/06-x64-android`）
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## 已完成的实测结论（P0 依据）
 
-来源：`dev/04-emulator/X86_64-ARM64-BRIDGE-EVAL.md`（全部为本机实测）
+来源：`dev/04-x64-android/docs/00-bridge-eval.md`（全部为本机实测）
 
 1. **libhoudini 不可用**：官方源 `_z`（arm64）变体只到 Android 7；8/9 系列只有 32 位 ARM 翻译器。
 2. **libndk_translation 可用**：官方 `google_apis;x86_64`(API 31) 镜像 `abilist=x86_64,arm64-v8a`，
@@ -112,7 +112,7 @@
 
 | 动作 | 结果 |
 |---|---|
-| **启动路径彩排**（`PRODUCT_OUT=<官方 sysdir> ./scripts/run-linux.sh`） | ✅ 抓出并修掉 1 个会挡住验收的真 bug：**缺 `ANDROID_BUILD_TOP`** 时 SDK 模拟器报 `missing the 'kernel-qemu' image file`（dev/04-emulator 的脚本导出了它，本项目脚本没导）→ 已补，坑 7 入档 |
+| **启动路径彩排**（`PRODUCT_OUT=<官方 sysdir> ./scripts/run-linux.sh`） | ✅ 抓出并修掉 1 个会挡住验收的真 bug：**缺 `ANDROID_BUILD_TOP`** 时 SDK 模拟器报 `missing the 'kernel-qemu' image file`（已移除的跨架构路线脚本导出了它，本项目脚本没导）→ 已补，坑 7 入档 |
 | `PRODUCT_OUT` 可覆盖 | ✅ `common.sh` 支持 `PRODUCT_OUT=` 覆盖，便于用官方镜像做彩排 |
 | 开机耗时日志匹配 | ✅ 37.x 说 `Boot completed in`、30.x 说 `boot time`，正则两者都认 |
 | `docs/05-adding-components.md` | ✅ P5 路线文档：把自己的系统组件（如 `autod`）编进 ROM 的三种方式、落点、SELinux 验证、以及两个现状约束（`ALLOW_MISSING_DEPENDENCIES` / 载荷瘦身） |

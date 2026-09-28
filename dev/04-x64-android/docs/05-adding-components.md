@@ -13,7 +13,7 @@
 | **B. Magisk/KernelSU 模块** | 把二进制与 `init.rc` 打包成模块装进去 | 不想每次重编镜像 | 重启 |
 | **C. 编进 ROM**（本文重点） | 源码进 AOSP 树 + 产品 mk 加 `PRODUCT_PACKAGES` + 重编 | 交付形态 | 重新构建 |
 
-前两种在 `dev/04-emulator/` 和 `dev/02-native-daemon/` 里已有脚本可参考；这里只讲 C。
+前两种在 `dev/02-native-daemon/` 里已有脚本可参考；这里只讲 C。
 
 ---
 
@@ -32,7 +32,7 @@ aosp/frameworks/native/cmds/autod/daemon/Android.bp   → 模块名 autod / auto
 
 ### 2.2 加进产品
 
-编辑 `dev/06-x64-android/device/autosnap_x64_arm64/product/autosnap_x64_arm64.mk`，在末尾加：
+编辑 `dev/04-x64-android/device/autosnap_x64_arm64/product/autosnap_x64_arm64.mk`，在末尾加：
 
 ```make
 # ---- 自制系统组件 ----
@@ -44,7 +44,7 @@ PRODUCT_PACKAGES += \
 然后：
 
 ```bash
-cd dev/06-x64-android
+cd dev/04-x64-android
 ./scripts/apply-overlay.sh        # 把改动同步进 AOSP 树（设备树是唯一真源）
 ./scripts/build-rom.sh            # 重编（增量，只编受影响的部分）
 ./tools/verify-rom.sh             # 自检：确认二进制进了 /system/bin

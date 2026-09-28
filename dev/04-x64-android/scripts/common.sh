@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 公共变量 —— 被 dev/06-x64-android/scripts 下其它脚本 source，不要直接执行。
+# 公共变量 —— 被 dev/04-x64-android/scripts 下其它脚本 source，不要直接执行。
 
 set -euo pipefail
 

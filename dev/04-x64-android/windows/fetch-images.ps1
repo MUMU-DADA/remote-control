@@ -3,7 +3,7 @@
   从 Linux 构建机把自编 ROM 的镜像拉到 Windows，并校验完整性。
 
 .DESCRIPTION
-  默认从**打包目录**取（dev/06-x64-android/artifacts/rom-autosnap_x64_arm64/）——它由
+  默认从**打包目录**取（dev/04-x64-android/artifacts/rom-autosnap_x64_arm64/）——它由
   scripts/package-rom.sh 生成，文件集固定、带 SHA256SUMS 与 MANIFEST.txt。
   也可以 -RemoteDir 指到构建产物目录（out/target/product/autosnap_x64_arm64）。
 
@@ -12,7 +12,7 @@
 [CmdletBinding()]
 param(
     [string]$Remote    = "root@192.168.0.108",
-    [string]$RemoteDir = "/root/AutoSnapshotAndroid/dev/06-x64-android/artifacts/rom-autosnap_x64_arm64",
+    [string]$RemoteDir = "/root/AutoSnapshotAndroid/dev/04-x64-android/artifacts/rom-autosnap_x64_arm64",
     [string]$Dest      = "$PSScriptRoot\images",
     [switch]$Force,
     [switch]$SkipVerify
@@ -76,7 +76,7 @@ if ((-not (Test-Path "$Dest\initrd")) -and (Test-Path "$Dest\ramdisk.img")) {
 }
 
 # 自建 arm64 探针 APK（Linux 侧 tools/build-probe-apk.sh 产出）
-$probeRemote = "/root/AutoSnapshotAndroid/dev/06-x64-android/artifacts/arm64-probe.apk"
+$probeRemote = "/root/AutoSnapshotAndroid/dev/04-x64-android/artifacts/arm64-probe.apk"
 $probeLocal  = Join-Path $Dest "arm64-probe.apk"
 if ((Remote-Size "arm64-probe.apk") -or ((ssh $Remote "stat -c %s '$probeRemote' 2>/dev/null") -join "").Trim()) {
     $src = if ((Remote-Size "arm64-probe.apk").Trim()) { "$RemoteDir/arm64-probe.apk" } else { $probeRemote }

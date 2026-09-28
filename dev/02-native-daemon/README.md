@@ -273,7 +273,7 @@ python3 autod_client.py --socket /tmp/autod.sock swipe 540 1600 540 400
 | 项 | 状态 | 依赖 |
 |---|---|---|
 | 截图（`capture_surfaceflinger.cpp`）编译验证 | ⏳ 等 AOSP 同步 | `frameworks/native/libs/gui` |
-| 在真机上跑 `autod`（`--inject-backend` 已就绪） | ⏳ 待开始 | 一台 root 的 ARM64 设备，**或** [`../04-emulator/`](../04-emulator/README.md) |
+| 在真机上跑 `autod`（`--inject-backend` 已就绪） | ⏳ 待开始 | 一台 root 的 ARM64 设备，**或** [`../04-x64-android/`](../04-x64-android/README.md)（x86_64 ROM + 翻译层，能跑 arm64 应用） |
 | SELinux 规则调通 | ⏳ 待开始 | 上面两项 |
 | 真机端到端（真实截图 + 触控） | ⏳ 待开始 | 上面三项 |
 | `KeyEvent` / 文本输入 | ⏳ 未实现 | —— |
@@ -288,8 +288,8 @@ python3 autod_client.py --socket /tmp/autod.sock swipe 540 1600 540 400
 **不要一上来就写 sepolicy。** 先在已经宽松的环境里把链路跑通。
 
 在 Magisk root 的真机、Cuttlefish（userdebug），或
-**[`../04-emulator/`](../04-emulator/README.md) 里起的 arm64 模拟器**上
-（模拟器是免真机的路径，适合先验证截图与触控链路）：
+**[`../04-x64-android/`](../04-x64-android/README.md) 里起的模拟器**上
+（免真机路径；`ro.product.cpu.abilist` 含 `arm64-v8a`，arm64 的 `autod` 可直接跑）：
 
 ```bash
 # 1. 编好 autod 和 autodctl 后
@@ -317,10 +317,10 @@ adb shell "/data/local/tmp/autodctl --socket /data/local/tmp/autod.sock tap 540 
 > 注意：`deploy_cuttlefish.sh` 目前写的是新版 `cvd` 工具链的用法。
 > **Android 12 用的是老的 `launch_cvd`**，需要相应调整。
 >
-> 在 `04-emulator` 的模拟器上请改用
-> [`../04-emulator/linux-arm64/smoke-autod.sh`](../04-emulator/linux-arm64/smoke-autod.sh)：
-> 本脚本把二进制推进 `/system/bin`，需要模拟器以 `--writable-system` 启动；
-> 而冒烟脚本走的是上表的 `/data/local/tmp` 阶段 1 路径，不需要 remount。
+> 在 `04-x64-android` 的模拟器上请见
+> [`../04-x64-android/docs/05-adding-components.md`](../04-x64-android/docs/05-adding-components.md)：
+> 该文给了三种加组件的方式（运行时推 / Magisk 模块 / 编进 ROM），
+> 阶段 1 用其中的"运行时推到 `/data/local/tmp`"即可，不需要 remount。
 
 ### 阶段 2：固化 init 服务 + sepolicy
 

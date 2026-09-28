@@ -157,7 +157,7 @@ ERROR | Your system directory is missing the 'kernel-qemu' image file.
 ```
 
 而 sysdir 里明明有 `kernel-ranchu`（22 MB）、`ramdisk.img`、`initrd`、`system.img`：
-**`dev/04-emulator/linux-arm64/run-emulator.sh` 跑同一个目录是能起来的**。
+**用本项目 `scripts/run-linux.sh`（或手动补上下面两个环境变量）跑同一个目录是能起来的**。
 
 **根因**：模拟器进"构建模式"需要**两个**环境变量，我只给了第一个：
 

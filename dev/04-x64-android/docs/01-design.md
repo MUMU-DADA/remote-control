@@ -1,7 +1,7 @@
 # 设计记录：这份 ROM 为什么这么写
 
 > 每条决策都附 AOSP 源码位置或本机实测，便于日后升级 AOSP 版本时逐条复核。
-> 全部实测证据见 [`../../dev/04-emulator/X86_64-ARM64-BRIDGE-EVAL.md`](../../04-emulator/X86_64-ARM64-BRIDGE-EVAL.md)。
+> 全部实测证据见 [`00-bridge-eval.md`](00-bridge-eval.md)。
 
 ---
 

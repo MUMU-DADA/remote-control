@@ -1,4 +1,4 @@
-# 验收报告（dev/06-x64-android）
+# 验收报告（dev/04-x64-android）
 
 > 这份文档是**结论性证据记录**：每条都给出可复现的命令与本机实测输出。
 > 逐条展开的实测过程见 `PLAN.md`；踩过的坑见 `docs/02-build-traps.md`。
@@ -95,7 +95,7 @@ $ sha256sum -c SHA256SUMS   →  20/20 通过
 **用户侧闭环方式**：在一台开了虚拟化（BIOS VT-x/AMD-V + 「Windows 虚拟机监控程序平台」）的 x64 Windows 上执行
 
 ```powershell
-cd dev\06-x64-android\windows
+cd dev\04-x64-android\windows
 .\fetch-emulator.ps1 ; .\fetch-images.ps1 ; .\preflight.ps1 ; .\run-windows.ps1
 ```
 
@@ -107,7 +107,7 @@ cd dev\06-x64-android\windows
 ## 四、怎么从零复现全部结论
 
 ```bash
-cd dev/06-x64-android
+cd dev/04-x64-android
 
 ./scripts/fetch-payload.sh      # 从官方镜像提取翻译层（23 MB，90 文件）
 ./scripts/apply-overlay.sh      # 注入 AOSP 树（不改上游一行；--revert 可撤）

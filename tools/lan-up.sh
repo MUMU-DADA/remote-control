@@ -21,7 +21,7 @@ set -euo pipefail
 
 PROJECT_DIR=/root/AutoSnapshotAndroid
 EMU=/opt/android/emu31b/emulator/emulator
-STOCK="$PROJECT_DIR/dev/04-emulator/linux-arm64/.run/stock-image/x86_64"
+STOCK="$PROJECT_DIR/dev/04-x64-android/artifacts/rom-autosnap_x64_arm64"
 ADB=/usr/bin/adb
 SERIAL=emulator-5554
 DEV=/data/local/tmp

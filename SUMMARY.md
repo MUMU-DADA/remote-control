@@ -241,7 +241,7 @@ cd dev/02-native-daemon/tests && sudo make run
 | `dev/01-ndk-prototype/` | 阶段 0：纯 NDK 快速验证 |
 | `dev/02-native-daemon/` | 阶段 1–2：AOSP native daemon（主体代码） |
 | `dev/03-java-service/` | 阶段 3：Java 系统服务（长期形态） |
-| `dev/04-emulator/` | 模拟器方向（**独立线，见该目录的 README**） |
+| `dev/04-x64-android/` | 验证环境：自编 x86_64 ROM + ARM 用户态翻译层（**独立线，见该目录的 README**） |
 | `dev/05-controller-app/` | 上位应用（只做服务管理） |
 
 ### 工具

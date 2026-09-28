@@ -1,6 +1,6 @@
 # 运行期与产物（不入库）
 #
-# 本项目位于 dev/06-x64-android/（原在仓库根的 x64-android/，已下移与 04-emulator 同级）。
+# 本项目位于 dev/04-x64-android/（原 dev/06-x64-android，更早曾在仓库根的 x64-android/）。
 # 细则就近维护在这里；仓库根的 .gitignore 里另有一段"大件速查"。
 
 # 运行期：模拟器 datadir、符号链接工作目录、日志、下载的模拟器包、打包锁

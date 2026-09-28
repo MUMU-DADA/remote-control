@@ -1,10 +1,12 @@
-# dev/06-x64-android · 同架构 x86_64 Android ROM（可跑 arm64 应用）
+# dev/04-x64-android · 同架构 x86_64 Android ROM（可跑 arm64 应用）
 
-> **与 `dev/04-emulator/` 的区别**：那边是"用模拟器验证 `autod`"的**开发内循环**；
-> 这里是**独立的 ROM 项目**——自编一份 x86_64 安卓，让它在 **x86_64 Linux（KVM）** 与
-> **x86_64 Windows（WHPX）** 上**同架构**运行，并且能跑 **arm64 应用**。
+> **本目录即验证环境（轨 04）**：自编一份 x86_64 Android 12，让它在 **x86_64 Linux（KVM）** 与
+> **x86_64 Windows（WHPX）** 上**同架构**运行，并且能跑 **arm64 应用**，用来免真机验证 `autod`。
 >
 > 目标一句话：**不要跨架构模拟，要同架构 + 用户态翻译层。**
+>
+> 历史：本目录原为 `dev/06-x64-android`；更早的 `dev/04-emulator`（跨架构全系统 arm64 模拟）
+> 经实测评估后移除，结论见 [`docs/09-why-not-full-arm64-sim.md`](docs/09-why-not-full-arm64-sim.md)。
 
 ---
 
@@ -36,7 +38,7 @@
 | G5 | （备选）arm64 不行时下放到 arm32 | 换成带 `armeabi-v7a` 的翻译层载荷 + 四 ABI 板级配置（见 §5） |
 
 **技术路线**（不是拍脑袋，依据是本仓库的实测评估
-[`../dev/04-emulator/X86_64-ARM64-BRIDGE-EVAL.md`](../04-emulator/X86_64-ARM64-BRIDGE-EVAL.md)）：
+[`docs/00-bridge-eval.md`](docs/00-bridge-eval.md)）：
 
 - 翻译层用 Google 官方的 **`libndk_translation`**（来自 `system-images;android-31;google_apis;x86_64`）。
   **不是 libhoudini**——houdini 的 arm64 变体只到 Android 7，公开源上 8/9 系列根本没有 `_z`。
@@ -49,7 +51,7 @@
 ## 2. 目录结构
 
 ```
-dev/06-x64-android/
+dev/04-x64-android/
 ├── README.md                       ← 本文件
 ├── PLAN.md                         ← 阶段划分与当前状态
 ├── device/                         ← 设备树（注入 aosp/device/autosnap/ 的唯一真源）
@@ -90,7 +92,7 @@ dev/06-x64-android/
 ## 3. 快速开始
 
 ```bash
-cd dev/06-x64-android
+cd dev/04-x64-android
 
 ./scripts/fetch-payload.sh          # 1. 取翻译层（约 1.4 GB 下载 + 一次官方镜像启动）
 ./scripts/apply-overlay.sh          # 2. 注入 AOSP 树（幂等，可 --revert）
@@ -145,7 +147,7 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 
 ## 6. 相关文档
 
-- 路线评估与全部实测证据 → [`../dev/04-emulator/X86_64-ARM64-BRIDGE-EVAL.md`](../04-emulator/X86_64-ARM64-BRIDGE-EVAL.md)
+- 路线评估与全部实测证据 → [`docs/00-bridge-eval.md`](docs/00-bridge-eval.md)
 - 设备树为什么这么写（逐条 AOSP 依据） → [`docs/01-design.md`](docs/01-design.md)
 - 构建中实际撞到的坑与解法 → [`docs/02-build-traps.md`](docs/02-build-traps.md)
 - 交付与验收（Linux/Windows 两侧怎么跑、怎么证明是同一份） → [`docs/03-delivery.md`](docs/03-delivery.md)
@@ -153,4 +155,5 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 - **验收报告（结论性证据记录）** → [`docs/07-verification-report.md`](docs/07-verification-report.md)
 - 往 ROM 里加自制组件（如 `autod`） → [`docs/05-adding-components.md`](docs/05-adding-components.md)
 - **arm32 下放预案**（目标里的"如果 arm64 不行"） → [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md)
+- **为什么不做"跨架构全系统模拟 arm64"**（实测结论 + 可复用发现） → [`docs/09-why-not-full-arm64-sim.md`](docs/09-why-not-full-arm64-sim.md)
 - 进度与阶段 → [`PLAN.md`](PLAN.md)

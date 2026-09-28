@@ -1,7 +1,7 @@
 # 验收排错手册
 
 > 对应 `scripts/run-linux.sh` 的 4 组验收。每条都是"症状 → 先查什么 → 怎么修"。
-> 命令默认在 `dev/06-x64-android/` 下执行，`S=emulator-5580`。
+> 命令默认在 `dev/04-x64-android/` 下执行，`S=emulator-5580`。
 
 ```bash
 S=emulator-5580
