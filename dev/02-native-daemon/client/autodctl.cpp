@@ -318,6 +318,16 @@ void Usage(const char* argv0) {
   selftest                                  环境自检（有副作用：会抓帧、建设备）
   stats                                     运行统计
   log [sinceSeq]                            取最近日志（增量拉取）
+  key <键名|键码> [--long]        按键注入（home/back/a/172…）
+  longpress <x> <y> [ms]          长按（按下不动再抬起）
+  doubletap <x> <y> [ms]          双击
+  drag <x1> <y1> <x2> <y2> [ms]   拖拽（起点停顿 + 慢速移动）
+  clipboard get|info              读剪贴板
+  clipboard set <文本>            写剪贴板
+  power reboot|shutdown|reboot-*  设备关机 / 重启
+  service on|off|status           服务对外开关（不真停进程）
+  running                         正在运行的应用与进程状态
+  logfile                         落盘的历史日志（最近 10KB）
   shutdown                                  优雅退出
   restart                                   退出并由 init 重启（退出码 1）
 
@@ -478,6 +488,43 @@ std::string PrettyJson(const std::string& in, int indentStep = 2) {
 }
 
 // 通用：发一条 v2 命令并把 JSON 打出来
+// v4 之后新增的命令：大多是"payload + JSON 应答"的形状，
+// 直接复用已有的 CmdV2（它就是干这个的）。
+//
+// 手势类（LongPress / DoubleTap / Drag）走坐标字段，用 MakeRequest + Transact。
+int CmdGesture(int sockFd, Cmd cmd, int x, int y, uint32_t durationMs) {
+    Request req = MakeRequest(cmd);
+    req.x = x;
+    req.y = y;
+    req.durationMs = durationMs;
+
+    Reply reply{};
+    int frameFd = -1;
+    if (!Transact(sockFd, req, &reply, &frameFd)) return 1;
+    if (!CheckReply(reply)) return 1;
+
+    printf("已发送 (%d, %d)，时长 %u ms\n", x, y, durationMs);
+    return 0;
+}
+
+int CmdDrag(int sockFd, int x1, int y1, int x2, int y2, uint32_t durationMs) {
+    Request req = MakeRequest(Cmd::Drag);
+    req.x  = x1;
+    req.y  = y1;
+    req.x2 = x2;
+    req.y2 = y2;
+    req.durationMs = durationMs;
+
+    Reply reply{};
+    int frameFd = -1;
+    if (!Transact(sockFd, req, &reply, &frameFd)) return 1;
+    if (!CheckReply(reply)) return 1;
+
+    printf("已拖拽 (%d,%d) → (%d,%d)，时长 %u ms\n",
+           x1, y1, x2, y2, durationMs);
+    return 0;
+}
+
 int CmdV2(int sockFd, Cmd cmd, const std::string& payload, uint32_t flags,
           bool compact = false) {
     Reply reply{};
@@ -636,6 +683,47 @@ int main(int argc, char** argv) {
         if (remaining < 5) { Usage(argv[0]); close(sockFd); return 1; }
         rc = CmdSwipe(sockFd, atoi(args[0]), atoi(args[1]),
                       atoi(args[2]), atoi(args[3]), ms);
+    }
+    // ── v4/v5/v6 ──
+    //
+    // 这几条都是"原始请求 + JSON 应答"，逻辑一样，所以统一走一个 helper。
+    // 手写二十遍 if-else 只会让新增命令变成一件苦差事。
+    else if (cmd == "key") {
+        if (remaining < 2) { Usage(argv[0]); close(sockFd); return 1; }
+        uint32_t fl = 0;
+        if (remaining >= 3 && strcmp(args[1], "--long") == 0) fl |= kFlagKeyLongPress;
+        rc = CmdV2(sockFd, Cmd::KeyEvent, BuildPayload({args[0]}), fl);
+    } else if (cmd == "longpress") {
+        if (remaining < 3) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdGesture(sockFd, Cmd::LongPress, atoi(args[0]), atoi(args[1]), ms);
+    } else if (cmd == "doubletap") {
+        if (remaining < 3) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdGesture(sockFd, Cmd::DoubleTap, atoi(args[0]), atoi(args[1]), ms);
+    } else if (cmd == "drag") {
+        if (remaining < 5) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdDrag(sockFd, atoi(args[0]), atoi(args[1]),
+                     atoi(args[2]), atoi(args[3]), ms);
+    } else if (cmd == "clipboard") {
+        const char* op = remaining >= 2 ? args[0] : "get";
+        if (strcmp(op, "set") == 0) {
+            if (remaining < 3) { Usage(argv[0]); close(sockFd); return 1; }
+            rc = CmdV2(sockFd, Cmd::Clipboard,
+                       BuildPayload({"set", args[1]}), 0);
+        } else {
+            rc = CmdV2(sockFd, Cmd::Clipboard, BuildPayload({op}), 0);
+        }
+    } else if (cmd == "power") {
+        if (remaining < 2) { Usage(argv[0]); close(sockFd); return 1; }
+        rc = CmdV2(sockFd, Cmd::Power, BuildPayload({args[0]}), 0);
+    } else if (cmd == "service") {
+        const char* op = remaining >= 2 ? args[0] : "status";
+        // kFlagForce：服务关闭时这条仍然要放行，否则就开不回来了
+        rc = CmdV2(sockFd, Cmd::ServiceSwitch, BuildPayload({op}),
+                   kFlagForce);
+    } else if (cmd == "running") {
+        rc = CmdV2(sockFd, Cmd::RunningApps, {}, 0);
+    } else if (cmd == "logfile") {
+        rc = CmdV2(sockFd, Cmd::LogFile, {}, 0);
     }
     // ── v2：应用与文件管理 ──
     // 约定：payload 为 NUL 分隔字符串，应答为 JSON

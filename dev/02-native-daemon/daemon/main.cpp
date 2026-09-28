@@ -61,10 +61,12 @@ void PrintUsage(const char* argv0) {
   --gid <gid>          配套的 GID，省略则用与 uid 相同的值
   --selftest           检查运行环境后退出（首次部署时先跑这个）
   --config <路径>       配置文件，默认 /sdcard/autod.conf（首启无鉴权）
-  --http-bind <地址>    启用 HTTP/JSON API 并绑定该地址（如 127.0.0.1）
-                        不指定则不启用。绑非回环地址时**必须**配 --http-token
+  --http-bind <地址>    启用 HTTP/JSON API 并绑定该地址（如 0.0.0.0 对外）
+                        不指定则由配置文件决定。默认的 /sdcard/autod.conf
+                        首启是 0.0.0.0:8088 且**无鉴权**
   --http-port <端口>    HTTP 端口，默认 8088
-  --http-token <令牌>   访问 HTTP API 所需的 Bearer token
+  --http-token <令牌>   访问令牌。给了就等于开启鉴权；
+                        不给则由配置文件的 auth=/token= 决定
   --socket-mode <8进制>  socket 文件权限，默认 0660
                         放宽到 0666 可让上位应用以自己的 UID 连入；
                         但那意味着同设备任何进程都能控制本服务，请自行权衡
@@ -75,6 +77,9 @@ void PrintUsage(const char* argv0) {
 示例:
   # 开发期：前台跑，自己 bind socket
   autod --socket /data/local/tmp/autod.sock --foreground --verbose
+
+  # 常用：让配置文件决定监听地址/端口/鉴权（上位应用就是这么管的）
+  autod --socket /data/local/tmp/autod.sock
 
   # 生产：由 init 拉起，socket 由 init 创建并打好 SELinux 标签
   autod --init-socket autod
@@ -559,6 +564,25 @@ int main(int argc, char** argv) {
     server.Run([&dispatcher, &server, &httpServer](
                        const Request& req, const std::string& payload,
                        int reqFd, int peerUid) {
+        // ── 服务对外开关 ──
+        //
+        // HTTP 那边在 RestApi::Handle 里挡了，socket 这边也要挡 ——
+        // 不然"关掉服务"只是关掉了 HTTP，本机进程照样能通过 socket
+        // 完整控制设备，软开关就成了摆设。
+        //
+        // 只放行 ServiceSwitch 本身（带 kFlagForce），否则关掉之后
+        // 就没有任何入口能开回来了。
+        if (!ServiceState::Instance().Serving() &&
+            req.cmd != static_cast<uint32_t>(Cmd::ServiceSwitch)) {
+            ALOGW("socket 拒绝（服务已关闭对外能力）cmd=%u", req.cmd);
+            ReplyPacket denied;
+            denied.reply.magic  = kMagic;
+            denied.reply.status = kErrPermission;
+            denied.reply.cmd    = req.cmd;
+            ServiceState::Instance().CountRequest(req.cmd, kErrPermission);
+            return denied;      // 处理器是取返回值的，不是循环体
+        }
+
         // 不加锁 —— 串行化在 Dispatcher::Handle 里做。
         // 放这里对流式响应无效（回调在处理器返回之后才跑），
         // 而且两处都加会直接死锁。

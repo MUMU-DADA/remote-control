@@ -156,7 +156,43 @@ HttpResponse RestApi::Call(Cmd cmd, const std::string& payload, uint32_t flags,
 
 // ── 截图 ────────────────────────────────────────────────────────────────────
 HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
-    const std::string format = req.queryParam("format", "png");
+    // ── 格式与质量 ──
+    //
+    // **和画面流用同一套解析**，不要各写一遍。早先这里是
+    //   `format == "raw" ? raw : 一律 PNG`
+    // 于是：
+    //   ?format=jpeg   静默返回 PNG
+    //   ?format=bogus  也静默返回 PNG
+    // 调用方拿到 PNG 却以为要到了 JPEG，而且没有任何提示。
+    ImageFormat codec = ImageFormat::kAuto;
+    {
+        const std::string f = req.queryParam("format", "auto");
+        if (!ImageEncoder::ParseFormat(f, &codec)) {
+            return HttpResponse::Error(
+                    400, "未知格式: " + f + "（可用 auto|png|jpeg|webp|raw）");
+        }
+    }
+    // auto 的含义**随场景变**：
+    //   单次截图 → PNG（无损。一次调用，大小不重要，清晰更重要）
+    //   画面流   → JPEG（一路视频，带宽和编码耗时都重要）
+    // 两个默认值不同是有意的，不是不一致。
+    if (codec == ImageFormat::kAuto) codec = ImageFormat::kPng;
+
+    int quality = 0;
+    {
+        const std::string q = req.queryParam("quality", "");
+        if (!q.empty()) {
+            char* end = nullptr;
+            const long v = strtol(q.c_str(), &end, 10);
+            if (end != nullptr && *end == '\0' && v >= 1 && v <= 100) {
+                quality = static_cast<int>(v);
+            }
+        }
+    }
+    if (quality == 0) {
+        quality = (codec == ImageFormat::kPng) ? 6
+                : (codec == ImageFormat::kWebp) ? 90 : 90;
+    }
 
     Request request{};
     request.magic = kMagic;
@@ -164,7 +200,8 @@ HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
     request.flags = 0;
 
     ReplyPacket packet = dispatcher_->Handle(request, "", -1, 0);
-    ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Capture), packet.reply.status);
+    ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Capture),
+                                          packet.reply.status);
 
     if (packet.reply.status != kOk) {
         if (packet.fd >= 0) close(packet.fd);
@@ -181,70 +218,72 @@ HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
         return HttpResponse::Error(500, "截图返回空数据");
     }
 
-    // mmap 而不是 read：大帧少一次拷贝，而且后面编 PNG 要按行随机访问
+    // mmap 而不是 read：大帧少一次拷贝，而且编码要按行随机访问
     void* base = mmap(nullptr, size, PROT_READ, MAP_SHARED, packet.fd, 0);
     if (base == MAP_FAILED) {
         close(packet.fd);
-        return HttpResponse::Error(500, std::string("mmap 失败: ") + strerror(errno));
+        return HttpResponse::Error(500, std::string("mmap 失败: ") +
+                                            strerror(errno));
     }
+
+    // 统一收尾。原来每条分支都写一遍 munmap+close，漏一条就是 fd 泄漏 ——
+    // 这个函数现在分支更多了，用 RAII 才靠得住。
+    struct Guard {
+        void* p; uint64_t n; int fd;
+        ~Guard() { munmap(p, n); close(fd); }
+    } guard{base, size, packet.fd};
 
     HttpResponse resp;
-    if (format == "raw") {
+    resp.extraHeaders.push_back({"X-Autod-Width", std::to_string(w)});
+    resp.extraHeaders.push_back({"X-Autod-Height", std::to_string(h)});
+    resp.extraHeaders.push_back({"X-Autod-PixelFormat", std::to_string(fmt)});
+
+    if (codec == ImageFormat::kRaw) {
         resp.status = 200;
         resp.contentType = "application/octet-stream";
+        resp.extraHeaders.push_back({"X-Autod-Stride",
+                                     std::to_string(packet.reply.stride)});
         resp.body.assign(static_cast<const char*>(base), size);
-    } else {
-        // 只处理 4 字节/像素的格式。别的（RGB_565 等）在传输层转没意义，
-        // 明确报错让调用方知道要什么。
-        const bool is4bpp = (fmt == 1 /*RGBA_8888*/ || fmt == 2 /*RGBX_8888*/ ||
-                             fmt == 5 /*BGRA_8888*/);
-        if (!is4bpp) {
-            munmap(base, size);
-            close(packet.fd);
-            return HttpResponse::Error(
-                    500, "像素格式 0x" + std::to_string(fmt) +
-                             " 暂不支持编码（只支持 RGBA/RGBX/BGRA_8888）；"
-                             "可用 ?format=raw 取原始像素");
-        }
-
-        // BGRA → RGBA：PNG 要求 RGBA 顺序
-        std::vector<uint8_t> rgba;
-        const uint8_t* src = static_cast<const uint8_t*>(base);
-        if (fmt == 5) {
-            rgba.resize(size);
-            for (uint64_t i = 0; i + 3 < size; i += 4) {
-                rgba[i + 0] = src[i + 2];
-                rgba[i + 1] = src[i + 1];
-                rgba[i + 2] = src[i + 0];
-                rgba[i + 3] = src[i + 3];
-            }
-            src = rgba.data();
-        }
-
-        std::string perr;
-        if (!PngEncoder::Instance().Init(&perr)) {
-            munmap(base, size);
-            close(packet.fd);
-            return HttpResponse::Error(500, perr);
-        }
-        std::string png = PngEncoder::Instance().EncodeRgba(src, w, h, 6, &perr);
-        if (png.empty()) {
-            munmap(base, size);
-            close(packet.fd);
-            return HttpResponse::Error(500, "PNG 编码失败: " + perr);
-        }
-        resp.status = 200;
-        resp.contentType = "image/png";
-        resp.body = std::move(png);
+        return resp;
     }
 
-    munmap(base, size);
-    close(packet.fd);
+    // 只处理 4 字节/像素的格式。别的（RGB_565 等）在传输层转没意义，
+    // 明确报错让调用方知道要什么。
+    const bool is4bpp = (fmt == 1 /*RGBA_8888*/ || fmt == 2 /*RGBX_8888*/ ||
+                         fmt == 5 /*BGRA_8888*/);
+    if (!is4bpp) {
+        return HttpResponse::Error(
+                500, "像素格式 0x" + std::to_string(fmt) +
+                         " 暂不支持编码（只支持 RGBA/RGBX/BGRA_8888）；"
+                         "可用 ?format=raw 取原始像素");
+    }
 
-    // 尺寸信息放在头里，方便调用方不解析图片就知道分辨率
-    resp.extraHeaders.emplace_back("X-Autod-Width", std::to_string(w));
-    resp.extraHeaders.emplace_back("X-Autod-Height", std::to_string(h));
-    resp.extraHeaders.emplace_back("X-Autod-PixelFormat", std::to_string(fmt));
+    // BGRA → RGBA
+    std::vector<uint8_t> rgba;
+    const uint8_t* src = static_cast<const uint8_t*>(base);
+    if (fmt == 5) {
+        rgba.resize(size);
+        for (uint64_t i = 0; i + 3 < size; i += 4) {
+            rgba[i + 0] = src[i + 2];
+            rgba[i + 1] = src[i + 1];
+            rgba[i + 2] = src[i + 0];
+            rgba[i + 3] = src[i + 3];
+        }
+        src = rgba.data();
+    }
+
+    std::string perr;
+    if (!ImageEncoder::Instance().Init(&perr)) {
+        return HttpResponse::Error(500, perr);
+    }
+    std::string out = ImageEncoder::Instance().Encode(src, w, h, codec,
+                                                      quality, &perr);
+    if (out.empty()) {
+        return HttpResponse::Error(500, perr.empty() ? "编码失败" : perr);
+    }
+    resp.status = 200;
+    resp.contentType = ImageEncoder::MimeType(codec);
+    resp.body = std::move(out);
     return resp;
 }
 
@@ -1251,7 +1290,47 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         return Call(Cmd::Power, PackArgs({what}), 0, -1);
     }
     if (res == "info" && method == "GET") {
-        return Call(Cmd::Info, "", 0, -1);
+        // ⚠️ 不能直接 `return Call(Cmd::Info, …)`。
+        //
+        // Cmd::Info 把结果填在 Reply **结构体的字段**里（width/height/
+        // stride/format），那是 socket 协议的表达方式；而 HTTP 这一层
+        // 只看应答的 JSON 正文。直接转发的结果是
+        //   {"ok":true,"status":0,"error":"ok"}
+        // —— 看着成功，其实一个有用字段都没有。
+        //
+        // 所以这里自己发一次 Capture 探帧（走的是和截图同一条路），
+        // 再从 Reply 里把尺寸读出来拼成 JSON。
+        Request r{};
+        r.magic = kMagic;
+        r.cmd   = static_cast<uint32_t>(Cmd::Info);
+        ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
+        if (p.fd >= 0) close(p.fd);
+        if (p.reply.status != kOk) {
+            return HttpResponse::Error(500, StatusName(p.reply.status));
+        }
+
+        Request c{};
+        c.magic = kMagic;
+        c.cmd   = static_cast<uint32_t>(Cmd::Capture);
+        ReplyPacket cp = dispatcher_->Handle(c, "", -1, 0);
+        ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Capture),
+                                              cp.reply.status);
+        if (cp.fd >= 0) close(cp.fd);
+        if (cp.reply.status != kOk) {
+            return HttpResponse::Error(500, StatusName(cp.reply.status));
+        }
+
+        json::Writer w;
+        w.Obj()
+            .Field("ok", true)
+            .Field("primaryWidth", static_cast<int64_t>(cp.reply.width))
+            .Field("primaryHeight", static_cast<int64_t>(cp.reply.height))
+            .Field("primaryStride", static_cast<int64_t>(cp.reply.stride))
+            .Field("primaryFormat", static_cast<int64_t>(cp.reply.format))
+            .Field("touchWidth", static_cast<int64_t>(p.reply.width))
+            .Field("touchHeight", static_cast<int64_t>(p.reply.height))
+         .EndObj();
+        return HttpResponse::Json(200, w.str());
     }
     if (res == "tap" && method == "POST") {
         json::Value b; HttpResponse err;
@@ -1367,7 +1446,20 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         return HttpResponse::Error(405, "files 只支持 GET / POST");
     }
 
-    return HttpResponse::Error(404, "未知资源: " + res);
+    // ⚠️ 这里用 **kErrBadCmd（4098）而不是 HTTP 的 404**。
+    //
+    // 早先传的是 404，于是 `status` 字段的含义变成了"有时候是协议码、
+    // 有时候是 HTTP 码" —— 调用方没法统一处理：参数错的响应里
+    // status=4099，路由错的响应里 status=404，两者都是 400 类错误
+    // 却长得完全不一样。
+    //
+    // 现在 status **始终是协议状态码**，HTTP 状态码由这一层映射出来
+    // （kErrBadCmd → 400）。唯一的例外是 401 和 503 —— 那是 HTTP 层
+    // 独有的情况，没有对应的协议码（见 docs/api/05-errors.md）。
+    // 传**协议码**而不是 HTTP 码：未知路由的本质是"不认识这个命令"，
+    // 语义上是 kErrBadCmd，不是 kErrBadArg。Error() 会据此推出 HTTP 400。
+    return HttpResponse::Error(static_cast<int>(kErrBadCmd),
+                               "未知资源: " + res);
 }
 
 }  // namespace autod

@@ -73,6 +73,17 @@ std::string CommandName(uint32_t cmd) {
         case Cmd::Log:           return "Log";
         case Cmd::Shutdown:      return "Shutdown";
         case Cmd::Restart:       return "Restart";
+        // v4
+        case Cmd::LongPress:     return "LongPress";
+        case Cmd::Drag:          return "Drag";
+        case Cmd::DoubleTap:     return "DoubleTap";
+        case Cmd::Clipboard:     return "Clipboard";
+        // v5
+        case Cmd::Power:         return "Power";
+        // v6
+        case Cmd::ServiceSwitch: return "ServiceSwitch";
+        case Cmd::RunningApps:   return "RunningApps";
+        case Cmd::LogFile:       return "LogFile";
         default:                 return "Cmd" + std::to_string(cmd);
     }
 }

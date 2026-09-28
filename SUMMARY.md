@@ -212,6 +212,13 @@ cd dev/02-native-daemon/tests && sudo make run
 
 | 文档 | 内容 |
 |---|---|
+| **`docs/api/`** | **接口文档（权威）** —— HTTP / WebSocket / Unix socket / 配置 / 错误码 |
+| `docs/api/README.md` | 索引、5 分钟上手、三条传输的取舍 |
+| `docs/api/01-http.md` | HTTP/JSON API 全部 29 个端点 |
+| `docs/api/02-websocket.md` | 画面流 / 触控流 / 日志流 |
+| `docs/api/03-socket.md` | Unix socket 二进制协议（32 条命令） |
+| `docs/api/04-config.md` | 配置文件、命令行、鉴权、supervisor |
+| `docs/api/05-errors.md` | 状态码与错误处理 |
 | `docs/01-selection.md` | 方案选型：为什么不用内核，三种落点对比 |
 | `docs/02-architecture.md` | 架构设计：组件、协议、关键决策 |
 | `docs/03-version-matrix.md` | 各 Android 版本的截图/注入 API 差异 |
@@ -220,6 +227,9 @@ cd dev/02-native-daemon/tests && sudo make run
 | `docs/06-constraints.md` | 关键约束与风险清单 |
 | `docs/07-environment.md` | 本机实际环境：磁盘、镜像源、构建容器 |
 | `docs/08-official-implementations.md` | 官方/开源实现对照：用了哪个、为什么 |
+| `docs/09-app-and-file-api.md` | 应用与文件管理的设计记录 |
+| `docs/10-http-api.md` | HTTP 传输的设计记录（含安全模型） |
+| `docs/11-live-stream-and-input.md` | 实时流与输入的设计记录（含性能实测） |
 | `dev/01-ndk-prototype/` | 阶段 0：纯 NDK 快速验证 |
 | `dev/02-native-daemon/` | 阶段 1–2：AOSP native daemon（主体代码） |
 | `dev/03-java-service/` | 阶段 3：Java 系统服务（长期形态） |

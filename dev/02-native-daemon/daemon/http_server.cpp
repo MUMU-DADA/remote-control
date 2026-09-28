@@ -2,6 +2,8 @@
 
 #include "http_server.h"
 
+#include "protocol.h"   // kErr* 协议状态码（Error 要把它写进 status 字段）
+
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -130,11 +132,58 @@ HttpResponse HttpResponse::WebSocket(const std::string& accept) {
     return r;
 }
 
+// HTTP 状态码 → 协议状态码。
+//
+// 为什么要有这个映射：`status` 字段必须是**协议状态码**，否则调用方
+// 没法统一处理 —— 参数错的响应里 status=4099，路由错的响应里 status=404，
+// 两者都是 400 类错误却长得完全不一样。
+//
+// 映射表只覆盖有对应协议码的那几个。401 和 503 是 HTTP 层独有的情况
+// （需要令牌 / 服务被软开关关掉），没有协议码可用，**原样保留** ——
+// 这一点在 docs/api/05-errors.md 里明确写了。
+static int ToProtocolStatus(int code) {
+    // 已经给了协议码（≥ 0x1000）就原样用
+    if (code >= 0x1000) return code;
+    switch (code) {
+        case 400: return autod::kErrBadArg;
+        case 403: return autod::kErrPermission;
+        case 404: return autod::kErrNotFound;
+        case 500: return autod::kErrInternal;
+        case 501: return autod::kErrUnsupported;
+        case 504: return autod::kErrTimeout;
+        default:  return code;   // 401 / 503 等 HTTP 层专属，保留原值
+    }
+}
+
+// 反向：协议码 → HTTP 状态码。调用方直接传协议码时用。
+static int ToHttpStatus(int proto) {
+    switch (proto) {
+        case autod::kErrBadMagic:
+        case autod::kErrBadCmd:
+        case autod::kErrBadArg:
+        case autod::kErrPayload:     return 400;
+        case autod::kErrPermission:  return 403;
+        case autod::kErrNotFound:    return 404;
+        case autod::kErrUnsupported: return 501;
+        case autod::kErrTimeout:     return 504;
+        default:                     return 500;
+    }
+}
+
 HttpResponse HttpResponse::Error(int status, const std::string& message) {
+    HttpResponse r;
+    // 调用方可以传 HTTP 状态码（400）也可以传协议码（kErrBadCmd）。
+    // 两种都支持是因为调用点写什么的都有，而**输出必须统一**。
+    r.status = (status >= 0x1000) ? ToHttpStatus(status) : status;
+    // status 字段用协议码；HTTP 状态码保持调用方给的那个（两者已经对应上）
     json::Writer w;
-    w.Obj().Field("ok", false).Field("status", status)
-           .Field("error", message).EndObj();
-    return Json(status, w.str());
+    w.Obj().Field("ok", false)
+           .Field("status", static_cast<uint64_t>(ToProtocolStatus(status)))
+           .Field("error", message)
+     .EndObj();
+    r.body = w.str();
+    r.contentType = "application/json; charset=utf-8";
+    return r;
 }
 
 // ── HttpServer ──────────────────────────────────────────────────────────────
