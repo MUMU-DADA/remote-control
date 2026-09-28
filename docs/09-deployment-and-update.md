@@ -353,3 +353,49 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 不受影响 —— 那才是本次需求的根因部分）。
 `daemon/launcher.cpp`（壳）与 `tools/rc-update.sh`（推送/切换/回滚）都已写好、
 能编译，选 A 或 B 之后接上即可。
+
+### 9.4 两条路都实测过了：都不通
+
+**方案 B（载荷放 /system）—— 这个 ROM 上做不到**：
+
+| 手段 | 实测结果 |
+|---|---|
+| `adb disable-verity` | `only works for userdebug builds` —— 我们**就是** userdebug，它仍然拒绝 |
+| `adb remount` | `liblp: WritePrimaryMetadata ... failed: Operation not permitted` + `/system_ext: Read-only file system`。动态分区（super）的元数据在运行时改不了 |
+| 模拟器 `-writable-system` | 标志确认已传给 qemu（`ps` 里查得到），但 `adb remount` 仍失败：`Consider providing all the dependencies to enable overlayfs`。没有 overlayfs 也没有 scratch 分区 |
+
+结论：这套 ROM 是**动态分区 + AVB**，`/system` 在运行时就是只读的。
+`-writable-system` 的"临时副本"也救不了，因为 overlayfs 起不来。
+
+**方案 A（壳跑 shell 域 + 服务放弃 coredomain）—— 会引发 neverallow 级联**：
+
+去掉 `coredomain` 之后，域就落进 `{ domain -appdomain -coredomain ... }` 这个集合，
+而 AOSP 对"既不是核心域、也不是应用域"的域限制**多得多**。实测第一条就撞上：
+
+    neverallow on line 829 of public/domain.te violated by
+        allow remote_control remote_control_payload_exec:file { entrypoint };
+
+那条规则禁止这类域访问 `core_data_file_type`（它只豁免 appdomain 和 coredomain）。
+可 **sepolicy_tests 又要求 /data 下的类型必须带 core_data_file_type** ——
+两个要求直接对立，不是"再加一条 allow"能解决的。
+
+要真走 A，得把载荷槽挪出 `/data`（否则躲不开 core_data_file_type），
+那又回到方案 B 的死路。**所以 A 不是"多花点工夫"，是此路不通。**
+
+### 9.5 最终结论
+
+热替换通道的**前提**（能执行 /data 里的载荷）在这个 AOSP 版本上对
+"非 appdomain 的常驻服务"不成立。三条 neverallow 互相咬住（§9.2），
+两条绕开的路又各自被动态分区和 neverallow 级联堵死（§9.4）。
+
+**因此本次不做热替换**，更新走既有的正规通道：
+
+    ./scripts/build-rom.sh && ./scripts/package-rom.sh && ./scripts/emulator.sh restart <实例>
+
+全流程约 3 分钟，改动被编进镜像、跨重启、可回滚（git）。它比"秒级热替换"慢，
+但**没有拿安全换** —— 服务保持专属 SELinux 域（计划 §2 的第 ③ 条腿），
+这才是这套东西的正规形态。
+
+`daemon/launcher.cpp` 与 `tools/rc-update.sh` 保留在树里：若将来上
+Magisk（`/data/adb/modules` 是 appdomain 之外的另一条路）或换 AOSP 版本，
+它们可以直接接上；在那之前不要把它们当可用功能。
