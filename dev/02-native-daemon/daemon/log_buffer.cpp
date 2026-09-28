@@ -50,6 +50,16 @@ void LogBuffer::Append(LogLevel level, const char* tag, const std::string& text)
     LogLine line;
     line.seq    = nextSeq_++;
     line.timeMs = MonotonicMs();
+
+    // 墙上时间：在缓冲层统一打，而不是让每个写入点自己格式化。
+    // 写入点遍布各处，漏一个就会出现没有时间的日志行。
+    {
+        const time_t now = time(nullptr);
+        line.wallSec = static_cast<int64_t>(now);
+        struct tm tmv{};
+        localtime_r(&now, &tmv);
+        strftime(line.timeStr, sizeof(line.timeStr), "%m-%d %H:%M:%S", &tmv);
+    }
     line.level  = level;
     line.tag    = tag != nullptr ? tag : "";
     line.text   = text;
@@ -80,21 +90,16 @@ void LogBuffer::Append(LogLevel level, const char* tag, const std::string& text)
 void LogBuffer::AppendToHistory(const LogLine& line) {
     if (historyPath_.empty()) return;
 
-    // 组装一行。时间用墙上时间 —— 排障时"几点发生的"比"开机后多久"有用；
-    // 内存缓冲里用单调时钟是为了排序稳定，这里没那个需求。
-    char ts[32];
-    const time_t now = time(nullptr);
-    struct tm tmv{};
-    localtime_r(&now, &tmv);
-    strftime(ts, sizeof(ts), "%m-%d %H:%M:%S", &tmv);
-
+    // 时间直接用缓冲层算好的，不再重新格式化一遍 ——
+    // 两处各写一次的话，格式一旦不一致（比如一处带秒一处不带），
+    // 同一个文件里就会出现两种时间格式。
     static const char* kLevelChar = "IWED";
     const int li = static_cast<int>(line.level);
     const char lc = kLevelChar[(li >= 0 && li < 4) ? li : 0];
 
     std::string out;
     out.reserve(line.text.size() + 48);
-    out += ts;
+    out += line.timeStr;
     out += ' ';
     out += lc;
     out += ' ';

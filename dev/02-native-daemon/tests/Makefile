@@ -52,7 +52,9 @@ INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
              $(DAEMON)/clipops.cpp \
              $(DAEMON)/png_encoder.cpp \
              $(DAEMON)/json_parser.cpp \
-             $(DAEMON)/webui.cpp
+             $(DAEMON)/webui.cpp \
+             $(DAEMON)/websocket.cpp \
+             $(DAEMON)/config_file.cpp
 
 # [3] screencap 截图后端：配 fake_screencap 冒充设备命令
 SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \

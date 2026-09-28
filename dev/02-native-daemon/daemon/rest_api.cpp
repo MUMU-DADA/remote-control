@@ -250,37 +250,87 @@ HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
 
 // ── 安装 ────────────────────────────────────────────────────────────────────
 HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
-    if (req.body.empty()) {
-        return HttpResponse::Error(400, "请求体为空：请把 APK 字节作为请求体发送");
-    }
+    // 两种来源：
+    //   1. 请求体 = APK 字节（网页上传走这条）
+    //   2. ?path=/sdcard/xxx.apk（文件已经推到设备上了）
+    //
+    // 两条都落到**真实文件**上，而不是 memfd。原因就是需求里那条：
+    // "安装完成或者失败后删除"。memfd 没有"删除"这个动作可做，
+    // 而真实文件如果忘了删，用几次就把 /sdcard 堆满了 APK。
+    std::string path = req.queryParam("path", "");
+    const bool fromBody = path.empty();
 
-    // 落成临时文件：协议要求通过 fd 传 APK，而 fd 背后得有个真实数据源。
-    // 用 memfd 更干净，但 InstallApp 的实现会把它当普通 fd 顺序读，
-    // 这里直接写 memfd 省掉一次磁盘往返。
-    const int fd = memfd_create("apk-http", MFD_CLOEXEC);
-    if (fd < 0) {
-        return HttpResponse::Error(500, std::string("memfd_create 失败: ") +
-                                            strerror(errno));
-    }
+    if (fromBody) {
+        if (req.body.empty()) {
+            return HttpResponse::Error(
+                    400, "请求体为空：把 APK 字节作为请求体发送，"
+                         "或用 ?path= 指定设备上已有的文件");
+        }
+        // 放 /sdcard 而不是 /data/local/tmp：installer 对两者都能读，
+        // 但 /sdcard 上的文件用户自己也能看见 —— 出问题时好排查。
+        path = "/sdcard/autod-upload-" + std::to_string(getpid()) + ".apk";
 
-    size_t off = 0;
-    while (off < req.body.size()) {
-        const ssize_t n = write(fd, req.body.data() + off, req.body.size() - off);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            return HttpResponse::Error(500, std::string("写入临时 fd 失败: ") +
+        const int wfd = open(path.c_str(),
+                             O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0660);
+        if (wfd < 0) {
+            return HttpResponse::Error(500, "无法创建 " + path + ": " +
                                                 strerror(errno));
         }
-        off += static_cast<size_t>(n);
+        size_t off = 0;
+        bool ok = true;
+        while (off < req.body.size()) {
+            const ssize_t n = write(wfd, req.body.data() + off,
+                                    req.body.size() - off);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                ok = false;
+                break;
+            }
+            off += static_cast<size_t>(n);
+        }
+        fsync(wfd);
+        close(wfd);
+        if (!ok) {
+            unlink(path.c_str());
+            return HttpResponse::Error(500, std::string("写 APK 失败: ") +
+                                                strerror(errno));
+        }
+        ALOGI("收到上传的 APK: %s（%zu 字节）", path.c_str(), req.body.size());
+    } else if (access(path.c_str(), R_OK) != 0) {
+        return HttpResponse::Error(404, "找不到文件: " + path);
     }
-    lseek(fd, 0, SEEK_SET);
+
+    // 交给 InstallApp。它按 fd 顺序读，所以这里把文件打开成 fd。
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        // 打开失败也要删 —— 上传上来的文件已经落地了，
+        // 不删就是垃圾。只有 keep=1 才留。
+        const bool keep = req.queryParam("keep", "0") == "1";
+        if (!keep) unlink(path.c_str());
+        return HttpResponse::Error(500, "打开 " + path + " 失败: " +
+                                            strerror(errno));
+    }
 
     const bool replace = req.queryParam("replace", "1") != "0";
     const uint32_t flags = replace ? static_cast<uint32_t>(kFlagReplace) : 0u;
 
     HttpResponse resp = Call(Cmd::InstallApp, "", flags, fd);
     close(fd);
+
+    // ── 删除 ──
+    //
+    // **成功和失败都删**。不删的话每次安装都在 /sdcard 上留一个 APK，
+    // 用一阵子就是一堆几十 MB 的文件，而且没人会想起来清。
+    //
+    // keep=1 可以保留（调试用：想手工确认 APK 内容时）。
+    if (req.queryParam("keep", "0") != "1") {
+        if (unlink(path.c_str()) == 0) {
+            ALOGI("安装%s，已删除 %s", resp.status == 200 ? "成功" : "失败",
+                  path.c_str());
+        } else {
+            ALOGW("安装后删除 %s 失败: %s", path.c_str(), strerror(errno));
+        }
+    }
     return resp;
 }
 
@@ -590,6 +640,7 @@ HttpResponse RestApi::HandleLogStream(const HttpRequest& req) {
                     w.Obj()
                         .Field("seq", static_cast<int64_t>(l.seq))
                         .Field("ms", l.timeMs)
+                        .Field("time", l.timeStr)
                         .Field("level", static_cast<int64_t>(l.level))
                         .Field("tag", l.tag)
                         .Field("text", l.text)

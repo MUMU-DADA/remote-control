@@ -29,6 +29,12 @@ const char* LogLevelName(LogLevel lv);
 struct LogLine {
     uint64_t seq = 0;          // 单调递增序号，客户端用它做增量拉取
     int64_t  timeMs = 0;       // 单调时钟（不是墙上时间，避免时区/跳变问题）
+    // 墙上时间（秒）。界面要显示"几点几分发生的"，单调时钟给不了这个；
+    // 而排序和增量拉取用单调时钟更稳（不受系统时间被改的影响）。
+    // 两个都留着，各干各的。
+    int64_t  wallSec = 0;
+    // 预格式化的 "MM-DD HH:MM:SS"，显示端直接用，不用各自再做一遍时区转换
+    char     timeStr[24] = {};
     LogLevel level = LogLevel::kInfo;
     std::string tag;
     std::string text;

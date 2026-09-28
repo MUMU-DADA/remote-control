@@ -939,6 +939,7 @@ ReplyPacket Dispatcher::HandleLog(const Request& req,
         w.Obj()
             .Field("seq", ln.seq)
             .Field("timeMs", ln.timeMs)
+            .Field("time", ln.timeStr)
             .Field("level", LogLevelName(ln.level))
             .Field("tag", ln.tag)
             .Field("text", ln.text)
@@ -1209,6 +1210,35 @@ ReplyPacket Dispatcher::HandleRunningApps(const Request& req) {
                              "取运行状态失败: " + (err.empty() ? r.err : err));
     }
 
+    // 先拿系统应用清单，用来给每个进程打 system 标记。
+    //
+    // lru 的输出里没有这个信息，而"只看第三方应用"是排障时最常见的需求 ——
+    // 二十多个进程里大部分是系统组件。用 uid 猜（< 10000 算系统）不靠谱：
+    // com.android.settings 的 app id 恰好是 1000，但它明显是系统应用，
+    // 而某些预装应用的 id 又大于 10000。所以直接问 PackageManager。
+    std::vector<std::string> sysArgv = {
+        "/system/bin/pm", "list", "packages", "-s",
+    };
+    CommandResult sysRes;
+    std::vector<std::string> sysPkgs;
+    if (RunCommand(sysArgv, 15000, 1u << 20, &sysRes, nullptr) &&
+        sysRes.exitCode == 0) {
+        size_t sp = 0;
+        while (sp < sysRes.out.size()) {
+            const size_t e = sysRes.out.find('\n', sp);
+            std::string l = sysRes.out.substr(
+                    sp, e == std::string::npos ? std::string::npos : e - sp);
+            sp = (e == std::string::npos) ? sysRes.out.size() : e + 1;
+            // "package:com.android.settings" 或 "package:com.x -> /path"
+            const size_t c = l.find(':');
+            if (c == std::string::npos) continue;
+            std::string name = l.substr(c + 1);
+            const size_t sp2 = name.find_first_of(" \t\r");
+            if (sp2 != std::string::npos) name = name.substr(0, sp2);
+            if (!name.empty()) sysPkgs.push_back(name);
+        }
+    }
+
     json::Writer w;
     w.Obj().Field("ok", true);
     w.Key("apps").Arr();
@@ -1288,12 +1318,32 @@ ReplyPacket Dispatcher::HandleRunningApps(const Request& req) {
         const std::string pkg =
                 (sub == std::string::npos) ? proc : proc.substr(0, sub);
 
+        // 系统应用判定要**三条一起看**，任何单独一条都有盲区：
+        //
+        //   1. 包名在 `pm list packages -s` 里 —— 权威，但覆盖不到
+        //      没有对应包的进程（system_server 的进程名就叫 "system"，
+        //      android.process.acore 的进程名也不是包名）
+        //   2. uid 不是 u0aNN 形式（纯数字，如 1000）—— 可靠，但
+        //      launcher3 这类预装应用用的是 app uid（u0a90），会漏
+        //   3. 进程名里带 ".process." —— 那是框架的共享进程命名法，
+        //      取它前面那段当包名再查一次
+        std::string basePkg = pkg;
+        const size_t pp = basePkg.find(".process.");
+        if (pp != std::string::npos) basePkg = basePkg.substr(0, pp);
+
+        const bool byUid  = !uid.empty() && uid[0] != 'u';
+        const bool byName = (basePkg == "android") || (basePkg == "system");
+        const bool byList = std::find(sysPkgs.begin(), sysPkgs.end(), basePkg)
+                                != sysPkgs.end();
+        const bool isSys = byUid || byName || byList;
+
         w.Obj()
             .Field("package", pkg)
             .Field("process", proc)
             .Field("pid", static_cast<int64_t>(strtol(pidStr.c_str(), nullptr, 10)))
             .Field("uid", uid)
             .Field("state", state)
+            .Field("system", isSys)
          .EndObj();
         ++count;
     }

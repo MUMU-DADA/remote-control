@@ -37,6 +37,14 @@ const std::string& WebUiHtml() {
           padding:10px; }
   .card h2 { font-size:12px; margin:0 0 8px; color:var(--dim);
              font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+  /* 可收起的卡片头。整行可点，不只小三角 —— 手机上点一个小图标很难命中 */
+  .card h2.clickable { cursor:pointer; user-select:none; display:flex;
+                       align-items:center; gap:6px; margin-bottom:0; }
+  .card h2.clickable .arrow { font-size:10px; transition:transform .15s;
+                              display:inline-block; color:#666; }
+  .card.collapsed h2.clickable .arrow { transform:rotate(-90deg); }
+  .card.collapsed .body { display:none; }
+  .card h2.clickable + .body { margin-top:8px; }
   .row { display:flex; gap:6px; flex-wrap:wrap; }
   button { background:#2a2a2a; color:var(--fg); border:1px solid #444;
            border-radius:4px; padding:6px 10px; font-size:12px; cursor:pointer; }
@@ -166,28 +174,48 @@ const std::string& WebUiHtml() {
       </div>
     </div>
 
-    <div class="card">
-      <h2>应用</h2>
+    <div class="card" id="card-apps">
+      <h2 class="clickable" onclick="toggleCard('card-apps')">
+        <span class="arrow">▼</span>应用
+      </h2>
+      <div class="body">
       <div class="row">
         <label style="font-size:12px"><input type="checkbox" id="appSys"> 含系统应用</label>
         <button onclick="loadApps()">刷新列表</button>
+        <button onclick="$('apkfile').click()">上传安装 APK</button>
+        <input type="file" id="apkfile" accept=".apk,application/vnd.android.package-archive"
+               style="display:none" onchange="uploadApk(this)">
+        <label style="font-size:12px;align-self:center">
+          <input type="checkbox" id="apkReplace" checked>
+          覆盖安装
+        </label>
       </div>
+      <div id="apkmsg" class="dim" style="font-size:12px;margin-top:5px"></div>
       <div id="apps" class="dim" style="margin-top:6px;font-size:12px">
         （点「刷新列表」加载）
       </div>
+      </div>
     </div>
 
-    <div class="card">
-      <h2>运行中的应用</h2>
+    <div class="card" id="card-running">
+      <h2 class="clickable" onclick="toggleCard('card-running')">
+        <span class="arrow">▼</span>运行中的应用
+      </h2>
+      <div class="body">
       <div class="row">
         <button onclick="loadRunning()">刷新</button>
         <label style="font-size:12px;align-self:center">
           <input type="checkbox" id="runAuto" onchange="setRunAuto(this.checked)">
           自动刷新
         </label>
+        <label style="font-size:12px;align-self:center">
+          <input type="checkbox" id="runSys" onchange="loadRunning()">
+          含系统应用
+        </label>
       </div>
       <div id="running" class="dim" style="margin-top:6px;font-size:12px">
         （点「刷新」加载）
+      </div>
       </div>
     </div>
 
@@ -828,6 +856,71 @@ function updateServiceUi(note) {
   if (note) setStatus(note);
 }
 
+// ── 卡片收起 / 展开 ──
+//
+// 状态记在 localStorage：控制台的面板很多，用户收起某几块是长期偏好，
+// 刷新一次就复位会很烦。
+function toggleCard(id) {
+  const el = $(id);
+  if (!el) return;
+  el.classList.toggle('collapsed');
+  const st = readCollapsed();
+  if (el.classList.contains('collapsed')) st[id] = 1; else delete st[id];
+  try { localStorage.setItem('autod_collapsed', JSON.stringify(st)); } catch (e) {}
+}
+
+function readCollapsed() {
+  try { return JSON.parse(localStorage.getItem('autod_collapsed') || '{}'); }
+  catch (e) { return {}; }
+}
+
+function applyCollapsed() {
+  const st = readCollapsed();
+  for (const id of Object.keys(st)) {
+    const el = $(id);
+    if (el) el.classList.add('collapsed');
+  }
+}
+
+// ── 上传安装 APK ──
+//
+// 直接把文件字节当请求体 POST，不用 multipart —— 服务端只收一个文件，
+// 为它实现一遍 multipart 解析不划算，而 fetch 传 File 本来就能直接当 body。
+function uploadApk(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const msg = $('apkmsg');
+  const mb = (f.size / 1048576).toFixed(1);
+  msg.className = '';
+  msg.textContent = '上传中… ' + f.name + '（' + mb + ' MB）';
+
+  const replace = $('apkReplace').checked ? '1' : '0';
+  fetch('/api/v1/install?replace=' + replace, {
+    method: 'POST',
+    headers: authHeaders({'Content-Type': 'application/vnd.android.package-archive'}),
+    body: f
+  })
+    .then(r => r.json().then(j => ({ status: r.status, j: j })))
+    .then(({status, j}) => {
+      // 显示服务端的原话：安装失败的原因（签名冲突、版本降级、空间不足）
+      // 是用户唯一能据此行动的信息，包装成"安装失败"就没用了
+      if (j && j.ok) {
+        msg.className = 'ok';
+        msg.textContent = '✓ 已安装 ' + (j.package || f.name);
+      } else {
+        msg.className = 'err';
+        msg.textContent = '✗ 安装失败：' + ((j && j.error) || ('HTTP ' + status));
+      }
+      setStatus(msg.textContent, !(j && j.ok));
+      setTimeout(loadRunning, 800);
+    })
+    .catch(e => {
+      msg.className = 'err';
+      msg.textContent = '✗ 上传失败：' + e;
+    })
+    .finally(() => { input.value = ''; });   // 允许重复选同一个文件
+}
+
 // ── 运行中的应用 ──
 let runTimer = null;
 
@@ -836,9 +929,14 @@ function loadRunning() {
   api('/running').then(d => {
     box.textContent = '';
     box.className = '';
-    const apps = d.apps || [];
+    const all = d.apps || [];
+    // 默认只看第三方应用。系统组件占了大半，默认全列出来的话
+    // 真正要找的那个应用反而被淹了。
+    const showSys = $('runSys').checked;
+    const apps = showSys ? all : all.filter(a => !a.system);
     if (!apps.length) {
-      box.innerHTML = '<span class="dim">（没有运行中的应用）</span>';
+      box.innerHTML = '<span class="dim">（没有匹配的进程'
+          + (showSys ? '' : '；勾上「含系统应用」看全部 ' + all.length + ' 个') + '）</span>';
       return;
     }
     // 前台和可见的排前面 —— 那才是用户关心的
@@ -864,7 +962,8 @@ function loadRunning() {
       row.append(name, bKill);
       box.append(row);
     }
-    setStatus('运行中 ' + apps.length + ' 个进程');
+    setStatus('运行中 ' + apps.length + ' 个'
+              + (showSys ? '（含系统）' : '（仅第三方，共 ' + all.length + ' 个进程）'));
   }).catch(e => setStatus('取运行状态失败：' + e, true));
 }
 
@@ -922,7 +1021,11 @@ function appendLogs(lines) {
     const lv = 'IWED'[l.level] || '?';
     const d = document.createElement('div');
     d.className = 'lg-' + lv;
-    d.textContent = lv + ' ' + (l.text || '');
+    // 时间前缀。服务端已经格式化好了（MM-DD HH:MM:SS），
+    // 这里原样带上 —— 各端各自转时区的话，同一份日志在不同机器上
+    // 会显示出不同的时间。
+    const t = l.time ? (l.time + ' ') : '';
+    d.textContent = t + lv + ' ' + (l.text || '');
     frag.append(d);
   }
   box.append(frag);
@@ -952,6 +1055,7 @@ function logHistory() {
 }
 
 // ── 启动 ──
+applyCollapsed();
 refresh();
 refreshService();
 startStream();
