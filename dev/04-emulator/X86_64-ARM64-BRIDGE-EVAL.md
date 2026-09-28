@@ -14,7 +14,9 @@
 | x64 安卓能跑 **arm64 应用** | ✅ **成立** | 官方镜像上装 + 跑含 arm64 原生库的 APK，进程映射 22 条 `/system/lib64/arm64/*.so`，无崩溃 |
 | 用 **libhoudini** 实现 | ❌ **不成立** | 官方源 **Android 8 起就没有 arm64 变体**（HTTP 矩阵 + 包内 `file` 双重验证） |
 | 正确的翻译层 | ✅ `libndk_translation`（Google 官方，随 AVD 镜像分发） | 镜像内 2.4 MB 翻译器 + 59 个 aarch64 系统库 |
+| ABI 覆盖面 | ⚠️ **取决于 API 级别**（§2.5） | Android 11 镜像四 ABI 全支持（含 32 位 ARM）；Android 12 镜像纯 64 位 |
 | 必须自己造 ROM 吗 | ⚠️ **不需要也能用**；要造，AOSP 里有现成脚手架 | `device/generic/goldfish/emulator64_x86_64_arm64/` |
+| 把 libndk **搬进自己的镜像** | ✅ **已实测成功**（§2.6） | 23 MB 载荷 + 10 行属性（4 增 6 改）→ 同一份镜像从「拒绝 arm64」变成「arm64 应用正常运行」 |
 
 **方向对、工具错**：想达到"x64 上跑 arm64 应用"，不需要碰 houdini，也不需要自己编译翻译层——
 Google 的 `system-images;android-31;google_apis;x86_64` 就是这份东西，一条 `curl` 加 34 秒开机即可用。
@@ -29,7 +31,7 @@ Google 的 `system-images;android-31;google_apis;x86_64` 就是这份东西，�
 |---|---|---|
 | **A. 宿主能跑 x86_64 安卓** | KVM / WHPX 是否可用 | ✅ 早就成立，无争议 |
 | **B. arm64 应用能在 x86_64 安卓上跑** | 有没有可用的 ARM→x86 翻译层 | ✅ 有（但不是 houdini） |
-| **C. 翻译层能不能装进"我们的 ROM"** | 专有二进制 + 属性 + SELinux 接线 | ⚠️ 有官方脚手架，成本中等（本次未端到端验证，见第 5 节） |
+| **C. 翻译层能不能装进"我们的 ROM"** | 专有二进制 + 属性 + SELinux 接线 | ✅ **已实测可搬**（§2.6：23 MB 载荷 + 10 行属性，端到端跑通） |
 
 提议里"libhoudini"只是 B 的一种**实现选择**，而它恰好是唯一走不通的那一种。
 
@@ -155,16 +157,114 @@ acc=4999999950000000
 
 > 注意这是微基准，不代表真实应用整体。真实应用的 Java/ART 部分不翻译，只有 `lib*.so` 走翻译层。
 
-### 2.5 限制：这份镜像是**纯 64 位**
+### 2.5 ABI 覆盖面：想要 32 位 ARM 应用，就得选 **Android 11**
 
-`ro.product.cpu.abilist32` 为空 ——
+这条差异比"翻译层能不能用"更容易被忽略：同一渠道、同为 x86_64，只是 API 级别不同，ABI 覆盖面完全不同。
 
-- ✅ `arm64-v8a` 应用：能装能跑（本次验证）
-- ❌ `armeabi-v7a`（32 位 ARM）应用：**不支持**，装不上
-- ❌ 32 位 x86 应用：不支持
+| 镜像 | x86_64 | x86 | arm64-v8a | **armeabi-v7a** |
+|---|---|---|---|---|
+| `android-30;google_apis;x86_64`（Android 11） | ✅ | ✅ | ✅ | ✅ **实测跑通** |
+| `android-31;google_apis;x86_64`（Android 12） | ✅ | ❌ | ✅ | ❌ **装不上** |
 
-对"现代应用基本都是 arm64"的场景影响不大，但**老应用/带 32 位 only 原生库的应用会直接装不上**，
-这是选型时必须先确认的一件事（和下面第 5 节的"到底要跑什么应用"是同一个问题）。
+API 30 那份的实测值：
+
+```
+ro.product.cpu.abilist   = x86_64,x86,arm64-v8a,armeabi-v7a,armeabi
+ro.product.cpu.abilist32 = x86,armeabi-v7a,armeabi
+/system/lib/arm      59 个（32 位 ARM 系统库）   /system/bin/arm/{linker,app_process}
+/system/lib64/arm64  59 个                      /system/etc/ld.config.arm.txt + ld.config.arm64.txt
+```
+
+活体验证（同一个 APK，只强制走 32 位 ARM）：`pm install --abi armeabi-v7a` → `Success`，
+`primaryCpuAbi=armeabi-v7a`，运行后进程映射 **17 条 `/system/lib/arm/*.so`**（libm 等），Activity 在前台，无崩溃。
+
+**为什么会这样**：SDK 仓库里 32 位的 `x86` 镜像**只到 API 30**，API 31 起只剩 `x86_64`；镜像也就从
+"四 ABI"变成"纯 64 位"。而 AOSP 公开树的 `build/make/target/board/emulator_x86_64_arm64/BoardConfig.mk`
+恰好就是四 ABI 那一版（`TARGET_2ND_ARCH := x86` + `TARGET_NATIVE_BRIDGE_2ND_ARCH := arm`）——
+Google 的 Android 11 镜像正是照它做的。
+
+→ **决策含义**：只要目标应用里有 **32 位 ARM（armeabi-v7a）** 原生库，这条路就要以
+**Android 11 为基座**；或者自编一份四 ABI 的 ROM 并另配带 arm32 的载荷（跨版本混用载荷不可取，
+社区共识是"翻译层必须与 Android 版本匹配"，本次未验证混用）。**只跑 arm64 应用的话，Android 12 那份就是对的。**
+
+---
+
+### 2.6 关键补充：把 libndk **搬进自己的镜像** —— 已实测成功
+
+上面证明的是"Google 的镜像能用"。真正的问题是"**我们的** x86_64 ROM 能不能用"。
+做法：拿一份**同一 API 级别的普通 AOSP 风格 x86_64 镜像**（`default;x86_64`，就是现在 `--fast` 跑的那份，
+没有翻译层、`abilist` 只有 `x86_64`），把翻译层搬进去，看它是否变成"能跑 arm64 应用"。
+
+**结果：完全成功。** 改造前后对比：
+
+| 项 | 改造前 | 改造后 |
+|---|---|---|
+| `ro.product.cpu.abilist` | `x86_64` | `x86_64,arm64-v8a` |
+| `ro.dalvik.vm.native.bridge` | 无 | `libndk_translation.so`（zygote 启动参数里可见 `-XX:NativeBridge=`） |
+| `/proc/sys/fs/binfmt_misc/` | 空 | `arm64_exe arm64_dyn arm_exe arm_dyn` |
+| aarch64 ELF 直接执行 | — | ✅ `HELLO_FROM_ARM64` |
+| `pm install --abi arm64-v8a` | ❌ `ABI arm64-v8a not supported on this device` | ✅ `Success`，`primaryCpuAbi=arm64-v8a` |
+| 应用实际运行 | — | ✅ 进程存活、**29 条** `/system/lib64/arm64/*.so` 映射、Activity 在前台 |
+| 性能 | — | 与官方镜像一致（INT 1.07×，FP 串行 22.7×） |
+
+**要搬的东西 = 23 MB 载荷 + 10 行属性**（4 行新增 + 6 行改值）。
+
+载荷（`tar` 一下即可，来源就是官方镜像的 `/system`）：
+
+```
+/system/lib64/libndk_translation.so + libndk_translation_proxy_lib*.so   (21 个, 3.5 MB)
+/system/lib64/arm64/                                                     (59 个, 18 MB)
+/system/bin/arm64/{linker64,app_process64}
+/system/bin/ndk_translation_program_runner_binfmt_misc_arm64
+/system/etc/binfmt_misc/{arm_exe,arm_dyn,arm64_exe,arm64_dyn}
+/system/etc/init/ndk_translation.rc
+/system/etc/ld.config.arm.txt  /system/etc/ld.config.arm64.txt     ← 易漏：ARM 侧 linker 命名空间
+```
+
+属性（**三个分区都要改，漏一个就不生效**）：
+
+| 文件 | 改动 |
+|---|---|
+| `/system/build.prop` | `abilist` / `abilist64` → `x86_64,arm64-v8a`；追加 `ro.dalvik.vm.isa.arm=x86`、`ro.dalvik.vm.isa.arm64=x86_64`、`ro.enable.native.bridge.exec=1` |
+| `/vendor/build.prop` | `ro.vendor.product.cpu.abilist{,64}` → `x86_64,arm64-v8a`；追加 `ro.dalvik.vm.native.bridge=libndk_translation.so` |
+| `/odm/etc/build.prop` | `ro.odm.product.cpu.abilist{,64}` → `x86_64,arm64-v8a` ← **最容易漏** |
+
+再 `restorecon` 重打标签（`ld.config.*.txt` 必须是 `system_linker_config_file`，
+`lib64/arm64/*` 与 `libndk_translation*.so` 是 `system_lib_file`），重启即可。
+
+### 这一步踩到的三个真坑（文档查不到，只有动手才会遇到）
+
+**① 属性改三处，而且 `odm` 的优先级比 `vendor` 高。** 读 AOSP 源码
+（`system/core/init/property_service.cpp`）：
+
+- 所有 build.prop 先读进一个 map，**后读的覆盖先读的**（`ro.` 属性同样如此），顺序为
+  `/system` → `/system_ext` → `/vendor/default` → `/vendor` → `/odm`(etc) → `/product`(etc)。
+  所以 `/system/build.prop` 里那句 `ro.dalvik.vm.native.bridge=0` 不碍事——日志里能看到
+  `Overriding previous property 'ro.dalvik.vm.native.bridge':'0' with new value 'libndk_translation.so'`。
+- 但**平凡的 `ro.product.cpu.abilist` 并不写在 build.prop 里**，而是 init 启动时按
+  **product → odm → vendor → system** 的优先级，从分区前缀属性派生出来的
+  （`property_initialize_ro_cpu_abilist()`）。
+  实测：只改 `system`+`vendor` 时，`ro.odm.product.cpu.abilist64=x86_64` 仍然胜出 → 应用照旧装不上；
+  **补上 odm 才生效。**
+
+**② `ld.config.arm.txt` / `ld.config.arm64.txt` 属于载荷。** 少了它们，ARM 侧 linker 命名空间不对，
+应用起来就崩。这两个文件在官方镜像里带 `system_linker_config_file` 标签。
+
+**③ Android 11+ 的 `adb remount` 要跑两次。** 第一次只是"启用 overlayfs"，输出
+`Now reboot your device for settings to take effect`；重启后再 `adb remount` 才真正可写
+（启动模拟器时也要带 `-writable-system`）。另外这份镜像要求模拟器 **≥ 31.2.7**。
+
+### 落到真正的自编 ROM 上
+
+上面是"运行时打补丁"（overlayfs）的验证方式，用来证明**这套载荷在 AOSP 风格镜像上成立**。
+换成真编译（`lunch sdk_phone64_x86_64-userdebug && m`），对应的是构建级改动，而且 AOSP 已经做好一半：
+
+| 要做的事 | 落点 |
+|---|---|
+| ABI 列表（system/vendor/odm 三处 `abilist`） | ✅ **自动**：BoardConfig 设 `TARGET_NATIVE_BRIDGE_ARCH := arm64` / `TARGET_NATIVE_BRIDGE_ABI := arm64-v8a`，`board_config.mk` + `sysprop.mk` 会写进三个分区 |
+| 翻译层文件 | `PRODUCT_COPY_FILES`（开发期也可以用 Magisk 模块，更省事） |
+| `ro.enable.native.bridge.exec`、`ro.dalvik.vm.isa.*`、`ro.dalvik.vm.native.bridge` | ⚠️ **公开树里没有**（`device/`、`build/` 全树搜不到），要自己用 `PRODUCT_PROPERTY_OVERRIDES` / `PRODUCT_VENDOR_PROPERTY_OVERRIDES` 加 |
+| 内核 | 需要 `CONFIG_BINFMT_MISC=y`（模拟器内核已带，实测通过） |
 
 ---
 
@@ -181,7 +281,8 @@ acc=4999999950000000
 | `build/make/core/board_config.mk` / `sysprop.mk` | `TARGET_NATIVE_BRIDGE_ABI` 自动并入 `ro.product.cpu.abilist` |
 
 也就是说：**属性、ABI 列表、ART 的 native bridge、linker namespace、binfmt 注册，AOSP 全都写好了。**
-公开树里唯一缺的是**翻译层二进制本身**（`libndk_translation` 是 Google 专有，只随 SDK 系统镜像分发）。
+公开树里唯一缺的是**翻译层二进制本身**（`libndk_translation` 是 Google 专有，只随 SDK 系统镜像分发；
+搬运清单、属性落位与 SELinux 标签见 §2.6，已实测）。
 
 顺带修正一个现状认知：本机 `out/target/product/emulator64_arm64/` 有完整自制镜像，
 但 **`emulator64_x86_64/` 里一个关键镜像都没有**（只有 `kernel-ranchu`、`dtb.img`、`encryptionkey.img`）——
@@ -194,7 +295,7 @@ acc=4999999950000000
 | 路线 | 做法 | 代价 | 何时选 |
 |---|---|---|---|
 | **A. 直接用官方镜像**（推荐先做） | 下 `google_apis;x86_64` → `run-emulator.sh` 指过去（Linux KVM / Windows WHPX） | 半天，已实测可跑 | 目标是"有个快的、能跑 arm64 应用的安卓环境"（开发内循环、Windows 交付验证） |
-| **B. 自编 x86_64 ROM + 移植翻译层** | `lunch sdk_phone64_x86_64-userdebug` + 把 §2.2 的载荷按 Magisk 模块 / `PRODUCT_COPY_FILES` 塞进去 | 数天，含 SELinux 标签与属性落位 | 需要把 `autod` 烧进 `/system` 开机自启、需要定制 ROM、或者要对外交付整机 |
+| **B. 自编 x86_64 ROM + 移植翻译层** | `lunch sdk_phone64_x86_64-userdebug` + 把 §2.6 的载荷按 `PRODUCT_COPY_FILES`（开发期也可先用 Magisk 模块）塞进去 | **1~2 天**：§2.6 已把载荷、属性落位、SELinux 标签实测清楚，再加一次系统镜像编译 | 需要把 `autod` 烧进 `/system` 开机自启、需要定制 ROM、或者要对外交付整机 |
 | **C. arm64 真机 / arm64 宿主** | 二手 Pixel 6 / ARM 云主机 | 千元级 | **验证 aarch64 真实行为与真实延迟**——翻译层给不了这个答案 |
 
 **建议组合：A（日常与 Windows 交付环境） + C（最终 arm64 验证）。B 只在明确需要整机交付时做。**
@@ -223,7 +324,7 @@ acc=4999999950000000
 | 项 | 状态 |
 |---|---|
 | 官方镜像能跑 arm64 应用 | ✅ 本次实测（含 A/B 对照） |
-| **把翻译层移植进自编 AOSP 12 x86_64 ROM** | ⚠️ **本次未做端到端验证**。依据是：AOSP 有官方脚手架 + 社区有成例（见下），但 SELinux 标签、属性落位（`/vendor/build.prop` vs `/system/build.prop`）、APEX/链接器命名空间都可能有坑 |
+| **把翻译层移植进自编 AOSP 12 x86_64 ROM** | ✅ **已验证**（§2.6：在 AOSP 风格镜像上端到端跑通，含属性三处分区、SELinux 标签、binfmt 注册）。**构建级落位**（`PRODUCT_COPY_FILES` + 属性 + 真跑一次 `m`）尚未走完，但用的是同一套文件与属性 |
 | 翻译层对"你们要跑的那个应用"是否够用 | ⚠️ **未测**。必须先拿真实 APK 试（尤其是重原生计算的、带 JNI 的、有反模拟检测的） |
 | 32 位 ARM 应用 | ❌ 该镜像不支持（§2.5） |
 | 许可 / 可分发性 | ⚠️ `libndk_translation` 是 Google 专有（只随 SDK 镜像分发），houdini 是 Intel 专有。**内部开发测试无碍；若要随整机交付给客户，必须先过法务** |
@@ -288,6 +389,33 @@ adb -s emulator-5560 shell pidof <包名> | xargs -I{} adb -s emulator-5560 shel
 for s in 6 7 8 9; do for v in x y z; do
   printf "%s_%s %s\n" $s $v "$(curl -sSI http://dl.android-x86.org/houdini/${s}_${v}/houdini.sfs | head -1 | tr -d '\r')"
 done; done
+```
+
+「把 libndk 搬进自己的 x86_64 镜像」复现（§2.6，前提：普通 AOSP 风格 x86_64 镜像 + 模拟器 ≥ 31.2.7）：
+
+```bash
+A=adb                                        # 5560=官方带翻译层镜像，5562=目标镜像
+$A -s emulator-5562 root; $A -s emulator-5562 remount; $A -s emulator-5562 reboot   # 第 1 次：只启用 overlayfs
+$A -s emulator-5562 root; $A -s emulator-5562 remount                              # 重启后再来一次才 rw
+
+# a) 打包载荷（≈23 MB）
+$A -s emulator-5560 shell 'cd / && tar -cf /data/local/tmp/p.tar \
+  system/lib64/libndk_translation.so system/lib64/libndk_translation_proxy_lib*.so \
+  system/lib64/arm64 system/bin/arm64 \
+  system/bin/ndk_translation_program_runner_binfmt_misc_arm64 \
+  system/etc/binfmt_misc system/etc/init/ndk_translation.rc \
+  system/etc/ld.config.arm.txt system/etc/ld.config.arm64.txt'
+$A -s emulator-5560 pull /data/local/tmp/p.tar .
+$A -s emulator-5562 push p.tar /data/local/tmp/
+$A -s emulator-5562 shell 'cd / && tar -xf /data/local/tmp/p.tar'
+
+# b) 三个分区改属性（§2.6 的表，odm 最易漏），然后重打标签 + 重启
+$A -s emulator-5562 shell 'restorecon -RF /system/lib64 /system/bin /system/etc'
+$A -s emulator-5562 reboot
+
+# c) 验收
+$A -s emulator-5562 shell getprop ro.product.cpu.abilist          # 期望 x86_64,arm64-v8a
+$A -s emulator-5562 shell 'pm install --abi arm64-v8a -r /data/local/tmp/app.apk'
 ```
 
 ---

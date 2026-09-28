@@ -612,3 +612,45 @@ guest 一路到 `post-fs-data` → `zygote` ✓ → HAL 阶段（**guest 零崩�
 
 **下一步**：① 完成 marker 判定，找到 guest 真正的 vendor 来源；② 把剩下几个"碰设备"的服务
 摘掉（battery/USB/wifi 类），配合 `-cpu cortex-a53`，A12 arm64 **完整启动已是触手可及**。
+
+---
+
+## 第 9 轮：解开"补丁打不到 guest"之谜 —— 源头是 **super.img**
+
+### 真相
+
+第 6~8 轮一直诡异：`vendor.img`、`vendor-qemu.img`、super 里的 vendor 分区三处都补丁过
+（回读都确认 0 个相关 rc），guest 却仍启动 `vendor.usb-hal` / `sensors-hal` / `thermal-hal`。
+
+本轮用两个决定性实验定位：
+
+1. **逐文件排查**：把 vendor 与 system 分区里**所有** `.rc` 文件（含 `/etc/init/hw/`）
+   逐个 grep 服务名 → **一处都没有** ✗（说明 guest 用的根本不是我补的那份）；
+2. **删掉 `super.img` 试跑** → 第一阶段的 init 直接自杀并进入启动循环：
+
+```
+init: BlockDevInitializer::InitDevices: partition(s) not found after polling timeout: super
+init: InitFatalReboot: signal 6
+```
+
+⇒ **第一阶段的 init 强依赖 `super` 分区，而 guest 的 system/vendor 正是从 super 挂出来的。**
+之前几轮我改的 `*.img` / `*-qemu.img` 对 guest 无效，**必须改 `super.img`**。
+
+### 正确配方（已逐项验证）
+
+1. 编译（`m`）产出 plain 镜像与 `super.img`；
+2. 给 plain 镜像打补丁（`debugfs`，例如 init.rc 的 `encryption=Require`→`Attempt`、
+   删掉碰设备的那批 vendor HAL 的 rc/二进制）；
+3. **`rm super.img system-qemu.img vendor-qemu.img` 后重跑 `m`**，让它们**从补丁后的
+   plain 镜像重建**；
+4. 每次重建后**必须回读校验 `super.img`**（编译有时会按依赖把 patch 过的 plain 镜像
+   重新构建而覆盖补丁：本轮就出现过 `system-qemu.img` 里没有 patch、
+   而 `super.img` 里有的情况）；
+5. 启动参数里**必须带 `-cpu cortex-a53`**（第 8 轮的突破），并保留
+   `-qemu -machine type=virt`、`-selinux permissive`。
+
+按此配方跑出的这一轮：**设备类 HAL 全部不再启动 ✓、guest 零崩溃 ✓、无 recovery ✓、
+宿主零段错误直到 78 秒 ✓**（此前 20~70 秒必崩），随后宿主在 `audioserver`/`credstore`
+阶段仍段错误退出 —— 说明 `virt` 上"guest 访问 ranchu 专有 MMIO"这一类问题会**逐个**
+暴露，属于平台层面的固有缺陷（ranchu 才是匹配的板子，但它被模拟器无条件的 PCI 音频
+设备卡死）。**要根治仍需从源码重建模拟器去掉那个音频设备**。

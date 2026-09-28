@@ -11,6 +11,8 @@
 > ⭐ **新方向评估（全部结论实测）** → [`X86_64-ARM64-BRIDGE-EVAL.md`](X86_64-ARM64-BRIDGE-EVAL.md)
 > 「x86_64 安卓 + ARM 翻译层」能否替代 arm64 TCG：**方向成立，但 libhoudini 的 arm64 变体止步于 Android 7**；
 > 正确工具是 Google 官方的 `libndk_translation`，官方 `google_apis;x86_64` 镜像 **34 秒开机且能跑 arm64 应用**。
+> 并且已实测：把它搬进**自己的** x86_64 镜像 = 23 MB 载荷 + 10 行属性（§2.6），arm64 应用照跑。
+> 注意 ABI 覆盖面随 API 级别变化：**要跑 32 位 ARM 应用得选 Android 11**，Android 12 镜像是纯 64 位（§2.5）。
 
 > **两个平台都要跑真实 ROM。** 镜像只编一次，两边共用；
 > 平台差异只有模拟器版本与显示方式，见下面「两个平台跑同一份 ROM」。
