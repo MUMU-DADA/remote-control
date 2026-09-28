@@ -39,6 +39,7 @@ cc_defaults {
         "clipops.cpp",
         "webui.cpp",
         "image_encoder.cpp",
+        "frame_hub.cpp",
         "jpeg_encoder.cpp",
         "webp_encoder.cpp",
         "websocket.cpp",

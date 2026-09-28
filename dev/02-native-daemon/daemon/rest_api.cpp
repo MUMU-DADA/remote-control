@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -19,6 +20,7 @@
 #include "dispatch.h"
 #include "json_parser.h"
 #include "json_writer.h"
+#include "frame_hub.h"
 #include "image_encoder.h"
 #include "png_encoder.h"
 #include "protocol.h"
@@ -791,6 +793,37 @@ bool ParseStreamParams(const HttpRequest& req, StreamParams* out,
 //
 // 用盒式平均而不是最近邻：最近邻会把细线（文字、边框）整条丢掉，
 // 看起来像画面在闪。
+// 客户端还在吗？
+//
+// ⚠️ 这个函数是**必须**的，不是优化。
+//
+//    流式循环靠 `write` 失败来发现客户端断开 —— 但"画面没变"时
+//    根本不 write（`continue` 跳过），于是一旦画面静止：
+//      发现不了断开 → 循环空转 → 一直请求抓帧 → 订阅永不释放
+//
+//    实测症状：客户端断开 4 秒后，抓帧数还在涨（27 → 69），
+//    FrameHub 的订阅数停在 2 不动。
+//
+//    这是**既有 bug**（改共享抓帧之前就有），只是以前每次循环都要
+//    抓一帧（200ms），空转得慢，看不出来。
+bool PeerGone(int fd) {
+    // 明确的挂断/错误
+    pollfd p{};
+    p.fd = fd;
+    p.events = POLLOUT;
+    if (poll(&p, 1, 0) > 0 && (p.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+        return true;
+    }
+    // 对端关了连接 —— recv 立刻返回 0（EOF）
+    char c = 0;
+    const ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n == 0) return true;
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        return true;
+    }
+    return false;
+}
+
 void DownscaleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
                    uint32_t dw, uint32_t dh, std::vector<uint8_t>* out) {
     out->resize(static_cast<size_t>(dw) * dh * 4);
@@ -839,35 +872,65 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
                                       bool* unchanged) {
     *unchanged = false;
 
-    Request r{};
-    r.magic = kMagic;
-    r.cmd   = static_cast<uint32_t>(Cmd::Capture);
-    ReplyPacket rp = dispatcher_->Handle(r, "", -1, 0);
-    if (rp.reply.status != kOk || rp.fd < 0) {
-        if (rp.fd >= 0) close(rp.fd);
+    // ── 订阅共享抓帧 ──
+    //
+    // 第一次调用时订阅，之后这个连接一直持有它。
+    // 第一个订阅者启动抓帧线程，最后一个离开时停掉 ——
+    // **没人在看画面的时候完全不抓帧**。
+    if (!st->hubSub) {
+        std::string err;
+        st->hubSub = FrameHub::Instance().Subscribe(&err);
+        if (!st->hubSub) {
+            ALOGW("订阅共享抓帧失败: %s", err.c_str());
+            return {};
+        }
+    }
+
+    // ── 等一帧比我已消费的更新的 ──
+    //
+    // 多个客户端会等到**同一帧** —— 这正是共享的意义：
+    // 三个客户端看同一块屏幕，只需要抓一次。
+    //
+    // 超时给两倍帧间隔（下限 100ms、上限 500ms）：既够等到下一次
+    // 抓帧完成（screencap 后端要 120ms+），又不会把控制消息
+    // （改帧率/画质）拖太久 —— 那些是在同一个循环里处理的。
+    const int waitMs = std::min(500, std::max(100, p.fps > 0 ? 2000 / p.fps : 200));
+
+    uint64_t latestSeq = 0;
+    FramePtr f = FrameHub::Instance().WaitNext(st->hubSeq, waitMs, &latestSeq);
+    if (!f) {
+        // 没等到新帧。两种可能：
+        //   - 抓帧比帧间隔还慢（超时是正常的，不是错误）
+        //   - 抓帧失败
+        // 分开计数，不然"画面卡住"的时候看不出是哪一种。
+        if (latestSeq == st->hubSeq) ++st->hubTimeouts;
+        return {};
+    }
+    st->hubSeq = f->seq;
+
+    // ⚠️ 下游的 DownscaleRgba 逐行按 width 跨步。stride != width 时
+    //    会画出斜的图 —— 与其静默出错，不如明确拒绝一次并说清楚。
+    //    （实测见过的后端都是 stride == width，所以这是道保险。）
+    if (f->stride != 0 && f->stride != f->width) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            ALOGE("抓帧 stride(%u) != width(%u)，画面流暂不支持 —— 请报告",
+                  f->stride, f->width);
+        }
         return {};
     }
 
-    const uint32_t w = rp.reply.width, h = rp.reply.height;
-    const uint64_t size = rp.reply.dataSize;
-    const uint32_t fmt = rp.reply.format;
-    void* base = mmap(nullptr, size, PROT_READ, MAP_SHARED, rp.fd, 0);
-    if (base == MAP_FAILED) {
-        close(rp.fd);
-        return {};
-    }
+    const uint32_t w = f->width, h = f->height;
+    const size_t size = f->size;
+    const uint8_t* src = f->data;
 
-    if (fmt != 1 && fmt != 2 && fmt != 5) {
-        munmap(base, size);
-        close(rp.fd);
-        return {};
-    }
-
-    const uint8_t* src = static_cast<const uint8_t*>(base);
+    // BGRA → RGBA。每个客户端各转一次（不同客户端可能用不同的
+    // 降采样），换算成本远低于一次抓帧。
     std::vector<uint8_t> rgba;
-    if (fmt == 5) {   // BGRA → RGBA
+    if (f->needsBgraSwap()) {
         rgba.resize(size);
-        for (uint64_t i = 0; i + 3 < size; i += 4) {
+        for (size_t i = 0; i + 3 < size; i += 4) {
             rgba[i]     = src[i + 2];
             rgba[i + 1] = src[i + 1];
             rgba[i + 2] = src[i];
@@ -893,8 +956,6 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
     const size_t encBytes = static_cast<size_t>(dw) * dh * 4;
     const uint64_t hash = HashBytes(enc, encBytes);
     if (p.skipUnchanged && st->haveLast && hash == st->lastHash) {
-        munmap(base, size);
-        close(rp.fd);
         *unchanged = true;
         return {};
     }
@@ -905,9 +966,6 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
     std::string out = ImageEncoder::Instance().Encode(enc, dw, dh,
                                                       static_cast<ImageFormat>(p.codec),
                                                       p.level, &perr);
-    munmap(base, size);
-    close(rp.fd);
-
     if (out.empty()) ALOGW("流编码失败: %s", perr.c_str());
 
     if (!out.empty()) ++st->frameNo;
@@ -950,6 +1008,10 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             if (img.empty()) {
                 // 画面没变就整帧跳过：MJPEG 客户端会继续显示上一帧，
                 // 这正是我们要的。出错也走这里，下一轮重试。
+                //
+                // ⚠️ 但**必须**在这里检查客户端还在不在 —— 这条路径
+                //    不 write，靠 write 失败是发现不了断开的。
+                if (PeerGone(fd)) break;
                 const int64_t rest = intervalMs - (NowMs() - t0);
                 if (rest > 0) usleep(static_cast<useconds_t>(rest) * 1000);
                 continue;

@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -27,6 +28,9 @@
 #include "inject.h"   // InjectorConfig
 
 namespace autod {
+
+// 前向声明：StatsJson 的回调要用。json 是 autod 里的 namespace。
+namespace json { class Writer; }
 
 class Capture;
 class Injector;
@@ -64,7 +68,10 @@ class ServiceState {
     // ── 运行时状态（每次调用重新采集）────────────────────────────────────────
     std::string RuntimeJson() const;
     std::string ConfigJson() const;
-    std::string StatsJson() const;
+    // extra 用来让调用方追加自己的字段（比如 FrameHub 的抓帧统计）。
+    // 不让 ServiceState 直接认识 FrameHub —— 它不该知道画面流的细节。
+    std::string StatsJson(
+        const std::function<void(json::Writer&)>& extra = {}) const;
 
     // ── 热改配置 ────────────────────────────────────────────────────────────
     struct ApplyResult {

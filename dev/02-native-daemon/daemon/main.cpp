@@ -27,6 +27,7 @@
 #endif
 #include "capture.h"
 #include "dispatch.h"
+#include "frame_hub.h"
 #include "inject.h"
 #include "protocol.h"
 #include "log_buffer.h"
@@ -415,6 +416,12 @@ int main(int argc, char** argv) {
     fprintf(stderr, "autod: 就绪, 监听 %s\n", server.path().c_str());
 
     Dispatcher dispatcher(&capture, &injector);
+
+    // 共享抓帧：告诉它用哪个 Dispatcher（抓帧要走那把操作锁）。
+    //
+    // 线程**不在这里启动** —— 第一个画面流订阅者到来时才启，
+    // 最后一个离开时停。没人看画面的时候一次都不抓。
+    FrameHub::Instance().Configure(&dispatcher);
 
     // ── HTTP/JSON API ──
     //

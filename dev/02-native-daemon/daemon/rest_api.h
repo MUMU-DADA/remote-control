@@ -13,9 +13,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "frame_hub.h"
 #include "http_server.h"
 #include "protocol.h"
 
@@ -42,6 +44,15 @@ struct StreamState {
     uint32_t outW     = 0;
     uint32_t outH     = 0;
     std::vector<uint8_t> scaled;
+
+    // ── 共享抓帧（见 frame_hub.h）──
+    //
+    // 订阅的生命周期 = 这个 StreamState 的生命周期 = 这条连接。
+    // 第一个订阅者启动抓帧线程，最后一个离开时停掉它 ——
+    // **没人在看的时候完全不抓帧**。
+    std::unique_ptr<FrameHub::Sub> hubSub;
+    uint64_t hubSeq = 0;          // 本连接已经消费到哪一帧
+    uint64_t hubTimeouts = 0;     // 等新帧超时的次数（诊断用）
 };
 
 class Dispatcher;

@@ -69,6 +69,7 @@ INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
              $(DAEMON)/websocket.cpp \
              $(DAEMON)/config_file.cpp \
              $(DAEMON)/image_encoder.cpp \
+             $(DAEMON)/frame_hub.cpp \
              $(DAEMON)/jpeg_encoder.cpp \
              $(DAEMON)/webp_encoder.cpp
 

@@ -72,12 +72,13 @@ for f in main.cpp socket_server.cpp dispatch.cpp selftest.cpp \
          appops.cpp subprocess.cpp fileops.cpp http_client.cpp \
          service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp \
          json_parser.cpp png_encoder.cpp keyboard.cpp clipops.cpp \
-         webui.cpp image_encoder.cpp jpeg_encoder.cpp webp_encoder.cpp \
+         webui.cpp image_encoder.cpp frame_hub.cpp jpeg_encoder.cpp \
+         webp_encoder.cpp \
          websocket.cpp \
          config_file.cpp; do
     [ -f "$DAEMON/$f" ] || { bad "缺源文件: daemon/$f"; exit 1; }
 done
-ok "25 个源文件齐备"
+ok "26 个源文件齐备"
 
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
@@ -162,6 +163,7 @@ COMMON_FLAGS=(
     "$DAEMON/clipops.cpp" \
     "$DAEMON/webui.cpp" \
     "$DAEMON/image_encoder.cpp" \
+    "$DAEMON/frame_hub.cpp" \
     "$DAEMON/jpeg_encoder.cpp" \
     "$DAEMON/webp_encoder.cpp" \
     "$WEBP_OBJ"/*.o \

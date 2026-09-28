@@ -219,7 +219,8 @@ std::string ServiceState::RuntimeJson() const {
     return w.str();
 }
 
-std::string ServiceState::StatsJson() const {
+std::string ServiceState::StatsJson(
+        const std::function<void(json::Writer&)>& extra) const {
     std::lock_guard<std::mutex> lock(mutex_);
     json::Writer w;
     w.Obj()
@@ -232,7 +233,9 @@ std::string ServiceState::StatsJson() const {
         if (byCommand_[i] == 0) continue;
         w.Field(CommandName(static_cast<uint32_t>(i)).c_str(), byCommand_[i]);
     }
-    w.EndObj().EndObj();
+    w.EndObj();                 // 关 byCommand
+    if (extra) extra(w);        // 调用方追加（FrameHub 等）
+    w.EndObj();                 // 关外层
     return w.str();
 }
 

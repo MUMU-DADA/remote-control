@@ -19,6 +19,7 @@
 
 #include "appops.h"
 #include "clipops.h"
+#include "frame_hub.h"
 #include "image_encoder.h"
 #include "png_encoder.h"
 #include "keyboard.h"
@@ -939,7 +940,26 @@ ReplyPacket Dispatcher::HandleSelfTest(const Request& req) {
 }
 
 ReplyPacket Dispatcher::HandleStats(const Request& req) {
-    return MakeJsonReply(req.cmd, ServiceState::Instance().StatsJson());
+    // 顺便报共享抓帧的状态。
+    //
+    // 没有这段的话，"抓帧线程在不在跑""这一帧是共享来的还是自己抓的"
+    // 都只能靠猜 —— 而这两件事正是这次改造的核心。
+    auto extra = [](json::Writer& w) {
+        FrameHub::Stats h = FrameHub::Instance().GetStats();
+        w.Key("frameHub").Obj()
+             .Field("running", h.running)
+             .Field("subscribers", static_cast<int64_t>(h.subscribers))
+             .Field("frames", h.frames)
+             .Field("lastSeq", h.lastSeq)
+             .Field("lastCaptureMs", h.lastCaptureMs)
+             // waits: 真的触发了抓帧的次数
+             // sharedHits: 直接拿到别人抓的帧的次数
+             // 这个比值就是"共享抓帧"省下了多少
+             .Field("waits", h.waits)
+             .Field("sharedHits", h.sharedHits)
+         .EndObj();
+    };
+    return MakeJsonReply(req.cmd, ServiceState::Instance().StatsJson(extra));
 }
 
 ReplyPacket Dispatcher::HandleLog(const Request& req,
