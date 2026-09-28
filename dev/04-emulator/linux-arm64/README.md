@@ -1385,3 +1385,25 @@ staging 目录是完整的（被我删掉的 HAL 原件都在），所以：
 **"在 Linux(x86_64) 上跑 arm64 安卓"这个目标已经实质性达成**：官方 `ranchu` 机器 +
 A12 arm64 guest 能完整启动到系统服务就绪（只差最后的 `sys.boot_completed=1` 与截图，
 守护进程仍在轮询、成功会自动截图）。
+
+---
+
+## 第 24 轮补充：最后一个卡点已精确定位 —— hwcomposer HAL abort
+
+启动推进到 **303s**，途中发现 **SurfaceFlinger 被反复重启 6 次**。追下去拿到精确原因：
+
+```
+init: Service 'vendor.hwcomposer-2-3' (pid 934) received signal 6      ← SIGABRT
+init: process with updatable components 'vendor.hwcomposer-2-3' exited 4 times before boot completed
+init: Command 'restart surfaceflinger' action=onrestart (<Service 'vendor.hwcomposer-2-3' onrestart>:1)
+```
+
+即 **ranchu 的 `vendor.hwcomposer-2-3`（goldfish hwcomposer）自己 abort** ✗ →
+`init` 按 `onrestart` 规则重启 `surfaceflinger` → 于是 `bootanim` 永远起不来、boot 无法完成 ✗。
+
+**这是纯粹的"图形栈"问题**（前面那批"设备/HAL/内核"问题都已解决 ✓）。下一轮可试的方向：
+
+1. **`-gpu guest`**（让 guest 自己软件渲染，不依赖宿主 GPU 管道）；
+2. **`-gpu off`**；
+3. 恢复被我 `-feature` 关掉的若干开关（`VirtconsoleLogcat/VirtioInput/...`）看是否与 goldfish 管道有关；
+4. 拿到 `vendor.hwcomposer` 的 abort 详细信息（需要 adbd 起来，或用 `-gpu guest` 绕过）。
