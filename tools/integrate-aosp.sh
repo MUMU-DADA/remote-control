@@ -161,6 +161,17 @@ for sub in daemon client sepolicy; do
     ok "$sub/"
 done
 
+# tools/cliptool/ 也要同步：它的产物 cliptool.jar 由 ROM 用
+# PRODUCT_COPY_FILES 直接拷进 /system/etc/remote-control/。
+# 少了这一步，编 ROM 会报
+#     ninja: 'frameworks/native/cmds/remote-control/tools/cliptool/build/cliptool.jar' missing
+# 只带 jar 和源码，丢掉 javac 的中间产物。
+if [ -d "$SRC/tools/cliptool" ]; then
+    mkdir -p "$DST/tools/cliptool/build"
+    rsync -a --exclude='classes/' "$SRC/tools/cliptool/" "$DST/tools/cliptool/"
+    ok "tools/cliptool/"
+fi
+
 # tests/ 单独处理：保留源码，去掉 Makefile 和产物
 mkdir -p "$DST/tests"
 rsync -a --exclude='test_inject_uinput' --exclude='test_integration' \

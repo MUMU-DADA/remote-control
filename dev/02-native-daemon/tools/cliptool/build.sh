@@ -63,7 +63,7 @@ mkdir -p "$OUT/classes"
     "$HERE/ClipTool.java" 2>&1 | grep -v "^注:" || true
 ok "javac 完成"
 
-"$BT/d8" --min-api 31 --output "$OUT" "$OUT/classes/com/remote-control/clip/ClipTool.class"
+"$BT/d8" --min-api 31 --output "$OUT" "$OUT/classes/com/remotecontrol/clip/ClipTool.class"
 [ -f "$OUT/classes.dex" ] || { bad "d8 没产出 classes.dex"; exit 1; }
 ok "classes.dex $(stat -c%s "$OUT/classes.dex") 字节"
 

@@ -54,7 +54,11 @@
 /dev/05-controller-app/build/
 /dev/05-controller-app/debug.keystore
 # dev/02-native-daemon/tools/cliptool/build.sh 的产出
-/dev/02-native-daemon/tools/cliptool/build/
+# cliptool 的构建目录整体忽略，但**产物 jar 要入库** ——
+# ROM 用 PRODUCT_COPY_FILES 直接拷它（见产品 .mk）。不入库的话，
+# 全新检出编 ROM 会因为找不到这个文件而失败。
+/dev/02-native-daemon/tools/cliptool/build/*
+!/dev/02-native-daemon/tools/cliptool/build/cliptool.jar
 
 # --- AOSP 构建输出 ---
 # 正常情况下会落在 aosp/out/

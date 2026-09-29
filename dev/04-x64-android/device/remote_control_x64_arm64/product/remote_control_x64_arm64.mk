@@ -40,7 +40,8 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
     system/bin/remote-control \
     system/bin/remote-control-launch \
     system/bin/rcctl \
-    system/etc/init/remote-control.rc
+    system/etc/init/remote-control.rc \
+    system/etc/remote-control/cliptool.jar
 
 #
 # All components inherited here go to system_ext image
@@ -127,6 +128,17 @@ PRODUCT_VENDOR_PROPERTIES += \
 #
 # 第一次开机 / 载荷槽还是空的时候，壳回退到 /system/bin/remote-control，
 # 所以全新机器开箱即可用，不需要先手工推一版。
+# 剪贴板辅助工具 cliptool.jar。
+#
+# 它是**只含 classes.dex 的 zip**，由服务以 shell 身份经 app_process 运行
+# （为什么要这么绕见 daemon/clipops.h 的文件头）。
+# 放在 /system/etc/remote-control/ —— 正是 clipops.cpp 的搜索路径之一。
+#
+# 用 PRODUCT_COPY_FILES 而不是 Soong 模块：这个 jar 由 tools/cliptool/build.sh
+# 用 javac + d8 编出来（2.7KB），为它引一整套 Java 构建规则不划算。
+PRODUCT_COPY_FILES += \
+    frameworks/native/cmds/remote-control/tools/cliptool/build/cliptool.jar:$(TARGET_COPY_OUT_SYSTEM)/etc/remote-control/cliptool.jar
+
 PRODUCT_PACKAGES += \
     remote-control-launch \
     remote-control \

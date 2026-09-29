@@ -193,6 +193,14 @@ allow system_server remote_control:fifo_file { write read getattr open };
 #    "应用可见系统服务"的分组属性。
 allow remote_control app_api_service:service_manager find;
 
+# ⚠️ **光有 app_api_service 不够** —— 它只覆盖"应用可见"的服务。
+#    `cmd window`（旋转、读显示尺寸都靠它）要的 window_service 属于
+#    **system_api_service**（public/service.te:240），不在 app_api_service 里。
+#    少了这条，`cmd window` 静默失败（service_manager 的拒绝是 dontaudit 的），
+#    表现为旋转接口报 "读不到显示尺寸" 且**没有任何 denial**。
+allow remote_control window_service:service_manager find;
+allow remote_control system_api_service:service_manager find;
+
 binder_call(remote_control, surfaceflinger)
 # 抓帧是**回调**：SurfaceFlinger 拿到我们的 BufferQueue 之后要反向调回来。
 # 只给单向的话实测报
@@ -315,6 +323,14 @@ allow remote_control gpu_device:fd use;
 #             tcontext=u:object_r:shell_exec:s0
 #     shell_exec 是 system_file_type，coredomain 本来就有资格执行 ——
 #     只是没人写过这条 allow。服务本来就是设计来跑这些命令的，加上。
+# ⚠️ clipops 用 `/system/bin/env` 给子进程设 CLASSPATH，而 **env 是 toybox
+#    的符号链接** —— 执行它要 toolbox_exec 权限。少了这条实测报
+#         avc: denied { execute } ... name="toybox" tcontext=u:object_r:toolbox_exec:s0
+#    表现为"剪贴板工具返回 127：exec failed"（127 = exec 失败，不是找不到文件）。
+allow remote_control toolbox_exec:file {
+    read open getattr map execute execute_no_trans
+};
+
 allow remote_control shell_exec:file {
     read open getattr map execute execute_no_trans
 };
