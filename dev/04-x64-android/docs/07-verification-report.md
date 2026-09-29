@@ -1,5 +1,10 @@
 # 验收报告（dev/04-x64-android）
 
+> ⚠️ **历史文档 —— 一次性验收报告，不代表现状。**
+> ROM 交付后又经历了改名（`autosnap_x64_arm64` → `remote_control_x64_arm64`）
+> 和多轮修复，当前状态请看 [04-acceptance-runbook.md](04-acceptance-runbook.md)
+> 与仓库根目录的 `tools/functional-sweep.py`。
+
 > 这份文档是**结论性证据记录**：每条都给出可复现的命令与本机实测输出。
 > 逐条展开的实测过程见 `PLAN.md`；踩过的坑见 `docs/02-build-traps.md`。
 
