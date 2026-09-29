@@ -336,6 +336,20 @@ else:
             break
     if back >= 0:
         check("设备真的重启了（uptime 归零）", True, f"新 uptime={back}s")
+        # ⚠️ 设备重启会把 **adb forward 一起清掉**（adbd 重起）。
+        #    不重建的话这里必然 HTTP 0 —— 而那是测试脚手架的毛病，不是服务没恢复。
+        #    实测踩过：脚本报"重启后服务自动恢复"失败，人工一查服务 running、HTTP 200。
+        host, port = BASE.split("//")[1].split(":")
+        if host in ("127.0.0.1", "localhost") and ADB:
+            try:
+                subprocess.run([ADB, "-s", SERIAL, "forward", "--remove-all"],
+                               capture_output=True, timeout=15)
+                subprocess.run([ADB, "-s", SERIAL, "forward",
+                                f"tcp:{port}", "tcp:8088"],
+                               capture_output=True, timeout=15)
+            except Exception:
+                pass
+        st2 = 0
         for _ in range(20):
             st2, d2 = req("/api/v1/info", timeout=6)
             if st2 == 200:
