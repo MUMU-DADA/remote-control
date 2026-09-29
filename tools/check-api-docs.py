@@ -12,7 +12,8 @@
 
 退出码 0 = 全部一致；非 0 = 有文档与实际不符。
 """
-import json, urllib.request, urllib.error, urllib.parse, re, sys, os
+import json
+import re, urllib.request, urllib.error, urllib.parse, re, sys, os
 
 # 默认地址可被参数或 REMOTE_CONTROL_BASE 覆盖 —— 设备 IP 会变，
 # 写死一个只会让人以为"检查通过了"而其实连的是别的东西。
@@ -35,6 +36,16 @@ d = api("/describe")
 cmds = d.get("commands", [])
 print("\n[1] 命令数 / 版本")
 chk(d.get("protocolVersion") == 7, "protocolVersion = 7", f"实际 {d.get('protocolVersion')}")
+
+# ⚠️ 再核对**文档示例里**写的版本号 —— 上面那条只验活服务。
+#    实测踩过：docs/api/01-http.md 的示例里写着 protocolVersion: 6，
+#    而服务已经是 7；检查器全绿却漏了它。
+_doc_pv = re.findall(r'"protocolVersion"\s*:\s*(\d+)', open(
+    os.path.join(os.path.dirname(__file__), "..", "docs", "api", "01-http.md"),
+    encoding="utf-8").read())
+chk(all(int(v) == d.get("protocolVersion") for v in _doc_pv),
+    "文档示例里的 protocolVersion 与实际一致",
+    f"文档里出现 {sorted(set(_doc_pv))}，实际 {d.get('protocolVersion')}")
 chk(len(cmds) == 33, "命令 33 条", f"实际 {len(cmds)}")
 # README 里写"32 条命令"
 for f in ("README.md","03-socket.md","01-http.md"):

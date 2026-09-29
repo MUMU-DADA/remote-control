@@ -85,7 +85,7 @@ curl http://host:8088/api/v1/describe
 ```json
 {
   "service": "remote-control",
-  "protocolVersion": 6,
+  "protocolVersion": 7,
   "pid": 21266,
   "capabilities": {
     "screenshot": true, "touch": true, "multiTouch": true,
@@ -722,6 +722,21 @@ curl -X POST http://host:8088/api/v1/key \
 ## 五、剪贴板
 
 ### GET /clipboard?op=get · POST /clipboard
+
+> ⚠️ **写入在 Android 10+ 上受平台限制，后台进程写不进去。**
+>
+> 实测（Android 12，服务以 shell 身份运行）：接口返回 `{"ok":true}`、
+> binder 调用不抛异常、无 SELinux 拒绝，但剪贴板里**什么都没有**。
+> 直接跑 `cliptool.jar` 也是同样结果（`op=set` → `ok`，随后 `get` 为空）。
+>
+> 原因：Android 10 起剪贴板只允许**前台应用**（或默认输入法）写入，
+> 后台进程的写入被**静默丢弃** —— 不报错、不抛异常、`setPrimaryClip` 正常返回。
+> 守护进程永远不在前台，所以**这是平台规则，不是本项目的缺陷**。
+>
+> 读：剪贴板里本来有内容时通常能读（读的限制比写松）。
+> 要真正支持"远程写剪贴板"，需要一个**有前台窗口的配套 App** 代写。
+
+
 
 | op | 说明 | 响应 |
 |---|---|---|
