@@ -309,8 +309,25 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 1. **策略不能放 `system/sepolicy/private/`**。放进去 sepolicy_freeze_test 必挂
    （它 diff 当前树与 `prebuilts/api/31.0/`，多一个文件就 `Only in ...`），
    ninja 直接停。**正确落点是设备树**：`device/remote_control_x64_arm64/sepolicy/`
-   + `BoardConfig.mk` 的 `BOARD_SEPOLICY_DIRS`（同一份 BoardConfig 里
-   goldfish 的 x86 策略就是这么接的）。脚本已改成这个落点。
+   + `BoardConfig.mk` 里的 `SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS`。
+   （同一份 BoardConfig 里 goldfish 的 x86 策略走的是 `BOARD_SEPOLICY_DIRS`，
+   但**两者不等价** —— 见下。）
+
+   ⚠️ **用哪个变量决定了策略编进哪个分区，而分区决定看得见哪些类型**：
+
+   | 变量 | 编进 | 看得见 | 看不见 |
+   |---|---|---|---|
+   | `BOARD_SEPOLICY_DIRS` | **vendor** | vendor 侧 HAL 类型（抓帧要的） | 平台私有类型（`odsign_prop` 等） |
+   | `SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS` | **system_ext** | 平台私有类型 | vendor 侧 HAL 类型 |
+
+   **一个分区拿不到两边** —— 实测两头都撞过：先用 vendor，`odsign_prop`
+   报 `unknown type`；换 system_ext，`hal_graphics_allocator_default`
+   又报 `unknown type`。当前选 **system_ext**，因为服务要跑
+   `pm`/`am`/`cmd`（它们要读平台私有属性），而抓帧所需的 HAL 权限
+   由 `hal_client_domain()` 宏提供 —— 宏用的是 **attribute**，可见性规则
+   与实现类型不同，在 system_ext 里也能用（实测抓帧正常）。
+
+   两者都能避开 `sepolicy_freeze_test`（那只管 `system/sepolicy/{public,private}`）。
 2. **`remote_control_controller.te` 里有三个东西在 Android 12 上不存在**：
    `app_use_file_type`、`appdomain_different_pkg`（都是更新版本才有的），
    还有一处 SELinux 语法错误
