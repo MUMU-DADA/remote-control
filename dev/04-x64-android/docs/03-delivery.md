@@ -3,6 +3,13 @@
 > 目标（G2 + G4）：**同一份自编镜像**在 x86_64 Linux（KVM）与 x86_64 Windows（WHPX）上
 > **同架构**跑起来，并且都能跑 arm64 应用。
 
+> ℹ️ **范围说明（后加的）**：本文只覆盖 **x86_64 桥产品**（`remote_control_x64_arm64`）这条路。
+> 项目后来长出了第二条 ROM 产品线（**arm64 原生**，`remote_control_arm64`）和第三套宿主脚本
+> （**macOS / darwin**）：
+>  · 那些东西怎么来、为什么必须做 → [`13-macos-port.md`](13-macos-port.md)
+>  · 打包成可交付 zip（现在支持 `--platform linux|windows|darwin|both|all`）→ [`15-release-packaging.md`](15-release-packaging.md)
+> 本文的**构建与验收步骤对两条 ROM 线都适用**（共享脚本已按 `PRODUCT=x64_arm64|arm64` 参数化）。
+
 ---
 
 ## 1. 产物是什么

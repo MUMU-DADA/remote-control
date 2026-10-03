@@ -20,6 +20,8 @@
 | G4 Windows x86_64 跑同一份 ROM（WHPX） | ⊘ **明确不由 agent 验证**（用户决定）；工程部分已交付：脚本 + 镜像 + `preflight.ps1` + 首次运行对照表 + **同 build id 等价性**（Windows 稳定包 15917651 与 Linux 包同 build，Linux 侧实跑全绿） |
 | G5 arm32 下放（备选） | 📄 预案见 [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md) |
 | **G6 可交付的 release 包（两平台成品）** | ✅ `./scripts/release.sh` → **一个平台一个 zip**：完整无头运行环境 + 虚拟机镜像 + 模板；两个包用**同一 build id** 的模拟器；Linux 那份已解压**真启动验收**（见 [`docs/15-release-packaging.md`](docs/15-release-packaging.md)） |
+| **G7 arm64 原生 ROM 产品线** | ✅ **已实测**：`PRODUCT=arm64` 全量构建 `EXIT=0`，产物全是 `ELF 64-bit ARM aarch64`，`libndk_translation*` = 0，`abilist64=arm64-v8a`（没有翻译层 —— 它是给 Apple Silicon 准备的） |
+| **G8 macOS 宿主支持** | 🟡 **代码完成、离线验证通过，缺真机**：`macos/` 备料脚本 + `packaging/bin/darwin/` 五个包内脚本 + `release.sh` 的 darwin 平台；`tools/test-macos-port.sh` **99 项全绿**；darwin 包已在 Linux 上真铺出来。**真 Mac 上的启动/开机/自启/签名未验**（见 [`docs/13-macos-port.md`](docs/13-macos-port.md) §8） |
 
 ```bash
 # 一次性复现（构建→自检→打包→启动验收）
@@ -248,12 +250,16 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 - 验收排错手册（症状 → 查什么 → 怎么修） → [`docs/04-acceptance-runbook.md`](docs/04-acceptance-runbook.md)
 - **验收报告（结论性证据记录）** → [`docs/07-verification-report.md`](docs/07-verification-report.md)
 - 往 ROM 里加自制组件（如 `remote-control`） → [`docs/05-adding-components.md`](docs/05-adding-components.md)
+- **模拟器版本要求与 AOSP 自带版本的差距**（哪个版本起才认这些镜像） → [`docs/08-emulator-version-notes.md`](docs/08-emulator-version-notes.md)
 - **arm32 下放预案**（目标里的"如果 arm64 不行"） → [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md)
 - **为什么不做"跨架构全系统模拟 arm64"**（实测结论 + 可复用发现） → [`docs/09-why-not-full-arm64-sim.md`](docs/09-why-not-full-arm64-sim.md)
 - **网络桥接模式**（让模拟器落到物理局域网，`-net-tap`） → [`docs/10-network-bridge.md`](docs/10-network-bridge.md)
 - **快照与多实例**（7 秒从快照恢复、一键再开一台机器、MAC 硬限制） → [`docs/11-snapshots-and-multi.md`](docs/11-snapshots-and-multi.md)
 - **实例生命周期控制**（建/起/停/强杀/重启/重置/删除/复制，GPU 自适应） → [`docs/12-emulator-control.md`](docs/12-emulator-control.md)
 - **release 打包**（两个平台各一个 zip：无头运行环境 + 镜像 + 模板；怎么验、踩了哪些坑） → [`docs/15-release-packaging.md`](docs/15-release-packaging.md)
-- **加 macOS 支持**（arm64 ROM 产品 + 第三套宿主脚本，计划） → [`docs/13-macos-port.md`](docs/13-macos-port.md)
-- **把服务做成 macOS 被控端**（API 等价性与权限模型调研） → [`docs/14-macos-host-notes.md`](docs/14-macos-host-notes.md)
+- **加 macOS 支持**（arm64 原生 ROM 产品 + 第三套宿主脚本）→ [`docs/13-macos-port.md`](docs/13-macos-port.md)
+  · 评估 + 实现 + 离线验证记录都在这一篇（§7.0.x 是逐轮的实测留痕）
+  · ⚠️ **离线能验的都验过了；真机（真 Mac）验证还没做** —— 见该篇 §8 清单
+- **把服务做成 macOS 被控端**（API 等价性与权限模型调研；**这是另一件事**：被控端 ≠ 宿主）
+  → [`docs/14-macos-host-notes.md`](docs/14-macos-host-notes.md)
 - 进度与阶段 → [`PLAN.md`](PLAN.md)

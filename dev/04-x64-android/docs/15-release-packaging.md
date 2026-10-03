@@ -4,6 +4,15 @@
 > **完整无头运行环境** + **对应的虚拟机镜像** + **模板**。
 > 命令：`./scripts/release.sh`　产物：`release/autosnap-<版本>-<平台>-x86_64.zip`
 
+> ℹ️ **平台范围（后加的）**：`--platform` 现在支持 `linux` / `windows` / **`darwin`** / `both` / `all`。
+> `both` 仍是 linux+windows（默认值没变）；加 macOS 那条线用 `--platform darwin`
+> （还可选 `--darwin-arch aarch64|x64`）。
+>
+> ⚠️ **一次调用只认一份 ROM**：`darwin --darwin-arch aarch64` 需要 **arm64 原生 ROM**，
+> 而 linux/windows/Intel-Mac 需要现有的 **x86_64 桥 ROM** —— 所以两者要**各打一次**。
+> 平台与 ROM 不配套时 `release.sh` 会直接拒绝（不会产出"装得上、起不来"的包）。
+> 细节与实测见 [`13-macos-port.md`](13-macos-port.md) §7.0.11、§7.0.13。
+
 ## 0. 本轮实测（真跑出来的数字）
 
 | 项 | linux-x86_64 | windows-x86_64 |

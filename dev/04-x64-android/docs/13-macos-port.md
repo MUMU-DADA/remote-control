@@ -1,12 +1,23 @@
 # 13 · macOS 宿主支持：arm64 ROM 产品 + 第三套宿主脚本
 
-> **状态：计划 + 首轮核查已完成（2026-10-03）。**
-> §7.0 是**实测记录**（已核实，带 sha1 与文件清单）；§1–§6、§8 的其余部分仍是**计划与估算**。
-> 本文两条线都还没有写出任何代码。
+> **状态：代码已完成、离线验证通过；真机（真 Mac）验证未做。**（最后更新 2026-10-03）
 >
-> 相关：[`14-macos-host-notes.md`](14-macos-host-notes.md)（把 remote-control 做成 macOS 被控端的 API 与权限调研）
-> · [`09-why-not-full-arm64-sim.md`](09-why-not-full-arm64-sim.md)（"跨架构全系统模拟"曾被我方否决的实测结论）
-> · [`03-delivery.md`](03-delivery.md)（当前的"一份 ROM，两个 x64 平台"）
+> | | 位置 | 到什么程度 |
+> |---|---|---|
+> | **评估**（改动量有多少） | §1–§6 | ✅ 完成，数字都是实测的 |
+> | **实测记录** | §7.0.1–§7.0.15 | ✅ 逐轮留痕（带 sha1、文件清单、测试输出） |
+> | **实现** | 见下方"交付物" | ✅ arm64 ROM 产品线 + 三套宿主脚本 + 打包接入 |
+> | **验证** | §7.0.8 / §7.0.13 / §7.0.14 | ✅ 离线：`tools/test-macos-port.sh` **99 项全绿**；darwin 包已在 Linux 上真铺出来 |
+> | **真机验证** | §8 清单 | ❌ **未做** —— 需要一台真 Mac，见 §8 里逐条标出的未验项 |
+>
+> **交付物**（都在仓库里）：
+> `device/remote_control_arm64/`（arm64 产品线）· `macos/`（备料脚本 + `run-darwin.sh`）
+> · `packaging/bin/darwin/`（五个包内脚本）· `release.sh` 的 darwin 平台
+> · `tools/test-macos-port.sh`（离线测试台）
+>
+> 相关：[`14-macos-host-notes.md`](14-macos-host-notes.md)（**另一件事**：把 remote-control 做成 macOS **被控端**的 API 与权限调研）
+> · [`09-why-not-full-arm64-sim.md`](09-why-not-full-arm64-sim.md)（**另一件事**："跨架构全系统模拟 arm64"被否决的实测结论 —— 与本文的"arm64 **原生**"不同，见该文开头）
+> · [`03-delivery.md`](03-delivery.md)（交付与验收）· [`15-release-packaging.md`](15-release-packaging.md)（打包）
 
 ---
 
