@@ -207,6 +207,7 @@ bash tools/test-release.sh
 | 6 | 第 4 组验收没打印失败项就退出 | `adb shell pidof <没跑起来的包>` 返回**非 0**，`set -e` 把脚本静默带走；根因是**包名写死了**（APK 早改名为 `org.autosnap.arm64probe`） | helper 一律 `\|\| true`；包名改成**从设备上发现**（`pm list packages -3`），并改成在整份 logcat 里找 `PROBE_RESULT`（不依赖 tag） |
 | 7 | 包里的 `images/` 被写脏 | `initrd` / `config.ini` 被链进工作目录后写穿 | 工作目录构建里写死 `NO_LINK` 名单（两个平台各一份） |
 | 8 | 在 PowerShell 里 `New-Item -ItemType Junction` "成功"但没建东西 | 非 Windows 上该 cmdlet 静默无效 | 每一档链接都读回确认，收尾再核对 `images/` 每项都在 |
+| 9 | 冒烟**全绿**，脚本却以**失败**退出（调用者拿到退出码 1，且 staging 不清理） | `smoke_linux` 的最后一句是 `[ "$CLEAN_SMOKE" = 1 ] && rm -rf ...`：条件为假时这条 AND 列表返回 1 → **函数返回 1** → `set -e` 在"清理 staging / 完成"之前把脚本带走 | 改成真正的 `if` 并 `return 0`。**通用陷阱**：函数/`if` 块的最后一句别留 `[ 条件 ] && 命令` |
 
 ---
 

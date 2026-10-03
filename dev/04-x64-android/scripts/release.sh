@@ -606,7 +606,13 @@ smoke_linux() {   # smoke_linux <zip>
         warn "没有可用的 adb（$SMOKE_ADB），只做解压 + 结构检查，不启动"
     fi
     log "冒烟目录：${dir#"$PROJECT_ROOT"/}（含启动日志与验收输出）"
-    [ "$CLEAN_SMOKE" = 1 ] && { rm -rf "$dir"; log "已清理冒烟目录"; }
+    # ⚠️ 这里**不能**写成 `[ "$CLEAN_SMOKE" = 1 ] && rm -rf ...`：
+    #    条件为假时这条 AND 列表返回 1，函数就返回 1，于是 set -e 在"清理 staging / 完成"
+    #    之前把整个脚本带走 —— 冒烟明明全绿，调用者却拿到**失败**的退出码（实测踩过）。
+    if [ "$CLEAN_SMOKE" = 1 ]; then
+        rm -rf "$dir"; log "已清理冒烟目录"
+    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------

@@ -246,7 +246,7 @@ system   system.img sha256 = 243298b2fb1aa4d9631ddd1435ef8bc8b0a2266cdf65d67bf00
 | `docs/15-release-packaging.md` | ✅ 包结构、怎么打、运行时装哪一版、模板是什么、怎么验、**6 条坑记录**、上限与后续 |
 | 真包实测 | ✅ 两个 zip 都产出并解压核验：Linux 那份**真启动**（`Boot completed in 25283 ms`）+ 四组验收全绿 + 包内 `SHA256SUMS` 逐文件校验通过 |
 
-### 这一轮踩到并修掉的 6 个真问题
+### 这一轮踩到并修掉的 7 个真问题
 
 | # | 现象 | 根因 | 修法 |
 |---|---|---|---|
@@ -256,6 +256,7 @@ system   system.img sha256 = 243298b2fb1aa4d9631ddd1435ef8bc8b0a2266cdf65d67bf00
 | 4 | 清单漏 `images/MANIFEST.txt` | ROM 自带的 `SHA256SUMS` 是在写 `MANIFEST.txt` **之前**算的（`package-rom.sh` 的顺序），所以镜像里有文件不在那份清单里 | 用 `comm` 找出"镜像里清单没覆盖的文件"补算（`comm` 必须与 `sort` 同用 `LC_ALL=C`） |
 | 5 | 结构自检把 `system-qemu.img`/后端/模板**全报成缺失** | `unzip -Z1 \| grep -qxF` 里 grep 一命中就退出，unzip 吃 SIGPIPE(141)，`pipefail` 下成了"明明有却报没有" | 清单先落成文件再比对（`smoke_linux` 里 `unzip ... \| head -1` 是同一个坑，一起修了） |
 | 6 | 第 4 组验收没打印失败项就退出 | `adb shell pidof` 找不到进程返回非 0，`set -e` 把脚本**静默**带走 | helper 一律 `\|\| true`；包名改成**从设备上发现**（`pm list packages -3`），不再写死 `org.remotecontrol.arm64probe`（真包名已是 `org.autosnap.arm64probe`） |
+| 7 | 冒烟全绿，`release.sh` 却以**失败**退出、staging 也不清理 | `smoke_linux` 最后一句是 `[ "$CLEAN_SMOKE" = 1 ] && rm -rf ...`：条件为假时 AND 列表返回 1 → **函数返回 1** → `set -e` 在"清理/完成"前把脚本带走 | 改成 `if` 并 `return 0`。通用陷阱：函数/`if` 块的最后一句别留 `[ 条件 ] && 命令` |
 
 > 教训和第 12 轮一样：**"命令没报错"不等于"事情做成了"**。
 > 这轮 6 个问题里有 4 个是"看起来成功、其实清单/自检是错的"，
