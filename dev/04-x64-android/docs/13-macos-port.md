@@ -1126,8 +1126,26 @@ linux          windows          darwin-aarch64          darwin-x86_64
 | `darwin-aarch64` | `qemu/darwin-aarch64/…aarch64-headless` | **arm64 原生**（`abilist64=arm64-v8a`） | darwin 那套 | Apple Silicon 提示 + Hypervisor ✓ |
 | `darwin-x86_64` | `qemu/darwin-x86_64/…x86_64-headless` | x86_64 桥（`x86_64,arm64-v8a`） | darwin 那套 | **Intel Mac 提示** + Hypervisor ✓，且**不出现** Apple Silicon 提示 |
 
-四份整包 `SHA256SUMS` 都可校验（447 / 435 / 401 / 403 行）。
-`tools/test-macos-port.sh` 加到 **107 项**（新增目标展开、缺 arm64 ROM 的报错文案等断言）。
+**完整打包也真跑了**（不是只铺包）——`./scripts/release.sh --platform all` 一次产出四份 zip：
+
+| zip | 大小 | 条目 |
+|---|---|---|
+| `autosnap-<版本>-linux-x86_64.zip` | 1.87 GB | 511 |
+| `autosnap-<版本>-windows-x86_64.zip` | 1.98 GB | 495 |
+| `autosnap-<版本>-darwin-aarch64.zip` | 1.90 GB | 462 |
+| `autosnap-<版本>-darwin-x86_64.zip` | 2.03 GB | 464 |
+
+并且**独立复验**过（不只看当时的输出）：`unzip -t` 完整性全通过、第一层目录名正确、
+关键文件齐全、**不带别的平台的后端目录**、包内 `SHA256SUMS` 抽验通过。
+
+`tools/test-macos-port.sh` 加到 **107 项**（新增目标展开、缺 arm64 ROM 的报错文案等断言）；
+原有 `tools/test-release.sh` 仍 **65 项全绿**。
+
+> ⚠️ 这次完整打包里我自己踩了一个坑：**在 release 正跑的时候编辑了 release.sh**
+> ——bash 边读边执行，于是它按旧偏移读到了新文件的中间，报出
+> `$'\220\214': 未找到命令`（半个汉字被当成命令名）。四个 zip 本身没问题，
+> 但收尾的清理与"完成"那几行**静默丢了**。
+> 已记进 [`02-build-traps.md`](02-build-traps.md) 第 9 条。
 
 **本轮实跑又抓到五个真问题**（都是"读代码看不出来"的）：
 
