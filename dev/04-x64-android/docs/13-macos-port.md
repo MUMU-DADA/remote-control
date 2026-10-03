@@ -1024,6 +1024,50 @@ linux/windows 早就有对应的覆盖参数，darwin 缺了这两个就**离线
 另：那几条 bash 4 语法检查必须先**剔掉注释行**再查 —— 这几条恰好写在 lib.sh 的注释里
 当反例（"只用 bash 3.2 语法：无 declare -A…"），不剔注释就会把说明文字判成违规。
 
+#### 7.0.15 `macos/run-darwin.sh`：补上源码树侧那个缺口（本轮）
+
+§3 里 `macos/` 那三个脚本（`preflight` / `fetch-emulator` / `fetch-images`）只负责**备料**，
+起机器那一步原来在 README 里写的是"手工拼参数，照抄 `run-linux.sh` 的 `launch()`"。
+本轮把它补成一个**薄封装**：`macos/run-darwin.sh`。
+
+**为什么是薄封装，不是再写一套**：起停逻辑（探 GPU、建工作目录、GPU 回退链、等开机）
+已经在 `packaging/bin/darwin/` 里写好，并被 `tools/test-macos-port.sh` 离线测过。
+源码树与发布包的区别**只有路径约定**（发布包是 `bin/` 与 `images/ runtime/ templates/` 同级；
+源码树里脚本在 `packaging/bin/darwin/`，镜像与运行时在别处）。所以这个脚本只做一件事：
+把 `AUTOSNAP_*` 指对位置，再 `exec` 包内脚本。
+参数照抄一份的结果一定是**两边漂移** —— 这个项目已经在别处吃过这个亏。
+
+它比"透传"多做一件事：**启动前的架构自检**。两种 Mac 各自只有**一个**后端，
+配错镜像会"装得上、起不来"，而且报错完全指不到真因。所以它在启动前比对
+`uname -m` 与镜像 `build.prop` 的 `abilist64`，不匹配就直接说清楚该换哪份 ROM：
+
+```
+[x] 本机是 Apple Silicon，但镜像的 abilist64 是「x86_64,arm64-v8a」（含 x86_64）。
+    Apple Silicon 的模拟器包**没有** x86_64 后端 —— 这份镜像起不来。
+    换 arm64 那份： cd .. && PRODUCT=arm64 ./scripts/package-rom.sh
+```
+
+**写它的过程中踩到一个坑**（已记进注释与测试）：`AUTOSNAP_TEMPLATES` 原来我指到
+`packaging/templates/` —— 那个目录里**只有 README**，`config.ini` 的真源是
+`emulator/config.ini`（`common.sh` 的 `EMULATOR_CONFIG` 就是它，`release.sh` 打包时才拷进去）。
+指过去的结果是 `模板缺失：…/packaging/templates/config.ini`（实测踩到）。
+
+**验证**（stub 伪装的 macOS 上，端到端）：
+
+| 输入 | 结果 |
+|---|---|
+| arm64 Mac + arm64 镜像 | ✅ 过自检 → 委托包内脚本 → 建出工作目录（`initrd` 实文件、大件软链） |
+| arm64 Mac + x86_64 镜像 | ✅ 拒绝，并给出该换哪份 ROM |
+| **Intel** Mac + arm64 镜像 | ✅ 拒绝（Intel 的包里没有 aarch64 后端） |
+| 缺 `sdk/` 或镜像 | ✅ 明确报错并指出先跑哪个脚本（不静默失败） |
+
+测试台加了 `[6]` 组守这几条，现在共 **99 项**。
+
+**顺带**：`[6]` 组第一次跑又抓到一个假阳性 —— `run-darwin.sh` 的**注释**里写着
+「不要自己拿产物目录当 `-sysdir` 启动」，而检查是"文件里不许出现 `-sysdir`"。
+这是同一个模式今天第三次出现（bash 4 语法、旧目录名、`-sysdir`），
+所以现在规则统一成：**凡是"检查代码里出现的字符串"，一律先 `strip_comments`**。
+
 ### 7.1 仍需在真机上验的
 
 | # | 事项 | 为什么重要 | 怎么验 | 状态 |

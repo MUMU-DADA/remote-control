@@ -342,6 +342,36 @@ has "verify.sh 认 x86-64 的 e_machine"  "$VSH" "3e00"
 
 # =============================================================================
 echo
+echo "── [6] macos/run-darwin.sh（源码树入口）的架构自检"
+# =============================================================================
+# 两种 Mac 各自只有**一个**后端，配错镜像会"装得上、起不来"，而且报错指不到真因。
+# 这个薄封装的价值就在**启动前**把这件事判掉 —— 所以它值得一个断言。
+RUNW="$X64_DIR/macos/run-darwin.sh"
+if [ -f "$RUNW" ]; then
+    okc "macos/run-darwin.sh 存在"
+    # 三种输入下的三种输出。注意都在**没有真 sdk / 真 artifacts** 的前提下，
+    # 所以前两条走的是"缺依赖就明确报错"而不是静默失败。
+    o1="$(PATH="$STUB:$PATH" STUB_UNAME_M=arm64 bash "$RUNW" --no-wait 2>&1 | head -2 | tr -d '\n')"
+    if printf '%s' "$o1" | grep -q "找不到"; then
+        okc "缺 sdk/镜像时明确报错，并指出先跑哪个脚本"
+    else
+        badc "run-darwin.sh 缺依赖时的输出不像预期：$o1"
+    fi
+    has "run-darwin.sh 会比对本机架构与镜像 abilist64" "$(cat "$RUNW")" "abilist64"
+    has "run-darwin.sh 对 Apple Silicon 有专门提示"     "$(cat "$RUNW")" "Apple Silicon"
+    has "run-darwin.sh 是薄封装（交给包内脚本）"        "$(cat "$RUNW")" 'exec "$PKG_BIN/start-headless.sh"'
+    # ⚠️ 必须先剔注释再查：run-darwin.sh 的注释里就写着「不要自己拿产物目录当 -sysdir 启动」。
+    #    "检查代码里出现的字符串"一律先 strip_comments —— 这个假阳性模式今天出现三次了
+    #    （bash 4 语法、旧目录名、-sysdir），每次都是注释把检查骗了。
+    hasnt "run-darwin.sh 没有自己拼 -sysdir 参数"       "$(strip_comments "$RUNW")" "-sysdir"
+    # 模板路径这条踩过：packaging/templates/ 里只有 README，config.ini 的真源是 emulator/
+    has "run-darwin.sh 的模板指向 emulator/（config.ini 的真源）" "$(cat "$RUNW")" 'AUTOSNAP_TEMPLATES="$X64_DIR/emulator"'
+else
+    badc "macos/run-darwin.sh 不存在"
+fi
+
+# =============================================================================
+echo
 if [ "$FAIL" = 0 ]; then
     printf '\033[1;32m==>\033[0m 全部通过：%d 项（沙箱：%s）\n' "$PASS" "${SANDBOX#"$REPO_ROOT"/}"
     exit 0
