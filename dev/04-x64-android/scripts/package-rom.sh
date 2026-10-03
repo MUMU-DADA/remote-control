@@ -57,6 +57,89 @@ mkdir -p "$RUN_DIR"
 exec 9>"$LOCK"
 flock -n 9 || die "另一个打包实例正在跑（锁：$LOCK）"
 
+# ---------------------------------------------------------------------------
+# 交付目录白名单
+#
+# ⚠️ 为什么是白名单而不是黑名单：产物的来源是 AOSP 产物目录，而**那个目录会被
+#    模拟器直接写**（开发时常用 `-sysdir $PRODUCT_OUT` 迭代）。写进去的东西里
+#    最危险的是 `userdata-qemu.img`：
+#      · 表观 **32 GB** 的稀疏文件 —— 实测把交付目录从 6.2 G 撑到 39 G 表观体积，
+#        打进 zip 之后包也跟着变大；
+#      · 更要紧的是它**是跑过的用户数据**：把上一台机器的应用/账号/输入内容
+#        发给最终用户，是数据泄漏而不只是体积问题。
+#    黑名单永远列不全（模拟器还会写 build.avd / hardware-qemu.ini /
+#    version_num.cache / modem_simulator / *.lock …）。所以反过来：
+#    只允许我们认识的文件，其余一律拦下。
+# ---------------------------------------------------------------------------
+ALLOWED_FILES="$REQUIRED $OPTIONAL initrd source.properties MANIFEST.txt SHA256SUMS config.ini"
+ALLOWED_DIRS="system vendor product odm system_ext build.avd"
+
+# 交付目录里出现了不该有的东西就拒绝打包（只读检查，不改任何文件）
+verify_dest_allowlist() {
+    local stray="" name
+    for f in "$DEST"/* "$DEST"/.[!.]*; do
+        [ -e "$f" ] || continue
+        name="$(basename "$f")"
+        # 目录：只放行 ALLOWED_DIRS
+        if [ -d "$f" ]; then
+            case " $ALLOWED_DIRS " in *" $name "*) ;; *) stray="$stray $name/(目录)" ;; esac
+            continue
+        fi
+        case " $ALLOWED_FILES " in *" $name "*) ;; *) stray="$stray $name" ;; esac
+    done
+    if [ -n "$stray" ]; then
+        # DEST 是本脚本 rm -rf 之后自建的，正常情况**不可能**触发；
+        # 触发说明拷贝逻辑或清单出了变化 —— 那是 bug，必须停下来看。
+        die "交付目录里出现了清单外的东西：$stray
+
+    这些通常是**拿产物目录/交付目录当 -sysdir 启动过模拟器**留下的运行期文件。
+    其中 userdata-qemu.img 是表观 32 GB 的稀疏文件，而且**是跑过的用户数据** ——
+    绝不能进交付包（数据泄漏 + 体积暴涨，实测把交付目录从 6.2 G 撑到 39 G）。
+
+    清理办法（先确认没有在跑的实例）：
+        rm -rf $PRODUCT_OUT/build.avd $PRODUCT_OUT/hardware-qemu.ini \
+               $PRODUCT_OUT/emu-launch-params.txt $PRODUCT_OUT/version_num.cache \
+               $PRODUCT_OUT/modem_simulator $PRODUCT_OUT/*.lock \
+               $PRODUCT_OUT/*.qcow2 $PRODUCT_OUT/userdata-qemu.img*
+    或者干脆重新打一份： ./scripts/build-rom.sh   （再 ./scripts/package-rom.sh）
+    然后重跑本脚本。"
+    fi
+}
+
+# 运行期垃圾：模拟器直接在产物目录里跑过就会留下这些
+#   ⚠️ userdata-qemu.img 是**表观 32 GB 的稀疏文件**，而且是**跑过的用户数据** ——
+#      它进交付包的后果是"数据泄漏 + 体积暴涨"（实测把交付目录从 6.2 G 撑到 39 G 表观）。
+#      属可再生的运行期状态，打包时清掉是对的。
+RUNTIME_JUNK="userdata-qemu.img userdata-qemu.img.qcow2 cache.img.qcow2 encryptionkey.img.qcow2 \
+hardware-qemu.ini emu-launch-params.txt version_num.cache read-snapshot.txt multiinstance.lock"
+RUNTIME_JUNK_DIRS="build.avd modem_simulator"
+
+clean_product_out_junk() {
+    local f n=0 freed=0 before after
+    before="$(du -sh --apparent-size "$PRODUCT_OUT" 2>/dev/null | cut -f1)"
+    for f in $RUNTIME_JUNK; do
+        [ -e "$PRODUCT_OUT/$f" ] || continue
+        n=$((n + 1))
+        rm -rf "$PRODUCT_OUT/$f"
+        printf '    清掉 %s\n' "$f"
+    done
+    for f in $RUNTIME_JUNK_DIRS; do
+        [ -d "$PRODUCT_OUT/$f" ] || continue
+        n=$((n + 1))
+        rm -rf "$PRODUCT_OUT/$f"
+        printf '    清掉 %s/（目录）\n' "$f"
+    done
+    if [ "$n" -gt 0 ]; then
+        after="$(du -sh --apparent-size "$PRODUCT_OUT" 2>/dev/null | cut -f1)"
+        warn "产物目录里有 $n 项运行期文件（模拟器直接跑过），已清理：表观 $before → $after"
+        warn "  这类文件不该进交付包 —— 尤其 userdata-qemu.img 是**跑过的用户数据**"
+    fi
+}
+
+# 闸门一：清源头（否则交付目录会被这些文件污染）
+log "清理产物目录里的运行期文件"
+clean_product_out_junk
+
 log "清空并重建 $DEST"
 rm -rf "$DEST"; mkdir -p "$DEST/system"
 
@@ -67,6 +150,10 @@ done
 # 屏幕尺寸/密度：交付目录里那份 config.ini 用本项目 emulator/config.ini 覆盖。
 # ROM 构建产出的是 goldfish 的 config.ini.xl（1440x2960 @560dpi）；统一成 720x1280 @320dpi。
 # ⚠️ 必须在算 SHA256SUMS/MANIFEST 之前写，否则清单和实物对不上。
+# 闸门放在"拷贝完、写派生文件之前"：
+# 此刻 $DEST 里只可能有刚 cp 进来的文件 + 空目录，还没开始写 initrd/config.ini/SHA256SUMS
+verify_dest_allowlist
+
 if [ -s "$EMULATOR_CONFIG" ]; then
     cp -f "$EMULATOR_CONFIG" "$DEST/config.ini"
     log "显示配置： $(grep -E '^(skin\.name|hw\.lcd\.density)=' "$EMULATOR_CONFIG" | paste -sd' ' -)"

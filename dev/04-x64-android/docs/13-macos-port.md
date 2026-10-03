@@ -873,6 +873,57 @@ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm
 **仍未做的**：`packaging/templates/` 里没有 mac 专属模板（目前三平台共用同一套
 `config.ini` / `instance.env`，这没问题）；`--slim` 在 darwin 上的裁剪未经真机验证。
 
+#### 7.0.12 产物目录被模拟器污染：一个 32 GB 稀疏文件的教训（本轮）
+
+**症状**：arm64 交付目录的表观体积是 **39 GB**（实际占用 6.2 GB），而 x86_64 那份是 6.2 GB。
+逐文件看，罪魁是 `userdata-qemu.img` —— **表观 34,359,738,368 字节（32 GiB）的稀疏文件**，
+实占只有 197 KB。
+
+**来源**：`-sysdir` 指向哪个目录，模拟器就往**那个目录**写运行期状态，**`-datadir` 拦不住它**。
+本项目里踩了两次，是同一个原因的两个受害点：
+
+| 受害点 | 怎么中的 | 后果 |
+|---|---|---|
+| AOSP 产物目录 `out/target/product/remote_control_arm64/` | 开发时常用 `-sysdir $PRODUCT_OUT` 迭代 | 再打包一次就会把 32 GB 的东西带进交付目录 |
+| **交付目录** `artifacts/rom-remote_control_arm64/` | §7.0.4 那次排查直接拿交付目录当 `-sysdir` 启动 | 交付目录当场被撑到 39 G |
+
+**危害不止是体积**：`userdata-qemu.img` 是**跑过的用户数据**（应用、账号、输入内容都在里面）。
+把它打包发给最终用户是**数据泄漏**，不只是包大了几倍。
+
+**修法（两道闸门，都在 `package-rom.sh`）**：
+
+1. **清源头**：`clean_product_out_junk()` 在打包前把产物目录里的运行期文件清掉并如实报告
+   （清之前/之后的表观体积都打出来）。清的是可再生的运行期状态：
+   `userdata-qemu.img(+.qcow2)`、`*.img.qcow2`、`build.avd`、`modem_simulator`、
+   `hardware-qemu.ini`、`emu-launch-params.txt`、`version_num.cache`、`read-snapshot.txt`、`*.lock`。
+2. **交付目录白名单**：`verify_dest_allowlist()` 在拷贝完、写派生文件之前扫一遍 `$DEST`，
+   只放行 `REQUIRED/OPTIONAL` + `initrd/source.properties/MANIFEST.txt/SHA256SUMS/config.ini`
+   + `system/vendor/product/odm/system_ext/build.avd` 这些目录，其余一律 `die`。
+   为什么用**白名单而不是黑名单**：模拟器写什么列不全（这次是新发现的一项）。
+   这道闸门正常情况下不会触发（`$DEST` 是脚本自己 `rm -rf` 后重建的）——
+   触发就说明拷贝逻辑或清单变了，那是 bug，必须停下来看。
+
+**验证**：
+
+| 项 | 修前 | 修后 |
+|---|---|---|
+| 交付目录表观体积 | 39 G | **6.2 G** |
+| 实际占用 | 6.2 G | 5.7 G |
+| `userdata-qemu.img` | 在（32 GiB 表观） | **已清** |
+| `build.avd` / `hardware-qemu.ini` / `emu-launch-params.txt` / `version_num.cache` | 在 | **已清** |
+| `sha256sum -c SHA256SUMS` | —— | ✅ 全部通过 |
+| `source.properties` 的 `SystemImage.Abi` | —— | ✅ `arm64-v8a` |
+| `MANIFEST.txt` 翻译层段 | —— | ✅ 如实写"无翻译层" |
+
+**顺带澄清一个我之前说错的估计**：文档 §7.2 里"arm64 包体积可能变大也可能变小"那条，
+现在有数了 —— arm64 交付目录 **6.2 G 表观 / 5.7 G 实占**，与 x86_64 那份基本持平
+（少掉翻译层 80+ 个文件，但 arm64 系统库更大，两者大致抵消）。
+
+> ⚠️ **给后来人的规矩**：**永远不要拿交付目录当 `-sysdir`**。要在交付目录上试启动，
+> 先把 `images/` 拷出来或让模拟器用它自己的 `sysdir-<port>`（包内 `bin/start-headless.sh`
+> 正是这么做的：`build_sysdir` 把 `images/` **软链**进 `.run/sysdir-<port>/`，
+> 只有 `initrd` 和 `config.ini` 是实文件 —— 那两条的注释就在 lib.sh 里）。
+
 ### 7.1 仍需在真机上验的
 
 | # | 事项 | 为什么重要 | 怎么验 | 状态 |
