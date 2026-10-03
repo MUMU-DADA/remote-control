@@ -24,13 +24,59 @@ mkdir -p "$TMPDIR"
 
 # AOSP 内的落点（由 apply-overlay.sh 同步过去）
 DEVICE_DST="$AOSP_DIR/device/remote_control"
-PRODUCT_NAME="remote_control_x64_arm64"
+
+# ---------------------------------------------------------------------------
+# 产品选择
+#
+# 两个产品的**本质差别**是"guest 是不是原生 arm64"，它决定一大票分支：
+#
+#   PRODUCT=x64_arm64（默认）  x86_64 guest + 用户态翻译层（libndk_translation）
+#       → 宿主 x86_64：Linux(KVM) / Windows(WHPX) / Intel Mac(HVF，未实测)
+#       → 需要 bridge/ 载荷、TARGET_NATIVE_BRIDGE_*、三条 ro.dalvik.vm.* 属性
+#
+#   PRODUCT=arm64              原生 arm64，无翻译层
+#       → 宿主 arm64：Apple Silicon(HVF，待实测) / arm64 Linux(KVM，未实测)
+#       → **不要**载荷、**不要**翻译层属性；应用必须自带 arm64-v8a 库
+#
+# 用法：
+#   PRODUCT=arm64 ./scripts/build-rom.sh              # 编 arm64 ROM
+#   PRODUCT=arm64 ./scripts/apply-overlay.sh          # 只同步 arm64 设备树
+#   ./scripts/build-rom.sh                            # 默认仍是 x64_arm64，行为不变
+#
+# ⚠️ 产品名与产物目录**不同名**（实测踩过）：
+#     lunch 目标 / PRODUCT_NAME  = remote_control_<PRODUCT>
+#     产物目录                   = $AOSP_DIR/out/target/product/remote_control_<PRODUCT>
+#   当前两个产品恰好同名，所以看不出差异；**换新设备树时务必核对**
+#   `PRODUCT_OUT` 是不是真的落在了 lunch 之后 AOSP 打印的那个目录上。
+#   参照系：上游 sdk_phone64_arm64 的产物目录是 emulator64_arm64（跟 PRODUCT_DEVICE 走），
+#   两者不同名。见 docs/13-macos-port.md §7.0.1。
+# ---------------------------------------------------------------------------
+PRODUCT="${PRODUCT:-x64_arm64}"
+
+case "$PRODUCT" in
+    x64_arm64) HAS_BRIDGE=1 ;;
+    arm64)     HAS_BRIDGE=0 ;;
+    *) cat >&2 <<EOF
+[x] 未知的 PRODUCT：$PRODUCT
+    可选： x64_arm64（x86_64 guest + 翻译层，默认） / arm64（原生 arm64）
+    用法： PRODUCT=arm64 $0 ...
+EOF
+       exit 1 ;;
+esac
+
+PRODUCT_NAME="remote_control_$PRODUCT"
 LUNCH_TARGET="$PRODUCT_NAME-userdebug"
 PRODUCT_OUT="${PRODUCT_OUT:-$AOSP_DIR/out/target/product/$PRODUCT_NAME}"
 # 想拿别的镜像做彩排（例如官方 google_apis 镜像）时直接覆盖：
 #   PRODUCT_OUT=/path/to/sysdir EMULATOR_PORT=5562 ./scripts/run-linux.sh
 
+# 这个产品的 ROM 跑在哪种宿主上（只用于提示与文档口径，不参与构建）
+#   x64_arm64 → x86_64 宿主；arm64 → arm64 宿主
+PRODUCT_HOST_ARCH=$([ "$HAS_BRIDGE" = 1 ] && printf 'x86_64' || printf 'arm64')
+
 # 官方镜像（翻译层来源）。API 31 = Android 12，与本 ROM 的 API 级别一致。
+# ⚠️ 只有 x64_arm64 产品用得上；arm64 产品下 fetch-payload.sh / apply-overlay.sh
+#    会**整段跳过**（翻译层在原生 arm64 上不存在，见 docs/13-macos-port.md §2.2）。
 BRIDGE_API=31
 BRIDGE_TAG=google_apis
 BRIDGE_ABI=x86_64

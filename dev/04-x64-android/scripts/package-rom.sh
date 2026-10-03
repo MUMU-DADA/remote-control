@@ -88,13 +88,25 @@ cp -f "$PRODUCT_OUT/system/build.prop" "$DEST/system/build.prop"
 
 # AOSP 产物没有 source.properties；SDK 版模拟器（Windows 侧用的那个）更认它，
 # 补一份最小可用的，AOSP 自带模拟器也不受影响。
+#
+# ⚠️ **SystemImage.Abi 必须与产品实际 guest 架构一致** —— 模拟器靠它判断
+#    guest 是不是本机架构；写错会让它按错误架构去布置机器（"缺配置"或直接起不来）。
+if [ "$HAS_BRIDGE" = 1 ]; then
+    _desc="remote-control x86_64 with ARM64 bridge"
+    _abi="x86_64"
+    _tagdisp="remote-control x86_64 + ARM64 bridge"
+else
+    _desc="remote-control arm64 (native, no translation layer)"
+    _abi="arm64-v8a"
+    _tagdisp="remote-control arm64 native"
+fi
 cat > "$DEST/source.properties" <<EOF
-Pkg.Desc=remote-control x86_64 with ARM64 bridge
+Pkg.Desc=$_desc
 Pkg.Revision=1
 AndroidVersion.ApiLevel=31
-SystemImage.Abi=x86_64
+SystemImage.Abi=$_abi
 SystemImage.TagId=remote_control
-SystemImage.TagDisplay=remote-control x86_64 + ARM64 bridge
+SystemImage.TagDisplay=$_tagdisp
 EOF
 for f in system_ext/build.prop vendor/build.prop product/build.prop; do
     [ -s "$PRODUCT_OUT/$f" ] && { mkdir -p "$DEST/$(dirname $f)"; cp -f "$PRODUCT_OUT/$f" "$DEST/$f"; }
@@ -127,9 +139,14 @@ prop_of() {
 }
 
 {
-    echo "# remote-control x86_64 + ARM64 桥 ROM"
+    if [ "$HAS_BRIDGE" = 1 ]; then
+        echo "# remote-control x86_64 + ARM64 桥 ROM"
+    else
+        echo "# remote-control arm64 原生 ROM（无翻译层）"
+    fi
     echo "# 生成时间：$(date '+%Y-%m-%d %H:%M:%S %z')"
     echo "# lunch 目标：$LUNCH_TARGET"
+    echo "# 产品：$PRODUCT（$([ "$HAS_BRIDGE" = 1 ] && printf 'x86_64 guest + 用户态翻译层' || printf '原生 arm64 guest')）"
     echo
     echo "## 关键属性"
     for p in ro.build.version.sdk ro.product.system.device ro.product.cpu.abi \
@@ -142,11 +159,17 @@ prop_of() {
     printf '%-32s = %s\n' "ro.system.build.fingerprint" "$(prop_of ro.system.build.fingerprint)"
     printf '%-32s = %s\n' "system.img sha256" "$(cd "$DEST" && sha256sum system.img 2>/dev/null | cut -d' ' -f1 || true)"
     echo
-    echo "## 翻译层（随 ROM 一起编进 /system）"
-    bridge="$DEVICE_DST/remote_control_x64_arm64/bridge/system"
-    echo "翻译器库：  $(ls "$bridge/lib64"/libndk_translation*.so 2>/dev/null | wc -l) 个"
-    echo "arm64 系统库：$(ls "$bridge/lib64/arm64" 2>/dev/null | wc -l) 个"
-    echo "载荷清单：  payload/MANIFEST.sha256"
+    if [ "$HAS_BRIDGE" = 1 ]; then
+        echo "## 翻译层（随 ROM 一起编进 /system）"
+        bridge="$DEVICE_DST/$PRODUCT_NAME/bridge/system"
+        echo "翻译器库：  $(ls "$bridge/lib64"/libndk_translation*.so 2>/dev/null | wc -l) 个"
+        echo "arm64 系统库：$(ls "$bridge/lib64/arm64" 2>/dev/null | wc -l) 个"
+        echo "载荷清单：  payload/MANIFEST.sha256"
+    else
+        echo "## 翻译层"
+        echo "无 —— 原生 arm64 产品不需要 libndk_translation（见 docs/13-macos-port.md §2.2）"
+        echo "⚠️ 因此本 ROM **跑不了**纯 x86/x86_64 应用；应用必须自带 arm64-v8a 库。"
+    fi
     echo
     echo "## 文件"
     # ⚠️ 文件名要用 **$NF**，不能写死 $9。

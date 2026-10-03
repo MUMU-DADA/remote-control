@@ -24,9 +24,25 @@ else
 fi
 
 hr "2. AOSP 注入"
-if [ -f "$DEVICE_DST/remote_control_x64_arm64/bridge/bridge-copy.mk" ]; then
-    printf '   %s ✓（拷贝规则 %s 条）\n' "${DEVICE_DST#"$PROJECT_ROOT"/}" \
-        "$(grep -c 'TARGET_COPY_OUT_SYSTEM' "$DEVICE_DST/remote_control_x64_arm64/bridge/bridge-copy.mk")"
+# 两个产品都看：AndroidProducts.mk 里并列，缺任何一个对应产品的 lunch 目标就没了
+_inj=0
+for _p in remote_control_x64_arm64 remote_control_arm64; do
+    if [ -d "$DEVICE_DST/$_p" ]; then
+        printf '   %-28s ✓\n' "$_p"
+        _inj=$((_inj + 1))
+    else
+        printf '   %-28s \033[1;33m缺\033[0m\n' "$_p"
+    fi
+done
+if [ "$_inj" -gt 0 ]; then
+    if [ -f "$DEVICE_DST/remote_control_x64_arm64/bridge/bridge-copy.mk" ]; then
+        printf '   翻译层载荷：拷贝规则 %s 条\n' \
+            "$(grep -c 'TARGET_COPY_OUT_SYSTEM' "$DEVICE_DST/remote_control_x64_arm64/bridge/bridge-copy.mk")"
+    else
+        printf '   翻译层载荷：\033[1;33m未注入\033[0m（x64_arm64 产品需要）\n'
+    fi
+    printf '   当前 PRODUCT：%s（%s）\n' "$PRODUCT" \
+        "$([ "$HAS_BRIDGE" = 1 ] && printf 'x86_64 guest + 翻译层' || printf '原生 arm64，无翻译层')"
 else
     printf '   \033[1;33m未注入\033[0m（先跑 ./apply-overlay.sh）\n'
 fi

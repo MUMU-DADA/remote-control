@@ -55,8 +55,18 @@ docker ps --format '{{.Names}}' | grep -qx "$BUILDER_CONTAINER" \
     || die "容器 $BUILDER_CONTAINER 不在跑（docker start $BUILDER_CONTAINER）"
 [ -f "$DEVICE_DST/AndroidProducts.mk" ] \
     || die "AOSP 里没有注入设备树。先跑： ./apply-overlay.sh"
-[ -f "$DEVICE_DST/remote_control_x64_arm64/bridge/bridge-copy.mk" ] \
-    || die "载荷拷贝规则缺失，重跑： ./apply-overlay.sh"
+[ -d "$DEVICE_DST/$PRODUCT_NAME" ] \
+    || die "AOSP 里没有 $PRODUCT_NAME 的设备树。先跑： PRODUCT=$PRODUCT ./apply-overlay.sh"
+if [ "$HAS_BRIDGE" = 1 ]; then
+    [ -f "$DEVICE_DST/$PRODUCT_NAME/bridge/bridge-copy.mk" ] \
+        || die "载荷拷贝规则缺失，重跑： ./apply-overlay.sh"
+else
+    # 原生 arm64 产品没有载荷。**但要确认它真的没被带进来** ——
+    # 残留的 bridge 目录会被 ProductConfig 通过 AndroidProducts 之外的路径读到吗？不会，
+    # 但残留会让人误以为该产品也用翻译层。所以这里显式报一句。
+    [ -d "$DEVICE_DST/$PRODUCT_NAME/bridge" ] \
+        && warn "$PRODUCT_NAME 下存在 bridge/ 目录（原生 arm64 不该有）；重跑 ./apply-overlay.sh 会清掉"
+fi
 
 if [ "$(build_status)" = running ]; then
     warn "已经有一个构建在跑（--status 看进度）"
