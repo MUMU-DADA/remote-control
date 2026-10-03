@@ -1,11 +1,21 @@
-# dev/04-x64-android · 同架构 x86_64 Android ROM（可跑 arm64 应用）
+# dev/04-android-rom · 自编 Android 12 ROM 与宿主运行环境
 
-> **本目录即验证环境（轨 04）**：自编一份 x86_64 Android 12，让它在 **x86_64 Linux（KVM）** 与
-> **x86_64 Windows（WHPX）** 上**同架构**运行，并且能跑 **arm64 应用**，用来免真机验证 `remote-control`。
+> **本目录即验证与交付轨道（轨 04）**：自编 Android 12 ROM，在三种宿主上跑起来，
+> 并打出可交付的 release 包，用来免真机验证 `remote-control`。
 >
-> 目标一句话：**不要跨架构模拟，要同架构 + 用户态翻译层。**
+> **两条 ROM 产品线**（本模块最容易混的地方，见 [`../README.md`](../README.md)）：
 >
-> 历史：本目录原为 `dev/06-x64-android`；更早的 `dev/04-emulator`（跨架构全系统 arm64 模拟）
+> | 产品 | guest 架构 | 翻译层 | 跑在哪 |
+> |---|---|---|---|
+> | `remote_control_x64_arm64` | x86_64 | 有（`libndk_translation`） | Linux/KVM、Windows/WHPX、Intel Mac |
+> | `remote_control_arm64` | **原生 arm64** | 无 | Linux/aarch64、Apple Silicon |
+>
+> 目标一句话：**不要跨架构模拟，要同架构**；需要跑异构应用时再叠一层**用户态**翻译
+> （系统侧始终不跨）。
+>
+> **历史与改名理由**：`dev/06-x64-android` → `dev/04-x64-android` → **`dev/04-android-rom`**。
+> 老名字只覆盖了上面第一条产品线；G7（原生 arm64 ROM）与 G8（macOS 宿主）落地之后，
+> "x64" 已经不是这个目录的全貌。更早的 `dev/04-emulator`（跨架构全系统 arm64 模拟）
 > 经实测评估后移除，结论见 [`docs/09-why-not-full-arm64-sim.md`](docs/09-why-not-full-arm64-sim.md)。
 
 ---
@@ -62,7 +72,7 @@
 ## 2. 目录结构
 
 ```
-dev/04-x64-android/
+dev/04-android-rom/
 ├── README.md                       ← 本文件
 ├── PLAN.md                         ← 阶段划分与当前状态
 ├── device/                         ← 设备树（注入 aosp/device/remote_control/ 的唯一真源）
@@ -144,7 +154,7 @@ dev/04-x64-android/
 ## 3. 快速开始
 
 ```bash
-cd dev/04-x64-android
+cd dev/04-android-rom
 
 ./scripts/fetch-payload.sh          # 1. 取翻译层（约 1.4 GB 下载 + 一次官方镜像启动）
 ./scripts/apply-overlay.sh          # 2. 注入 AOSP 树（幂等，可 --revert）

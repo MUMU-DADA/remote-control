@@ -43,14 +43,14 @@ service remote-control /system/bin/remote-control --socket /data/misc/remote-con
     # 独立 SELinux domain。没有这一行 init 会拒绝启动。
     #
     # ⚠️ **必须是下划线**：SELinux 标识符是 [A-Za-z0-9_]，域类型定义在
-    #    dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/remote_control.te 里的 `type remote_control, domain;`。
+    #    dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/remote_control.te 里的 `type remote_control, domain;`。
     #    上游 sepolicy 里没有任何带连字符的类型名。写成 remote-control 的话
     #    域不存在，init 起服务时会失败。
     # ⚠️ 用 remote_control 域（下划线）—— 上游 sepolicy 里没有带连字符的类型名。
     #
     #    这里本来要指向启动壳的域（计划 §5 的热替换通道）。实测那条路被
     #    AOSP 策略挡死了，而且是三条 neverallow 互相咬住，详见
-    #    dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/remote_control.te
+    #    dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/remote_control.te
     #    里「载荷槽的类型暂时不声明」那一节，以及
     #    docs/09-deployment-and-update.md 末尾的「实施记录」。
     #    取舍定了之后这里再换成 remote-control-launch。
@@ -61,7 +61,7 @@ service remote-control /system/bin/remote-control --socket /data/misc/remote-con
     #
     # ⚠️ 权限必须是 **0666**：0660 + system:system 意味着只有 system UID/组能连，
     #    而上位应用是 untrusted_app 自己的 UID —— 连不上。
-    #    真正的边界交给 SELinux 域（dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/remote_control_controller.te
+    #    真正的边界交给 SELinux 域（dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/remote_control_controller.te
     #    里已经只为控制器应用放开了这一个 socket）。
     #
     #    注意：init 模式下 `--socket-mode` 是**无效**的（fd 由 init 建好传进来），

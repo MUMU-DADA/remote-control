@@ -27,13 +27,13 @@
 set -uo pipefail
 
 REMOTE="root@192.168.0.108"
-REMOTE_DIR="/root/AutoSnapshotAndroid/dev/04-x64-android/artifacts/rom-remote_control_x64_arm64"
+REMOTE_DIR="/root/AutoSnapshotAndroid/dev/04-android-rom/artifacts/rom-remote_control_x64_arm64"
 DEST="$(cd "$(dirname "$0")" && pwd)/../images"
 LOCAL_SRC=""
 FORCE=0
 SKIP_VERIFY=0
 DEQ=0
-PROBE_REMOTE="/root/AutoSnapshotAndroid/dev/04-x64-android/artifacts/arm64-probe.apk"
+PROBE_REMOTE="/root/AutoSnapshotAndroid/dev/04-android-rom/artifacts/arm64-probe.apk"
 
 while [ $# -gt 0 ]; do
     case "$1" in

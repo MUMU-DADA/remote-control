@@ -186,7 +186,7 @@ for pat in ("README.md", "docs/**/*.md", "dev/*/README.md",
             "dev/02-native-daemon/**/*.md"):
     allmd += glob.glob(os.path.join(ROOT, pat), recursive=True)
 allmd = sorted(set(f for f in allmd if os.path.isfile(f)
-                   and "/vendor/" not in f and "04-x64-android" not in f))
+                   and "/vendor/" not in f and "04-android-rom" not in f))
 dead = []
 for f in allmd:
     base = os.path.dirname(f)
@@ -210,7 +210,7 @@ for f in allmd:
         # `docs/xxx.md` 这种写法一律按**仓库根**解析；
         # 带 ../ 的按文件所在目录解析。
         # 两种解析都试：先按文件所在目录，再按仓库根。
-        # 文档里既写 `../../docs/x.md` 也写 `dev/04-x64-android/...`，
+        # 文档里既写 `../../docs/x.md` 也写 `dev/04-android-rom/...`，
         # 只认一种会误报。
         cands = [os.path.normpath(os.path.join(base, t)),
                  os.path.normpath(os.path.join(ROOT, t))]

@@ -2,7 +2,7 @@
 
 > 目标：**x86_64 Linux + x86_64 Windows 上同架构运行的自编 Android ROM，可跑 arm64 应用**
 > （arm64 若不成立，下放到 arm32）
-> 位置：`/root/AutoSnapshotAndroid/dev/04-x64-android`（原 `dev/06-x64-android`）
+> 位置：`/root/AutoSnapshotAndroid/dev/04-android-rom`（原 `dev/06-x64-android`）
 >
 > ⚠️ **时效**：下面的轮次日志**止于第 13 轮（release 打包）**。
 > 第 14 轮起的逐轮记录在 [`docs/13-macos-port.md`](docs/13-macos-port.md) **§7.0.1 起**
@@ -32,7 +32,7 @@
 
 ## 已完成的实测结论（P0 依据）
 
-来源：`dev/04-x64-android/docs/00-bridge-eval.md`（全部为本机实测）
+来源：`dev/04-android-rom/docs/00-bridge-eval.md`（全部为本机实测）
 
 1. **libhoudini 不可用**：官方源 `_z`（arm64）变体只到 Android 7；8/9 系列只有 32 位 ARM 翻译器。
 2. **libndk_translation 可用**：官方 `google_apis;x86_64`(API 31) 镜像 `abilist=x86_64,arm64-v8a`，

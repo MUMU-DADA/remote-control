@@ -4,7 +4,7 @@
 #
 # 策略的**唯一真源在设备树**：
 #
-#     dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/
+#     dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/
 #       ├── remote_control.te             主服务域
 #       ├── remote_control_controller.te  控制器应用域
 #       └── file_contexts                 文件标签
@@ -31,7 +31,7 @@
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TE_SRC="$PROJECT_DIR/dev/04-x64-android/device/remote_control_x64_arm64/sepolicy"
+TE_SRC="$PROJECT_DIR/dev/04-android-rom/device/remote_control_x64_arm64/sepolicy"
 AOSP="$PROJECT_DIR/aosp"
 CONTAINER=${CONTAINER:-remote-control-builder}
 TARGET=${TARGET:-remote_control_x64_arm64-userdebug}
@@ -69,7 +69,7 @@ ok "平台策略树是干净的（没有往里塞东西）"
 # -----------------------------------------------------------------------------
 if [ "$MODE" = "apply" ]; then
     step "同步设备树进 AOSP"
-    bash "$PROJECT_DIR/dev/04-x64-android/scripts/apply-overlay.sh" 2>&1 | tail -4
+    bash "$PROJECT_DIR/dev/04-android-rom/scripts/apply-overlay.sh" 2>&1 | tail -4
     ok "已同步（BoardConfig 里的 BOARD_SEPOLICY_DIRS 指向它）"
 fi
 

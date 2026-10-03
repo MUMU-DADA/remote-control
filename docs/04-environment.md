@@ -325,20 +325,24 @@ docker exec remote-control-builder pgrep -f "repo/main.py" >/dev/null && echo �
 
 ### 8.7 模拟器（跑 arm64 应用验证 `remote-control`，不需要真机）
 
-**当前路线（2026-09-28 起）**：`dev/04-x64-android/` —— **自编 x86_64 Android 12 ROM +
+**当前路线（2026-09-28 起）**：`dev/04-android-rom/` —— **自编 x86_64 Android 12 ROM +
 ARM 用户态翻译层**，同架构运行、KVM/WHPX 加速，能跑 arm64 应用。详见该目录的 README。
+
+> 📌 本节讲的是**第一条产品线**（x86_64 桥）。2026-10-03 起该目录还有第二条线：
+> `remote_control_arm64`（**原生 arm64**、无翻译层，给 Apple Silicon / arm64 Linux 用）。
+> 两条线的分工与约束见 [`../dev/README.md`](../dev/README.md)。
 
 | 项 | 值 |
 |---|---|
 | lunch 目标 | **`remote_control_x64_arm64-userdebug`** |
-| 产物 / 交付目录 | `out/target/product/remote_control_x64_arm64/`；打包产物见 `dev/04-x64-android/artifacts/rom-remote_control_x64_arm64/` |
+| 产物 / 交付目录 | `out/target/product/remote_control_x64_arm64/`；打包产物见 `dev/04-android-rom/artifacts/rom-remote_control_x64_arm64/` |
 | 加速 | Linux **KVM** / Windows **WHPX**（同架构虚拟化），开机几十秒 |
 | 跑 arm64 应用 | `ro.product.cpu.abilist = x86_64,arm64-v8a`，用 Google 官方 `libndk_translation` 做用户态翻译 |
 | 宿主额外依赖 | `apt-get install -y libpulse0 libgl1`（模拟器二进制的动态依赖，缺了起不来） |
 
 **为什么不是"跨架构模拟 arm64 Android"（已实测评估并放弃）**：guest arm64 / 宿主 x86_64 ⇒
 没有 arm64 KVM，只能 TCG，整机（内核/框架/HAL 都要翻译）比翻译层方案慢 **5~15 倍**，开机以十分钟计。
-完整实测与结论见 `dev/04-x64-android/docs/09-why-not-full-arm64-sim.md`。
+完整实测与结论见 `dev/04-android-rom/docs/09-why-not-full-arm64-sim.md`。
 
 ### 8.8 注意事项
 

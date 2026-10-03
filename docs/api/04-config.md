@@ -198,7 +198,7 @@ remote-control [选项]
 默认 `0660`（root:root）。要让上位应用以**自己的 UID** 连入，
 得放宽到 `0666` —— 但那意味着同设备任何进程都能控制本服务。
 
-生产环境应该走 SELinux（见 `dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/`），
+生产环境应该走 SELinux（见 `dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/`），
 而不是靠放宽文件权限。
 
 ---
@@ -372,5 +372,5 @@ bash tools/lan-up.sh --stop     # 停服务
 ## 相关
 
 - [04-config.md 的鉴权部分](#三鉴权) 与 [01-http.md](01-http.md) 的通用约定
-- `dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/` —— SELinux 策略（生产环境用这个，不要靠放宽权限）
+- `dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/` —— SELinux 策略（生产环境用这个，不要靠放宽权限）
 - `tools/remote-control-supervisord.sh` —— supervisor 实现

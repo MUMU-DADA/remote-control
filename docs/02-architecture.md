@@ -313,7 +313,7 @@ main()
 |---|---|---|
 | 服务本体 | `/system/bin/remote-control`，由 init 拉起 | 开机自启（`on property:sys.boot_completed=1`）+ 崩了 5 秒自动拉起（`restart_period 5`，**没有 `oneshot`**） |
 | 启动参数 | `--socket /data/misc/remote-control/remote-control.sock`<br>`--config /data/misc/remote-control/remote-control.conf`<br>`--log /data/misc/remote-control/remote-control.log` | ⚠️ **配置与日志都不在 `/sdcard`** —— 那是共享存储，谁都能写；把可执行载荷和配置放一起等于把开关交出去 |
-| SELinux | 专属域 `remote_control` | 策略落在**设备树** `dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/`，由 `tools/integrate-sepolicy.sh` 接进树 |
+| SELinux | 专属域 `remote_control` | 策略落在**设备树** `dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/`，由 `tools/integrate-sepolicy.sh` 接进树 |
 | 运行身份 | `user shell` / `group shell uhid graphics` | ⚠️ **是 `shell`(2000)，不是 `system`(1000)**：`system` 读写不了 `/sdcard`（存储层 FUSE 挡的，加 sepolicy 无效），抓帧走的也是 shell 应用申请的 `READ_FRAME_BUFFER` |
 | 上位应用 | `dev/05-controller-app/` | **只做服务管理**：启停、改端口、开关鉴权（见下） |
 

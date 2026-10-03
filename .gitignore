@@ -36,18 +36,18 @@
 /dev/02-native-daemon/rcctl-host
 /dev/**/tests/fake_screencap
 
-# --- dev/04-x64-android：x86_64+ARM64 桥 ROM 项目 ---
+# --- dev/04-android-rom：x86_64+ARM64 桥 ROM 项目 ---
 # 细则在该目录自己的 .gitignore 里（就近维护）；这里只列**最容易被误提交的大件**，
 # 方便一眼看出"这个目录为什么不能整目录 git add"。
 #   .run/        模拟器 datadir、下载的模拟器包（~400 MB）、打包锁
 #   artifacts/   ROM 产物（system-qemu.img 等，5.7 GB）
 #   payload/system/  翻译层（Google 专有二进制，23 MB，可用 fetch-payload.sh 重建）
-/dev/04-x64-android/.run/
-/dev/04-x64-android/artifacts/
-/dev/04-x64-android/payload/system/
-/dev/04-x64-android/windows/sdk/
-/dev/04-x64-android/windows/images/
-/dev/04-x64-android/windows/data/
+/dev/04-android-rom/.run/
+/dev/04-android-rom/artifacts/
+/dev/04-android-rom/payload/system/
+/dev/04-android-rom/windows/sdk/
+/dev/04-android-rom/windows/images/
+/dev/04-android-rom/windows/data/
 
 # --- 构建产物：脚本能重新生成，不入库 ---
 # dev/05-controller-app/build-apk.sh 的产出（含 debug.keystore —— 缺了脚本会自己 keytool 生成）

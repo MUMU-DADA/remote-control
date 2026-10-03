@@ -65,7 +65,7 @@ $ADB -s $S install --abi armeabi-v7a <纯 32 位 ARM 的 APK>
 $ADB -s $S shell 'pidof <包名>' | xargs -I{} $ADB -s $S shell "grep -c '/system/lib/arm/' /proc/{}/maps"
 ```
 
-> 官方 Android 11 镜像上这 5 条**已经跑通过**（见 `../04-x64-android/docs/00-bridge-eval.md` §2.5：
+> 官方 Android 11 镜像上这 5 条**已经跑通过**（见 `../04-android-rom/docs/00-bridge-eval.md` §2.5：
 > `primaryCpuAbi=armeabi-v7a`、17 条 `/system/lib/arm/*` 映射、Activity 前台无崩溃）。
 
 ---

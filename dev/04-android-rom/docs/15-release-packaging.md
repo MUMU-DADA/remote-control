@@ -39,7 +39,7 @@
 
 ```bash
 # 一条命令打两个平台（运行时已缓存时不重下；首次下 333 MiB + 434 MiB）
-cd dev/04-x64-android
+cd dev/04-android-rom
 ./scripts/release.sh --smoke --smoke-port 5588 --smoke-adb /usr/bin/adb
 ```
 
@@ -83,7 +83,7 @@ release/
 ## 2. 怎么打
 
 ```bash
-cd dev/04-x64-android
+cd dev/04-android-rom
 
 ./scripts/release.sh                    # 两个平台各一个 zip（默认）
 ./scripts/release.sh --platform linux   # 只打 linux

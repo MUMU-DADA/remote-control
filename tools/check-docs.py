@@ -37,7 +37,7 @@ STALE_PATTERNS = [
 # 渲染进发布包的模板：里面的相对链接是**包内路径**，要按包布局校验，不能按仓库。
 # 包布局由 scripts/release.sh 的 stage_release() 决定。
 PACKAGE_TEMPLATES = {
-    "dev/04-x64-android/packaging/START-HERE.md",
+    "dev/04-android-rom/packaging/START-HERE.md",
 }
 PACKAGE_LAYOUT_PREFIXES = ("bin/", "images/", "runtime/", "templates/", "tools/")
 PACKAGE_LAYOUT_FILES = {"START-HERE.md", "RELEASE.json", "SHA256SUMS"}

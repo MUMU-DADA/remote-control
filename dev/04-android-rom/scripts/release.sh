@@ -826,7 +826,7 @@ doc = {
     "version": ver,
     "platform": tag,
     "builtAt": subprocess.run(["date", "-Iseconds"], capture_output=True, text=True).stdout.strip(),
-    "builtBy": "dev/04-x64-android/scripts/release.sh",
+    "builtBy": "dev/04-android-rom/scripts/release.sh",
     "gitHead": git_head(),
     "rom": {
         "product": "remote_control_x64_arm64",

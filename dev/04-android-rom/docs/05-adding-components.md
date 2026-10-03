@@ -32,7 +32,7 @@ aosp/frameworks/native/cmds/remote-control/daemon/Android.bp   → 模块名 rem
 
 ### 2.2 加进产品
 
-编辑 `dev/04-x64-android/device/remote_control_x64_arm64/product/remote_control_x64_arm64.mk`，在末尾加：
+编辑 `dev/04-android-rom/device/remote_control_x64_arm64/product/remote_control_x64_arm64.mk`，在末尾加：
 
 ```make
 # ---- 自制系统组件 ----
@@ -44,7 +44,7 @@ PRODUCT_PACKAGES += \
 然后：
 
 ```bash
-cd dev/04-x64-android
+cd dev/04-android-rom
 ./scripts/apply-overlay.sh        # 把改动同步进 AOSP 树（设备树是唯一真源）
 ./scripts/build-rom.sh            # 重编（增量，只编受影响的部分）
 ./tools/verify-rom.sh             # 自检：确认二进制进了 /system/bin

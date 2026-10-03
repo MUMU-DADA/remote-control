@@ -119,7 +119,7 @@ avc: denied { write } for name="remote-control.sock"
 
 **不能**用 `allow untrusted_app shell_data_file:sock_file write` 敷衍 ——
 那是把口子开给所有第三方应用。正确做法是给上位应用一个专属域，策略已写好：
-[`remote_control_controller.te`](../04-x64-android/device/remote_control_x64_arm64/sepolicy/remote_control_controller.te)。
+[`remote_control_controller.te`](../04-android-rom/device/remote_control_x64_arm64/sepolicy/remote_control_controller.te)。
 
 > 但**当前这版应用不再连 socket**（它写配置文件），所以这份策略目前处于
 > "写好了但用不上"的状态。当时的验证临时用过 `setenforce 0`，

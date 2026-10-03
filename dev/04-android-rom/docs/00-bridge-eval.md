@@ -363,7 +363,7 @@ setprop ro.dalvik.vm.native.bridge64 houdini64 # ❌ 这个属性根本不存在
 ## 6. 复现命令（本次评估的全部操作）
 
 ```bash
-cd dev/04-x64-android    # 注：本节为历史记录，当时在 dev/04-emulator/linux-arm64（该目录已移除）
+cd dev/04-android-rom    # 注：本节为历史记录，当时在 dev/04-emulator/linux-arm64（该目录已移除）
 
 # 1) 取官方"x86_64 + arm64 桥"镜像（1402 MiB，腾讯镜像与 Google 清单同源同 sha1）
 curl -O https://mirrors.cloud.tencent.com/AndroidSDK/sys-img/google_apis/x86_64-31_r14.zip

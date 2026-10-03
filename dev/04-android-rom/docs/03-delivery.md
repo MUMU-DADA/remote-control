@@ -35,7 +35,7 @@
 ## 2. Linux x86_64（KVM）
 
 ```bash
-cd dev/04-x64-android
+cd dev/04-android-rom
 ./scripts/build-rom.sh --status      # 确认编完了
 ./scripts/package-rom.sh
 ./scripts/run-linux.sh               # 启动 + 4 组验收
@@ -57,7 +57,7 @@ cd dev/04-x64-android
 ## 3. Windows x86_64（WHPX）
 
 ```powershell
-cd dev\04-x64-android\windows
+cd dev\04-android-rom\windows
 .\fetch-emulator.ps1                       # SDK emulator + adb（本机有 Android Studio 就直接用）
 .\fetch-images.ps1                         # 从 Linux 构建机拉同一份镜像 + system\build.prop
 .\run-windows.ps1                          # 启动（-accel on = WHPX）+ 同样的 4 组验收

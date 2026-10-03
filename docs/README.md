@@ -43,23 +43,23 @@
 | [../dev/02-native-daemon/README.md](../dev/02-native-daemon/README.md) | 服务本体：构建、部署、分阶段落地 |
 | [../dev/05-controller-app/README.md](../dev/05-controller-app/README.md) | 上位应用 |
 
-## 四、ROM 与模拟器（`dev/04-x64-android/`）
+## 四、ROM 与模拟器（`dev/04-android-rom/`）
 
 | 文档 | 定位 |
 |---|---|
-| [00-bridge-eval.md](../dev/04-x64-android/docs/00-bridge-eval.md) | **决策记录**：为什么是「x86_64 ROM + 用户态翻译层」 |
-| [01-design.md](../dev/04-x64-android/docs/01-design.md) | 这份 ROM 为什么这么写 |
-| [02-build-traps.md](../dev/04-x64-android/docs/02-build-traps.md) | 构建实际撞到的坑（持续追加，**改动前值得先扫一遍**） |
-| [03-delivery.md](../dev/04-x64-android/docs/03-delivery.md) | 交付与验收：一份 ROM，两个 x64 平台 |
-| [04-acceptance-runbook.md](../dev/04-x64-android/docs/04-acceptance-runbook.md) | 验收排错手册 |
-| [05-adding-components.md](../dev/04-x64-android/docs/05-adding-components.md) | 往 ROM 里加自己的组件 |
-| [08-emulator-version-notes.md](../dev/04-x64-android/docs/08-emulator-version-notes.md) | 模拟器版本与镜像兼容性（实测） |
-| [10-network-bridge.md](../dev/04-x64-android/docs/10-network-bridge.md) | 网络：桥接模式 |
-| [11-snapshots-and-multi.md](../dev/04-x64-android/docs/11-snapshots-and-multi.md) | 快照与多实例 |
-| [12-emulator-control.md](../dev/04-x64-android/docs/12-emulator-control.md) | 实例控制脚本（创建/启动/停止/克隆/导出…） |
-| [13-macos-port.md](../dev/04-x64-android/docs/13-macos-port.md) | **macOS 支持**：arm64 原生 ROM 产品线 + 第三套宿主脚本（**代码已完成、离线验证通过；真机验证未做**，见该文 §8） |
-| [14-macos-host-notes.md](../dev/04-x64-android/docs/14-macos-host-notes.md) | 把服务做成 macOS 被控端的 API 等价性与权限调研（ScreenCaptureKit / TCC / launchd） |
-| [15-release-packaging.md](../dev/04-x64-android/docs/15-release-packaging.md) | **release 打包**：`scripts/release.sh` 一个平台一个 zip（完整无头运行环境 + 虚拟机镜像 + 模板） |
+| [00-bridge-eval.md](../dev/04-android-rom/docs/00-bridge-eval.md) | **决策记录**：为什么是「x86_64 ROM + 用户态翻译层」 |
+| [01-design.md](../dev/04-android-rom/docs/01-design.md) | 这份 ROM 为什么这么写 |
+| [02-build-traps.md](../dev/04-android-rom/docs/02-build-traps.md) | 构建实际撞到的坑（持续追加，**改动前值得先扫一遍**） |
+| [03-delivery.md](../dev/04-android-rom/docs/03-delivery.md) | 交付与验收：一份 ROM，两个 x64 平台 |
+| [04-acceptance-runbook.md](../dev/04-android-rom/docs/04-acceptance-runbook.md) | 验收排错手册 |
+| [05-adding-components.md](../dev/04-android-rom/docs/05-adding-components.md) | 往 ROM 里加自己的组件 |
+| [08-emulator-version-notes.md](../dev/04-android-rom/docs/08-emulator-version-notes.md) | 模拟器版本与镜像兼容性（实测） |
+| [10-network-bridge.md](../dev/04-android-rom/docs/10-network-bridge.md) | 网络：桥接模式 |
+| [11-snapshots-and-multi.md](../dev/04-android-rom/docs/11-snapshots-and-multi.md) | 快照与多实例 |
+| [12-emulator-control.md](../dev/04-android-rom/docs/12-emulator-control.md) | 实例控制脚本（创建/启动/停止/克隆/导出…） |
+| [13-macos-port.md](../dev/04-android-rom/docs/13-macos-port.md) | **macOS 支持**：arm64 原生 ROM 产品线 + 第三套宿主脚本（**代码已完成、离线验证通过；真机验证未做**，见该文 §8） |
+| [14-macos-host-notes.md](../dev/04-android-rom/docs/14-macos-host-notes.md) | 把服务做成 macOS 被控端的 API 等价性与权限调研（ScreenCaptureKit / TCC / launchd） |
+| [15-release-packaging.md](../dev/04-android-rom/docs/15-release-packaging.md) | **release 打包**：`scripts/release.sh` 一个平台一个 zip（完整无头运行环境 + 虚拟机镜像 + 模板） |
 
 ### 历史记录（写于当时，**不代表现状**）
 
@@ -68,9 +68,9 @@
 
 | 文档 | 说明 |
 |---|---|
-| [09-why-not-full-arm64-sim.md](../dev/04-x64-android/docs/09-why-not-full-arm64-sim.md) | 与 `00-bridge-eval` 同一决策的另一角度（内容有重叠） |
-| [07-verification-report.md](../dev/04-x64-android/docs/07-verification-report.md) | 一次性验收报告 |
-| [06-arm32-fallback.md](../dev/04-x64-android/docs/06-arm32-fallback.md) | 预案（未启用） |
+| [09-why-not-full-arm64-sim.md](../dev/04-android-rom/docs/09-why-not-full-arm64-sim.md) | 与 `00-bridge-eval` 同一决策的另一角度（内容有重叠） |
+| [07-verification-report.md](../dev/04-android-rom/docs/07-verification-report.md) | 一次性验收报告 |
+| [06-arm32-fallback.md](../dev/04-android-rom/docs/06-arm32-fallback.md) | 预案（未启用） |
 
 ---
 

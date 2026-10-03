@@ -105,15 +105,15 @@ AutoSnapshotAndroid/
 └── dev/                       ← 开发轨道（索引见 dev/README.md）
     ├── README.md                 ⭐ **本树的索引**：三个模块 + 编号沿革（01/03/06 去哪了）
     ├── 02-native-daemon/         ⭐ 主体代码（remote-control + rcctl）
-    ├── 04-x64-android/           验证与交付轨道：自编 ROM（x86_64 桥 / arm64 原生两条线）
+    ├── 04-android-rom/           验证与交付轨道：自编 ROM（x86_64 桥 / arm64 原生两条线）
     │   └── docs/                 ← **16 篇专题**（评估 / 构建坑 / 交付 / 验收 / 网络 /
     │                                快照 / 实例控制 / macOS / release 打包；索引见该模块 README §6）
     └── 05-controller-app/        上位应用（设备本地的服务管理器；需「所有文件访问」权限）
 ```
 
 > ⚠️ `dev/` 的编号是**历史沿革**，不是「第几个模块」：`01-ndk-prototype`／`03-java-service`／
-> `04-emulator` 都已移除或改名，`04` 这个号被用过两次（现在的 `04-x64-android` 是当年的
-> `06-x64-android` 改名来的）。逐条去向见 [`dev/README.md`](dev/README.md)。
+> `04-emulator` 都已移除或改名，`04` 这个号被用过**三次**（`04-emulator` → `04-x64-android`
+> → 现在的 `04-android-rom`）。逐条去向见 [`dev/README.md`](dev/README.md)。
 
 ---
 
@@ -173,5 +173,5 @@ Java-only AIDL。`remote-control` 用 `/dev/uinput` 绕开 —— 代价是会�
 
 > ⚠️ 两样东西**不在**本仓库里，别以为 MIT 覆盖了它们：
 > AOSP 源码树（`.gitignore` 的 `/aosp/`，那 314 个 git 项目各自有许可），
-> 以及 Google 的 arm64 翻译层载荷（`dev/04-x64-android/payload/system/`，
+> 以及 Google 的 arm64 翻译层载荷（`dev/04-android-rom/payload/system/`，
 > 专有二进制，由 `fetch-payload.sh` 现拉、不得再分发）。

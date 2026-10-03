@@ -6,7 +6,7 @@
 |---|---|---|
 | 控制脚本 | `scripts/emulator.sh` | `windows/emulator.ps1` |
 | 唯一配置源 | `emulator/config.ini` | **同一份** `emulator/config.ini` |
-| 实例目录 | `.run/`（在 `dev/04-x64-android/` 下） | `windows/.run/` |
+| 实例目录 | `.run/`（在 `dev/04-android-rom/` 下） | `windows/.run/` |
 | 加速 | KVM | WHPX |
 | 镜像来源 | `artifacts/rom-<product>/` | `windows/images/`（`fetch-images.ps1` 拉的同一份） |
 | 网络 | 可桥接到物理 LAN（`-net-tap`） | 只有用户态 NAT（`-net-tap` 只在 Linux 实现） |
@@ -85,7 +85,7 @@ Windows 侧对应 `-Port` / `-Gpu` / `-Memory` / `-Cores` / `-NoWait` / `-Gui` /
 改完 config.ini 忘了清状态时一眼就能看出来：
 
 ```
-config.ini（唯一真源 dev/04-x64-android/emulator/config.ini）：
+config.ini（唯一真源 dev/04-android-rom/emulator/config.ini）：
   hw.ramSize               6144
   disk.dataPartition.size  32G
 

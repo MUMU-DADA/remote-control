@@ -498,7 +498,7 @@ emulator: INFO: userspace-boot-properties.cpp:249: Sending adb public key [...]
 
 #### 7.0.5 已写出 arm64 产品的设备树（本轮）
 
-`dev/04-x64-android/device/` 下新增一个产品，原先的 x86_64 产品与共享 sepolicy **一个字节没动**：
+`dev/04-android-rom/device/` 下新增一个产品，原先的 x86_64 产品与共享 sepolicy **一个字节没动**：
 
 ```
 device/
@@ -592,7 +592,7 @@ m -j8 remote-control rcctl remote-control-launch     # m 退出码 = 0
 
 #### 7.0.8 方案 B 的头两个脚本（本轮）
 
-放在 `dev/04-x64-android/macos/`（与 `windows/` 平行）：
+放在 `dev/04-android-rom/macos/`（与 `windows/` 平行）：
 
 | 文件 | 职责 | 已验证 |
 |---|---|---|
@@ -792,7 +792,7 @@ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm
 然后**又跑了一次 `apply-overlay.sh`** —— 它按设计用项目目录覆盖 AOSP 落点，
 把我手改的版本**覆盖回旧版**，于是"修好了"的构建照样失败，白跑一轮。
 
-> **正确顺序永远是：改 `dev/04-x64-android/device/` 下的源文件 → 跑 `apply-overlay.sh` 同步 → 构建。**
+> **正确顺序永远是：改 `dev/04-android-rom/device/` 下的源文件 → 跑 `apply-overlay.sh` 同步 → 构建。**
 > AOSP 树里的那份是**产物**，不是真源（`apply-overlay.sh` 文件头写明了这一点，我还是绕过去了）。
 > 判断"改动到底有没有生效"最省事的办法不是看文件，而是问构建系统：
 > `docker exec ... bash -lc "source build/envsetup.sh && lunch ... && get_build_var 变量名"`。

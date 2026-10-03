@@ -26,7 +26,7 @@ ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
 bad()  { printf '\033[1;31m  ✗ %s\033[0m\n' "$*" >&2; }
 
 PROJECT_DIR=/root/AutoSnapshotAndroid
-STOCK="$PROJECT_DIR/dev/04-x64-android/artifacts/rom-remote_control_x64_arm64"
+STOCK="$PROJECT_DIR/dev/04-android-rom/artifacts/rom-remote_control_x64_arm64"
 ADB=/usr/bin/adb
 DEV=/data/local/tmp
 
@@ -139,7 +139,7 @@ if [ -n "$SERIAL" ]; then
 else
     [ -x "$EMU" ] || { bad "找不到模拟器二进制（用 EMU=<路径> 指定）"; exit 1; }
     echo "  启动中（走 scripts/emulator.sh，约 30 秒）…"
-    "$PROJECT_DIR/dev/04-x64-android/scripts/emulator.sh" start default --no-wait \
+    "$PROJECT_DIR/dev/04-android-rom/scripts/emulator.sh" start default --no-wait \
         > /var/log/emu-lan.log 2>&1 || { bad "启动失败，看 /var/log/emu-lan.log"; exit 1; }
     SERIAL=$("$ADB" devices 2>/dev/null | awk '/^emulator-[0-9]+[ \t]+(device|offline)/{print $1; exit}') || true
     [ -n "$SERIAL" ] || { bad "起来后仍找不到串口，看 /var/log/emu-lan.log"; exit 1; }

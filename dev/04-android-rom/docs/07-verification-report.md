@@ -1,4 +1,4 @@
-# 验收报告（dev/04-x64-android）
+# 验收报告（dev/04-android-rom）
 
 > ⚠️ **历史文档 —— 一次性验收报告，不代表现状。**
 > ROM 交付后又经历了改名（`autosnap_x64_arm64` → `remote_control_x64_arm64`）
@@ -100,7 +100,7 @@ $ sha256sum -c SHA256SUMS   →  20/20 通过
 **用户侧闭环方式**：在一台开了虚拟化（BIOS VT-x/AMD-V + 「Windows 虚拟机监控程序平台」）的 x64 Windows 上执行
 
 ```powershell
-cd dev\04-x64-android\windows
+cd dev\04-android-rom\windows
 .\fetch-emulator.ps1 ; .\fetch-images.ps1 ; .\preflight.ps1 ; .\run-windows.ps1
 ```
 
@@ -112,7 +112,7 @@ cd dev\04-x64-android\windows
 ## 四、怎么从零复现全部结论
 
 ```bash
-cd dev/04-x64-android
+cd dev/04-android-rom
 
 ./scripts/fetch-payload.sh      # 从官方镜像提取翻译层（23 MB，90 文件）
 ./scripts/apply-overlay.sh      # 注入 AOSP 树（不改上游一行；--revert 可撤）

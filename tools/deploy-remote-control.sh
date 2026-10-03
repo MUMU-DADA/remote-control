@@ -46,7 +46,7 @@ done
 
 step "提权 + 关 SELinux"
 # ⚠️ 关 SELinux 只是开发期方便 —— 生产形态必须走 init 起的 remote-control.rc
-#    加专属 SELinux domain，见 dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/。
+#    加专属 SELinux domain，见 dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/。
 timeout "$TMO" "$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
 sleep 4
 sh_ setenforce 0 2>/dev/null || true
@@ -138,11 +138,11 @@ cat <<'EOF'
 
   1. **run-linux.sh 不带 --reuse 会 rm -rf 工作目录** —— 那是设计如此
      （"每次都是一台全新机器"），不是 bug。日常开关机请用
-     dev/04-x64-android/scripts/emulator.sh，它从不删工作目录。
+     dev/04-android-rom/scripts/emulator.sh，它从不删工作目录。
 
   2. **`adb emu kill` 是硬断电，不是优雅关机** —— 它让 QEMU 立刻终止，
      guest 没机会卸载文件系统。实测（同一台实例三组对照，
-     见 dev/04-x64-android/tools/verify-kill-is-hard-poweroff.sh）：
+     见 dev/04-android-rom/tools/verify-kill-is-hard-poweroff.sh）：
 
        写入后 sync 再关      → 重启后文件在
        写入后不 sync 直接关  → 重启后文件没了

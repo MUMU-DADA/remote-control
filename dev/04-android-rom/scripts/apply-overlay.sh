@@ -127,7 +127,7 @@ if [ "$HAS_BRIDGE" = 1 ]; then
     # 4) 生成 bridge-copy.mk（显式 PRODUCT_COPY_FILES，不用 make 里遍历目录）
     COPY_MK="$BRIDGE_DST/bridge-copy.mk"
     {
-        echo "# 由 dev/04-x64-android/scripts/apply-overlay.sh 自动生成，请勿手改。"
+        echo "# 由 dev/04-android-rom/scripts/apply-overlay.sh 自动生成，请勿手改。"
         echo "# 源：payload/system/<相对路径>  目的：\$(TARGET_COPY_OUT_SYSTEM)/<相对路径>"
         echo "PRODUCT_COPY_FILES += \\"
         ( cd "$BRIDGE_DST" && find system -type f | LC_ALL=C sort ) | while read -r rel; do

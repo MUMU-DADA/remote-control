@@ -99,7 +99,7 @@ HTTP 面，判据一律取**设备侧证据**（重启看 `uptime` 归零、按�
 ```
 
 > **sepolicy 不在这个目录里。** 策略的落点是设备树
-> `dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/`（`remote_control.te`
+> `dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/`（`remote_control.te`
 > + `file_contexts` + `remote_control_controller.te`），由 `tools/integrate-sepolicy.sh`
 > 接进树。为什么放那儿、以及为什么不能放 `system/sepolicy/private/`，
 > 见 [`docs/09`](../../docs/09-deployment-and-update.md) §9.1。
@@ -340,7 +340,7 @@ python3 rc_client.py --socket /tmp/remote-control.sock swipe 540 1600 540 400
 **不要一上来就写 sepolicy。** 先在已经宽松的环境里把链路跑通。
 
 在 Magisk root 的真机、Cuttlefish（userdebug），或
-**[`../04-x64-android/`](../04-x64-android/README.md) 里起的模拟器**上
+**[`../04-android-rom/`](../04-android-rom/README.md) 里起的模拟器**上
 （免真机路径；`ro.product.cpu.abilist` 含 `arm64-v8a`，arm64 的 `remote-control` 可直接跑）：
 
 ```bash
@@ -369,8 +369,8 @@ adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock ta
 > 注意：`deploy_cuttlefish.sh` 目前写的是新版 `cvd` 工具链的用法。
 > **Android 12 用的是老的 `launch_cvd`**，需要相应调整。
 >
-> 在 `04-x64-android` 的模拟器上请见
-> [`../04-x64-android/docs/05-adding-components.md`](../04-x64-android/docs/05-adding-components.md)：
+> 在 `04-android-rom` 的模拟器上请见
+> [`../04-android-rom/docs/05-adding-components.md`](../04-android-rom/docs/05-adding-components.md)：
 > 该文给了三种加组件的方式（运行时推 / Magisk 模块 / 编进 ROM），
 > 阶段 1 用其中的"运行时推到 `/data/local/tmp`"即可，不需要 remount。
 
@@ -380,7 +380,7 @@ adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock ta
 > [`docs/09`](../../docs/09-deployment-and-update.md) §9.1。这里保留原计划便于对照。
 
 1. `daemon/remote-control.rc` → 编进 `/system/etc/init/`
-2. sepolicy 落到设备树 `dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/`
+2. sepolicy 落到设备树 `dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/`
    （不是 `system/sepolicy/private/`，那样会撞 `sepolicy_freeze_test`）：
    先用 `permissive remote_control;` 定位，再逐条加 allow
 3. 开机自启 —— ⚠️ **实际用的是 `shell` UID，不是 `system`**，两个原因都实测过：

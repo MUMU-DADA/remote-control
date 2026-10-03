@@ -24,7 +24,7 @@
 ## 三步
 
 ```bash
-cd dev/04-x64-android/macos
+cd dev/04-android-rom/macos
 
 # 1) 自检：这台 Mac 到底能不能跑
 ./preflight.sh
@@ -53,7 +53,7 @@ cd dev/04-x64-android/macos
 
 ```bash
 # 参数照抄 ../scripts/run-linux.sh 的 launch()，把宿主路径与 -accel 换掉：
-cd dev/04-x64-android/macos
+cd dev/04-android-rom/macos
 ANDROID_PRODUCT_OUT="$PWD/images" ANDROID_BUILD_TOP="$PWD" \
   ./sdk/emulator/emulator -sysdir "$PWD/images" -datadir /tmp/avd -port 5580 \
     -no-window -gpu host -accel on -memory 6144 -cores 4 -no-audio -no-boot-anim \
