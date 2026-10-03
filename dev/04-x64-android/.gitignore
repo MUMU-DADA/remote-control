@@ -21,6 +21,9 @@ release/
 # MANIFEST.sha256 保留入库，用于锁定"这份 ROM 用的是哪一版载荷"。
 payload/system/
 
+# SDK 包下载缓存（release.sh / fetch-emulator 用；一个包 350~470 MB）
+.cache/
+
 # Windows 侧下载物
 windows/sdk/
 windows/images/

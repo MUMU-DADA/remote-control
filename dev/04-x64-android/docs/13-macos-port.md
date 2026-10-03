@@ -1,0 +1,762 @@
+# 13 · macOS 宿主支持：arm64 ROM 产品 + 第三套宿主脚本
+
+> **状态：计划 + 首轮核查已完成（2026-10-03）。**
+> §7.0 是**实测记录**（已核实，带 sha1 与文件清单）；§1–§6、§8 的其余部分仍是**计划与估算**。
+> 本文两条线都还没有写出任何代码。
+>
+> 相关：[`14-macos-host-notes.md`](14-macos-host-notes.md)（把 remote-control 做成 macOS 被控端的 API 与权限调研）
+> · [`09-why-not-full-arm64-sim.md`](09-why-not-full-arm64-sim.md)（"跨架构全系统模拟"曾被我方否决的实测结论）
+> · [`03-delivery.md`](03-delivery.md)（当前的"一份 ROM，两个 x64 平台"）
+
+---
+
+## 0. 一句话结论
+
+**加 macOS 不是"再写一套脚本"，而是要新增一条 arm64 ROM 产品线 + 第三套宿主脚本；两条线可以独立落地、互不阻塞。**
+
+而**这条 arm64 产品线比现在的 x86_64 那条更简单**：它把 `libndk_translation` 翻译层整套删掉，
+结构退回到上游 `sdk_phone64_arm64` 的形状。
+
+| 交付物 | 内容 | 新增 | 改动 |
+|---|---|---|---|
+| **A. arm64 ROM 产品** | 原生 arm64 goldfish ROM（跑 remote-control），Apple Silicon 模拟器用它 | **约 280–420 行** | 约 **120–200 行**（构建系统参数化） |
+| **B. macOS 宿主脚本** | 第三套运行时控制面 + 打包（`macos/`、`packaging/bin/macos/`） | **约 1500–2200 行** | 约 **400–600 行**（共享层的 GNU→BSD 适配） |
+
+两条线相加，约等于**"三分之二套"**现有骨架的量（现有：Linux 侧 `scripts/emulator.sh` 818 + `run-linux.sh` 354 + `packaging/bin/linux` 570；Windows 侧 `windows/emulator.ps1` 735 + `run-windows.ps1` 233 + `packaging/bin/windows` 690）。
+
+**一句话的分工**：ROM 那条腿是"换产品"，脚本那条腿是"换宿主"。**先说清一个反直觉的点——这两条腿的必要性不对称：**
+
+- 没有 B（macOS 脚本），Mac 用户照样能手工跑：自己装 SDK 模拟器、自己敲 `emulator` 命令。难用，但可行。
+- 没有 A（arm64 ROM），**Apple Silicon 用户根本跑不起来**：现有 ROM 是 x86_64 guest，
+  而 ARM 宿主上不存在 x86_64 的硬件加速路径（§1.3）。这不是难用，是不成立。
+
+> **所以如果只能先做一条，先做 A。**
+
+---
+
+## 1. 背景：现在的两套是什么，为什么 Mac 不能白捡
+
+### 1.1 现状盘点（已核实）
+
+| 层 | 文件 | 行数 |
+|---|---|---|
+| 共享控制面 | `scripts/common.sh` 204、`emulator.sh` 818、`run-linux.sh` 354、`release.sh` 682、`package-rom.sh` 163、`apply-overlay.sh` 128、`build-rom.sh` 95、`status.sh` 74、`accept.sh` 64、`fetch-payload.sh` 149 | ~2700 |
+| Windows 专有 | `windows/emulator.ps1` 735、`run-windows.ps1` 233、`fetch-emulator.ps1` 131、`fetch-images.ps1` 112、`preflight.ps1` 85 | ~1300 |
+| Linux 打包 | `packaging/bin/linux/`：`lib.sh` 242 + `start-headless/stop/status/verify` | ~570 |
+| Windows 打包 | `packaging/bin/windows/`：`common.ps1` 262 + `start-headless/stop/status/verify` | ~690 |
+
+**Windows 那套是 Linux 那套的完整重写**——同一组能力（建/起/停/查/验）有两份不同语言的实现。
+所以"加 macOS"= 加**第三份骨架**，而不是加一个 `case` 分支。
+
+### 1.2 交付面已经是"两平台"的形态
+
+`release.sh` 里已经有平台分派表（`release.sh:85-91`）：
+
+```bash
+platform_tag()    { case "$1" in linux) printf 'linux-x86_64' ;; windows) printf 'windows-x86_64' ;; esac; }
+platform_label()  { case "$1" in linux) printf 'Linux x86_64（KVM）' ;; windows) printf 'Windows x86_64（WHPX）' ;; esac; }
+platform_hostos() { case "$1" in linux) printf 'linux' ;; windows) printf 'windows' ;; esac; }
+platform_backend() { case "$1" in
+    linux)   printf 'qemu/linux-x86_64/qemu-system-x86_64-headless' ;;
+    windows) printf 'qemu/windows-x86_64/qemu-system-x86_64.exe' ;; esac; }
+```
+
+注意 `hostos` 这一列：SDK 清单里 macOS 的 host-os 就叫 `macosx`，`release.sh:142` 与
+`windows/fetch-emulator.ps1:9` 的注释都写明了「每个包有按 host-os 分的多个 archive（linux/windows/macosx）」。
+**下载与解包链路本来是平台无关的**，硬编码在 x86_64 上的只有两处：
+
+```bash
+# prepare_runtime() 里的后端校验与裁剪
+local backend="$rt/emulator/$(platform_backend "$plat")"
+[ -s "$backend" ] || die "运行时里没有 x86_64 无头后端：$backend
+    这个包带不动本 ROM（guest 是 x86_64，别的架构后端不行）"
+...
+case "$(basename "$qdir")" in
+    "$hostos-x86_64") ;;                 # ← 只保留 <hostos>-x86_64
+    *) rm -rf "$qdir" ;;                 # ← 其余全删
+esac
+```
+
+### 1.3 为什么 Apple Silicon 上现有 ROM 走不通（已核实 + 推演）
+
+| 宿主 | guest | 加速路径 | 判断 |
+|---|---|---|---|
+| Linux x86_64 | x86_64 | KVM | ✅ 已实跑 |
+| Windows x86_64 | x86_64 | WHPX | ⚠️ 未实跑（见 `03-delivery.md`），但同架构 |
+| Intel Mac | x86_64 | HVF（Hypervisor.framework） | 推演可行，**未实测** |
+| **Apple Silicon** | **x86_64** | **无** | ❌ **只有 TCG 全软件翻译** |
+
+最后一行就是 `09-why-not-full-arm64-sim.md` 里那条判据的镜像版——那份文档的结论句是
+「宿主 x86_64 **没有 arm64 KVM** ⇒ 只能 **TCG**」，并给了实测锚点：
+同一台机器上 KVM 开机 **23.8 s**，TCG 是 **5–8 分钟**量级、典型负载 **5–15× 慢**，
+而且那条路最终**卡在图形栈**（`vendor.hwcomposer-2.3` 缺 `libgralloctypes.so`）没能走到 `boot_completed`。
+
+把宿主换成 arm64、guest 保持 x86_64，困境一模一样。**这是"不成立"，不是"慢一点"。**
+
+> **已实测坐实（§7.0.2）**：Apple Silicon 的官方模拟器包里**只有 `qemu/darwin-aarch64/` 一个后端目录**，
+> 没有任何 x86_64 后端。所以这一行不是"我们推演 TCG 会很慢"，而是**包层面根本不提供这条路**。
+> 想要在 M 系列 Mac 上跑，**只能走方案 A**。
+
+> ⚠️ **不要把这条结论误读成"arm64 模拟器也不行"。** 被否决的是**跨架构**（arm64 宿主跑 x86_64 guest）；
+> 本文方案 A 是**同架构**（arm64 宿主跑 arm64 guest），正好是那份文档推荐的那一类。
+
+---
+
+## 2. 方案 A：新增 arm64 ROM 产品
+
+### 2.1 核心判断：它比现有产品更简单，不是更复杂
+
+上游 AOSP 12 **本来就把 arm64 模拟器产品当一等目标维护**（已核实，全部在本地已同步的树里）：
+
+| 前提 | 证据（远程 AOSP 树路径） |
+|---|---|
+| arm64 模拟器设备树存在 | `device/generic/goldfish/emulator64_arm64/BoardConfig.mk`（`TARGET_ARCH := arm64`、`TARGET_CPU_ABI := arm64-v8a`） |
+| arm64 内核预编译已同步 | `kernel/prebuilts/5.10/arm64/kernel-5.10`（48.9 MB）与 `kernel-5.10-gz`（19.9 MB） |
+| arm64 内核模块已同步 | `kernel/prebuilts/common-modules/virtual-device/5.10/arm64/`（含 `virtio_input.ko` 等） |
+| vendor 侧产品配对 | `device/generic/goldfish/64bitonly/product/arm64-vendor.mk` + `device/generic/goldfish/arm64-kernel.mk`（`TARGET_KERNEL_USE ?= 5.10`，`EMULATOR_KERNEL_FILE := kernel/prebuilts/5.10/arm64/kernel-5.10-gz`） |
+| **`/dev/uinput` 在 arm64 内核里可用** | `kernel/prebuilts/5.10/arm64/modules.builtin` 含 `kernel/drivers/input/misc/uinput.ko`（**内建**）；`System.map` 有 `uinput_open` / `uinput_write` |
+
+**最后一条是这份方案能成立的关键**：触控后端不用换、`remote-control.te` 里那一堆 uinput 规则不用改、
+`selftest.cpp` 的 `/dev/uinput` 探针不用改。
+
+### 2.2 arm64 产品与 x86_64 产品的逐项差异
+
+| 项 | `remote_control_x64_arm64`（现有） | `remote_control_arm64`（新增） |
+|---|---|---|
+| `TARGET_ARCH` / `TARGET_CPU_ABI` | `x86_64` | `arm64` / `arm64-v8a` |
+| `TARGET_NATIVE_BRIDGE_*`（4 个变量） | 有 | **删**（无翻译层） |
+| `bridge/` 目录 + `bridge-copy.mk`（80+ 条 `PRODUCT_COPY_FILES`） | 有 | **删** |
+| `PRODUCT_ENFORCE_ARTIFACT_PATH_REQUIREMENTS := relaxed` + 13 行 `ALLOWED_LIST` | 有（放行外来载荷） | **删**（不再有外来文件） |
+| `ro.dalvik.vm.isa.arm/arm64`、`ro.enable.native.bridge.exec` | 有 | **删** |
+| `ro.dalvik.vm.native.bridge=libndk_translation.so` | 有（写在 vendor 分区） | **必须不写**——写了 ART 会去找一个不存在的库 |
+| `BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true` | 有 | **删** |
+| `BOARD_SEPOLICY_DIRS += device/generic/goldfish/sepolicy/x86` | 有 | **改**：arm64 上游没有对应目录，按实际需要定（见 §2.5） |
+| vendor 继承 | `64bitonly/product/x86_64-vendor.mk` | `64bitonly/product/arm64-vendor.mk` |
+| 内核 | `kernel/prebuilts/5.10/x86_64/kernel-5.10` | `kernel/prebuilts/5.10/arm64/kernel-5.10-gz` |
+| `config.ini.xl` vs `advancedFeatures.ini.arm` | `config.ini.xl` | arm64-vendor 用的是 `advancedFeatures.ini.arm` |
+| `PRODUCT_SHIPPING_API_LEVEL` | 31 | 31（相同） |
+| `QEMU_USE_SYSTEM_EXT_PARTITIONS` / `PRODUCT_USE_DYNAMIC_PARTITIONS` | 都 true | 保持 true（不制造新的分区形态差异） |
+
+`emulator/config.ini`（97 行，硬件唯一真源：1280×720@320dpi、`hw.ramSize=6144`、`hw.cpu.ncore=4`、`hw.gpu.mode=auto`）
+**两个产品共用，不用改** —— 它不参与 AOSP 构建，由 `run-*.sh` / `package-rom.sh` 在运行期覆盖。
+
+### 2.3 删掉翻译层之后，产品文件小多少
+
+| 文件 | 现有行数 | arm64 版估算 | 说明 |
+|---|---|---|---|
+| `BoardConfig.mk` | 104（其中约 45 行是桥的注释与变量、约 30 行是 sepolicy 分区的长注释） | **约 90** | 桥那段整段消失，sepolicy 注释保留（选哪个分区这个坑两边都要防） |
+| `product/*.mk` | 168（其中约 60 行是桥的 `ALLOWED_LIST` 与属性） | **约 110** | 剩下的是 `remote-control` 的 `PRODUCT_PACKAGES` / `PRODUCT_COPY_FILES`，两个产品共享 |
+| `device.mk` | 35 | **约 55** | arm64 版要 `inherit` 上 `emulator64_arm64/device.mk`，但**要补回** x86_64 版里那两件上游缺的东西：BIOS host 包（`bios.bin`/`vgabios-cirrus.bin`）与以太网特性声明（`android.hardware.ethernet.xml`，桥接模式的必要前提） |
+| `AndroidProducts.mk` | 8 | **约 12** | 加一条 `PRODUCT_MAKEFILES` 条目，两个产品并列 |
+| `sepolicy/` | 3 个文件（`remote_control.te`、`file_contexts`、`remote_control_controller.te`） | **共享** | 见 §2.5 |
+
+### 2.4 构建系统要改哪些行
+
+产品名目前**写死在 `scripts/common.sh:27`**：
+
+```bash
+PRODUCT_NAME="remote_control_x64_arm64"
+LUNCH_TARGET="$PRODUCT_NAME-userdebug"
+PRODUCT_OUT="${PRODUCT_OUT:-$AOSP_DIR/out/target/product/$PRODUCT_NAME}"
+```
+
+往下游牵出去的地方（已核实位置）：
+
+| 文件:行 | 现状 | 改法 |
+|---|---|---|
+| `scripts/common.sh:27` | 写死 | `PRODUCT_NAME="${PRODUCT:-remote_control_x64_arm64}"` |
+| `scripts/apply-overlay.sh:92-125` | 桥的搬运 + `bridge-copy.mk` 生成 + 4 个载荷文件的存在性检查 | 按产品类型分支：arm64 产品**整段跳过** |
+| `scripts/build-rom.sh:58` | 前置检查 `bridge/bridge-copy.mk` 存在 | 同上，按产品跳过 |
+| `scripts/package-rom.sh:146` | `bridge="$DEVICE_DST/remote_control_x64_arm64/bridge/system"` 的校验 | 同上 |
+| `scripts/status.sh:27-29` | 显示 `bridge-copy.mk` 的规则条数 | 同上，arm64 显示"无翻译层" |
+| `scripts/release.sh:36,479,480` | `ROM_DIR`、`.release-meta.json` 里的 `product` / `lunch` | 从 `$PRODUCT_NAME` 与 `$LUNCH_TARGET` 取，不写死 |
+| `tools/integrate-sepolicy.sh:34,37` | 设备树路径与 `TARGET` 默认值 | 参数化 |
+
+合计约 **120–200 行**，其中大部分是"加一个产品类型分支"的机械改动。
+
+### 2.5 两个产品共享 sepolicy —— 不要复制一份
+
+`BoardConfig.mk` 里那段长注释记录了 `BOARD_SEPOLICY_DIRS`（vendor 策略）与
+`SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS`（system_ext 策略）的**双向取舍**，实测两头都撞过：
+
+- vendor 策略：✅ 看得见 HAL 类型（`hal_graphics_allocator_default`）／❌ 看不见平台私有类型（`odsign_prop` → `unknown type`）
+- system_ext 策略：反过来
+
+当前选 **vendor**，理由是「抓帧那条链依赖 HAL 类型，而它是这个服务的立身之本」。
+
+**这条取舍与 guest 架构无关**，所以：
+
+- 策略文件本身（`remote_control.te` / `file_contexts` / `remote_control_controller.te`）**一份就够**
+- 新产品的 `BoardConfig.mk` 里那条 `BOARD_SEPOLICY_DIRS` 指向**同一个目录**
+  （`device/remote_control/remote_control_x64_arm64/sepolicy`），或者把目录改名成中性名
+  （如 `device/remote_control/common/sepolicy`）——**代价是 `apply-overlay.sh` 的路径要跟着改**
+- ⚠️ 若为了少改路径而**复制**一份 sepolicy，就制造了第二处真源，以后必然漂移。**不要复制。**
+
+### 2.6 与翻译层绑定的校验要加闸门
+
+这些脚本/断言在 arm64 产品上会失效——不是"需要改"，而是"需要跳过"：
+
+| 位置 | 内容 |
+|---|---|
+| `scripts/apply-overlay.sh:119-125` | 检查 4 个翻译层载荷文件存在（`libndk_translation.so`、`ndk_translation_program_runner_binfmt_misc_arm64`、`ndk_translation.rc`、`ld.config.arm64.txt`） |
+| `scripts/run-linux.sh:280` | guest 内读 `/proc/sys/fs/binfmt_misc/` 判断翻译层是否注册 |
+| `scripts/run-linux.sh:292-338` | 用 `/data/local/tmp/arm64-probe` 验 arm64 机器码与 arm64 应用的映射库条数 |
+| `packaging/bin/linux/verify.sh:54,85` | 同样两件事（`binfmt_misc` + `/proc/$PID/maps` 里 `/system/lib64/arm64/` 条数） |
+| `tools/check-bridge-symbols.sh`（102 行） | 整份都是翻译层符号检查 |
+| `scripts/package-rom.sh:143` | 输出里带 "system.img sha256" 等桥相关摘要 |
+
+**做法**：给它们一个统一的 `产品类型` 判据（例如 `PRODUCT` 前缀或一个 `HAS_BRIDGE=0/1` 变量），
+arm64 产品下走"跳过并如实打印 ⊘ 未适用"，而不是静默通过——静默通过会让体检报告骗人。
+
+### 2.7 硬约束：这份 ROM 仍然不能在 Mac 上编
+
+AOSP 12 在 macOS 上编完整 ROM（含 Linux 内核、x86_64-only 的构建工具链）不是现实路径
+（需要区分大小写卷、80 GB+ 空间、Xcode 之外的一整套 prebuilt）。
+
+**所以 Mac 只拿产物，构建仍在 Linux 构建机上——和今天 Windows 用户的处境完全一样。**
+这**不增加工作量**，但它决定了交付说明里**不能承诺"Mac 用户能自己 build ROM"**。
+
+### 2.8 落地顺序（建议由小到大）
+
+1. **上游通路验证**（最便宜否决点）：`lunch sdk_phone64_arm64-userdebug && m`，确认能出可启动的 arm64 镜像。
+   这一步用的是上游产品，**不碰我们的设备树**，失败了后面全不用谈。
+   ⚠️ 目标名与产物目录名**不是一个**：`lunch` 用 `sdk_phone64_arm64-userdebug`，
+   而产物落在 `out/target/product/emulator64_arm64/`（跟 `PRODUCT_DEVICE` 走）。
+   写错不会报错，只会静默回落到 `aosp_arm`。见 §7.0.1 的表。
+2. 加一个**最小** `remote_control_arm64` 产品：先不带 sepolicy、以 root 跑，只验"能开机 + `adb` 通 + `/dev/uinput` 存在 + `remote-control` 在 `/system/bin/`"。
+3. 搬 sepolicy 与 `remote-control.rc`，开机自启，跑 `tools/functional-sweep.py` 的 33 条命令体检。
+4. 再进方案 B。
+
+---
+
+## 3. 方案 B：macOS 宿主（第三套脚本）
+
+### 3.1 平台能力对照（这张表就是"要写多少"的答案）
+
+| 能力 | Linux（现有） | Windows（现有） | macOS（要写） |
+|---|---|---|---|
+| 虚拟化加速 | KVM | WHPX | **Hypervisor.framework（`hvf`）**，前置检查 `sysctl kern.hv_support` |
+| 后端路径 | `qemu/linux-x86_64/qemu-system-x86_64-headless` | `qemu/windows-x86_64/qemu-system-x86_64.exe` | **已实测**：`qemu/darwin-aarch64/qemu-system-aarch64-headless`（§7.0.2）；Intel Mac 包为 `emulator-darwin_x64-*` |
+| 模拟器 / adb 路径 | `runtime/emulator/emulator` | `runtime\emulator\emulator.exe` | `runtime/emulator/emulator`（同 Linux） |
+| 进程枚举 | 遍历 `/proc/[0-9]*` 读 `comm` + `cmdline`（`common.sh:182-199`） | `Get-CimInstance Win32_Process`（`common.ps1:127`） | **`ps -eo pid,comm,args`**（无 `/proc`） |
+| GPU 探测 | `/dev/dri/renderD*` 字符设备可读写（`common.sh:93`） | `Get-CimInstance Win32_VideoController`（`common.ps1:65`） | **`system_profiler SPDisplaysDataType`** |
+| 校验和 | `sha1sum` / `sha256sum` | `sha1sum` / `sha256sum` | **`shasum -a 1` / `shasum -a 256`**（`sha*sum` 默认不存在） |
+| 打包锁 | `flock -n 9`（`release.sh:616`、`package-rom.sh:58`） | — | **无 `flock`** → `mkdir` 锁或 python 锁 |
+| 数值/时间格式化 | `stat -c %s`、`numfmt --to=iec`、`date -Iseconds` | — | **`stat -f%z`、自己算 IEC、`date -u +%Y-%m-%dT%H:%M:%SZ`** |
+| 稀疏归档 | `tar --sparse --numeric-owner`（`emulator.sh:589,680`） | — | `bsdtar` 的 `--sparse` 语义不同，且**默认写入扩展属性** → 必须 `COPYFILE_DISABLE=1` / `--no-mac-metadata` |
+| 网络桥接 | `-net-tap tap0` + `tools/net-bridge.sh`（177 行） | ❌ 未实现 | ❌ **同样不适用**（见 §3.5） |
+| 解压后的可执行位 | `unzip` 保留 | — | **`unzip` 丢可执行位** → 必须补 `chmod +x`（`release.sh:324` 那句要覆盖 `runtime/`） |
+| 从互联网下载的包 | — | — | **Gatekeeper / quarantine**（见 §3.4） |
+| 自启 | systemd / supervisord | 计划任务 | **launchd（LaunchAgent，理由见 `14-macos-host-notes.md` §6）** |
+| 脚本解释器 | 宿主 bash（≥4） | PowerShell | **`/bin/bash` 是 3.2**（见 §3.3 第 6 条） |
+
+### 3.2 要新写的文件
+
+| 文件 | 参照 | 估算行数 |
+|---|---|---|
+| `macos/emulator.sh` | `scripts/emulator.sh`(818) 的子集 | 300–450 |
+| `macos/run-macos.sh` | `run-linux.sh`(354) / `run-windows.ps1`(233) | 150–250 |
+| `macos/fetch-emulator.sh` | `windows/fetch-emulator.ps1`(131)，host-os 取 `macosx` | 80–120 |
+| `macos/fetch-images.sh` | `fetch-images.ps1`(112) | 60–100 |
+| `macos/preflight.sh` | `preflight.ps1`(85) | 80–120 |
+| `packaging/bin/macos/`：`lib.sh` / `start-headless.sh` / `stop.sh` / `status.sh` / `verify.sh` | `bin/linux/`(570) + `bin/windows/`(690) | 350–550 |
+
+### 3.3 共享层要改的点（少，但每一条都会真拦人）
+
+1. **`host_gpu_available()`（`common.sh:88-117`）在 macOS 上永远返回"没有 GPU"** —— 它探的是
+   `/dev/dri/renderD*`，于是 `-gpu auto` 被判成 `swiftshader_indirect`。**有显卡却用软渲染**，是最容易
+   被"跑起来了"掩盖的性能问题。改法：按 OS 分支，macOS 用 `system_profiler`。
+2. **`emu_pid_for_port()`（`common.sh:182-199`）读 `/proc`** —— macOS 无 `/proc`，改用 `ps`。
+   ⚠️ 那段注释里记录的坑（`pgrep -f "qemu-system.* -port N"` **会把调用者自己匹配上**，
+   可能导致 kill 到无辜进程）在 macOS 上**同样存在**，别退回 `pgrep -f`。
+3. **`flock` 不存在** —— `release.sh:616` 与 `package-rom.sh:58` 的 `exec 9>"$LOCK"; flock -n 9` 要换实现。
+4. **GNU 工具名** —— `sha1sum`/`sha256sum`/`stat -c`/`numfmt`/`date -Iseconds`/`du --apparent-size`/`sed -i`/`readlink -f`
+   全部要 macOS 分支（`shasum`、`stat -f%z`、`date -u +…`、`du -shA`、`perl -pi -e`、`cd`+`pwd -P`）。
+   `release.sh:95` 的 `require_tools` 白名单要按平台变。
+5. **`tar` 语义** —— `emulator.sh` 的导出/导入靠 `tar --sparse` 把 48 G 表观、551 M 实占的稀疏镜像压小
+   （注释在 `emulator.sh:472-475`），并用 `tar -tf` 的**条目数**做读回校验（`:597`）。
+   bsdtar 默认会把扩展属性写成 `._*` 旁文件，**条目数会变、校验会误判**；`--sparse` 的语义也不同。
+   必须显式关掉元数据写入，并重新确认稀疏与条目数两条断言。
+6. **`declare -A`（`release.sh:46`）需要 bash 4+** —— macOS 自带 bash 3.2。要么改写法，要么在 preflight 里
+   强制要求 `brew install bash` 并用绝对路径解释器。**建议改写法**：只为两个关联数组就让 Mac 用户装 bash，
+   是给交付加无谓的门槛。
+7. **`setsid`（`emulator.sh:137`、`packaging/bin/linux/start-headless.sh:141`）** —— macOS 无 `setsid`，
+   用 `nohup … &` + `disown`；若要开机自启则落到 launchd plist。
+8. **`unzip` 丢可执行位** —— 包内 `runtime/emulator/emulator`、`runtime/platform-tools/adb` 要显式 `chmod +x`。
+   Linux 侧的等价代码在 `release.sh:324,339`，Mac 侧必须覆盖 `runtime/` 这一层。
+
+### 3.4 打包与 Gatekeeper
+
+- **quarantine**：从浏览器下载的 zip 会给解出的每个文件打 `com.apple.quarantine`，`emulator` 一执行就被拦。
+  要么在 `START-HERE.md` 里写清步骤，要么在 `start-headless.sh` 里检测并提示 `xattr -dr com.apple.quarantine`。
+- **签名/公证**：包里的 `emulator`、`adb` 是**上游已签名**的，问题只在分发层。
+  是否给自己的包做签名+公证，取决于分发方式（内网 vs 公网）——**这是一个决定，不是默认动作**。
+- **包内文档**：`release.sh` 用模板替换生成 `START-HERE.md`（`:348-390`），现在只认
+  `if plat == "linux" … else …` 两个分支，要加第三个；`adb` 的路径拼接也是二元判断（`:384`）。
+
+### 3.5 桥接模式：macOS 上没有等价物，直接降级
+
+`-net-tap` 是 Linux 的 tun/tap。macOS 没有对应机制，而且这**不是 macOS 特有的缺口**——
+Windows 侧本来就没实现（`packaging/README.md`：「`tools/net-bridge*.sh` **仅 linux 包**；Windows 侧 `-net-tap` 没实现」）。
+
+**macOS 走同一条降级路径**：模拟器默认用户态 NAT + 宿主端口转发。`tools/net-bridge.sh`(177) +
+`net-bridge-ifup.sh`(21) 不进 mac 包，`run-macos.sh` 里不出现 `-net-tap` 分支。
+
+> ⚠️ 于是「mac 包没有桥接」**不是待修的缺陷，而是与 windows 包一致的能力面**。
+> 文档里要写成"已知限制"，别写成 TODO。
+
+### 3.6 不适用于 macOS 的部分（别顺手移植）
+
+以下脚本与"Linux 构建机 + Android 目标设备"强绑定，Mac 上一律不需要：
+
+`tools/setup-host.sh`（`apt-get`/`systemctl`）、`tools/integrate-aosp.sh`、`tools/build-*.sh`、
+`tools/deploy-remote-control.sh`（`adb`+`setenforce`）、`tools/verify-cuttlefish.sh`、
+`tools/lan-up.sh`（supervisord）、`tools/integrate-sepolicy.sh`、`tools/remote-control-supervisord.sh`、
+`dev/02-native-daemon/Makefile`（主机版，见 §5 说明）、`dev/05-controller-app` 的构建链。
+
+Mac 包 = **运行时控制面 + 打包**这一层，不包含构建链。
+
+---
+
+## 4. 两条线的关系：三个产品，别只保一条
+
+用户决策：**Intel Mac 也要支持 → 两条 ROM 线都保留**。于是产品矩阵是：
+
+| 产品 | `lunch` 目标 | guest 架构 | 跑在哪 | 状态 |
+|---|---|---|---|---|
+| 现有 | `remote_control_x64_arm64-userdebug` | x86_64 + 翻译层 | Linux x86_64（KVM）、Windows x86_64（WHPX）、**Intel Mac**（HVF，未实测） | ✅ 已建出并使用 |
+| 新增 | `remote_control_arm64-userdebug` | arm64 原生 | **Apple Silicon**（HVF）、arm64 Linux 宿主（KVM，未实测） | 📄 本文方案 A |
+
+**两边的公共部分**：`remote-control` 服务本体、`emulator/config.ini`、`packaging/` 的模板与
+`START-HERE.md` 骨架、`release.sh` 的分派表结构、`docs/` 的验收口径。
+
+**两边必须分开的部分**：设备树（BoardConfig/vendor/内核）、翻译层的存在与否、验收里与翻译层相关的断言（§2.6）。
+
+> ⚠️ **arm64 产品不是"为了 macOS 顺便做的"，它自己就有价值**：
+> 现有 x86_64 那条线的加速依赖 KVM/WHPX/HVF，**arm64 宿主（Apple Silicon、ARM 云主机、ARM 工作站）
+> 一条都吃不到**。所以方案 A 同时也是"能不能在 ARM 宿主上跑"的答案。
+
+---
+
+## 5. 与 `14-macos-host-notes.md` 的边界（避免两处都写、说法还不一样）
+
+`14-macos-host-notes.md` 研究的是**另一个问题**：把 `remote-control` 本身移植成 macOS 上的被控端
+（用 `CGEventPost` 注入、用 ScreenCaptureKit 抓屏、TCC 权限怎么拿、要不要 bundle 化）。
+
+| 问题 | 归哪份 |
+|---|---|
+| Mac 当**宿主机**跑安卓模拟器（本文） | **本文** |
+| Mac 当**被控端**（截图/注入 Mac 自己的桌面） | `14-macos-host-notes.md` |
+| 「macOS 宿主脚本要写多少行」 | **本文 §3** |
+| 「macOS 上 `SOCK_SEQPACKET` 不可用」 | `14-macos-host-notes.md` §5（**对本文不适用**——被控端在 guest 里，socket 是 Linux 的） |
+| 「root LaunchDaemon 注入不了输入」 | `14-macos-host-notes.md` §6（**对本文不适用**，同上） |
+
+> 两份文档里**唯一会互相影响**的点是 §2.7：ROM 只能在 Linux 上编。
+> 若将来真要在 Mac 上做构建，`14` 的 §7（交叉编译与签名/公证）是入口。
+
+---
+
+## 6. 改动量汇总
+
+| 类别 | 新增 | 改动 | 参照物 |
+|---|---|---|---|
+| A. arm64 ROM 产品 | 280–420 行（设备树 4 个文件 + 软链） | 120–200 行（构建系统参数化 + 桥分支） | 现有 `BoardConfig.mk` 104 + `product` 168 + `device.mk` 35 |
+| B. macOS 宿主脚本 | 1500–2200 行 | 400–600 行（共享层 GNU→BSD 适配） | `emulator.sh` 818 + `run-linux.sh` 354 + `bin/linux` 570；`emulator.ps1` 735 + `run-windows.ps1` 233 + `bin/windows` 690 |
+| **合计** | **约 1800–2600 行** | **约 520–800 行** | 现有两套骨架的 **约 2/3** |
+
+**没有算进去的**（因为不该算）：Mac 上的 ROM 构建链（不做，§2.7）、桥接网络（不做，§3.5）、
+`14-macos-host-notes.md` 涉及的被控端改造（另一条产品线）。
+
+---
+
+## 7. 风险与未决事项
+
+### 7.0 实施记录（2026-10-03，实测）
+
+动手前先把"能推翻方案"的三条验了。**结论：方案 A 的三个前提全部成立**，其中两条比预期更好。
+
+#### 7.0.1 arm64 ROM 早就编出来过 —— 不用再编一遍
+
+`aosp/out/target/product/emulator64_arm64/` 里有一套 **2026-09-28 的完整产物**（19 GB），
+构建指纹是 `Android/sdk_phone64_arm64/emulator64_arm64:12/SP1A.210812.016.C2/root09280433:userdebug/test-keys`。
+关键文件都在：`system.img` 778 MB、`system-qemu.img` 4.3 GB、`super.img` 4.3 GB、
+`product-qemu.img` 278 MB、`system_ext-qemu.img` 133 MB、
+`kernel-ranchu` 19.9 MB（`gzip compressed data, was "kern.patched"`）、`ramdisk-qemu.img` 4.2 MB、`vendor_boot.img` 100 MB。
+
+> ⚠️ **目标名有两个，别混**（本轮实测踩到，写错过一次）：
+>
+> | 概念 | 值 |
+> |---|---|
+> | `lunch` 目标 | **`sdk_phone64_arm64-userdebug`** |
+> | `PRODUCT_DEVICE`（也是 `ANDROID_PRODUCT_OUT` 的目录名） | **`emulator64_arm64`** |
+>
+> 写成 `lunch emulator64_arm64-userdebug` **不会报错**——`lunch` 找不到该产品时会**静默回落**到
+> `aosp_arm`（`TARGET_ARCH=arm`，32 位 ARM），然后在错误的输出目录里编出一堆用不上的东西。
+> 判断依据只有一行：`lunch` 之后必须核对 `TARGET_PRODUCT` 与 `ANDROID_PRODUCT_OUT`。
+
+> 含义：**§2.8 的第 1 步（"先编上游产品验通路"）事实上已完成**。剩下的不是"能不能编"，是"编出来的东西怎么起"。
+
+#### 7.0.2 macOS(aarch64) 模拟器包里有 arm64 后端，而且**没有** x86_64 后端
+
+从 SDK 清单下载并逐项核对（稳定渠道，未用镜像的二手信息）：
+
+| 项 | 实测值 |
+|---|---|
+| 包 | `emulator-darwin_aarch64-16428233.zip` |
+| 大小 | **416,112,708 字节**（与清单 `complete/size` 一致） |
+| sha1 | **`3af4fe44ce82b3d88ae5678a53735f27ad729c15`** —— 与清单逐字符相同 ✓ |
+| 包内 `Pkg.Revision` | **37.2.12**（`Pkg.BuildId=16428233`） |
+| `emulator/qemu/` 下的后端 | **`darwin-aarch64`**（唯一一个） |
+| arm64 guest 后端 | ✅ `qemu/darwin-aarch64/qemu-system-aarch64`、`qemu-system-aarch64-headless` |
+| x86_64 guest 后端 | ❌ **不存在**（`emulator/qemu/darwin-aarch64/` 是唯一目录） |
+| 顺带 | 包里自带 `qemu-img`（§3.6 提到的 `tools/diagnose-*.sh` 依赖它可以少一个 Homebrew 依赖） |
+
+**两条结论**：
+
+1. **方案 A 的前提成立** —— Apple Silicon 上有能跑 arm64 guest 的官方后端。这是本文档最想确认的一条。
+2. **Apple Silicon 上不存在"跑现有 x86_64 ROM"的选项** —— 不是慢，是**根本没有那个后端**。
+   这从"我们推演 TCG 会很慢"升级成了"包层面就不支持"。**§1.3 那张表的最后一行可以改成硬结论。**
+
+#### 7.0.3 SDK 清单里的三平台对齐情况
+
+稳定渠道（channel-0）同一个版本的包**三平台齐全**，这消掉了 §7.2 里"三平台对齐"的顾虑：
+
+| 包 | 版本 | 大小 |
+|---|---|---|
+| `emulator-linux_x64-16428233.zip` | 37.2.12 | 333 MB |
+| `emulator-darwin_aarch64-16428233.zip` | 37.2.12 | 396 MB ← **Apple Silicon** |
+| `emulator-darwin_x64-16428233.zip` | 37.2.12 | 466 MB ← **Intel Mac** |
+| `emulator-windows_x64-16428233.zip` | 37.2.12 | 434 MB |
+| `platform-tools_r37.0.1-{linux,darwin,win}.zip` | 37.0.1 | —（darwin 那份同时适用两种 Mac） |
+
+> 注意：项目现在用的是 **37.1.11**（`docs/03-delivery.md` 记录的 `emulator-windows_x64-15917651.zip`）。
+> 加 macOS 时如果要"三平台同 build id"，就是整条线一起升到 37.2.12。**这是一次版本决策，不是 macOS 独有的改动。**
+> 升级要重新验收：`docs/08-emulator-version-notes.md` 记录过 37.2.11 已移除 arm64 后端 ——
+> 那条结论针对的是**跨架构**场景（x86_64 宿主跑 arm64 guest），与本方案的 arm64 宿主 + arm64 guest 不是同一件事。
+
+#### 7.0.4 一条被挡住的验证（不隐瞒）
+
+想让这套 arm64 ROM 在**本机 Linux 上真跑一次开机**当基线，**没成功**，原因是模拟器版本而不是 ROM：
+
+| 尝试 | 结果 |
+|---|---|
+| 直接用产物目录当 `-sysdir` | `ERROR: Your system directory is missing the 'vendor.img' image file` —— arm64 产物**没有 `vendor.img`**（x86_64 那个产品有；差异待查，见 §7.2） |
+| 加 `-vendor vendor_boot.img` / `-qemu -audiodev none` | 均失败，停在 `qemu-system-aarch64-headless: PCI bus not available for hda` |
+| AOSP 自带模拟器 | 是 **30.8.3**，`prebuilts/android-emulator/` 下**没有 `qemu/` 目录**；`docs/08-emulator-version-notes.md` 已记录它"太旧，镜像要求 ≥31.2.7" |
+
+**关于 `vendor.img`：已定位并修好（本轮）**
+
+两个产品的对比显示 x86_64 的 `vendor.img`/`vendor-qemu.img` 时间戳（08:12/08:13）**晚于**其他镜像，
+说明它是**单独的镜像目标**产物，不是 `droid` 全量构建的副产品。arm64 那套是"编到能开机为止"的，
+从没编过这个目标。修法：
+
+```bash
+# 在构建容器里
+lunch sdk_phone64_arm64-userdebug     # ⚠️ 不是 emulator64_arm64-userdebug（会静默回落）
+m -j8 vendorimage
+```
+
+实测产出 `vendor.img` 102,883,328 字节 + `vendor-qemu.img` 105,906,176 字节，`m` 退出码 0。
+**两个坑**：① 上次被中断的编译会留下 `out/.lock`，新编译会报
+`Tried to lock out/.lock ... timed out polling every 1s until 10s`，需先 `rm -f out/.lock`；
+② 产物目录是 `out/target/product/emulator64_arm64`（跟 `PRODUCT_DEVICE` 走，不是 lunch 名）。
+
+**补齐后重试启动：QEMU 那关过了，但模拟器太旧**
+
+补上 `vendor.img` 后，启动一路推进到了比之前远得多的位置：
+
+```
+qemu-system-aarch64-headless: PCI bus not available for hda      ← 这行其实是**非致命**的
+emulator: Requested console port 5570: Inferring adb port 5571.
+emulator: feeding guest with passive gps data, in headless mode
+emulator: INFO: userspace-boot-properties.cpp:249: Sending adb public key [...]
+（随后干净退出，退出码 0）
+```
+
+"启动 1 秒后干净退出、日志停在 `Sending adb public key`" **正是 `docs/08-emulator-version-notes.md`
+记录过的症状**——那份文档的结论是 AOSP 自带模拟器 **30.8.3 太旧，镜像要求 ≥31.2.7**。
+本轮复现了同一症状，且**排除了 `vendor.img` 这个曾以为是原因的因素**。
+
+> 所以 `hda` 那条报错**不是**根因，别再往音频设备方向查。真正的天花板是模拟器版本：
+> Linux 侧手上只有 30.8.3（AOSP 自带）和 27.x（`/opt/android/emulator-new`），
+> 而 **37.2.12 的 Linux 包必须在 Linux 上验证时需要联网下载 333 MB** ——
+> 这条验证的正确落点仍是**目标 Mac + darwin-aarch64 包**。
+
+> 正确的验证路径是：**在目标 Mac 上用 37.2.12 的 darwin-aarch64 包起这套 arm64 ROM**。
+> 在没有 Mac 的构建机上无法完成这一步，别再花时间试 Linux 侧的组合。
+
+#### 7.0.5 已写出 arm64 产品的设备树（本轮）
+
+`dev/04-x64-android/device/` 下新增一个产品，原先的 x86_64 产品与共享 sepolicy **一个字节没动**：
+
+```
+device/
+├── AndroidProducts.mk                      ← 改为两个产品并列
+├── remote_control_arm64/                   ← 新增（本轮）
+│   ├── BoardConfig.mk                       TARGET_ARCH := arm64，无 TARGET_NATIVE_BRIDGE_*
+│   ├── device.mk                            inherit emulator64_arm64/device.mk + BIOS + 以太网
+│   └── product/remote_control_arm64.mk      PRODUCT_NAME := remote_control_arm64
+└── remote_control_x64_arm64/                ← 原样（含 sepolicy，被两个产品共用）
+```
+
+写的时候落进文件里的几条关键判断（都在注释里）：
+
+1. **`QEMU_USE_SYSTEM_EXT_PARTITIONS` 与 `PRODUCT_USE_DYNAMIC_PARTITIONS` 必须写在 `include` 之前**——
+   `BoardConfigEmuCommon.mk` 用 `ifeq` 决定动态分区列表是四个独立分区还是
+   `system/product`+`system/system_ext` 的 GSI 布局，而 make 的条件在 include 那一刻求值。
+2. **sepolicy 复用同一份**，`BOARD_SEPOLICY_DIRS` 指向 `remote_control_x64_arm64/sepolicy`——
+   历史命名但内容与架构无关。文件里明确写了"不要为了路径好看复制一份"，理由是那会造成第二处真源。
+3. **翻译层那三条属性一条都不能抄**，尤其 `ro.dalvik.vm.native.bridge=libndk_translation.so`：
+   在原生 arm64 上设了它，ART 会去找一个不存在的库。这条单独写了一段注释防止以后"对齐两个产品"时被顺手抄过来。
+4. **`BUILD_BROKEN_DUP_RULES` 先不设**，注释里留了一行"报 duplicate rules 时把它打开"——不预先放行没被证明必要的东西。
+5. `PRODUCT_MODEL` 写成 `remote-control arm64 (native, no translation layer)`，
+   便于 `getprop ro.product.model` 一眼区分两个产品。
+
+**尚未验证**：`m` 全量构建、开机、服务起没起（见 §7.1 #3/#5）。
+**但构建系统层面已验通**，见下。
+
+#### 7.0.6 新产品的 lunch 已验通（本轮）
+
+```
+✓ remote_control_arm64-userdebug        （新增）
+✓ remote_control_x64_arm64-userdebug    （原有，未被破坏）
+```
+
+停在 arm64 产品上核对到的关键变量：
+
+| 变量 | 值 | 说明 |
+|---|---|---|
+| `TARGET_PRODUCT` | `remote_control_arm64` | |
+| `ANDROID_PRODUCT_OUT` | `/aosp/out/target/product/remote_control_arm64` | |
+| `PRODUCT_MODEL` | `remote-control arm64 (native, no translation layer)` | 一眼区分两个产品 |
+| `TARGET_NATIVE_BRIDGE_ARCH` | **空** | ✓ 证明翻译层没被带进来 |
+| `PRODUCT_PACKAGES` 里 | `remote-control`、`remote-control-launch`、`rcctl`、`pm` | 四个都在 |
+
+**ABI 对照**（这条最能说明两个产品的本质差别）：
+
+| 产品 | `TARGET_CPU_ABI_LIST` |
+|---|---|
+| `remote_control_arm64` | `arm64-v8a` |
+| `remote_control_x64_arm64` | `x86_64,arm64-v8a` ← 翻译层带来的第二项 |
+
+**过程中修掉一个真错误**（验证器抓到的，不是我推出来的）：
+
+```make
+# device/remote_control/remote_control_arm64/BoardConfig.mk:32
+error: cannot assign to readonly variable: PRODUCT_USE_DYNAMIC_PARTITIONS
+dumpvars failed with: exit status 1
+```
+
+`PRODUCT_USE_DYNAMIC_PARTITIONS` 走到 `board_config.mk` 时已经 **readonly**（在 `config.mk` 更早处固化），
+**只能在产品 mk 里设**。顺带发现 x86_64 那个产品**两边都写了**——BoardConfig 里那行之所以没炸，
+是因为产品侧已经先把它设成同一个值、早于 BoardConfig 被求值。**本产品不复制那个巧合**，
+只在产品 mk 里设一次，BoardConfig 里留了一段注释说明为什么不能放这儿。
+
+#### 7.0.7 arm64 服务本体已编出（本轮）
+
+在**新产品**下编服务本体，验证 `Android.bp` 的平台私有库依赖在 arm64 目标上同样成立：
+
+```bash
+lunch remote_control_arm64-userdebug
+m -j8 remote-control rcctl remote-control-launch     # m 退出码 = 0
+```
+
+三个产物全部是**真 ARM aarch64 ELF**：
+
+| 产物 | 大小 | 类型 | 关键 NEEDED |
+|---|---|---|---|
+| `system/bin/remote-control` | 1,033,224 | ELF 64-bit LSB pie, **ARM aarch64** | `libbase` `libbinder` `libcutils` `libgui` `liblog` `libmediandk` `libui` `libutils` |
+| `system/bin/rcctl` | 55,848 | 同上 | `libjnigraphics` `libbase` `liblog` |
+| `system/bin/remote-control-launch` | 47,152 | 同上 | 只有 `libc` `libm` `libdl`（壳够薄，符合设计） |
+
+**没有翻译层混进来**（`system/lib64` 下 `libndk_translation*` 命中 **0**、`system/lib64/arm64` 条目 **0**），
+这正是 arm64 产品应有的样子。
+
+> 编译期开关的字符串核对（`strings` 计数）：
+> `surfaceflinger` 5 处、`screencap` 16 处、`uinput` 19 处、**`libndk_translation` 0 处**。
+> 说明这一版二进制里同时带了 SF 与 screencap 两条截图后端、以及 uinput 注入后端，
+> 而且**没有任何翻译层残留**。
+
+含义：**arm64 ROM 这条线现在"服务能在目标上编出来"已经成立**，剩下的验证是"放进镜像能不能开机自启"。
+
+#### 7.0.8 方案 B 的头两个脚本（本轮）
+
+放在 `dev/04-x64-android/macos/`（与 `windows/` 平行）：
+
+| 文件 | 职责 | 已验证 |
+|---|---|---|
+| `macos/fetch-emulator.sh` | 按 **host-os=macosx + host-arch** 选包、下载、校验 sha1、解包、**补可执行位** | ✅ 选包逻辑对真实清单验过；`bash -n` 通过；在 Linux 上正确自挡 |
+| `macos/preflight.sh` | 系统/架构、**`kern.hv_support`**、必需工具、模拟器与后端架构、adb、磁盘、Gatekeeper/quarantine、ROM 完整性 | ✅ `bash -n` 通过；在 Linux 上正确报"不是 macOS"并继续做完其余检查 |
+
+`fetch-emulator.sh` 的选包逻辑用真实 SDK 清单做了六组验证（这次没有真机，只能验到这一层）：
+
+| 包 | host-os | host-arch | 选中 |
+|---|---|---|---|
+| emulator | macosx | aarch64 | `emulator-darwin_aarch64-16428233.zip` 396 MiB |
+| emulator | macosx | x64 | `emulator-darwin_x64-16428233.zip` 466 MiB |
+| emulator | linux | x64 | `emulator-linux_x64-16428233.zip` 333 MiB |
+| emulator | windows | x64 | `emulator-windows_x64-16428233.zip` 434 MiB |
+| platform-tools | macosx | aarch64 / x64 | `platform-tools_r37.0.1-darwin.zip` 15 MiB（**两种 Mac 共用一份**） |
+| emulator | macosx | riscv64 | ✗ 正确报"没有该组合的 archive" |
+
+`preflight.sh` 把 macOS 上"不报错但静默变慢/静默失败"的四类坑做成了可判定项：
+后端架构与本机是否匹配、HVF 是否可用、可执行位是否被 `unzip` 丢掉、
+宿主 bash 是不是 3.2（`release.sh` 用了 `declare -A`，需 bash 4+）。
+
+**踩到并修掉的一处**：`set -o pipefail` 下 `XA="$(xattr -l ... | grep -c ...)"`
+会因为 `xattr` 在该文件"无扩展属性"时返回非 0 而带出非 0 退出码，导致脚本提前结束。
+改成 `XA="$(...)" || XA=0`。
+
+#### 7.0.9 共享脚本的产品分支 + `fetch-images`（本轮）
+
+**一、`scripts/` 的五个脚本改成产品感知**（`PRODUCT=x64_arm64`（默认）/ `PRODUCT=arm64`）
+
+改动的核心是把"这个产品要不要翻译层"收敛成**一个变量**，而不是散在五处硬编码：
+
+```bash
+# scripts/common.sh
+PRODUCT="${PRODUCT:-x64_arm64}"      # 新增，默认值与改动前一致
+case "$PRODUCT" in
+    x64_arm64) HAS_BRIDGE=1 ;;
+    arm64)     HAS_BRIDGE=0 ;;
+    *) <报错并列出可选值> ;;
+esac
+PRODUCT_NAME="remote_control_$PRODUCT"
+LUNCH_TARGET="$PRODUCT_NAME-userdebug"
+PRODUCT_OUT="${PRODUCT_OUT:-$AOSP_DIR/out/target/product/$PRODUCT_NAME}"
+PRODUCT_HOST_ARCH=$([ "$HAS_BRIDGE" = 1 ] && printf 'x86_64' || printf 'arm64')
+```
+
+| 文件 | 改了哪几处（按行号） | 行为差别 |
+|---|---|---|
+| `common.sh` | `PRODUCT_NAME` 那一行（原来写死 `remote_control_x64_arm64`） | 新增 `PRODUCT` / `HAS_BRIDGE` / `PRODUCT_HOST_ARCH`；非法值立即报错并列出可选项 |
+| `apply-overlay.sh` | 载荷校验段、同步载荷段、落点校验段 | `HAS_BRIDGE=0` 时**整段跳过**载荷（并明确打印"跳过"而不是静默）；新增"残留 bridge 目录会被清掉"；**两个产品的设备树一起校验** |
+| `build-rom.sh` | 前置检查 | `HAS_BRIDGE=0` 时不再要求 `bridge-copy.mk`；改为检查当前产品的设备树目录存在 |
+| `status.sh` | "AOSP 注入"一节 | 两个产品**分别**显示是否就位 + 翻译层载荷状态 + 当前 PRODUCT 及其性质 |
+| `package-rom.sh` | `source.properties`、`MANIFEST.txt` | 见下 |
+
+**两个设计判断（都写进了注释）**：
+
+1. **设备树"两个产品一起同步"，不是只同步当前产品。** `AndroidProducts.mk` 里两个产品并列，
+   AOSP 树里缺任何一个，对应产品的 `lunch` 目标就会消失——只同步当前产品会让并行开发互相踩。
+   差别只在"要不要搬翻译层载荷"，那是 `x64_arm64` 独有的。
+2. **`source.properties` 里的 `SystemImage.Abi` 必须与产品实际 guest 架构一致**：
+   `x86_64` → `x86_64`，`arm64` → `arm64-v8a`。模拟器靠它判断 guest 是不是本机架构，
+   写错会让它按错误架构布置机器。同理 `MANIFEST.txt` 里 arm64 产品会如实打印
+   "无翻译层"并提示"跑不了纯 x86 应用"。
+
+**回归验证**（项目纪律："别把 Linux 弄坏"）：
+
+| 用例 | 结果 |
+|---|---|
+| 默认 `PRODUCT`（`status.sh` 全跑） | ✅ 输出与改动前一致（载荷 91 文件 / 拷贝规则 91 条 / 产物 5.7 G / 设备在线） |
+| `PRODUCT=arm64 ./apply-overlay.sh` | ✅ 打印"跳过翻译层载荷 ✓ 不适用"，退出码 0 |
+| `PRODUCT=arm64 ./apply-overlay.sh --check` | ✅ 同上，且**明确说明没查载荷**（避免"检查通过"被误读） |
+| `PRODUCT=bogus ./apply-overlay.sh` | ✅ 报错并列出可选项 |
+| `PRODUCT=arm64 ./status.sh` | ✅ 正确显示"当前 PRODUCT：arm64（原生 arm64，无翻译层）" |
+| 五个脚本 `bash -n` | ✅ 全过 |
+
+**二、`macos/fetch-images.sh`（方案 B 第三个脚本）**
+
+从构建机把 ROM 交付目录拉到 Mac。算法与 `windows/fetch-images.ps1` 一致
+（比对远端大小 → `scp` → 按 `SHA256SUMS` 校验），但有三处**有意不同**：
+
+1. **远端缺必需文件时直接失败**，不学 Windows 版那样只打个 warning 走到最后。
+   那版会在中途的解压/校验阶段给出更迷惑的报错。
+2. **`initrd` 不只是"检查存在"**：QEMU 拿到不存在的 initrd 会
+   "主循环立刻结束且不报错"（`docs/02-build-traps.md`），所以脚本会**读回确认非空**，
+   两种来源（`ramdisk-qemu.img` 合并版 / 裸 `ramdisk.img`）分别给出不同级别的提示。
+3. **quarantine 默认只报告，不清除**：清除等于替用户声明"这个来源我信"，
+   而这可能正是从网上下载的归档。要清必须显式 `--dequarantine`。
+
+macOS 专有处理：`shasum -a 256`（没有 `sha256sum`）、本地目录拷贝优先 `ditto`
+（带扩展属性最稳）、**没有 `ditto` 时回退 `cp -a`**（对 `.img` 等价，且让脚本能在开发机上测）。
+
+**离线验证**（造 fixture 跑四个用例）：
+
+| 用例 | 期望 | 结果 |
+|---|---|---|
+| 正常路径（源里**故意不给** `initrd`） | 自动由 `ramdisk-qemu.img` 生成、SHA256SUMS 全过 | ✅ 退出码 0，"校验通过（10 个文件）" |
+| 篡改一个镜像 | 必须失败并指出是哪个文件 | ✅ 退出码 1，"校验不符：system-qemu.img" |
+| 删掉一个必需文件 | 必须失败 | ✅ 退出码 1，"缺文件：vendor-qemu.img" |
+| `initrd` 与 `ramdisk*` 都没有 | 必须失败并说清后果 | ✅ 退出码 1，"既没有 initrd 也没有 ramdisk*.img —— 模拟器起来会静默退出" |
+
+**这次测试抓到一个真 bug**：脚本原本只走 `ditto`，而 `ditto` **只存在于 macOS** ——
+在开发机上直接报 `ditto: 未找到命令` 然后死掉。已加回退分支。
+
+### 7.1 仍需在真机上验的
+
+| # | 事项 | 为什么重要 | 怎么验 | 状态 |
+|---|---|---|---|---|
+| 1 | **arm64 guest 在 Apple Silicon 上是否真走 HVF** | 若退到 TCG → 量级问题（§1.3 锚点：23.8 s vs 5–8 min） | `emulator -accel-check`、`-verbose` 日志里找 `hvf` | ⏳ 待真机 |
+| 2 | **这套 arm64 ROM 能不能真走到 `boot_completed`** | Linux 侧被 30.8.3 旧模拟器挡住（§7.0.4 已复现，并排除 vendor.img） | 目标 Mac + 37.2.12 darwin-aarch64 包，`-accel on` | ⏳ 待真机 |
+| 3 | ~~新产品的设备树能否 lunch 通~~ | —— | —— | ✅ **已验通**（§7.0.6） |
+| 4 | ~~`m remote-control rcctl` 在 arm64 产品下能否编出~~ | —— | —— | ✅ **已编出**（§7.0.7，三个产物均为 ARM aarch64 ELF） |
+| 5 | **arm64 ROM 全量构建 + 放进镜像** | 服务能编 ≠ 能装进镜像 | `m` 全量 → 查 `system/bin/` 与 `system/etc/init/` | 🔄 **进行中**（本轮已启动；服务三件套与 rc 已进镜像树） |
+| 5b | **服务在 arm64 guest 里能否开机自启** | 全量构建成功不等于服务真起来了；rc/sepolicy 在 arm64 上还没跑过 | 起模拟器 → `ps -A \| grep remote-control` + `dumpsys` | ⏳ 待验 |
+| 6 | **arm64 包体积与开机时间**（相对 x86_64） | §7.2 里那条"可能变大也可能变小"的估算 | 全量构建后实测，替换估算 | ⏳ 待验 |
+
+### 7.2 已知风险
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| **arm64 产物没有 `vendor.img`**（§7.0.4 实测；x86_64 产品有 `vendor.img` + `vendor-qemu.img`） | 模拟器直接拒绝启动（`missing the 'vendor.img' image file`），交付包也无法按现有 `REQUIRED` 清单组装 | §7.1 #3 先查清原因（`m vendorimage` / `installed-files-vendor.txt` / 动态分区配置差异），再决定 `package-rom.sh` 的清单是否按产品分叉 |
+| arm64 内核 5.10 与 API 31 的配对（`EMULATOR_KERNEL_FILE` 在 `arm64-kernel.mk` 里是 `kernel-5.10-gz` 变体） | 起不来 / 起得慢 | 产物已在（§7.0.1），在真机上直接试；这是 `sdk_phone64_arm64` 的官方配对 |
+| **模拟器版本决策**：项目现用 37.1.11，而 macOS 三包只有 37.2.12（稳定）/37.3.2（beta） | 加 macOS 就得整条线升版本，Windows/Linux 的验收要重跑 | §7.0.3：稳定渠道三平台同版本齐全，一次升级解决；升级后按 `docs/03-delivery.md` 的口径重验 |
+| arm64 系统库体积比 x86_64 大（同一套代码编 arm64 通常更大），加上**不再有翻译层文件**（80+ 个小文件） | arm64 包体积**可能变大也可能变小，未实测** | 按 §7.1 #4 实测对比，别按直觉写进文档 |
+| `dev/05-controller-app` 的 APK 若含预编译 `.so` | 原生 arm64 ROM 上**没有翻译层兜底**，必须自带 `arm64-v8a` | 编产品前先 `unzip -l` 看一眼 `lib/` 目录 |
+| 两个产品的 `remote-control` 行为差异（例如 `Ro属性` 上报、`abilist`） | 体检脚本的期望值要按产品区分 | 让 `functional-sweep.py` 的期望设备感知（它已经支持"已知平台限制"这个机制） |
+
+### 7.3 未决（需要人来定，不是技术能定的）
+
+1. **签名与公证**：mac 包是否做签名+公证？取决于分发范围（内网 = 可不做并写清 quarantine 步骤；公网 = 基本必须）。
+2. **Intel Mac 的支持期限**：两条 ROM 线都保 → 构建与验收成本翻倍（每个改动要验两个产品）。若 Intel Mac 用户占比很低，应显式写下"何时下线"。
+3. **是否把 sepolicy 目录改成中性名**（§2.5）：改动面 vs 目录语义，二选一。
+
+---
+
+## 8. 实施检查清单
+
+> 完成后逐条改勾，并把**实际数字**（体积、开机时间、行数）补进对应小节，替换掉估算。
+
+**A. arm64 ROM**
+
+- [x] 1. 上游 arm64 产品能编出来 —— **已完成**（§7.0.1：`emulator64_arm64` 全套产物在，2026-09-28）
+- [x] 2. `macosx` host-os 的 SDK emulator 包含 arm64 guest 后端 —— **已确认**（§7.0.2：`qemu/darwin-aarch64/qemu-system-aarch64(-headless)`，sha1 与清单一致）
+- [ ] 3. Apple Silicon 上确认走 HVF（§7.1 #1；需真机）
+- [ ] 3b. arm64 ROM 在真机上走到 `boot_completed`（§7.1 #2；本机被 30.8.3 旧模拟器挡住，见 §7.0.4）
+- [x] 4. 新增 `device/remote_control_arm64/`（`BoardConfig.mk` / `device.mk` / `product/*.mk`） —— **已完成**（§7.0.5）
+- [x] 5. `AndroidProducts.mk` 两个产品并列，`lunch` 都能识别 —— **已验通**（§7.0.6）
+- [x] 6. `apply-overlay.sh` / `build-rom.sh` / `package-rom.sh` / `status.sh` 加产品分支 —— **已完成并回归**（§7.0.9；`release.sh` 未改，它属打包层，见 #16）
+- [ ] 7. sepolicy 复用同一份（不复制，§2.5），`remote-control.rc` 自启验证
+- [ ] 8. `tools/functional-sweep.py` 跑 33 条命令（含 uinput 触控）
+- [ ] 9. §2.6 的 6 处翻译层断言加闸门并如实打印 ⊘
+- [ ] 10. `dev/05-controller-app` 的 APK 确认有 `arm64-v8a` 库
+- [x] 10b. `m remote-control rcctl remote-control-launch` 在 arm64 产品下编出 —— **已完成**（§7.0.7）
+- [ ] 10c. arm64 ROM 全量构建（`m`），并把服务装进镜像
+
+**B. macOS 宿主脚本**
+
+- [x] 11. `preflight` 检查 `kern.hv_support` / 架构 / Gatekeeper / 必需工具 —— **已写出并验语法**（§7.0.8）
+- [x] 12. `fetch-emulator` 走 `macosx` host-os + host-arch 选包 —— **已写出，选包逻辑对真实清单验过 6 组**（§7.0.8）
+- [x] 12b. `macos/fetch-images.sh` —— **已写出并离线验过 4 个用例**（§7.0.9）
+- [ ] 13. `emulator.sh` 的建/起/停/查/验五个动作在 Mac 上跑通
+- [ ] 14. `packaging/bin/macos/` 五个脚本，语义与另两套逐条对齐
+- [ ] 15. 共享层的 8 条改动（§3.3）落完，且**在 Linux 上回归一遍**（别把 Linux 弄坏）
+- [ ] 16. `release.sh` 三分派表 + `START-HERE.md` 三模板分支 + `--platform` 白名单
+- [ ] 17. 包内 `chmod +x`、quarantine 提示、`sha*sum` 与 `stat` 的 BSD 路径
+- [ ] 18. 从 zip 解压 → 启动 → 跑 `verify.sh` 全绿（Mac 上的"解压即用"验收）
+- [ ] 19. `macos/README.md` 的"未在真机验证"表换成真机输出（首次在 Mac 上跑时把 preflight/fetch 输出贴回）
+
+---
+
+## 9. 本文与项目其它文档的约定
+
+沿用仓库既有规矩，本文遵守：
+
+1. **同一件事只有一处权威描述**（见 `docs/README.md` 开头的"权威性"声明）。
+   产品矩阵以本文 §4 为准；被控端移植以 `14-macos-host-notes.md` 为准。
+2. **历史文档加状态横幅**。本文是**计划**，实施后要改状态，并把估算替换成实测。
+3. **实测与推演分开标**。本文凡"未实测/未核实"都逐条标了，实施时不要删标注，要**改成实测值**。
+4. **踩过的坑带注释留在代码里**（如 `common.sh` 里 `pgrep` 与 `/dev/dri` 那两段）。
+   macOS 分支要**继承同样的注释纪律**——否则下一个改的人会重犯。
