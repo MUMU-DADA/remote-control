@@ -10,6 +10,13 @@
 artifacts/*
 !artifacts/.gitkeep
 
+# release 产物：两个平台的 zip（每个 1~2 GB）与打包用的 staging / 下载缓存 / 冒烟目录
+# （staging 与缓存本来就在 .run/ 下，这里显式写出来是为了让"哪些是大件"一眼可见）
+release/
+.run/release-stage/
+.run/release-cache/
+.run/release-smoke/
+
 # 翻译层：Google 专有二进制（23 MB），由 scripts/fetch-payload.sh 从官方镜像重新生成。
 # MANIFEST.sha256 保留入库，用于锁定"这份 ROM 用的是哪一版载荷"。
 payload/system/
