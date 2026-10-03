@@ -17,6 +17,13 @@ adb shell "REMOTE_CONTROL_FORCE_FALLBACK=1 setsid nohup \
 环境变量会从 supervisor 继承给 remote-control（脚本用的是 `nohup "$BIN" …`，
 没有清环境）。
 
+> ⚠️ **这条假设的是「原型部署」**（supervisord 从 `/data/local/tmp` 拉起）。
+> 产品形态是 init 服务，`remote-control.rc` 里没有注入环境变量的地方 ——
+> 要在 init 形态下试回退编码器，得临时把 `.rc` 的命令行前面加上
+> `sh -c 'REMOTE_CONTROL_FORCE_FALLBACK=1 exec /system/bin/remote-control …'`，
+> 或退到原型部署。生产形态与原型部署的区别见
+> [`../09-deployment-and-update.md`](../09-deployment-and-update.md) §9.5。
+
 ### 它做什么
 
 只影响**编码器选择** —— 跳过 `AndroidBitmap_compress` 的探测，

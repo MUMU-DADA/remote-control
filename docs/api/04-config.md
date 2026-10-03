@@ -225,6 +225,16 @@ curl -X POST http://host:8088/api/v1/config \
 
 ## 六、supervisor：无 root 的应用怎么管 root 服务
 
+> ⚠️ **本节描述的是「免 SELinux 原型」那条路，不是当前的产品形态。**
+>
+> 产品形态是 **init 服务**：开机自启 + 崩了自动拉起，配置读
+> `/data/misc/remote-control/remote-control.conf`（**不是 `/sdcard`**）。
+> 见 [`../09-deployment-and-update.md`](../09-deployment-and-update.md) §9.5。
+>
+> 直接后果：**`dev/05-controller-app/` 那个应用对当前部署是失效的** ——
+> 它写 `/sdcard/remote-control.conf`，而没人读那个文件了。
+> 本节保留，是因为手工/原型部署仍会用到 supervisor。
+
 上位应用是普通 Android 应用，**没有 root**，起不了也停不了 root 守护进程。
 但它能写共享存储。所以：
 
@@ -270,19 +280,41 @@ serving=1
 
 ### 生产部署：做成 init 服务
 
-```bash
-# 见 dev/02-native-daemon/remote-control.rc
-service remote-control /system/bin/remote-control --init-socket remote-control
-    class main
-    user root
-    group root
-    socket remote-control seqpacket 0660 root system
-    seclabel u:r:remote-control:s0
-    disabled        # 由 ctl.start 拉起，或改成 oneshot 常驻
+**这就是当前的落地形态**，实际内容以
+[`../../dev/02-native-daemon/daemon/remote-control.rc`](../../dev/02-native-daemon/daemon/remote-control.rc) 为准。要点：
+
+```
+service remote-control /system/bin/remote-control \
+        --socket /data/misc/remote-control/remote-control.sock --socket-mode 0666 \
+        --config /data/misc/remote-control/remote-control.conf \
+        --log    /data/misc/remote-control/remote-control.log
+    class core
+    user shell                       # 不是 system —— /sdcard 是 FUSE 挡的
+    group shell uhid graphics        # uhid 组不能漏（/dev/uinput 是 0660 uhid:uhid）
+    seclabel u:r:remote_control:s0   # ⚠️ 下划线
+    restart_period 5
+    disabled
+
+on property:sys.boot_completed=1
+    start remote-control
 ```
 
-这样才是真正的"开机自启 + 崩溃拉起"。实机部署时用这个，
-supervisor 脚本是给**开发期**和没有定制 init 的场景用的。
+三条**踩过坑**的红线（每条都实测过，详见
+[`../09-deployment-and-update.md`](../09-deployment-and-update.md)）：
+
+1. **`seclabel` 必须是下划线** `remote_control`。SELinux 标识符只允许 `[A-Za-z0-9_]`，
+   写成 `remote-control` 域不存在，init 起服务直接失败。
+2. **绝不要写 `oneshot`**。它的语义是"退出后不再拉起"，和保活完全相反
+   （`Service::Reap` 里 `oneshot && !RESTART` → 置回 `SVC_DISABLED`）。
+3. **不要用 init 的 `socket` + `--init-socket`**。实测那条路 `accept` 报
+   `Invalid argument` 并以 100% CPU 死循环，把 HTTP 线程一起饿死。让服务自己
+   `--socket` bind 到自己的目录。
+
+配置**不放 `/sdcard`**：那是共享存储，谁都能写。放 `/data/misc/remote-control/`。
+
+> **`enabled` / `port` 没有运行时入口**：`POST /api/v1/config` 对这两个键回
+> `未知配置项`。`port` 是 bind 期定的，改了要重启进程；`enabled` 是软开关，
+> 走 [`01-http.md`](01-http.md) 的 `POST /api/v1/service`。
 
 ---
 

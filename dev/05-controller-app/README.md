@@ -1,67 +1,115 @@
-# 05 · 上位应用（remote-control 控制台）
+# 05 · 上位应用（remote-control 服务管理器）
 
-> 一个只做**服务管理**的 Android 应用：连 `remote-control`、看状态、点屏幕、管应用和文件。
-> 它自己**不申请任何权限**，所有能力都由 daemon 执行。
+> 一个**设备本地**的服务管理小应用：启停 `remote-control`、改监听端口、开关鉴权。
+> 它**不做**看画面、点屏幕、管应用、传文件 —— 那些都在网页控制台里。
+
+> ⚠️ **现状：对当前的 init 部署形态是失效的。** 应用写的是
+> `/sdcard/remote-control.conf`，而现在跑着的服务由 init 启动、读的是
+> `/data/misc/remote-control/remote-control.conf`，**没有任何东西会读前者**。
+> 详见下面[「当前状态」](#当前状态失效中)。本文档描述的是代码的**设计意图**，
+> 不是它今天能跑通的能力。
 
 ---
 
-## 界面结构
+## 它做什么
+
+源码里写得很清楚（[`java/com/remotecontrol/controller/MainActivity.java`](java/com/remotecontrol/controller/MainActivity.java) 开头）：
+
+1. 启动 / 停止 `remote-control` 服务
+2. 改它的对外监听端口
+3. 开关接口访问鉴权
+
+### 为什么原来那些功能被删了
+
+不是没做完，是**刻意删的**：画面、触控、应用管理、文件管理已经在网页控制台里了
+（有实时画面、流式触控、按键、应用列表，而且不用装在设备上）。应用再做一遍等于
+两套 UI 各维护一份，行为还容易不一致。
+
+应用真正的独有价值是**它是设备本地的**：服务没起来、网络不通、端口改错了导致
+连不上 —— 这些情况下网页控制台自己也进不去，只有本机应用还能把它拉回来。
+
+## 权限：`MANAGE_EXTERNAL_STORAGE` 是**必需**的
+
+`AndroidManifest.xml` 声明了 `MANAGE_EXTERNAL_STORAGE`（「所有文件访问」）。
+这与"应用不该要权限"的直觉相反，但它**是设计的一部分**：
+
+应用没有 root，改不了进程；它能做的是写共享存储。配置写在
+`/sdcard/remote-control.conf`，由常驻的 supervisor 监视并执行真正的启停。
+**不申请这个权限的话，应用只能写自己的私有目录，守护进程读不到。**
+
+> 所以本应用**不是**「一个权限都不申请」的协议客户端 —— 那是它被删掉的旧形态。
+> 根 [`README.md`](../../README.md) 里如果还这么写，是错的。
+
+## 当前状态：失效中
+
+| | 应用假设 | 现在实际 |
+|---|---|---|
+| 谁在管服务 | `tools/remote-control-supervisord.sh`（常驻 root 脚本）监视配置文件 | **init 服务** `remote-control`，开机自启 + 崩了自动拉起 |
+| 配置读哪里 | `/sdcard/remote-control.conf` | `/data/misc/remote-control/remote-control.conf`（init 用 `--config` 指定） |
+| 状态写哪里 | `/sdcard/remote-control.status`（supervisor 写） | 无人写这个文件 |
+
+结论：**应用今天的三个按钮都不会产生效果** —— 没人读它写的文件。
+
+这不是文档没跟上，是**部署形态换代后应用被落下了**：
+supervisord 是[阶段 1 的免 SELinux 原型](../02-native-daemon/README.md)，产品形态换成了
+init（见 [`docs/09`](../../docs/09-deployment-and-update.md) §9.5），而应用还停在原型那套。
+
+### 复活路径（尚未实施）
+
+让它改走 daemon 已有的 **HTTP API**，而不是写文件。已实测的对应关系：
+
+| 应用的功能 | HTTP 等价 | 实测结果 |
+|---|---|---|
+| 开关鉴权 | `POST /api/v1/config` body `{"auth":false}` | ✅ 热生效（`applied:["auth"]`） |
+| 启停服务 | `POST /api/v1/service` | ✅ 软开关，见 [`docs/api/01-http.md`](../../docs/api/01-http.md) |
+| 改监听端口 | ❌ **没有运行时入口** | `{"port":8088}` 被拒：`未知配置项`。端口是 bind 期定的，只能改配置 + 重启进程 |
+
+也就是说**三个功能里两个能用 HTTP 现成做到，改端口做不到** ——
+要保留这个功能，得让应用能触发"改配置 + 重启"，而那又绕回权限问题。
+这一步需要先定方向，别急着写代码。
+
+## 界面
+
+单页，不是标签页：
 
 ```
-┌─ socket 路径 ────────────── [连接] ─┐
-│ 状态提示（绿=成功 / 红=失败）        │
-│ [状态][应用][文件][控制]             │
+┌─ remote-control 服务管理 ───────────┐
+│ 只管服务的启停、端口与鉴权           │
+│ （控制设备请用网页控制台）            │
 ├─────────────────────────────────────┤
-│ 状态：显示参数 + 当前前台应用 + pid  │
-│ 应用：列表（标签/图标由本应用解析）、│
-│       点击启动、长按看清单/停止      │
-│ 文件：浏览下载目录、下载 URL、        │
-│       新建/删除/重命名               │
-│ 控制：点击、滑动、截图并显示         │
+│ 状态行（来自 /sdcard/...status）     │
+│ [服务运行中]  ← Switch               │
+│ [接口鉴权]    ← Switch               │
+│ 端口 / 令牌  ← 输入框 + [应用]        │
 └─────────────────────────────────────┘
 ```
-
-## 截图
-
-实机截图在 [`docs/evidence/`](../../docs/evidence/)。
-**这些截图是 remote-control 自己拍的** —— 服务在拍那个控制它的应用，完整闭环。
-
-| 文件 | 内容 |
-|---|---|
-| `controller-app-1.png` | 首次启动，未连接 |
-| `controller-app-3.png` | 已连接并查询到状态（含 remote-control 报出的前台应用 = 它自己） |
-| `controller-app-4.png` | 应用标签页 |
-| `controller-app-7.png` | 修复前的应用列表（显示成 APK 路径 —— 那个 bug 的现场） |
-| `controller-app-8.png` | 修复后：显示应用标签「remote-control 控制台」 |
-
-## 分工：为什么标签不在 daemon 里解析
-
-`pm list packages` 给不出应用标签；逐个 `dumpsys package` 对 100+ 应用太慢。
-而上位应用一个 `PackageManager.getApplicationLabel()` 就有了，还带图标、
-还是本地化的。
-
-所以 **daemon 只返回包名和廉价元数据**（路径/版本/installer），
-**展示层交给上位应用**。这是有意为之的分工，不是偷懒。
-
-## 应用申请了什么权限
-
-**一个都没有。** 所有能力都由 daemon 执行，应用只是协议的客户端。
-这样即使应用被替换，能做的事也不会超过 daemon 暴露的协议范围。
 
 ## 构建
 
 ```bash
-bash dev/05-controller-app/build-apk.sh          # 出 APK
+bash dev/05-controller-app/build-apk.sh          # 出 remote-control-controller.apk
 bash dev/05-controller-app/build-apk.sh --install
 ```
 
-不依赖 AOSP 的 out/（那个目录经常被别的构建占着），用独立 SDK build-tools。
+不依赖 AOSP 的 `out/`（那个目录经常被别的构建占着），用独立 SDK build-tools。
 JDK 直接用 AOSP 树自带的 `prebuilts/jdk/jdk11`。
 
-## ⚠️ 部署时的 SELinux 问题
+> ⚠️ **改名之后这份代码从未构建过。** `build/` 里现存的产物全是改名前的：
+> `autod-controller.apk`（09-28 08:10），`sources.txt` 指向已被删除的
+> `java/com/autod/controller/MainActivity.java`。而 `build-apk.sh` 现在会产出
+> `remote-control-controller.apk` —— 该文件在仓库里**不存在**。
+> 要恢复"可交付"，先跑一次构建脚本并装机验证。
 
-应用以自己的 UID（`untrusted_app` 域）连不上 `/data/local/tmp/remote-control.sock`
-（标签 `shell_data_file`）：
+## 截图（历史）
+
+[`docs/evidence/`](../../docs/evidence/) 下的 `controller-app-*.png` 是**旧 UI**
+（四标签页那一版）的实机截图，拍的是已经被删掉的功能，**不要再当成当前界面**。
+它们由 remote-control 自己拍摄（服务在拍控制它的应用，完整闭环），
+作为历史记录保留。
+
+## 附：当初的 SELinux 问题
+
+四标签页那版是**直连 socket** 的，遇到：
 
 ```
 avc: denied { write } for name="remote-control.sock"
@@ -70,7 +118,10 @@ avc: denied { write } for name="remote-control.sock"
 ```
 
 **不能**用 `allow untrusted_app shell_data_file:sock_file write` 敷衍 ——
-那是把口子开给所有第三方应用。正确做法是给上位应用一个专属域，
-见 `dev/04-x64-android/device/remote_control_x64_arm64/dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/remote_control_controller.te`。
+那是把口子开给所有第三方应用。正确做法是给上位应用一个专属域，策略已写好：
+[`remote_control_controller.te`](../04-x64-android/device/remote_control_x64_arm64/sepolicy/remote_control_controller.te)。
 
-本次功能验证临时用了 `setenforce 0`，**这不是可交付的方案**。
+> 但**当前这版应用不再连 socket**（它写配置文件），所以这份策略目前处于
+> "写好了但用不上"的状态。当时的验证临时用过 `setenforce 0`，
+> **那不是可交付方案**。复活时如果走 HTTP，需要的是网络权限与令牌，
+> 这份 socket 策略要重新评估是否还适用。

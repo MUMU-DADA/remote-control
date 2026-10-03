@@ -301,21 +301,33 @@ main()
 
 **并发模型**：两条传输各跑各的（HTTP 在独立线程，避免互相排队），但**操作是串行的**——锁在 `Dispatcher::Handle()` 里。这是刻意的：`Injector` 是有状态的（按下/抬起、槽位映射、手势 downTime），并发注入会互相破坏手势。代价是一次抓帧（~8–12ms）会让同时在跑的触控事件排队最多十几毫秒。
 
-**退出与重启**：`Shutdown` 让两条传输的 accept 立刻返回并正常退出（退出码 0）；`Restart` 以**退出码 1** 退出，由 init 的 `oneshot` + 外部监督脚本据此重新拉起。
+**退出与重启**：`Shutdown` 让两条传输的 accept 立刻返回并正常退出（退出码 0）；`Restart` 以**退出码 1** 退出，由 init 按 `restart_period`（默认 5 秒）重新拉起。⚠️ `.rc` 里**不能写 `oneshot`** —— 它的语义恰恰是"退出后不再拉起"，和保活相反（详见 [`09-deployment-and-update.md`](09-deployment-and-update.md) §3）。
 
 ---
 
 ## 7. 部署形态
 
+**产品形态是 init 服务**（落地记录见 [`09-deployment-and-update.md`](09-deployment-and-update.md)）：
+
 | 层 | 组成 | 说明 |
 |---|---|---|
-| 服务本体 | `/system/bin/remote-control`（init 拉起）或 `/data/local/tmp/remote-control`（root 手动） | 同一个二进制，靠 `--init-socket` / `--socket` 区分 |
-| 配置 | `/sdcard/remote-control.conf`（key=value 纯文本） | 上位应用与守护进程都能读写；`enabled` 每 2s 热读 |
-| supervisor | `tools/remote-control-supervisord.sh`（root 常驻） | 按配置**保活**，状态写 `/sdcard/remote-control.status` |
-| 上位应用 | `dev/05-controller-app/` | **只做服务管理**：启停、改端口、开关鉴权 |
-| 运行身份 | init 模式 `user system` / `group system uhid graphics` | ⚠️ **待核实**：`captureDisplay` 的权限检查比的是 **UID** 而非 GID，"在 graphics 组里"并不满足；若抓帧报 `PERMISSION_DENIED`，按 `remote-control.rc` 的备选方案改用 `user shell`。`remote-control --selftest` 的 [2] 会直接报出来 |
+| 服务本体 | `/system/bin/remote-control`，由 init 拉起 | 开机自启（`on property:sys.boot_completed=1`）+ 崩了 5 秒自动拉起（`restart_period 5`，**没有 `oneshot`**） |
+| 启动参数 | `--socket /data/misc/remote-control/remote-control.sock`<br>`--config /data/misc/remote-control/remote-control.conf`<br>`--log /data/misc/remote-control/remote-control.log` | ⚠️ **配置与日志都不在 `/sdcard`** —— 那是共享存储，谁都能写；把可执行载荷和配置放一起等于把开关交出去 |
+| SELinux | 专属域 `remote_control` | 策略落在**设备树** `dev/04-x64-android/device/remote_control_x64_arm64/sepolicy/`，由 `tools/integrate-sepolicy.sh` 接进树 |
+| 运行身份 | `user shell` / `group shell uhid graphics` | ⚠️ **是 `shell`(2000)，不是 `system`(1000)**：`system` 读写不了 `/sdcard`（存储层 FUSE 挡的，加 sepolicy 无效），抓帧走的也是 shell 应用申请的 `READ_FRAME_BUFFER` |
+| 上位应用 | `dev/05-controller-app/` | **只做服务管理**：启停、改端口、开关鉴权（见下） |
 
-上位应用是普通 Android 应用（**没有 root**），起不了 root 守护进程，但能写共享存储——所以它只写配置文件，真正的进程管理交给 supervisor；应用侧因此只依赖"文件能写"这一件事。网页控制台里已有的能力（画面、触控、应用管理）应用不再重复实现，避免两套 UI 行为不一致。
+### 非产品形态的两条路
+
+| 场景 | 做法 |
+|---|---|
+| 不编镜像、快速试一把 | `adb push` 到 `/data/local/tmp/` 手工起（见 [`../dev/02-native-daemon/README.md`](../dev/02-native-daemon/README.md) 阶段 1） |
+| 免 SELinux 原型 | `tools/remote-control-supervisord.sh`（root 常驻）监视 `/sdcard/remote-control.conf` 并保活，状态写 `/sdcard/remote-control.status` |
+
+> ⚠️ **supervisord 那套已被 init 形态取代。** 脚本仍在树里，但产品部署不再用它 ——
+> 而 `dev/05-controller-app/` 还停在"写 `/sdcard/remote-control.conf`、等 supervisor 来读"
+> 的假设上，所以那个应用对当前部署是**失效**的。详见
+> [`../dev/05-controller-app/README.md`](../dev/05-controller-app/README.md)。
 
 > **`enabled=0` 是软开关，不停进程**：进程停掉就没人能把它开回来了（网页打不开、接口不通，只能跑到机器跟前）。软开关只让 `/api/` 返回 `503`，同时始终放行"重新开启"这一条。详见 [`api/04-config.md`](api/04-config.md)。
 
