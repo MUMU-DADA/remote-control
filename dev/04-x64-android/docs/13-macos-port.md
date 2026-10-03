@@ -603,6 +603,52 @@ m -j8 remote-control rcctl remote-control-launch     # m 退出码 = 0
 后端架构与本机是否匹配、HVF 是否可用、可执行位是否被 `unzip` 丢掉、
 宿主 bash 是不是 3.2（`release.sh` 用了 `declare -A`，需 bash 4+）。
 
+**补记（同一轮的延伸）：包内 `bin/macos/` 五个脚本也已写出** ——
+`lib.sh` / `start-headless.sh` / `stop.sh` / `status.sh` / `verify.sh`，
+与 `bin/linux/`、`bin/windows/` 两侧语义逐条对齐，文件数都是 5。
+
+平台相关的重写只有四处（其余逻辑与 linux 版一致）：
+
+| 项 | Linux | macOS |
+|---|---|---|
+| 进程枚举 | 遍历 `/proc/*/comm` + `cmdline` | `ps -Ao pid=,comm=,args=` + awk 按字段精确比 `-port` |
+| GPU 探测 | `/dev/dri/renderD*` 可读写 | `system_profiler SPDisplaysDataType`，判据是**有没有 Metal** |
+| 虚拟化 | `/dev/kvm` 可读写 | `sysctl -n kern.hv_support` = 1 |
+| 后端路径 | 写死 `linux-x86_64` | **按本机架构拼**（`darwin-aarch64` / `darwin-x64`） |
+| 后台化 | `setsid nohup` | `nohup … &` + `disown`（macOS 没有 setsid） |
+
+**两处有意与 linux 版不同**：
+
+1. **没有 `--bridge`**：传了会**明确拒绝**并说明"这不是待修的缺陷 —— windows 包同样没有桥接"，
+   而不是静默忽略。（macOS 没有 `-net-tap` 等价物，见 §3.5。）
+2. **`verify.sh` 的判据按产品分派**：原生 arm64 断言"没有翻译层残留 + 服务是 aarch64"；
+   x86_64 桥产品断言"翻译层在场 + 服务是 x86_64"。核心检查是**读文件头里的 ELF 架构**
+   （`od` 读 `e_machine` 偏移 18：`0x3E`=x86-64、`0xB7`=aarch64），
+   不信设备自述、不信接口返回的 ok —— 这是上游被坑三次换来的纪律。
+
+**这些脚本怎么验的（手上没有 Mac）**：做了个**离线测试台** ——
+在 Linux 上用命令 stub 把 `uname`/`sw_vers`/`sysctl`/`system_profiler`/`ps`/`adb`
+换成假实现并 PATH 前置，让脚本以为自己在 macOS 上跑。18 个用例：
+
+| 用例 | 期望 | 结果 |
+|---|---|---|
+| arm64 镜像 + arm64 产物 | 全绿 | ✅ 11 项检查 0 失败 |
+| **故意混入 x86_64 产物** | 三项架构全报错 | ✅ 4 项失败（`x86-64` vs 期望 `aarch64`） |
+| x86_64 镜像交给 arm64 的 Mac | `status.sh` 标红"跑不了" | ✅ 明确报不匹配 |
+| `kern.hv_support=0` | 报错 + 提示会退 TCG | ✅ |
+| 无 Metal | `resolve_gpu_mode` 退 `swiftshader_indirect` | ✅ |
+| GPU 回退链（host 起不来） | 自动退 swiftshader，仍不行则报"起不来"+日志路径 | ✅ |
+| 进程枚举 | 命中真 qemu；**调用者自己的命令行不被误算** | ✅ 恰好 1 个 |
+| `--bridge` / 奇数端口 | 明确拒绝 | ✅ 退出码 1 |
+| 设备不在线 | `verify --device` 报失败、退出码 1，**不假装通过** | ✅ 6 项失败 |
+| 设备在线（stub 自述 arm64） | 14 项检查一致 | ✅ 只差"服务进程在跑"一项（夹具限制） |
+
+**测试夹具本身也修过一次**：`adb` stub 原来是空文件（永远返回 0），
+于是"设备起来了"被误判成真、`start-headless.sh` 一路走到"等开机"都不报错。
+换成可被 `STUB_ADB_OK` 控制的真 stub 之后才暴露 ——
+**这正是"判据不能只看命令返回 0"的一个现场例子**（和项目里
+「接口说成功而设备没动」那三次是同一类错误）。
+
 **踩到并修掉的一处**：`set -o pipefail` 下 `XA="$(xattr -l ... | grep -c ...)"`
 会因为 `xattr` 在该文件"无扩展属性"时返回非 0 而带出非 0 退出码，导致脚本提前结束。
 改成 `XA="$(...)" || XA=0`。
@@ -796,8 +842,9 @@ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm
 - [x] 11. `preflight` 检查 `kern.hv_support` / 架构 / Gatekeeper / 必需工具 —— **已写出并验语法**（§7.0.8）
 - [x] 12. `fetch-emulator` 走 `macosx` host-os + host-arch 选包 —— **已写出，选包逻辑对真实清单验过 6 组**（§7.0.8）
 - [x] 12b. `macos/fetch-images.sh` —— **已写出并离线验过 4 个用例**（§7.0.9）
-- [ ] 13. `emulator.sh` 的建/起/停/查/验五个动作在 Mac 上跑通
-- [ ] 14. `packaging/bin/macos/` 五个脚本，语义与另两套逐条对齐
+- [x] 13. 建/起/停/查/验五个动作的 mac 版 —— **已写出并离线验过 18 个用例**（§7.0.8 补记）
+- [ ] 13b. 上述五个脚本在**真 Mac** 上跑通（离线测试台不能替代真机）
+- [x] 14. `packaging/bin/macos/` 五个脚本 —— **已完成**（与另两套同为 5 个文件）
 - [ ] 15. 共享层的 8 条改动（§3.3）落完，且**在 Linux 上回归一遍**（别把 Linux 弄坏）
 - [ ] 16. `release.sh` 三分派表 + `START-HERE.md` 三模板分支 + `--platform` 白名单
 - [ ] 17. 包内 `chmod +x`、quarantine 提示、`sha*sum` 与 `stat` 的 BSD 路径

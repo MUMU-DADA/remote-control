@@ -39,18 +39,63 @@ cd dev/04-x64-android/macos
 ./fetch-images.sh --remote-dir .../rom-remote_control_arm64     # 拉 arm64 那份
 ./fetch-images.sh --local /Volumes/usb/rom-xxx        # 从本地目录拷，不走网络
 ./fetch-images.sh --dequarantine                      # 拉完顺手清 quarantine
-
-# 4) 起机器 —— 用 ../scripts/ 那条线（见下）
 ```
 
-> ⚠️ **第 4 步还没实现。** 本目录目前有 `preflight.sh` / `fetch-emulator.sh` / `fetch-images.sh`；
-> 建实例/起停/查状态的 mac 版（对应 `packaging/bin/linux/` 与 `packaging/bin/windows/`）
-> 还没写。在那之前，可以手工用 `sdk/emulator/emulator` 起（参数照抄
-> `../scripts/run-linux.sh` 的 `launch()`，把 `-accel on` 与宿主路径换掉）。
->
-> 另外：`../scripts/` 那套脚本现在支持 `PRODUCT=arm64` / `PRODUCT=x64_arm64` 两个产品
-> （见 `../docs/13-macos-port.md` §7.0.9），**但它们是 Linux 侧的**——
-> `PRODUCT=arm64` 只影响"编哪份、同步哪份"，宿主侧的起停逻辑仍是 Linux 的。
+**这三步只准备"料"。** 起停查那套脚本（`bin/`）是**发布包内**的，见下一节。
+
+---
+
+## 两条使用路径
+
+### A. 你现在就在源码树里开发（用 `macos/` 三个脚本）
+
+上面三步跑完，手工起机器：
+
+```bash
+# 参数照抄 ../scripts/run-linux.sh 的 launch()，把宿主路径与 -accel 换掉：
+cd dev/04-x64-android/macos
+ANDROID_PRODUCT_OUT="$PWD/images" ANDROID_BUILD_TOP="$PWD" \
+  ./sdk/emulator/emulator -sysdir "$PWD/images" -datadir /tmp/avd -port 5580 \
+    -no-window -gpu host -accel on -memory 6144 -cores 4 -no-audio -no-boot-anim \
+    -no-snapshot &
+./sdk/platform-tools/adb -s emulator-5580 wait-for-device
+```
+
+> 为什么这里还要手工拼参数：`../scripts/` 那套里的 `run-linux.sh` / `emulator.sh`
+> **是 Linux 宿主侧的**（探 `/dev/dri`、用 `/proc` 找进程、`setsid`）。
+> Mac 的对应实现已经写好，但它们在**发布包内**（下一条），不是源码树脚本。
+
+### B. 你是最终用户（用发布包里的 `bin/`）
+
+发布包（`release/autosnap-<版本>-darwin-aarch64.zip`）解压后是这样：
+
+```
+autosnap-<版本>-darwin-aarch64/
+├── START-HERE.md            ← 首读
+├── RELEASE.json             ← 版本 / 平台 / 运行时来源
+├── bin/                     ← **macOS 版**（本次新增）
+│   ├── lib.sh               公共函数：路径、config.ini、实例登记、adb/模拟器定位
+│   ├── start-headless.sh    无头启动（默认 -no-window，后台 + 等开机）
+│   ├── stop.sh              优雅停（**先 sync 再 kill**）
+│   ├── status.sh            宿主 + 实例 + ROM 指纹
+│   └── verify.sh            验收（宿主 / 产品类型 / ELF 架构 / 设备 / 服务）
+├── templates/               config.ini（硬件唯一真源）、实例登记说明
+├── images/**                ROM 交付目录
+├── runtime/**               SDK 模拟器（含 qemu 后端）+ platform-tools（adb）
+└── tools/                   arm64 探针 APK 等
+```
+
+```bash
+./bin/status.sh                       # 先看宿主与 ROM 对不对
+./bin/start-headless.sh               # 起一台，等开机完成
+./bin/verify.sh --port 5580           # 验收
+./bin/stop.sh --port 5580             # 停（先 sync）
+```
+
+> ⚠️ **`bin/macos/` 这五个脚本还没打进发布包** —— `../scripts/release.sh` 目前只认
+> `linux` / `windows` 两个平台（它的三分派表与 `START-HERE.md` 模板分支还没加 mac）。
+> 也就是说路径 B **尚未可用**，先把脚本按路径 A 用起来。
+> 打包那一层是独立一步，见 [`../docs/13-macos-port.md`](../docs/13-macos-port.md) §8 的 #16。
 
 ---
 
