@@ -16,6 +16,7 @@
 #   systemctl start remote-control-lan-forward # 作为服务跑（见 install-service.sh）
 # =============================================================================
 
+import os
 import socket
 import selectors
 import sys
@@ -27,11 +28,22 @@ import threading
 #    的 8088/5555，而 0.0.0.0:8088 与 127.0.0.1:8088 在 Linux 上**会冲突**
 #    （通配地址和具体地址重叠，SO_REUSEADDR 也救不了）。
 #    所以先把 adb forward 挪到 18088，转发的目标就是它。
-# HTTP 不再需要转发：remote-control 现在自己读 /sdcard/remote-control.conf 里的 bind/port，
-# 可以直接绑 0.0.0.0。多一层转发反而让"改端口"变成一个改完就失联的操作 ——
-# 上位机改了 remote-control 的端口，转发器还指着旧端口，两边对不上。
+#
+# ⚠️⚠️ 目标端口是**模拟器实例的 adb 端口**，它随 -port 变：
+#        模拟器 console 端口 = N，adb 端口 = N + 1
+#        scripts/emulator.sh 的默认实例 = 5580 → adb 在 5581
+#     早先这里写死 5555（默认实例还是 5554 那会儿的值）。实例换成 5580 之后
+#     转发就一直在连一个不存在的端口，`adb connect <IP>:15555` 永远 offline。
+#     ⇒ 用 LAN_FORWARD_TARGET 传，别写死。
+#
+# HTTP 不再需要转发：remote-control 自己读配置里的 bind/port，可以直接绑 0.0.0.0。
+# 多一层转发反而让"改端口"变成改完就失联 —— 上位机改了端口，转发器还指着旧的。
+# 但这只在"服务能自己绑对外地址"时成立；服务若只能绑 127.0.0.1，
+# 仍需要把 HTTP 也加进 FORWARDS。
 FORWARDS = [
-    (15555, 5555, "模拟器的 adb 端口（adb connect 接受任意端口）"),
+    (int(os.environ.get("LAN_FORWARD_LISTEN", "15555")),
+     int(os.environ.get("LAN_FORWARD_TARGET", "5581")),
+     "模拟器的 adb 端口（adb connect 接受任意端口）"),
 ]
 
 LISTEN_ADDR = "0.0.0.0"

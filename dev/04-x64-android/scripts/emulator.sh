@@ -72,6 +72,28 @@ build_sysdir() {   # build_sysdir <实例名>
     cp -f "$EMULATOR_CONFIG" "$sysdir/config.ini"
 }
 
+# 工作目录能不能直接拿来启动。
+#
+# 判据取 system-qemu.img：它是模拟器启动必需的第一个镜像。用 -e（会跟进
+# 符号链接）—— 软链指向的交付目录被清掉时也会判为不可用。
+sysdir_ready() {   # sysdir_ready <实例名>
+    local sysdir; sysdir="$(inst_sysdir "$1")"
+    [ -e "$sysdir/system-qemu.img" ] && [ -e "$sysdir/config.ini" ]
+}
+
+# 缺了就按交付目录重建。start 会先走这一步。
+#
+# 为什么非补不可：do_launch 直接把 sysdir 丢给 qemu，既不校验也不重建。
+# 工作目录被删过之后（手工 rm、或换实例时的清理），qemu 只会报
+#     ERROR | No initial system image for this configuration!
+# 这句话完全指不到"sysdir 是空的"这个真因，能白查很久。
+ensure_sysdir() {   # ensure_sysdir <实例名>
+    local name="$1" sysdir; sysdir="$(inst_sysdir "$name")"
+    sysdir_ready "$name" && return 0
+    warn "工作目录不完整（${sysdir#"$PROJECT_ROOT"/}）—— 按交付目录重建"
+    build_sysdir "$name"
+}
+
 # ---------------------------------------------------------------------------
 # 启动
 # ---------------------------------------------------------------------------
@@ -211,6 +233,10 @@ cmd_start() {
         warn "实例 '$name' 已经在跑（端口 $(instance_port "$name")）"
         return 0
     fi
+
+    # 工作目录可能被删过或残缺。缺了就重建，别让 qemu 报出指不到真因的错。
+    ensure_sysdir "$name"
+
     [ -x "$(pick_emulator)" ] || die "找不到模拟器"
 
     resolve_hw
@@ -729,12 +755,18 @@ cmd_list() {
     [ -n "$names" ] || { printf '（还没有实例）\n'; printf '建一台： ./scripts/emulator.sh create %s\n' "$DEFAULT_NAME"; return 0; }
     printf '%-12s %-7s %-16s %-9s %s\n' 名字 端口 状态 占用 工作目录
     printf '%-12s %-7s %-16s %-9s %s\n' ──────────── ─────── ──────────────── ───────── ────────
-    local n port sz du
+    local n port sz note
     for n in $names; do
         port="$(instance_port "$n")"
-        sz="$(du -sh "$RUN_DIR/sysdir-$port" 2>/dev/null | cut -f1)"
-        printf '%-12s %-7s %-16s %-9s %s\n' "$n" "$port" "$(inst_state "$n")" "${sz:--}" \
-               "${RUN_DIR#"$PROJECT_ROOT"/}/sysdir-$port"
+        # sysdir 可能已经被删掉（实例还在跑但目录没了，或历史残留）。
+        # 这里必须容错：脚本开头是 set -euo pipefail，而赋值形式的命令替换
+        # 会把 du 的失败码带上来触发 set -e，让 list 在第一个实例就中止 ——
+        # 表现成"一个实例都没列出来"，极具误导性。
+        sz="$(du -sh "$RUN_DIR/sysdir-$port" 2>/dev/null | cut -f1 || true)"
+        note=""
+        [ -d "$RUN_DIR/sysdir-$port" ] || note="   ← 工作目录缺失"
+        printf '%-12s %-7s %-16s %-9s %s%s\n' "$n" "$port" "$(inst_state "$n")" "${sz:--}" \
+               "${RUN_DIR#"$PROJECT_ROOT"/}/sysdir-$port" "$note"
     done
 }
 
@@ -746,6 +778,9 @@ cmd_status() {
     printf '状态       %s\n' "$(inst_state "$name")"
     printf '串口       adb -s emulator-%s\n' "$port"
     printf '工作目录   %s\n' "$(inst_sysdir "$name")"
+    if [ ! -d "$(inst_sysdir "$name")" ]; then
+        printf '           ⚠️  工作目录不存在（sysdir 已被删除）；实例若仍在跑，靠的是已删除的 inode\n'
+    fi
     printf '配置文件   %s/sysdir-%s/config.ini\n' "${RUN_DIR#"$PROJECT_ROOT"/}" "$port"
     printf '日志       %s\n' "$(inst_log "$name")"
     printf '\nconfig.ini（唯一真源 %s）：\n' "${EMULATOR_CONFIG#"$PROJECT_ROOT"/}"

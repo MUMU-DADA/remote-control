@@ -1,21 +1,32 @@
 # =============================================================================
 # remote-control-lan-forward —— 把模拟器的端口暴露到局域网
 #
-# 为什么不用真桥接（-net-tap + 网桥）：
-#   真桥接要把 ens33 加进网桥并迁移 IP，中间有一个"没有 IP"的窗口 ——
-#   远程 SSH 会当场断开，配错了只能到机器跟前救。
-#   端口转发能达到同样的访问效果，且不动网络配置、随时可停。
+# 什么时候需要它：
+#   **宿主做不了真桥接时的兜底通路。** 能桥接（-net-tap + 网桥）的话 guest
+#   自己就有局域网 IP，压根不需要转发 —— scripts/emulator.sh 默认走桥接。
+#   但桥接在某些环境不可用：把 ens33 加进网桥要迁移 IP，中间有一个"没有 IP"
+#   的窗口，远程 SSH 会当场断开，配错了只能到机器跟前救。
+#   端口转发能达到同样的访问效果，且不动网络配置、随时可撤。
+#
+# ⚠️ 目标端口 = 模拟器实例的 **adb 端口** = console 端口 + 1。
+#    emulator.sh 的默认实例是 5580 → adb 在 5581（下面 Environment 就是它）。
+#    换实例端口时必须用 Environment=LAN_FORWARD_TARGET=<console端口+1> 覆盖，
+#    否则转发会一直连一个不存在的端口 —— 历史上写死 5555（默认实例还是 5554
+#    那会儿的值）就是这样，`adb connect <IP>:15555` 永远 offline。
 #
 # 目标端口下线的处理：转发器会拒绝新连接并打日志，不会自己退出，
 # 所以模拟器重启期间这个服务不需要重启。
 # =============================================================================
 [Unit]
-Description=remote-control LAN forward (模拟器端口暴露到局域网)
+Description=remote-control LAN forward (模拟器 adb 端口暴露到局域网)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# 默认实例 5580 → adb 5581。见上面那段 ⚠️。
+Environment=LAN_FORWARD_LISTEN=15555
+Environment=LAN_FORWARD_TARGET=5581
 ExecStart=/usr/bin/python3 /root/AutoSnapshotAndroid/tools/lan-forward.py
 Restart=always
 RestartSec=3
