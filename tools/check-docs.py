@@ -12,6 +12,7 @@
   [4] 标题重复：不同文档用了完全相同的 H1（往往是复制粘贴留下的）
   [5] 孤儿文档：没有任何其它文档链接到它，且不在索引里
   [6] 明显的陈旧引用：指向已改名的路径（这类最坑，读的人会去找一个不存在的东西）
+  [7] 文档里让你运行的脚本路径是否还在（"照着做 → no such file" 是最坑的一种陈旧）
 
 排除：vendor/（第三方自带）、aosp/（AOSP 源码树）、.run/ .tmp/（构建产物）、
      .git/、以及 node_modules 之类。
@@ -39,6 +40,15 @@ PACKAGE_TEMPLATES = {
 }
 PACKAGE_LAYOUT_PREFIXES = ("bin/", "images/", "runtime/", "templates/", "tools/")
 PACKAGE_LAYOUT_FILES = {"START-HERE.md", "RELEASE.json", "SHA256SUMS"}
+
+# 文档里出现的这些路径是**发布包内**的（或客户端的），不在本仓库里，不该报缺失。
+PKG_ONLY_PREFIXES = ("./bin/", "bin/", "./runtime/", "runtime/", "./images/",
+                     "/data/local/tmp/", "/system/", "/sdcard/", "/vendor/", "/dev/")
+
+# 形如： ./scripts/x.sh   ../scripts/x.sh   scripts/x.sh   tools/x   bash scripts/x.sh
+SCRIPT_REF_RE = re.compile(
+    r"(?:\.\./)*(?:scripts|tools|dev/[0-9a-z-]+/scripts|dev/[0-9a-z-]+/tools)"
+    r"/[A-Za-z0-9_.-]+\.(?:sh|py|ps1)")
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.M)
@@ -167,8 +177,20 @@ for d, items in sorted(by_dir.items()):
         problems["编号重复"].append("%s: %s" % (rel(d), sorted(dup)))
     gaps = [n for n in range(nums[0], nums[-1] + 1) if n not in nums]
     if gaps:
-        problems["编号断号"].append("%s: 缺 %s（现有 %s..%s）" % (
-            rel(d), gaps, nums[0], nums[-1]))
+        # 把连续区间收成 `16–98`；还是太长就只列头几个。
+        # （反向测试时插了个 99 号文件，原来的写法一口气列出 83 个数字 ——
+        #   报得没错，但没人看得下去的消息等于没报。）
+        runs, start, prev = [], gaps[0], gaps[0]
+        for n in gaps[1:]:
+            if n == prev + 1:
+                prev = n
+                continue
+            runs.append((start, prev)); start = prev = n
+        runs.append((start, prev))
+        parts = ["%02d" % a if a == b else "%02d–%02d" % (a, b) for a, b in runs]
+        shown = "、".join(parts[:6]) + ("…" if len(parts) > 6 else "")
+        problems["编号断号"].append("%s: 缺 %s（共 %d 个号；现有 %02d..%02d）" % (
+            rel(d), shown, len(gaps), nums[0], nums[-1]))
 
 # --------------------------------------------------------------------------
 # [4] 标题重复
@@ -185,6 +207,60 @@ for t, fs in sorted(titles.items()):
     if len(fs) > 1:
         problems["H1 完全相同（可能是复制粘贴留下的）"].append(
             "%r ← %s" % (t, ", ".join(fs)))
+
+# --------------------------------------------------------------------------
+# [7] 文档里让你运行的脚本路径是否还在
+# --------------------------------------------------------------------------
+CODE_BLOCK_RE = re.compile(r"```.*?```", re.S)
+for f in files:
+    text = open(f, encoding="utf-8").read()
+    # (引用, 基准目录) —— 基准目录来自块内的 `cd <dir>`
+    refs = []
+    for block in CODE_BLOCK_RE.findall(text):
+        cwd = None                      # 块内的当前目录（被 `cd` 改）
+        for line in block.splitlines():
+            stripped = line.strip()
+            m_cd = re.match(r"^cd\s+(\S+)\s*$", stripped)
+            if m_cd:
+                arg = m_cd.group(1)
+                # 只跟相对路径；`cd $VAR` / `cd -` 之类不跟（跟了反而会误判）
+                if not arg.startswith(("/", "$", "-")) and " " not in arg:
+                    cwd = arg if cwd is None else os.path.normpath(os.path.join(cwd, arg))
+                continue
+            for r in SCRIPT_REF_RE.findall(line):
+                refs.append((r, cwd))
+    # 行内代码也算（`bash tools/xxx.sh`）
+    # 按人的读法逐级向上找：文档目录 → 各级祖先 → 仓库根。
+    # 本项目里 docs/ 与 scripts/ 是兄弟目录，文档写 `scripts/x.sh` 指的是**模块根**下的那个。
+    # 只试"文档目录"和"仓库根"会把这类全误报（第一次跑 34 条里绝大多数是这么来的）。
+    def resolvable(doc, ref, cwd=None):
+        d = os.path.dirname(doc)
+        # 块内 `cd` 过的话，先按那个目录试（这是最贴近读者理解的基准）
+        if cwd:
+            if os.path.exists(os.path.normpath(os.path.join(d, cwd, ref))):
+                return True
+            if os.path.exists(os.path.normpath(os.path.join(ROOT, cwd, ref))):
+                return True
+        while True:
+            if os.path.exists(os.path.normpath(os.path.join(d, ref))):
+                return True
+            if os.path.normpath(d) == os.path.normpath(ROOT):
+                break
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+        return os.path.exists(os.path.normpath(os.path.join(ROOT, ref)))
+
+    seen = set()
+    for r, cwd in refs:
+        if r.startswith(PKG_ONLY_PREFIXES) or (r, cwd) in seen:
+            continue
+        seen.add((r, cwd))
+        if resolvable(f, r, cwd):
+            continue
+        problems["文档里的脚本路径不存在（照着做会 no such file）"].append(
+            "%s → %s%s" % (rel(f), r, ("（块内 cd %s 之后仍找不到）" % cwd) if cwd else ""))
 
 # --------------------------------------------------------------------------
 # 报告

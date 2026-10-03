@@ -43,7 +43,7 @@
 | guest 确实重启了 | `/proc/uptime` = 2484s，与 `00:01:42` 对得上 `[实测]` |
 | 重启后进程没了 | `pidof remote-control` 空、`getprop \| grep init.svc` 空 `[实测]` |
 | **ROM 里根本没有它** | `/system/bin/remote-control` 不存在、`/system/etc/init/` 无对应 rc、`artifacts/rom-*/` 里没有任何 `remote-control*` `[实测]` |
-| 唯一启动途径是手工 | `scripts/run-linux.sh`、`scripts/emulator.sh` 里**一个字都没提** remote-control（`grep` 命中 0）`[源码]` |
+| 唯一启动途径是手工 | `dev/04-x64-android/scripts/run-linux.sh`、`…/scripts/emulator.sh` 里**一个字都没提** remote-control（`grep` 命中 0）`[源码]` |
 
 **结论**：重启 = 进程死 + 无人重启 + 8088 无监听。这不是"网页坏了"，是
 **服务跑在自己会重启的那台设备里，却没有开机自启**。
@@ -415,6 +415,7 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 
 **因此本次不做热替换**，更新走既有的正规通道：
 
+    cd dev/04-x64-android
     ./scripts/build-rom.sh && ./scripts/package-rom.sh && ./scripts/emulator.sh restart <实例>
 
 全流程约 3 分钟，改动被编进镜像、跨重启、可回滚（git）。它比"秒级热替换"慢，
