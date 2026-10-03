@@ -62,10 +62,10 @@ void PrintUsage(const char* argv0) {
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
   --gid <gid>          配套的 GID，省略则用与 uid 相同的值
   --selftest           检查运行环境后退出（首次部署时先跑这个）
-  --config <路径>       配置文件，默认 /sdcard/remote-control.conf（首启无鉴权）
+  --config <路径>       配置文件，默认 /data/misc/remote-control/remote-control.conf
   --http-bind <地址>    启用 HTTP/JSON API 并绑定该地址（如 0.0.0.0 对外）
-                        不指定则由配置文件决定。默认的 /sdcard/remote-control.conf
-                        首启是 0.0.0.0:8088 且**无鉴权**
+                        不指定则由配置文件决定；配置文件不存在时首启为
+                        127.0.0.1:8088 且**无鉴权**（对外必须显式写 0.0.0.0）
   --http-port <端口>    HTTP 端口，默认 8088
   --http-token <令牌>   访问令牌。给了就等于开启鉴权；
                         不给则由配置文件的 auth=/token= 决定
@@ -496,7 +496,7 @@ int main(int argc, char** argv) {
     bool      httpThreadStarted = false;
     // ── 合并持久化配置 ──
     //
-    // 优先级：CLI 显式给的 > /sdcard/remote-control.conf > 内置默认。
+    // 优先级：CLI 显式给的 > /data/misc/remote-control/remote-control.conf > 内置默认。
     //
     // 这个顺序是有讲究的：上位应用写配置文件、不传 CLI 参数，
     // 所以它能生效；而调试时 `--http-port 9999` 这种一次性覆盖

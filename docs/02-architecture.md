@@ -17,17 +17,17 @@
          └───────────┬──────────────────┘
                      ▼
      ┌───────────────────────────────────────────┐
-     │            remote-control (native daemon)          │
+     │      remote-control (native daemon)       │
      │                                           │
-     │  socket_server.cpp   Unix socket 服务端    │
-     │  http_server.cpp     HTTP/1.1 + WS 升级    │
-     │  rest_api.cpp        /api/v1/* 路由        │
-     │  dispatch.cpp        ← 唯一的 Dispatcher   │
-     │  capture_*.cpp       截图后端（编译期选）   │
-     │  inject_*.cpp        注入后端（编译期选）   │
-     │  config_file.cpp     /sdcard/remote-control.conf   │
+     │  socket_server.cpp   Unix socket 服务端   │
+     │  http_server.cpp     HTTP/1.1 + WS 升级   │
+     │  rest_api.cpp        /api/v1/* 路由       │
+     │  dispatch.cpp        ← 唯一的 Dispatcher  │
+     │  capture_*.cpp       截图后端（编译期选） │
+     │  inject_*.cpp        注入后端（编译期选） │
+     │  config_file.cpp     配置读写 /data/misc  │
      │                                           │
-     │  SELinux domain: remote-control                    │
+     │  SELinux domain: remote-control           │
      └───────┬──────────────────────┬────────────┘
              │ Binder               │ syscall
              ▼                      ▼
@@ -53,7 +53,7 @@
 | `capture.h` + `capture_surfaceflinger.cpp` / `capture_screencap.cpp` | 抓帧并拷进 memfd。前者直连 SF，后者 exec `/system/bin/screencap` | ✅ `libgui` / ❌（只 fork/exec） |
 | `inject.{h,cpp}` + `inject_uinput.cpp` / `inject_vtp.cpp` / `inject_binder.cpp` | 手势与按键逻辑（平台无关）+ 可替换的注入后端 | ✅ 视后端而定 |
 | `keyboard.cpp` / `clipops.cpp` / `appops.cpp` / `fileops.cpp` | 按键、剪贴板、应用管理、文件管理 | ⚠️ 走 `pm`/`am`/`cmd`/`dumpsys` 子进程 |
-| `config_file.{h,cpp}` / `service_state.{h,cpp}` | `/sdcard/remote-control.conf`、运行时状态（API 的"控制自身"） | ❌ 无 |
+| `config_file.{h,cpp}` / `service_state.{h,cpp}` | `/data/misc/remote-control/remote-control.conf`、运行时状态（API 的"控制自身"） | ❌ 无 |
 | `webui.cpp` / `image_encoder.cpp` / `png_encoder.cpp` | 内置网页控制台与图像编码 | ❌ 无 |
 | `main.cpp` | 初始化、参数解析、信号处理、拉起两条传输 | ⚠️ `libbinder` |
 
@@ -287,7 +287,7 @@ on property:sys.boot_completed=1
 main()
   ├─ ProcessState::setThreadPoolMaxThreadCount(0) + startThreadPool()
   │                                       ← 截图必需，且必须在任何抓帧之前
-  ├─ 解析命令行 + 读 /sdcard/remote-control.conf（优先级：CLI > 配置文件 > 内置默认）
+  ├─ 解析命令行 + 读 /data/misc/remote-control/remote-control.conf（优先级：CLI > 配置文件 > 内置默认）
   ├─ Capture::Init()                      → 连接 SurfaceFlinger，解析显示
   ├─ Injector::Init()                     → 打开 /dev/uinput，注册虚拟设备
   ├─ SocketServer::Start()                → 接管 init 传来的 fd（或自己 bind）

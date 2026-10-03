@@ -256,8 +256,9 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     if (!loopbackOnly && opts.token.empty()) {
         ALOGW("⚠️  HTTP API 绑定到 %s 且**未开启鉴权** —— 同网络的任何人都能"
               "完全控制本设备（截图、触控、装应用、删文件）。"
-              "要收紧请在 /sdcard/remote-control.conf 里设 auth=1",
-              opts.bindAddr.c_str());
+              "要收紧请在配置文件里设 auth=1（默认 %s）",
+              opts.bindAddr.c_str(),
+              "/data/misc/remote-control/remote-control.conf");
     }
 
     const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);

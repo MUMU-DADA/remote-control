@@ -138,9 +138,14 @@ su 1000(system)  读 /sdcard/...  → Permission denied      写 → Permission 
 su 2000(shell)   读 /sdcard/...  → OK                     写 → WRITE_OK
 ```
 
-这是**存储层（FUSE）**挡的，加 sepolicy 规则无效。而守护进程的默认路径正是
-`/sdcard/remote-control.conf`（`daemon/config_file.cpp:38`）与 `/sdcard/remote-control.log`（`daemon/main.cpp:140`）
+这是**存储层（FUSE）**挡的，加 sepolicy 规则无效。当时守护进程的配置与日志默认就落在
+`/sdcard/remote-control.conf`（`daemon/config_file.cpp` 的 `DefaultPath()`）与 `/sdcard/remote-control.log`（`daemon/main.cpp`）
 → 用 `user system` 跑的话，**上位应用写进去的配置改不动服务**（软开关、改端口、开鉴权全失效）。
+
+> 📌 **后续进展**：配置与日志已迁出 `/sdcard`，现在都在 init 创建的
+> `/data/misc/remote-control/`（`0770 shell shell`）。**结论不变** —— 那个目录同样只给 `shell`，
+> `user system` 一样读写不了，所以仍然必须 `user shell`。
+> 见 [`remote-control.rc`](../dev/02-native-daemon/daemon/remote-control.rc)。
 
 | | `user system` | `user shell` |
 |---|---|---|

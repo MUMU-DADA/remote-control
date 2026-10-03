@@ -1,11 +1,21 @@
-// config_file.h — 持久化配置（/sdcard/remote-control.conf）
+// config_file.h — 持久化配置（/data/misc/remote-control/remote-control.conf）
 //
-// 为什么放在 /sdcard：
+// 路径怎么定的：
 //
-//   上位应用（普通 Android 应用，没有 root）要能改配置，而守护进程
-//   是 root。两边都能读写的、不需要特殊权限的位置，就是共享存储。
-//   放在 /data/local/tmp 的话应用够不着；放在应用私有目录的话
-//   守护进程要模拟应用的身份才能写。
+//   产品形态下 init 用 --config 显式指向 /data/misc/remote-control/remote-control.conf
+//   （见 daemon/remote-control.rc）；没传 --config 时 DefaultPath() 返回同一个路径。
+//   两者一致是有意的 —— 少一个"文档写 A、运行读 B"的坑。
+//
+// 为什么**不**放 /sdcard（早期原型曾经放那儿）：
+//
+//   ① /sdcard 是共享存储，普通应用可写。把配置和可执行载荷放在一起，
+//      等于把执行权交出去。
+//   ② 它是 FUSE 挂载，UID 1000(system) 读写被拒（实测见
+//      docs/09-deployment-and-update.md §4.4）。
+//
+//   /data/misc/remote-control 由 init 以 0770 shell shell 建出来，服务正好以
+//   shell 身份运行。代价是上位应用不再能直接写配置 —— 要改配置得走
+//   POST /api/v1/config，由服务自己持久化。
 //
 // 为什么是纯文本 key=value 而不是 JSON：
 //

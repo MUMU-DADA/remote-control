@@ -75,7 +75,7 @@ I remote-control: 图像编码器: libjpeg: 6b … + libwebp（内置） + zlib 
 
 | 变量 | 作用 |
 |---|---|
-| `REMOTE_CONTROL_CONFIG` | 配置文件路径（默认 `/sdcard/remote-control.conf`） |
+| `REMOTE_CONTROL_CONFIG` | 配置文件路径（默认 `/data/misc/remote-control/remote-control.conf`） |
 | `REMOTE_CONTROL_IDLE_TIMEOUT_SEC` | socket 空闲超时。**测试用** —— 不压到 1 秒的话集成测试要等 30 秒 |
 | `REMOTE_CONTROL_FORCE_FALLBACK` | 见上 |
 

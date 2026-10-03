@@ -2,12 +2,23 @@
 
 ---
 
-## 一、配置文件 `/sdcard/remote-control.conf`
+## 一、配置文件 `/data/misc/remote-control/remote-control.conf`
+
+**只有这一个路径。** 产品形态下 init 用 `--config` 显式指向它
+（[`remote-control.rc`](../../dev/02-native-daemon/daemon/remote-control.rc)）；
+没传 `--config` 时 `ConfigFile::DefaultPath()` 返回的也是同一个路径
+（[`config_file.cpp`](../../dev/02-native-daemon/daemon/config_file.cpp)）。
+要换位置就用 `--config <路径>` 或环境变量 `REMOTE_CONTROL_CONFIG`。
 
 守护进程启动时读一次；`enabled` 会被**持续监视**（每 2s），改了立刻生效。
 
+> ⚠️ **不是 `/sdcard/remote-control.conf`。** 那是早期免 SELinux 原型形态的落点
+> （[`tools/remote-control-supervisord.sh`](../../tools/remote-control-supervisord.sh)），
+> 当前部署下**没有任何东西会读它**。移到 `/data/misc` 是有意的：`/sdcard` 是共享存储、
+> 普通应用可写，把配置和可执行载荷放在一起等于把执行权交出去。
+
 ```ini
-# remote-control 配置 —— 由上位应用或手工编辑，守护进程启动时读取。
+# remote-control 配置 —— 手工编辑，或由服务经 POST /api/v1/config 持久化。
 # 改完之后需要重启服务才生效（enabled 除外）。
 
 # 服务是否应当运行
@@ -40,13 +51,19 @@ Android 应用侧要用 Java 读写它。引 JSON 库只为存五个字段不划
 而且双方各用一套 JSON 实现时，格式分歧（转义、数字精度）会变成
 很难查的兼容性问题。这个文件的读者是人，可读性也重要。
 
-### 为什么放 `/sdcard`
+### 为什么**不**放 `/sdcard`
 
-上位应用是普通 Android 应用（**没有 root**），守护进程是 root。
-两边都能读写、都不需要特殊权限的位置，就是共享存储。
+原型形态曾经把配置放在 `/sdcard/remote-control.conf`，理由是"上位应用是普通
+Android 应用（没有 root），只有共享存储两边都能读写"。**这条路已经放弃**：
 
-放 `/data/local/tmp` 的话应用够不着；放应用私有目录的话守护进程
-要模拟应用的身份才能写。
+1. `/sdcard` 是共享存储、谁都能写。把配置和可执行载荷放在一起，
+   等于把执行权交出去。
+2. 它是 FUSE 挂载，`UID 1000(system)` 读写被拒（实测见
+   [`../09-deployment-and-update.md`](../09-deployment-and-update.md) §4.4）。
+
+现在放在 `/data/misc/remote-control/` —— init 以 `0770 shell shell` 建出来，
+服务正好以 `shell` 身份运行。代价是上位应用不能直接写配置了：
+它改配置要走 `POST /api/v1/config`，由服务自己持久化。
 
 ### 首启状态
 
@@ -67,7 +84,7 @@ bind=127.0.0.1  port=8088  auth=0  enabled=1
 命令行显式给的  >  配置文件  >  内置默认
 ```
 
-这个顺序是有讲究的：上位应用写配置文件、不传命令行参数，所以它能生效；
+这个顺序是有讲究的：配置文件是持久层、调用方不传命令行参数，所以它能生效；
 而调试时 `--http-port 9999` 这种一次性覆盖也不会被文件悄悄改掉。
 
 配置文件路径可以用 `--config` 或环境变量 `REMOTE_CONTROL_CONFIG` 覆盖。
@@ -79,8 +96,8 @@ bind=127.0.0.1  port=8088  auth=0  enabled=1
 ### 开启
 
 ```bash
-# 方式一：改配置文件（推荐 —— 上位应用就是这么做的）
-sed -i 's/^auth=0/auth=1/' /sdcard/remote-control.conf
+# 方式一：改配置文件（推荐 —— 进程重启后依然生效）
+sed -i 's/^auth=0/auth=1/' /data/misc/remote-control/remote-control.conf
 # 重启服务后，token 会被随机生成并写回文件
 
 # 方式二：命令行
@@ -96,7 +113,7 @@ remote-control --socket /data/local/tmp/remote-control.sock --http-token <令牌
 3. **写回配置文件**
 
 ```bash
-grep '^token=' /sdcard/remote-control.conf
+grep '^token=' /data/misc/remote-control/remote-control.conf
 # token=nonKbvyus_2bkj9e849gWgleEDjp_UYP
 ```
 
@@ -155,7 +172,7 @@ remote-control [选项]
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
   --gid <gid>          配套的 GID，省略则用与 uid 相同的值
   --selftest           检查运行环境后退出（首次部署时先跑这个）
-  --config <路径>      配置文件，默认 /sdcard/remote-control.conf
+  --config <路径>      配置文件，默认 /data/misc/remote-control/remote-control.conf
   --http-bind <地址>   启用 HTTP/JSON API 并绑定该地址（如 0.0.0.0 对外）
                        不指定则由配置文件决定
   --http-port <端口>   HTTP 端口，默认 8088
@@ -169,7 +186,7 @@ remote-control [选项]
   # 开发期：前台跑，自己 bind socket
   remote-control --socket /data/local/tmp/remote-control.sock --foreground --verbose
 
-  # 常用：让配置文件决定监听地址/端口/鉴权（上位应用就是这么管的）
+  # 常用：让配置文件决定监听地址/端口/鉴权
   remote-control --socket /data/local/tmp/remote-control.sock
 
   # 生产：由 init 拉起，socket 由 init 创建并打好 SELinux 标签

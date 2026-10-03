@@ -99,7 +99,15 @@ start_remote-control() {
     # **不传 --http-bind/--http-port** —— 让守护进程自己读配置文件。
     # 传了的话 CLI 优先级更高，配置文件里改端口就不会生效了，
     # 而那正是上位机要控制的东西。
+    #
+    # ⚠️ 但 **--config 必须显式传**。
+    #    守护进程没给 --config 时会落到 ConfigFile::DefaultPath()，而那个默认
+    #    指向产品形态的 /data/misc/remote-control/remote-control.conf ——
+    #    与本脚本监视的 $CONF 不是同一个文件，配置改了也不会生效。
+    #    --config 只指定**路径**、不提供**值**，所以上面那条"不传 --http-*"
+    #    的设计不受影响：bind/port 依旧由文件决定。
     nohup "$BIN" --socket "$SOCK" --socket-mode 0666 --foreground \
+        --config "$CONF" \
         > "$LOG" 2>&1 &
     cur_pid=$!
     cur_bind=$1

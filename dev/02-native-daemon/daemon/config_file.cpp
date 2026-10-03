@@ -35,7 +35,14 @@ bool ParseBool(const std::string& v, bool def) {
 std::string ConfigFile::DefaultPath() {
     const char* env = getenv("REMOTE_CONTROL_CONFIG");
     if (env != nullptr && *env != '\0') return env;
-    return "/sdcard/remote-control.conf";
+    // 与 init 的 --config 指向同一个路径（见 daemon/remote-control.rc）。
+    // 历史上这里返回过 /sdcard/remote-control.conf —— 那是免 SELinux 原型形态的
+    // 落点，当前部署下没有任何东西读它，留着只会制造"文档写 A、运行读 B"的坑。
+    //
+    // ⚠️ 依赖 init 先把 /data/misc/remote-control/ 建出来（rc 的 on post-fs-data）。
+    //    服务以 shell 身份跑，而 /data/misc 是 system:misc 0771 —— shell 自己
+    //    建不了这个子目录；Save() 也只写文件、不建目录，目录不在就会写失败。
+    return "/data/misc/remote-control/remote-control.conf";
 }
 
 bool ConfigFile::Load(const std::string& path, PersistedConfig* out,
