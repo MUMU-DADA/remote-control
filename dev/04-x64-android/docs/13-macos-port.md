@@ -786,6 +786,93 @@ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm
 > 判断"改动到底有没有生效"最省事的办法不是看文件，而是问构建系统：
 > `docker exec ... bash -lc "source build/envsetup.sh && lunch ... && get_build_var 变量名"`。
 
+#### 7.0.11 release 打包接入 macOS（本轮）
+
+`scripts/release.sh` 加了 `darwin` 平台，按**"只加不改"**做，默认行为保持不变（逐项验过）。
+
+**两个新的平台维度**：
+
+```
+--platform linux|windows|darwin|both|all     # all = 三平台；both 仍是 linux+windows
+--darwin-arch aarch64|x64                    # 默认 aarch64（Apple Silicon）
+```
+
+> ⚠️ `both` **必须仍是 linux+windows**。它原来是默认值，很多地方按"两个平台"假设它。
+> 我一度把 `both` 改成三个平台，结果**默认调用直接失败**（darwin/aarch64 要 arm64 ROM，
+> 而默认那份是 x86_64）——等于把所有人的默认行为弄坏。三平台用 `all`。
+
+**`sdk_archive` 加了 host-arch 维度**（这条是必须的，不是锦上添花）：
+
+| host-os | host-arch | 包 |
+|---|---|---|
+| macosx | aarch64 | `emulator-darwin_aarch64-16428233.zip`（396 MB） |
+| macosx | x64 | `emulator-darwin_x64-16428233.zip`（466 MB） |
+| macosx | （无字段） | `platform-tools_r37.0.1-darwin.zip`（两种 Mac 共用一份） |
+
+只看 host-os 会挑到错的那份——而错的那份**装得上、起不来**（Apple Silicon 的包里
+没有 x86_64 后端）。但 host-arch **不能当硬条件**：platform-tools 的 darwin 包没有
+这个字段，所以规则是"清单给了就比，没给就放过"。
+
+**平台与 ROM 的配套断言**（新，这条是本轮最有价值的判断）：
+
+`assert_rom_matches_platforms` 从 ROM 的 `build.prop` 读出 guest 架构，
+与目标平台的要求比对，不配套就**明确拒绝**并给出分两次的命令：
+
+```
+[x] 目标平台与这份 ROM 不配套：
+    - darwin 需要 guest=arm64 的 ROM，当前 ROM 是 guest=x86_64
+
+    一次调用只能打一份 ROM（ROM_DIR=...）。
+    正确的做法是分两次： ...
+```
+
+理由：`release.sh` 一次调用只认**一份 ROM**（`ROM_DIR` 是单个目录），
+而 darwin-aarch64 要 arm64 原生 ROM、linux/windows/Intel-Mac 要 x86_64+翻译层 ROM。
+不判的话会产出"darwin-aarch64 包装着 x86_64 镜像"这种包，
+用户解压后模拟器起不来，而报错完全指不到真因。判据取 **build.prop 里的事实**，
+不是我们以为的产品名。
+
+**三分支替换**：原来 quickstart / adb 示例路径 / stop-verify 命令 / `check_zip` 的入口脚本名
+都是 `linux` vs `else` 的二元判断——darwin 会被当成 windows（渲染出 powershell）。
+四处都改成 `[ "$plat" = windows ]` 取 ps1，其余取 sh。
+
+**START-HERE.md 模板两处修正**：
+
+1. 平台行原来**写死**「guest 是 x86_64，另有 ARM64 用户态翻译层」——对 arm64 包是错的
+   → 改成 `@GUEST_DESC@`，按平台取。
+2. 新增 `@PLATFORM_HINT@`：darwin 包渲染出一段引用块，明说这机器只能跑哪种 ROM。
+
+**冒烟三处改进**：
+
+- 新增 `host_can_smoke`：在 Linux 上打 darwin 包是常规操作，但**不能真去执行** Mach-O 二进制。
+  不判的话冒烟会以一条与代码无关的报错把打包整体拖挂。现在明确打印
+  「跳过冒烟，只做结构检查」并说明原因。
+- 新增 `resolve_smoke_adb`：macOS 上没有 `/usr/bin/adb`（那是 linux 的路径），
+  不换的话 darwin 包会永远走"没有可用的 adb"这条**静默**分支。
+- 冒烟循环原来只按 zip 名里有没有 `linux` 决定跑不跑，改成按 `platform_list` 逐个来。
+
+**验证（六组，全部实跑）**：
+
+| 用例 | 结果 |
+|---|---|
+| A `darwin/x64` + x86_64 ROM | ✅ 选到 `emulator-darwin_x64-16428233.zip`（466 MiB） |
+| B `darwin/aarch64` + arm64 ROM | ✅ 选到 `emulator-darwin_aarch64-16428233.zip`（396 MiB） |
+| C **默认 `both`** + x86_64 ROM | ✅ 与改动前一致（linux 333 MB / windows 434 MB） |
+| D `--platform all` + x86_64 ROM | ✅ 拒绝（darwin 需要 arm64 ROM） |
+| E `--platform all` + arm64 ROM | ✅ 拒绝（linux/windows 需要 x86_64 ROM，两条都列出来了） |
+| F 非法 `--darwin-arch` / `--platform` | ✅ 明确报错，退出码 1 |
+
+**过程中修掉自己引入的两个真 bug**（都写进代码注释了）：
+
+1. **`--list` 里把平台名当 host-os 传**给 `sdk_archive`（`darwin` vs `macosx`）。
+   lookup 静默返回空，界面显示"清单里没有这个组合"——看着像清单缺包，其实是参数传错。
+   **靠 `bash -x` 才定位到**（在此之前我反复怀疑清单、缓存、python 解析，全猜错了）。
+2. **`require_mac_tools` 的 die 消息里写了 `$(...)` 与 `$PATH`** —— 双引号里会先展开，
+   bash 在**解析期**就报 `未预期的记号 "(" 附近有语法错误`，整个脚本过不了 `bash -n`。
+
+**仍未做的**：`packaging/templates/` 里没有 mac 专属模板（目前三平台共用同一套
+`config.ini` / `instance.env`，这没问题）；`--slim` 在 darwin 上的裁剪未经真机验证。
+
 ### 7.1 仍需在真机上验的
 
 | # | 事项 | 为什么重要 | 怎么验 | 状态 |
@@ -846,7 +933,8 @@ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm
 - [ ] 13b. 上述五个脚本在**真 Mac** 上跑通（离线测试台不能替代真机）
 - [x] 14. `packaging/bin/macos/` 五个脚本 —— **已完成**（与另两套同为 5 个文件）
 - [ ] 15. 共享层的 8 条改动（§3.3）落完，且**在 Linux 上回归一遍**（别把 Linux 弄坏）
-- [ ] 16. `release.sh` 三分派表 + `START-HERE.md` 三模板分支 + `--platform` 白名单
+- [x] 16. `release.sh` 五分派表 + `START-HERE.md` 三分支 + `--platform{all}` / `--darwin-arch` + 平台-ROM 配套断言 —— **已完成，六组实跑验过**（§7.0.11）
+- [ ] 16b. 真机上打一次完整 darwin 包（`release.sh --platform darwin` 全流程 + 结构自检 `check_zip`）
 - [ ] 17. 包内 `chmod +x`、quarantine 提示、`sha*sum` 与 `stat` 的 BSD 路径
 - [ ] 18. 从 zip 解压 → 启动 → 跑 `verify.sh` 全绿（Mac 上的"解压即用"验收）
 - [ ] 19. `macos/README.md` 的"未在真机验证"表换成真机输出（首次在 Mac 上跑时把 preflight/fetch 输出贴回）
