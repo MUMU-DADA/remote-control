@@ -1039,7 +1039,8 @@ bash release.sh --platform darwin --images .../artifacts/rom-remote_control_arm6
 - [x] 14. `packaging/bin/darwin/` 五个脚本 —— **已完成**（与另两套同为 5 个文件）
 - [ ] 15. 共享层的 8 条改动（§3.3）落完，且**在 Linux 上回归一遍**（别把 Linux 弄坏）
 - [x] 16. `release.sh` 五分派表 + `START-HERE.md` 三分支 + `--platform{all}` / `--darwin-arch` + 平台-ROM 配套断言 —— **已完成，六组实跑验过**（§7.0.11）
-- [ ] 16b. 真机上打一次完整 darwin 包（`release.sh --platform darwin` 全流程 + 结构自检 `check_zip`）
+- [x] 16b. `release.sh --platform darwin` 全流程铺包（`--stage-only`）—— **已在 Linux 上实跑通**（§7.0.13，6.9 G 包，两个产品的第 6 节渲染都验过）
+- [ ] 16c. 真机上打**完整 zip**（含 `check_zip` 结构自检与 `--smoke`）—— 需要真 Mac
 - [ ] 17. 包内 `chmod +x`、quarantine 提示、`sha*sum` 与 `stat` 的 BSD 路径
 - [ ] 18. 从 zip 解压 → 启动 → 跑 `verify.sh` 全绿（Mac 上的"解压即用"验收）
 - [ ] 19. `macos/README.md` 的"未在真机验证"表换成真机输出（首次在 Mac 上跑时把 preflight/fetch 输出贴回）
