@@ -63,21 +63,29 @@ BOARD_SEPOLICY_DIRS += device/generic/goldfish/sepolicy/x86
 #    （顺带：get_prop() 这类宏也才在正确的可见性上下文里。）
 SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
 
-# ⚠️⚠️ **策略分区是个双向取舍，实测两头都撞过**：
+# ⚠️⚠️ **这一整段是历史记录，不要照着它做决定 —— 生效的只有上面第 64 行。**
 #
-#   BOARD_SEPOLICY_DIRS              → vendor 策略
+#   策略分区两头都实测撞过，先后顺序是「先 vendor，撞墙后改 system_ext」：
+#
+#   BOARD_SEPOLICY_DIRS              → vendor 策略   ← **已弃用**（下面那行是注释）
 #        ✅ 看得见 vendor 侧类型（hal_graphics_allocator_default 等 HAL）
 #        ❌ 看不见平台私有类型（odsign_prop → unknown type）
 #
-#   SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS → system_ext 策略
+#   SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS → system_ext 策略  ← **当前生效**（第 64 行）
 #        ✅ 看得见平台私有类型
-#        ❌ 看不见 vendor 侧类型（hal_graphics_allocator_default → unknown type）
-#
-#   一个分区拿不到两边。当前选 **vendor**：抓帧那条链依赖 HAL 类型，
-#   而它是这个服务的立身之本；app_process 需要的平台私有属性只能另想办法。
+#        ⚠️ 曾担心"看不见 vendor 侧类型" —— 但 x86_64 产品用这个宏**全量构建全绿**，
+#           说明该担心在这个 AOSP 12 树上**不成立**（至少对策略里用到的那些类型不成立）。
 #
 #   （两者都能避开 sepolicy_freeze_test —— 那只管 system/sepolicy/{public,private}。）
-# SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
+#
+# ⚠️ 2026-10-03 补记：这段注释原来结尾写着"当前选 **vendor**"，与文件里**实际生效的行相反**，
+#    直接导致 arm64 产品照着它抄、构建失败在 `unknown type odsign_prop`
+#    （device/remote_control_arm64/BoardConfig.mk 的第一版）。
+#    教训：**注释会被当成事实抄走**。改代码时如果旧注释不再成立，要么删掉、要么显式标注"已弃用"。
+#    详见 docs/13-macos-port.md §7.0.10。
+#
+# 旧写法（**不要启用**）：
+# BOARD_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
 
 # Wifi.
 BOARD_WLAN_DEVICE           := emulator

@@ -684,6 +684,62 @@ macOS 专有处理：`shasum -a 256`（没有 `sha256sum`）、本地目录拷�
 **这次测试抓到一个真 bug**：脚本原本只走 `ditto`，而 `ditto` **只存在于 macOS** ——
 在开发机上直接报 `ditto: 未找到命令` 然后死掉。已加回退分支。
 
+#### 7.0.10 sepolicy 分区：一次"照抄注释而非照抄代码"的失败（本轮）
+
+**症状**：arm64 全量构建在 1% 处失败，卡在 vendor 策略：
+
+```
+FAILED: out/target/product/remote_control_arm64/obj/ETC/vendor_sepolicy.cil_intermediates/vendor_sepolicy.cil
+device/remote_control/remote_control_x64_arm64/sepolicy/remote_control.te:404:
+    ERROR 'unknown type odsign_prop' at token ';' on line 42076:
+allow remote_control odsign_prop:file { getattr open read map };
+checkpolicy:  error(s) encountered while parsing configuration
+```
+
+**根因**：我在 arm64 的 `BoardConfig.mk` 里写的是
+
+```make
+BOARD_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy   # ← 错的
+```
+
+而 x86_64 产品**实际生效**的是
+
+```make
+SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
+```
+
+`odsign_prop` 是**平台私有属性类型**，vendor 策略看不见它 → 编译期直接失败。
+
+**为什么会写错**：x86_64 那份 BoardConfig 里有一段很长的注释，标题是
+「策略分区是个双向取舍，实测两头都撞过」，结尾写着「**当前选 vendor**」。
+我读了注释，没逐行核对哪一行是生效的（那行 vendor 写法其实是**被 `#` 注释掉的**）。
+**注释与代码相反，而我信了注释。**
+
+**两个修复**：
+
+1. `remote_control_arm64/BoardConfig.mk` 改用 `SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS`，
+   并把"注释与生效行相反"这件事直接写进文件（含失败原文），防止下一个人重犯。
+2. **顺手纠正了 x86_64 那份的过时注释**：把那段双向取舍标注为
+   「历史记录，不要照着它做决定」，旧写法显式标成「**不要启用**」。
+   理由写清楚了：**注释会被当成事实抄走**——这次就是。
+
+**验证**：
+
+| 检查 | 结果 |
+|---|---|
+| 容器里 `get_build_var BOARD_SEPOLICY_DIRS` | `device/generic/goldfish/sepolicy/common`（**不含** remote-control）✓ |
+| 容器里 `get_build_var SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS` | `device/remote_control/remote_control_x64_arm64/sepolicy` ✓ |
+| 重跑全量构建 | `unknown type odsign_prop` 命中 **0** 次，构建推进过 1% 原失败点 ✓ |
+
+**顺带踩到的第二个坑（流程性的）**：我第一次是直接 `cp` 到 `aosp/device/remote_control/` 下改的，
+然后**又跑了一次 `apply-overlay.sh`** —— 它按设计用项目目录覆盖 AOSP 落点，
+把我手改的版本**覆盖回旧版**，于是"修好了"的构建照样失败，白跑一轮。
+
+> **正确顺序永远是：改 `dev/04-x64-android/device/` 下的源文件 → 跑 `apply-overlay.sh` 同步 → 构建。**
+> AOSP 树里的那份是**产物**，不是真源（`apply-overlay.sh` 文件头写明了这一点，我还是绕过去了）。
+> 判断"改动到底有没有生效"最省事的办法不是看文件，而是问构建系统：
+> `docker exec ... bash -lc "source build/envsetup.sh && lunch ... && get_build_var 变量名"`。
+
 ### 7.1 仍需在真机上验的
 
 | # | 事项 | 为什么重要 | 怎么验 | 状态 |

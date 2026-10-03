@@ -79,8 +79,20 @@ WIFI_DRIVER_FW_PATH_AP      := "/dev/null"
 #       改成中性目录名（如 device/remote_control/common/sepolicy）是可以的，
 #       但那要同时改 apply-overlay.sh 与 x86_64 产品的 BoardConfig —— 另作一次改动。
 #
-# 2) 策略分区选 **vendor**（BOARD_SEPOLICY_DIRS），与 x86_64 产品一致。
-#    "vendor 策略 vs system_ext 策略"那段双向取舍记在 x86_64 的 BoardConfig 里，
-#    结论对两个产品都成立（取决于抓帧链路要用的 HAL 类型，与架构无关）。
+# 2) 策略分区必须用 **SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS**，不是 BOARD_SEPOLICY_DIRS。
 #
-BOARD_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
+#    ⚠️⚠️ 这一条是**实测撞出来的**，别照着 x86_64 那份 BoardConfig 里的注释抄：
+#        那份文件里有一段很长的"vendor 策略 vs system_ext 策略"取舍分析，
+#        结尾写着"当前选 vendor"—— **那段注释是过时的**：
+#        文件里真正生效的是 SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS 那一行，
+#        而 `BOARD_SEPOLICY_DIRS += .../sepolicy` 那一行是**被注释掉的**（前缀 #）。
+#
+#        我第一次写本文件时照抄了注释而不是生效行，arm64 全量构建直接失败在：
+#            remote_control.te:404: ERROR 'unknown type odsign_prop'
+#            build_sepolicy - failed to run command: checkpolicy ... (ret:1)
+#        原因：odsign_prop 是**平台私有属性类型**，vendor 策略看不见它。
+#
+#    x86_64 产品用的是同一个宏，所以两个产品的策略落点其实是一致的 ——
+#    区别只在"注释怎么写"。见 docs/13-macos-port.md §7.0.10。
+#
+SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
