@@ -2,15 +2,25 @@
 # =============================================================================
 # release 打包：把"无头运行环境 + 虚拟机镜像 + 模板"打成一个平台一个 zip。
 #
-#   ./scripts/release.sh                    # 打 linux + windows 两个平台的成品
-#   ./scripts/release.sh --platform linux   # 只打 linux
-#   ./scripts/release.sh --list             # 只打印计划（不下载、不打包）
-#   ./scripts/release.sh --stage-only       # 只铺 staging，不压缩（调结构用）
-#   ./scripts/release.sh --zip-only         # 复用已有 staging，只压缩
+#   ./scripts/release.sh                     # 打 linux + windows 两个成品（默认）
+#   ./scripts/release.sh --platform all      # **四端**：linux + windows + mac 的两档
+#   ./scripts/release.sh --platform darwin   # 只打 mac（默认 Apple Silicon 那档）
+#   ./scripts/release.sh --platform darwin --darwin-arch both   # mac 两档都出
+#   ./scripts/release.sh --list              # 只打印计划（不下载、不打包）
+#   ./scripts/release.sh --stage-only        # 只铺 staging，不压缩（调结构用）
+#   ./scripts/release.sh --zip-only          # 复用已有 staging，只压缩
 #   ./scripts/release.sh --zip-only --reuse-zip   # 连压缩也跳过：拿已有 zip 补跑冒烟
-#   ./scripts/release.sh --smoke            # 打完再解压 linux 那份真启动验收
+#   ./scripts/release.sh --smoke             # 打完再解压 linux 那份真启动验收
 #
-# 产物： release/autosnap-<版本>-<平台>-x86_64.zip
+# ⚠️ **一次调用可能要用两份 ROM**，因为 mac 两档的 guest 架构不同：
+#     darwin-aarch64（Apple Silicon）要 **arm64 原生 ROM**；
+#     linux / windows / darwin-x86_64（Intel Mac）要 **x86_64 桥 ROM**。
+#     两份不通用，分别用这两个参数指定（都有默认值，产物在的话不用给）：
+#       --images       <x86_64 桥 ROM 目录>    # 默认：当前 PRODUCT 的产物
+#       --images-arm64 <arm64 原生 ROM 目录>   # 默认：artifacts/rom-remote_control_arm64
+#
+# 产物： release/autosnap-<版本>-<目标>.zip
+#       目标 = linux-x86_64 / windows-x86_64 / darwin-aarch64 / darwin-x86_64
 #
 # 包里三样东西：
 #   1. runtime/   完整**无头**运行环境：SDK 模拟器（含 qemu x86_64 后端）+ 自带 adb
@@ -19,8 +29,8 @@
 #   另有 bin/ 入口脚本（起/停/看状态/验收）与 START-HERE.md 首读文档。
 #
 # 设计要点（每条都是踩出来的，别随手改）：
-#   · 两个平台用**同一个 build id** 的模拟器（渠道里 linux/windows 同版本发布），
-#     这样"两个成品是同一份工程"才有据可依；build id 记进 RELEASE.json。
+#   · 各平台用**同一个渠道、同一个 build id** 的模拟器（linux/windows/darwin 同版本发布），
+#     这样"几个成品是同一份工程"才有据可依；build id 记进 RELEASE.json。
 #   · 运行时不塞 SDK zip 原样：解出来、核对无头后端存在、记来源 URL + sha1。
 #   · 镜像用**硬链接**进 staging：zip 只读，5.7 GB 不复制第二份。
 #   · 镜像的 sha256 复用 ROM 自带的 SHA256SUMS（先 sha256sum -c 验过），

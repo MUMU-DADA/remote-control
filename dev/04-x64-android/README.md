@@ -186,9 +186,13 @@ cd dev/04-x64-android
 
 ### 打 release：一个平台一个 zip
 
-默认出 **linux + windows** 两个成品；macOS 那条线用 `--platform darwin`
-（它需要 **arm64 原生 ROM**，与默认那份 x86_64 桥 ROM 不通用，所以要各打一次 —— 见
-[`docs/13-macos-port.md`](docs/13-macos-port.md) §7.0.11）。
+默认出 **linux + windows** 两个成品；`--platform all` 出**四端**
+（多出 mac 的 `darwin-aarch64` 与 `darwin-x86_64`）。
+
+⚠️ mac 两档的 guest 架构不同，所以**一次调用可能要用两份 ROM**：
+`darwin-aarch64` 要 arm64 原生 ROM，其余要 x86_64 桥 ROM。
+两份都有约定默认值（产物在的话不用给），也可以显式指定 `--images` / `--images-arm64`。
+见 [`docs/13-macos-port.md`](docs/13-macos-port.md) §7.0.16。
 
 ```bash
 ./scripts/release.sh                       # linux + windows 两个成品（默认）

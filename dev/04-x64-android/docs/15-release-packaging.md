@@ -4,14 +4,27 @@
 > **完整无头运行环境** + **对应的虚拟机镜像** + **模板**。
 > 命令：`./scripts/release.sh`　产物：`release/autosnap-<版本>-<平台>-x86_64.zip`
 
-> ℹ️ **平台范围（后加的）**：`--platform` 现在支持 `linux` / `windows` / **`darwin`** / `both` / `all`。
-> `both` 仍是 linux+windows（默认值没变）；加 macOS 那条线用 `--platform darwin`
-> （还可选 `--darwin-arch aarch64|x64`）。
+> ℹ️ **平台范围（后加的）**：`--platform` 支持 `linux` / `windows` / `darwin` / `both` / `all`，
+> 也可以直接写目标名（`darwin-aarch64` / `darwin-x86_64`）。
 >
-> ⚠️ **一次调用只认一份 ROM**：`darwin --darwin-arch aarch64` 需要 **arm64 原生 ROM**，
-> 而 linux/windows/Intel-Mac 需要现有的 **x86_64 桥 ROM** —— 所以两者要**各打一次**。
-> 平台与 ROM 不配套时 `release.sh` 会直接拒绝（不会产出"装得上、起不来"的包）。
-> 细节与实测见 [`13-macos-port.md`](13-macos-port.md) §7.0.11、§7.0.13。
+> | 写法 | 出几个包 |
+> |---|---|
+> | `both`（默认） | 2：linux + windows |
+> | `all` | **4：linux + windows + `darwin-aarch64` + `darwin-x86_64`** |
+> | `darwin` | 由 `--darwin-arch aarch64\|x64\|both` 决定（1 或 2 个） |
+>
+> ⚠️ **一次调用可能要用两份 ROM** —— mac 两档的 guest 架构不同：
+> `darwin-aarch64`（Apple Silicon）要 **arm64 原生 ROM**，
+> 其余（linux / windows / `darwin-x86_64`）要 **x86_64 桥 ROM**。两份不通用：
+>
+> ```bash
+> --images       <x86_64 桥 ROM>    # 默认：当前 PRODUCT 的产物
+> --images-arm64 <arm64 原生 ROM>   # 默认：artifacts/rom-remote_control_arm64
+> ```
+>
+> 目标与 ROM 不配套时 `release.sh` 会**直接拒绝**，并说清该补哪一份、怎么打
+>（不会产出"装得上、起不来"的包）。
+> 细节与实测见 [`13-macos-port.md`](13-macos-port.md) §7.0.11、§7.0.13、§7.0.16。
 
 ## 0. 本轮实测（真跑出来的数字）
 
@@ -72,8 +85,9 @@ release/
 ```bash
 cd dev/04-x64-android
 
-./scripts/release.sh                    # 两个平台各一个 zip
+./scripts/release.sh                    # 两个平台各一个 zip（默认）
 ./scripts/release.sh --platform linux   # 只打 linux
+./scripts/release.sh --platform all     # 四端（含 mac 的 aarch64 与 x86_64）
 ./scripts/release.sh --list             # 只打印计划（不下载、不打包）
 ./scripts/release.sh --stage-only       # 只铺 staging（调结构用，不压缩）
 ./scripts/release.sh --zip-only         # 复用已有 staging，只压缩
@@ -84,7 +98,9 @@ cd dev/04-x64-android
 | 选项 | 作用 |
 |---|---|
 | `--version VER` | 发布版本号（默认 `<日期>-<git 短 sha>`，已跟踪文件有未提交改动时带 `-dirty`） |
-| `--platform linux\|windows\|both` | 打哪些平台（默认 both） |
+| `--platform linux\|windows\|darwin\|both\|all` | 打哪些（默认 both=linux+windows；all=四端） |
+| `--darwin-arch aarch64\|x64\|both` | mac 出哪一档（默认 aarch64=Apple Silicon） |
+| `--images-arm64 PATH` | arm64 原生 ROM 目录（`darwin-aarch64` 用；默认自动找） |
 | `--reuse-zip` | 配合 `--zip-only`：已有 zip 就不重压，只做结构自检（补跑冒烟用） |
 | `--channel NAME` | 模拟器渠道（默认 `Stable`） |
 | `--images DIR` | 指定 ROM 交付目录（默认 `artifacts/rom-<product>`） |
