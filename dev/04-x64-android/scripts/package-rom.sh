@@ -149,7 +149,13 @@ prop_of() {
     echo "载荷清单：  payload/MANIFEST.sha256"
     echo
     echo "## 文件"
-    ( cd "$DEST" && ls -la | awk 'NR>1{printf "%-24s %12s\n", $9, $5}' )
+    # ⚠️ 文件名要用 **$NF**，不能写死 $9。
+    #    `ls -la` 的日期列随 locale 变宽：C locale 下是 `Sep 29 08:13`（3 个字段），
+    #    zh_CN 下是 `9月29日 08:13`（2 个字段）→ 文件名从 $9 挪到 $8，
+    #    写死 $9 的话整列变成空白（实测：清单里只剩字节数、没有文件名）。
+    #    $5（字节数）在两种 locale 下位置都稳定，所以保留。
+    #    同类写法见 tools/build-cuttlefish.sh（那里一直是对的）。
+    ( cd "$DEST" && ls -la | awk 'NR>1{printf "%-24s %12s\n", $NF, $5}' )
 } > "$DEST/MANIFEST.txt"
 
 log "打包完成：${DEST#"$PROJECT_ROOT"/}（$(du -sh "$DEST" | cut -f1)）"
