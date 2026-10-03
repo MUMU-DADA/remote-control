@@ -96,7 +96,9 @@ AutoSnapshotAndroid/
 │   ├── integrate-aosp.sh         把 dev/ 源码接进 AOSP 树（rsync）
 │   ├── build-remote-control.sh            编 remote-control / rcctl（AOSP 平台后端）
 │   ├── build-ndk.sh              编 NDK 版（screencap 后端，无需 AOSP 树）
-│   └── check-api-docs.py         核对文档与运行中的服务是否一致
+│   ├── check-api-docs.py         核对文档与运行中的服务是否一致（**文档 ↔ 服务**）
+│   └── check-docs.py             文档体检：链接 / 索引覆盖 / 编号 / 孤儿 /
+│                                 陈旧路径 / 脚本路径是否存在（**文档 ↔ 仓库**）
 │
 ├── aosp/                      ← AOSP 源码树
 │

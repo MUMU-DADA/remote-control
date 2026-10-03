@@ -61,5 +61,6 @@ Apple Silicon 上**没有** x86_64 后端，所以现有的 x86_64 ROM 在 M 系
 | 设计取舍与踩过的坑 | [`docs/05-design-notes.md`](../docs/05-design-notes.md) |
 | 环境（磁盘 / 镜像源 / 构建容器） | [`docs/04-environment.md`](../docs/04-environment.md) |
 | 全部文档索引 | [`docs/README.md`](../docs/README.md)、[`04-x64-android/README.md`](04-x64-android/README.md) §6 |
+| **文档体检工具** | `python3 tools/check-docs.py`（加 `--strict` 则有问题时非 0 退出）。改了文档路径 / 新增文档 / 改名之后跑一下：它会告诉你谁的链接断了、哪篇没进索引、哪条命令照着做会 `no such file` |
 
 （本文件与各模块 README 的一致性由 `tools/check-docs.py` 检查。）
