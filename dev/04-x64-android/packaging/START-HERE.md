@@ -85,7 +85,7 @@
    已经先 `adb shell sync` 了，别绕过它去 `kill -9`。
 2. **`initrd` 与 `config.ini` 不在工作目录里做链接。** 模拟器会**透过符号链接**
    重写 `initrd`，链过去就会改到 `images/` 里那份，`SHA256SUMS` 当场对不上。
-   两个平台的工作目录构建逻辑都写死了这条例外。
+   各平台的工作目录构建逻辑都写死了这条例外。
 3. **改过 `config.ini` 之后旧快照全部作废。** 快照要求硬件配置与存档时逐项一致，
    不一致模拟器会拒绝加载（`The emulator hardware cannot load snapshot`）。
 

@@ -48,7 +48,7 @@ packaging/
    模拟器会**透过符号链接**重写 `initrd`（把自己的 ramdisk + dtb 合进去），
    链过去就把 `images/` 里那份改了 —— `SHA256SUMS` 当场校验失败。
    `config.ini` 同理：要按包内真源覆盖，链过去会写穿。
-   两个平台的工作目录构建逻辑里都各自写了一条 `NO_LINK` 名单。
+   **每套**宿主脚本的工作目录构建逻辑里都各自写了一条 `NO_LINK` 名单。
 
 2. **停机器必须先 `adb shell sync`，再 `adb emu kill`。**
    `emu kill` 是**硬断电**不是关机。实测：写完不 sync 直接停，最近写的数据

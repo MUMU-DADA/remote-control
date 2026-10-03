@@ -57,7 +57,7 @@
 | [10-network-bridge.md](../dev/04-x64-android/docs/10-network-bridge.md) | 网络：桥接模式 |
 | [11-snapshots-and-multi.md](../dev/04-x64-android/docs/11-snapshots-and-multi.md) | 快照与多实例 |
 | [12-emulator-control.md](../dev/04-x64-android/docs/12-emulator-control.md) | 实例控制脚本（创建/启动/停止/克隆/导出…） |
-| [13-macos-port.md](../dev/04-x64-android/docs/13-macos-port.md) | **macOS 支持计划**：arm64 ROM 产品线 + 第三套宿主脚本（计划，未实施） |
+| [13-macos-port.md](../dev/04-x64-android/docs/13-macos-port.md) | **macOS 支持**：arm64 原生 ROM 产品线 + 第三套宿主脚本（**代码已完成、离线验证通过；真机验证未做**，见该文 §8） |
 | [14-macos-host-notes.md](../dev/04-x64-android/docs/14-macos-host-notes.md) | 把服务做成 macOS 被控端的 API 等价性与权限调研（ScreenCaptureKit / TCC / launchd） |
 | [15-release-packaging.md](../dev/04-x64-android/docs/15-release-packaging.md) | **release 打包**：`scripts/release.sh` 一个平台一个 zip（完整无头运行环境 + 虚拟机镜像 + 模板） |
 

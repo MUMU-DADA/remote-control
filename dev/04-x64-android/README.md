@@ -27,7 +27,7 @@
 # 一次性复现（构建→自检→打包→启动验收）
 ./scripts/accept.sh
 
-# 打 release：两个平台各一个 zip（含无头运行环境 + 镜像 + 模板）
+# 打 release：默认 linux + windows 各一个 zip（含无头运行环境 + 镜像 + 模板）
 ./scripts/release.sh
 ```
 
@@ -179,11 +179,17 @@ cd dev/04-x64-android
 （`tools/test-windows-emulator.sh`，55 项）见
 [`docs/12-emulator-control.md`](docs/12-emulator-control.md)。
 
-### 打 release：两个平台各一个 zip
+### 打 release：一个平台一个 zip
+
+默认出 **linux + windows** 两个成品；macOS 那条线用 `--platform darwin`
+（它需要 **arm64 原生 ROM**，与默认那份 x86_64 桥 ROM 不通用，所以要各打一次 —— 见
+[`docs/13-macos-port.md`](docs/13-macos-port.md) §7.0.11）。
 
 ```bash
-./scripts/release.sh                  # linux + windows 两个成品
-./scripts/release.sh --platform linux # 只打一个平台
+./scripts/release.sh                       # linux + windows 两个成品（默认）
+./scripts/release.sh --platform linux      # 只打一个平台
+./scripts/release.sh --platform darwin     # macOS（Apple Silicon，需 arm64 ROM）
+./scripts/release.sh --platform all        # 三个平台
 ./scripts/release.sh --list           # 只看计划（不下载、不打包）
 ./scripts/release.sh --smoke          # 打完解压 linux 那份**真启动验收**
 ```
@@ -192,16 +198,18 @@ cd dev/04-x64-android
 
 | 进包的东西 | 来源 | 为什么在包里 |
 |---|---|---|
-| `runtime/` **完整无头运行环境** | SDK 模拟器包（含 `qemu-system-x86_64-headless` / `...\.exe`）+ platform-tools 的 adb，按 host-os + 渠道现取并校验 sha1 | 交付方不用装 Android SDK，也不用联网 |
+| `runtime/` **完整无头运行环境** | SDK 模拟器包（含 `qemu-system-*-headless` / `...\.exe`）+ platform-tools 的 adb，按 **host-os + host-arch + 渠道**现取并校验 sha1 | 交付方不用装 Android SDK，也不用联网 |
 | `images/` **虚拟机镜像** | `artifacts/rom-<product>/` 交付目录（硬链接进 staging，不复制实体） | 就是这份 ROM 本体（含翻译层） |
 | `templates/` **模板** | `emulator/config.ini`（硬件唯一真源）+ 实例登记模板 | 改屏幕/内存/核数/数据分区只改这里，不用重编 ROM |
 
-外加 `bin/`（起 / 停 / 看状态 / 验收四个入口，两个平台各一套）、`START-HERE.md`（首读）、
+外加 `bin/`（起 / 停 / 看状态 / 验收四个入口，**每个平台各一套**：
+`packaging/bin/{linux,windows,darwin}/`）、`START-HERE.md`（首读）、
 `RELEASE.json`（版本 + ROM 指纹 + 运行时 build id）、**整包 `SHA256SUMS`**。
 细节与全部坑记录见 [`docs/15-release-packaging.md`](docs/15-release-packaging.md)。
 
-> 两个平台用的是**同一个 build id** 的模拟器（Stable 渠道里 linux/windows 同版本发布），
+> linux 与 windows 用的是**同一个 build id** 的模拟器（Stable 渠道里两者同版本发布），
 > 所以"两个成品是同一份工程"有据可依；build id 写在包内 `runtime/RUNTIME.txt` 与 `RELEASE.json` 里。
+> （macOS 在同一个渠道下也是同一版本，只是**包不同**：darwin 分 aarch64 / x64 两档。）
 
 Windows 侧：同一份打包产物 + `emulator.exe` + WHPX，见 [`windows/README.md`](windows/README.md)。
 
@@ -256,7 +264,7 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 - **网络桥接模式**（让模拟器落到物理局域网，`-net-tap`） → [`docs/10-network-bridge.md`](docs/10-network-bridge.md)
 - **快照与多实例**（7 秒从快照恢复、一键再开一台机器、MAC 硬限制） → [`docs/11-snapshots-and-multi.md`](docs/11-snapshots-and-multi.md)
 - **实例生命周期控制**（建/起/停/强杀/重启/重置/删除/复制，GPU 自适应） → [`docs/12-emulator-control.md`](docs/12-emulator-control.md)
-- **release 打包**（两个平台各一个 zip：无头运行环境 + 镜像 + 模板；怎么验、踩了哪些坑） → [`docs/15-release-packaging.md`](docs/15-release-packaging.md)
+- **release 打包**（一个平台一个 zip：无头运行环境 + 镜像 + 模板；怎么验、踩了哪些坑） → [`docs/15-release-packaging.md`](docs/15-release-packaging.md)
 - **加 macOS 支持**（arm64 原生 ROM 产品 + 第三套宿主脚本）→ [`docs/13-macos-port.md`](docs/13-macos-port.md)
   · 评估 + 实现 + 离线验证记录都在这一篇（§7.0.x 是逐轮的实测留痕）
   · ⚠️ **离线能验的都验过了；真机（真 Mac）验证还没做** —— 见该篇 §8 清单

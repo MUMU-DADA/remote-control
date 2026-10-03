@@ -3,6 +3,11 @@
 > 目标：**x86_64 Linux + x86_64 Windows 上同架构运行的自编 Android ROM，可跑 arm64 应用**
 > （arm64 若不成立，下放到 arm32）
 > 位置：`/root/AutoSnapshotAndroid/dev/04-x64-android`（原 `dev/06-x64-android`）
+>
+> ⚠️ **时效**：下面的轮次日志**止于第 13 轮（release 打包）**。
+> 第 14 轮起的逐轮记录在 [`docs/13-macos-port.md`](docs/13-macos-port.md) **§7.0.1 起**
+> （arm64 原生 ROM 产品线、macOS 宿主支持 —— 那两轮只有那一条 cron，不再在这里重复）。
+> **当前状态的权威位置是 [`README.md`](README.md) §0 的目标表**（G1–G8），本文的轮次日志是过程记录。
 
 ---
 
@@ -14,8 +19,11 @@
 | **P1 · 全量编译** | `m` 产出完整 x86_64 镜像（system/vendor/product/ramdisk/kernel-ranchu） | ✅ **完成**（`EXIT=0`，62083 个目标；后又以 `QEMU_DISABLE_AVB=true` 增量重编） |
 | **P2 · Linux 侧验收** | KVM 启动 + arm64 应用实跑（abilist / 装 / 起 / maps） | ✅ **全部通过**（多轮复跑：23.8 s / 28.5 s / 30.2 s / 41.2 s 开机；结论性证据见 `docs/07-verification-report.md`） |
 | **P3 · Windows 侧验收** | 同一份镜像 + SDK emulator + WHPX | ⊘ **明确不由 agent 验证**（用户决定）；工程部分已交付：脚本 + 镜像 + `preflight.ps1` + 期望输出对照表 + 同 build id 等价性 |
-| **P4 · arm32 下放（可选）** | 若需要 32 位 ARM：切 API 30 基座 + 四 ABI 板级配置 | ⬜ 备选 |
-| **P5 · ROM 定制** | 把 `remote-control` 等自制组件编进 `/system`（本项目的下一步价值所在） | ⬜ 待 P2 |
+| **P4 · arm32 下放（可选）** | 若需要 32 位 ARM：切 API 30 基座 + 四 ABI 板级配置 | ⬜ 备选（预案见 [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md)） |
+| **P5 · ROM 定制** | 把 `remote-control` 等自制组件编进 `/system` | ✅ **已完成**（`remote-control` / `rcctl` / `remote-control-launch` 都在产物里，开机自启见 [`docs/05-adding-components.md`](docs/05-adding-components.md)；表格早先误标为"⬜ 待 P2"） |
+| **P6 · release 打包** | 一个平台一个 zip（无头运行环境 + 镜像 + 模板） | ✅ 已完成（两个平台同 build id，Linux 那份真启动验收；见 [`docs/15-release-packaging.md`](docs/15-release-packaging.md)） |
+| **P7 · arm64 原生 ROM 产品线** | 给 Apple Silicon 用的原生 arm64（无翻译层） | ✅ **已实测**：`EXIT=0`，产物全是 aarch64，`abilist64=arm64-v8a`（第 14 轮） |
+| **P8 · macOS 宿主支持** | 第三套宿主脚本 + `release.sh` 的 darwin 平台 | 🟡 代码完成、离线验证通过；**缺真机**（第 15 轮起，见 [`docs/13-macos-port.md`](docs/13-macos-port.md)） |
 
 ---
 
