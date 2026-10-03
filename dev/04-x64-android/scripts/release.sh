@@ -468,10 +468,12 @@ render_start_here() {   # render_start_here <平台> <root>
     python3 - "$PACKAGING_DIR/START-HERE.md" "$root/START-HERE.md" "$plat" \
              "autosnap-$VERSION-$tag" "$VERSION" "$(platform_label "$plat")" \
              "$(date '+%Y-%m-%d %H:%M:%S %z')" "$(rom_fingerprint)" \
-             "$(du -sh --apparent-size "$ROM_DIR" | cut -f1)" <<'PY'
+             "$(du -sh --apparent-size "$ROM_DIR" | cut -f1)" "$ROM_DIR" <<'PY'
 import os, sys
-(tpl, out, plat, rootdir, ver, label, built, fp, imgsize) = sys.argv[1:10]
+(tpl, out, plat, rootdir, ver, label, built, fp, imgsize, romdir_abs) = sys.argv[1:11]
 
+# ⚠️ 这里**没有 tag 变量**：tag 已经折进 rootdir（autosnap-<版本>-<平台tag>）。
+#    判宿主架构要用 rootdir.endswith("aarch64")，写 tag 会 NameError（实测踩到）。
 def quickstart():
     if plat == "windows":
         return "\n".join(["```powershell", f"cd {rootdir}",
@@ -502,6 +504,56 @@ if os.path.exists(rtfile):
         if len(parts) == 2:
             rt[parts[0]] = parts[1].strip()
 
+# 第 6 节的表体：按产品类型给不同的行。
+# 判据是 images/system/build.prop 里的 abilist64（文件里的事实），
+# 因为"有没有翻译层"这件事只有它说了算 —— 平台名与产品名都可能骗人。
+def dist_rows(rt, rootdir, romdir_abs):
+    # ⚠️ 判据从 **$ROM_DIR（绝对路径）** 读，不要用 rootdir 拼：
+    #    rootdir 在渲染时可能是个相对路径，拼出来读不到文件 —— 而读不到时
+    #    这个函数会落到"原生 arm64"那一支，把 x86_64 桥产品渲染成原生描述（实测踩到）。
+    import os as _os, sys as _sys
+    abilist = ""
+    bp = _os.path.join(romdir_abs, "system", "build.prop")
+    if _os.path.exists(bp):
+        for line in open(bp, encoding="utf-8"):
+            if line.startswith("ro.system.product.cpu.abilist64="):
+                abilist = line.split("=", 1)[1].strip()
+    if not abilist:
+        # 取不到判据就**说出来**，并按平台+tag 保守回退，不假装知道
+        _sys.stderr.write("警告：读不到 %s 的 abilist64，第 6 节按平台回退渲染\n" % bp)
+        bridge = not (plat == "darwin" and rootdir.endswith("aarch64"))
+    else:
+        bridge = "x86_64" in abilist      # 有 x86_64 就是桥产品
+    accel = "同架构才有加速"
+    if plat == "darwin":
+        accel_row = "| 加速 | macOS 用 Hypervisor.framework（`sysctl kern.hv_support` 必须为 1）。" \
+                    "为 0（常见于虚拟机里的 macOS）会退到纯软件模拟，开机从分钟级变十几分钟 |"
+    elif plat == "linux":
+        accel_row = "| 加速 | Linux 用 KVM（/dev/kvm 可读写）。没有就退到纯软件模拟（很慢） |"
+    else:
+        accel_row = "| 加速 | Windows 用 WHPX。没有就退到纯软件模拟（很慢） |"
+
+    if bridge:
+        return "\n".join([
+            "| **翻译层许可** | `images/` 里的 `libndk_translation*` 是 Google 专有二进制"
+            "（随 SDK 系统镜像分发，SDK 许可**不含再分发**）。内部使用/开发无碍；"
+            "**对外交付整机前必须过法务** |",
+            "| ABI 覆盖 | 本 ROM 是 `%s`（纯 64 位）：**32 位 ARM（armeabi-v7a）应用装不上** |" % (abilist or "x86_64,arm64-v8a"),
+            "| 性能 | 串行依赖浮点实测退化 21~23×（整数/哈希约 1.1×）——目标应用先做性能验收 |",
+            "| 版本绑定 | 翻译层与 Android 版本绑定：Android 12（API 31）的载荷只能配 API 31 的框架 |",
+            accel_row,
+        ])
+    return "\n".join([
+        "| 翻译层许可 | **不适用** —— 本 ROM 是原生 arm64，不含 `libndk_translation`，"
+        "没有 Google 专有二进制（这是它相对桥产品的优势之一） |",
+        "| ABI 覆盖 | 本 ROM 是 `%s`（纯 64 位）：**32 位 ARM（armeabi-v7a）装不上**；"
+        "**任何 x86/x86_64 应用也装不上**（原生 arm64 系统没有翻译层兜底） |" % (abilist or "arm64-v8a"),
+        "| 性能 | **没有翻译层开销**（桥产品才有 21~23× 的串行浮点退化）——"
+        "应用跑的是原生 arm64 机器码 |",
+        "| 版本绑定 | 不适用（无翻译层）。内核/框架/应用都是 arm64，与 Android 版本的关系同普通 ROM |",
+        accel_row,
+    ])
+
 adb = ".\\runtime\\platform-tools\\adb.exe" if plat == "windows" else "./runtime/platform-tools/adb"
 subs = {
     "@VER@": ver, "@PLATFORM_LABEL@": label, "@BUILT_AT@": built, "@ROM_FINGERPRINT@": fp,
@@ -512,11 +564,14 @@ subs = {
     "@VERIFY_CMD@": ".\\bin\\verify.ps1" if plat == "windows" else "./bin/verify.sh",
     "@ADB_EXAMPLE@": f"{adb} -s emulator-5580 shell getprop ro.product.cpu.abilist",
     "@ROOT_DIR@": rootdir,
+    # 第 6 节（交付约束）按**产品类型**渲染 —— 判据取包内 build.prop 的 abilist64，
+    # 不看平台名（darwin+x64 用的就是桥产品 ROM，平台名判不出来）。
+    "@DIST_ROWS@": dist_rows(rt, rootdir, romdir_abs),
     # guest 架构说明：原来是写死在模板里的"guest 是 x86_64，另有 ARM64 用户态翻译层"，
     # 对 arm64 原生包是错的（那份没有翻译层，也不跑 x86 应用）。
     "@GUEST_DESC@": ("arm64-v8a 原生，**无翻译层** —— 跑不了纯 x86/x86_64 应用，"
                      "应用需自带 arm64-v8a 库")
-                    if plat == "darwin" and tag.endswith("aarch64")
+                    if plat == "darwin" and rootdir.endswith("aarch64")
                     else "x86_64，另有 ARM64 用户态翻译层（可跑 arm64 应用）",
     "@ENTRY_NAMES@": "start-headless / stop / status / verify",
     "@TOOLS_EXTRA@": "（另有 net-bridge.sh / net-bridge-ifup.sh：guest 桥接到物理 LAN）" if plat == "linux" else "",
@@ -524,7 +579,7 @@ subs = {
     "@PLATFORM_HINT@": "\n> ⚠️ **这台是 Apple Silicon**：只能跑 arm64 原生 ROM。"
                        "现有 x86_64 ROM 在 Apple Silicon 上**没有**可用的模拟器后端"
                        "（不是慢，是根本没有那条路 —— 见包内 runtime/RUNTIME.txt 的后端路径）。\n"
-                       if plat == "darwin" and tag.endswith("aarch64")
+                       if plat == "darwin" and rootdir.endswith("aarch64")
                        else "\n> ⚠️ **这台是 Intel Mac**：可跑现有 x86_64 ROM；"
                             "arm64 原生 ROM 在 Intel 上同样没有后端。\n"
                        if plat == "darwin" else "",
@@ -558,10 +613,11 @@ write_manifest() {   # write_manifest <平台> <root>
     #    否则 RELEASE.json 自己不在清单里（"包内每个文件都可校验"就不成立了）。
     local n
     n="$(python3 - "$root" "$VERSION" "$plat" "$tag" "$emu_zip" "$emu_url" "$emu_sha" "$emu_ver" "$emu_build" \
-             "$pt_zip" "$pt_url" "$pt_sha" "$pt_ver" "$ROM_DIR" "$PROJECT_ROOT" <<'PY'
+             "$pt_zip" "$pt_url" "$pt_sha" "$pt_ver" "$ROM_DIR" "$PROJECT_ROOT" \
+             "$(platform_backend "$plat")" <<'PY'
 import json, os, subprocess, sys
 (root, ver, plat, tag, emu_zip, emu_url, emu_sha, emu_ver, emu_build,
- pt_zip, pt_url, pt_sha, pt_ver, romdir, projroot) = sys.argv[1:16]
+ pt_zip, pt_url, pt_sha, pt_ver, romdir, projroot, backend) = sys.argv[1:17]
 
 def from_manifest(prefix):
     man = os.path.join(root, "images", "MANIFEST.txt")
@@ -623,8 +679,10 @@ doc = {
         "buildId": emu_build,
         "url": emu_url,
         "sha1": emu_sha,
-        "backend": "emulator/" + ("qemu/linux-x86_64/qemu-system-x86_64-headless" if plat == "linux"
-                                  else "qemu/windows-x86_64/qemu-system-x86_64.exe"),
+        # ⚠️ 这里原来是硬编码的 linux/else 二元判断 —— darwin 会落到 windows 那一支，
+        #    RELEASE.json 里就写着 windows 的后端路径（实测踩到）。
+        #    后端路径由 bash 侧算好传进来（platform_backend），别在 python 里再判一次。
+        "backend": "emulator/" + backend,
         "accuracy": "headless：只带本平台的 x86_64 qemu 后端",
     },
     "platformTools": {"package": os.path.basename(pt_zip), "version": pt_ver, "url": pt_url, "sha1": pt_sha},

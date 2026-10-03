@@ -92,7 +92,7 @@ autosnap-<版本>-darwin-aarch64/
 ./bin/stop.sh --port 5580             # 停（先 sync）
 ```
 
-> ⚠️ **`bin/macos/` 这五个脚本还没打进发布包** —— `../scripts/release.sh` 目前只认
+> ⚠️ **`bin/darwin/` 这五个脚本还没打进发布包** —— `../scripts/release.sh` 目前只认
 > `linux` / `windows` 两个平台（它的三分派表与 `START-HERE.md` 模板分支还没加 mac）。
 > 也就是说路径 B **尚未可用**，先把脚本按路径 A 用起来。
 > 打包那一层是独立一步，见 [`../docs/13-macos-port.md`](../docs/13-macos-port.md) §8 的 #16。

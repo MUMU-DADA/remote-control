@@ -20,7 +20,7 @@
 | 交付物 | 内容 | 新增 | 改动 |
 |---|---|---|---|
 | **A. arm64 ROM 产品** | 原生 arm64 goldfish ROM（跑 remote-control），Apple Silicon 模拟器用它 | **约 280–420 行** | 约 **120–200 行**（构建系统参数化） |
-| **B. macOS 宿主脚本** | 第三套运行时控制面 + 打包（`macos/`、`packaging/bin/macos/`） | **约 1500–2200 行** | 约 **400–600 行**（共享层的 GNU→BSD 适配） |
+| **B. macOS 宿主脚本** | 第三套运行时控制面 + 打包（`macos/`、`packaging/bin/darwin/`） | **约 1500–2200 行** | 约 **400–600 行**（共享层的 GNU→BSD 适配） |
 
 两条线相加，约等于**"三分之二套"**现有骨架的量（现有：Linux 侧 `scripts/emulator.sh` 818 + `run-linux.sh` 354 + `packaging/bin/linux` 570；Windows 侧 `windows/emulator.ps1` 735 + `run-windows.ps1` 233 + `packaging/bin/windows` 690）。
 
@@ -259,7 +259,7 @@ AOSP 12 在 macOS 上编完整 ROM（含 Linux 内核、x86_64-only 的构建工
 | `macos/fetch-emulator.sh` | `windows/fetch-emulator.ps1`(131)，host-os 取 `macosx` | 80–120 |
 | `macos/fetch-images.sh` | `fetch-images.ps1`(112) | 60–100 |
 | `macos/preflight.sh` | `preflight.ps1`(85) | 80–120 |
-| `packaging/bin/macos/`：`lib.sh` / `start-headless.sh` / `stop.sh` / `status.sh` / `verify.sh` | `bin/linux/`(570) + `bin/windows/`(690) | 350–550 |
+| `packaging/bin/darwin/`：`lib.sh` / `start-headless.sh` / `stop.sh` / `status.sh` / `verify.sh` | `bin/linux/`(570) + `bin/windows/`(690) | 350–550 |
 
 ### 3.3 共享层要改的点（少，但每一条都会真拦人）
 
@@ -603,7 +603,7 @@ m -j8 remote-control rcctl remote-control-launch     # m 退出码 = 0
 后端架构与本机是否匹配、HVF 是否可用、可执行位是否被 `unzip` 丢掉、
 宿主 bash 是不是 3.2（`release.sh` 用了 `declare -A`，需 bash 4+）。
 
-**补记（同一轮的延伸）：包内 `bin/macos/` 五个脚本也已写出** ——
+**补记（同一轮的延伸）：包内 `bin/darwin/` 五个脚本也已写出** ——
 `lib.sh` / `start-headless.sh` / `stop.sh` / `status.sh` / `verify.sh`，
 与 `bin/linux/`、`bin/windows/` 两侧语义逐条对齐，文件数都是 5。
 
@@ -924,6 +924,60 @@ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm
 > 正是这么做的：`build_sysdir` 把 `images/` **软链**进 `.run/sysdir-<port>/`，
 > 只有 `initrd` 和 `config.ini` 是实文件 —— 那两条的注释就在 lib.sh 里）。
 
+#### 7.0.13 真打一次 darwin 包（本轮，stage-only）
+
+不再只验"选包对不对"，而是**把整条打包流程跑完**（`--stage-only`：铺出完整包目录树，
+不打 zip；这样能验到 `prepare_runtime` / `render_start_here` / `write_manifest` 全部逻辑）：
+
+```bash
+bash release.sh --platform darwin --images .../artifacts/rom-remote_control_arm64 \
+     --stage-only --keep-stage --no-verify-images
+```
+
+**结果：跑通**，产物 `autosnap-<版本>-darwin-aarch64`（6.9 G，其中 images 5.7 G + runtime 1.3 G，
+401 项 sha256）。
+
+**这一跑抓到四个真问题**（全部只靠"读代码"看不出来）：
+
+| # | 问题 | 症状 | 根因 |
+|---|---|---|---|
+| 1 | `packaging/bin/macos/` 目录名不对 | `cp: stat .../packaging/bin/darwin/. 失败` | `release.sh` 按**平台名**找目录（`bin/linux`、`bin/windows`），所以必须是 `bin/darwin`。已 `git mv` 改名并更新全部引用 |
+| 2 | START-HERE 渲染崩 | `NameError: name 'tag' is not defined` | 渲染的 python 里**没有 `tag` 变量**（tag 折进了 `rootdir`）。我写 `tag.endswith("aarch64")` 判架构 → 改成 `rootdir.endswith("aarch64")` |
+| 3 | `RELEASE.json` 里写的是 **windows 后端** | `runtime.backend = emulator/qemu/windows-x86_64/qemu-system-x86_64.exe` | `write_manifest` 的 python 里有一处**硬编码的 linux/else 二元判断**（`"backend": ... if plat == "linux" else "windows..."`）。这是我在 §7.0.11 修的那四处三分支之外的**第五处**，藏在 python 块里。改成由 bash 侧算好传进来 |
+| 4 | START-HERE 第 6 节对 arm64 包**说错话** | 渲染出「翻译层许可 … Google 专有二进制」「本 ROM 是 `x86_64,arm64-v8a`」「串行浮点退化 21~23×」 | 那一整节的五行都是 **x86_64 桥产品专属**。arm64 包的读者会读到对他完全不成立的话 —— **交付文档说错话比不说更糟**（他会以为包里有专有二进制，或以为装不上 arm64 应用） |
+
+第 4 条的修法值得单说：把第 6 节表体改成 `@DIST_ROWS@` 占位符，
+由 `dist_rows()` 按**产品类型**渲染 —— 判据取 **`$ROM_DIR/system/build.prop` 的
+`abilist64`**（文件里的事实），不看平台名：
+
+| | 桥产品（abilist64 含 x86_64） | 原生 arm64（只有 arm64-v8a） |
+|---|---|---|
+| 翻译层许可 | Google 专有二进制，交付前过法务 | **不适用**（无翻译层，这是它的优势） |
+| ABI 覆盖 | `x86_64,arm64-v8a`，32 位 ARM 装不上 | `arm64-v8a`，**任何 x86/x86_64 应用也装不上** |
+| 性能 | 串行浮点退化 21~23× | **没有翻译层开销** |
+| 版本绑定 | 翻译层与 Android 版本绑定 | 不适用 |
+| 加速 | 按平台：KVM / WHPX | 按平台：Hypervisor.framework（darwin） |
+
+**这一条我又踩了一次自己的坑**：第一版 `dist_rows` 用 `rootdir` 拼路径读 build.prop，
+而 `rootdir` 在渲染时是相对的 → 读不到 → 判据落空 → **静默落到"原生 arm64"那一支**，
+把 x86_64 桥产品渲染成了原生描述（回归测试当场抓到）。修法是两条：
+① 判据改从 bash 显式传的 **`$ROM_DIR`（绝对路径）** 读；
+② **取不到判据时要打 stderr 告警并按平台保守回退**，不假装知道。
+—— 教训与 §7.0.10 那次（照抄注释）同源：**判据取不到时的默认值必须安全且可见**。
+
+**验证（两个产品都实跑）**：
+
+| 包 | 第 6 节渲染 | 结果 |
+|---|---|---|
+| `darwin-aarch64` + arm64 ROM | 原生行（不适用 / arm64-v8a / 无翻译层开销 / Hypervisor.framework） | ✅ |
+| `linux-x86_64` + x86_64 ROM（回归） | 桥行（专有二进制 / `x86_64,arm64-v8a` / 21~23× / KVM） | ✅ |
+
+另外确认包内结构正确：`bin/` 五个脚本且都有可执行位、`runtime/emulator/qemu/darwin-aarch64/`
+后端存在、`RUNTIME.txt` 的包名/版本/后端/adb 全对、`RELEASE.json` 的
+`platform=darwin-aarch64` + `runtime.backend=emulator/qemu/darwin-aarch64/qemu-system-aarch64-headless`。
+
+**仍未做的**：真正打 zip（`check_zip` 的结构自检、`--smoke`）与在真 Mac 上启动。
+
 ### 7.1 仍需在真机上验的
 
 | # | 事项 | 为什么重要 | 怎么验 | 状态 |
@@ -982,7 +1036,7 @@ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm
 - [x] 12b. `macos/fetch-images.sh` —— **已写出并离线验过 4 个用例**（§7.0.9）
 - [x] 13. 建/起/停/查/验五个动作的 mac 版 —— **已写出并离线验过 18 个用例**（§7.0.8 补记）
 - [ ] 13b. 上述五个脚本在**真 Mac** 上跑通（离线测试台不能替代真机）
-- [x] 14. `packaging/bin/macos/` 五个脚本 —— **已完成**（与另两套同为 5 个文件）
+- [x] 14. `packaging/bin/darwin/` 五个脚本 —— **已完成**（与另两套同为 5 个文件）
 - [ ] 15. 共享层的 8 条改动（§3.3）落完，且**在 Linux 上回归一遍**（别把 Linux 弄坏）
 - [x] 16. `release.sh` 五分派表 + `START-HERE.md` 三分支 + `--platform{all}` / `--darwin-arch` + 平台-ROM 配套断言 —— **已完成，六组实跑验过**（§7.0.11）
 - [ ] 16b. 真机上打一次完整 darwin 包（`release.sh --platform darwin` 全流程 + 结构自检 `check_zip`）
