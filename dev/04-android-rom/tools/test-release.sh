@@ -61,12 +61,24 @@ for f in system-qemu.img vendor-qemu.img product-qemu.img ramdisk-qemu.img \
     head -c 8192 /dev/urandom > "$FAKE_ROM/$f"
 done
 cp "$X64_DIR/emulator/config.ini" "$FAKE_ROM/config.ini"
-echo "ro.product.device=fake_device" > "$FAKE_ROM/system/build.prop"
+cat > "$FAKE_ROM/system/build.prop" <<'EOF'
+ro.product.device=remote_control_x64_arm64
+ro.product.system.device=remote_control_x64_arm64
+ro.system.product.cpu.abilist=x86_64,arm64-v8a
+ro.system.product.cpu.abilist64=x86_64,arm64-v8a
+EOF
 # ⚠️ 顺序要和 package-rom.sh 一致：**先算 SHA256SUMS、再写 MANIFEST.txt**。
 #    反过来的话假 ROM 的清单会包含 MANIFEST.txt，而真 ROM 的不会 ——
 #    于是"整包清单漏掉 images/MANIFEST.txt"这类 bug 在假测试里测不出来（真实踩过）。
 ( cd "$FAKE_ROM" && find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS )
-echo "ro.system.build.fingerprint=fake/product/fake:12/TEST/1:userdebug/test-keys" > "$FAKE_ROM/MANIFEST.txt"
+cat > "$FAKE_ROM/MANIFEST.txt" <<'EOF'
+# lunch 目标：remote_control_x64_arm64-userdebug
+# 产品：remote_control_x64_arm64（x86_64 guest + 用户态翻译层）
+ro.system.build.fingerprint    = fake/product/fake:12/TEST/1:userdebug/test-keys
+ro.product.system.device      = remote_control_x64_arm64
+ro.system.product.cpu.abilist = x86_64,arm64-v8a
+ro.system.product.cpu.abilist64 = x86_64,arm64-v8a
+EOF
 
 # 假模拟器包：结构与真包一致（emulator/ + qemu/<宿主>-x86_64/ + source.properties）
 make_fake_emu_zip() {   # <输出> <后端相对路径> <另一个要删掉的后端> <启动器文件名>
@@ -185,6 +197,12 @@ chk_out "RELEASE.json 记下了运行时 build id" "999999" \
     python3 -c "import json;print(json.load(open('$SANDBOX/x/$LROOT/RELEASE.json'))['runtime']['buildId'])"
 chk_out "RELEASE.json 记下了 sha1" "$(sha1sum "$SANDBOX/emu-linux.zip" | cut -d' ' -f1)" \
     python3 -c "import json;print(json.load(open('$SANDBOX/x/$LROOT/RELEASE.json'))['runtime']['sha1'])"
+chk_out "RELEASE.json 的 ROM 产品身份来自镜像清单" "remote_control_x64_arm64|remote_control_x64_arm64-userdebug|x86_64,arm64-v8a" \
+    python3 -c "import json;d=json.load(open('$SANDBOX/x/$LROOT/RELEASE.json'))['rom'];print('|'.join([d['product'],d['lunch'],d['abilist']]))"
+chk_out "Linux RELEASE.json 入口使用 shell 脚本" "bin/start-headless.sh|bin/verify.sh" \
+    python3 -c "import json;d=json.load(open('$SANDBOX/x/$LROOT/RELEASE.json'))['entrypoints'];print(d['start']+'|'+d['verify'])"
+chk_out "Windows RELEASE.json 入口使用 PowerShell 脚本" 'bin\\start-headless.ps1|bin\\verify.ps1' \
+    python3 -c "import json;d=json.load(open('$SANDBOX/xw/$WROOT/RELEASE.json'))['entrypoints'];print(d['start']+'|'+d['verify'])"
 chk_out "RELEASE.json 的 sha256sumsLines 与实际行数一致" "1" \
     python3 -c "
 import json

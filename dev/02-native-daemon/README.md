@@ -136,17 +136,19 @@ sudo make run   # 编译并运行全部测试
 
 | 测试 | 覆盖范围 | 检查项 |
 |---|---|---|
-| `test_inject_uinput` | 注入后端本身 | 35 |
-| `test_integration` | **端到端**：socket → dispatch → 帧通道 / 注入 → 内核 | 39 |
+| `test_inject_uinput` | 注入后端本身 | 38 |
+| `test_integration` | **端到端**：socket → dispatch → 帧通道 / 注入 → 内核 | 47 |
 | `test_capture_screencap` | screencap 后端：fork/exec → 解析 → memfd | 18 |
 | `test_appops` | 应用管理后端（`pm`/`am`/`cmd` 子进程解析） | 57 |
 | `test_json` | JSON 解析 / 输出（用 AOSP 树内的 jsoncpp） | 34 |
 | `test_keyboard` | 按键注入（键名映射 → 键码） | 79 |
-| `test_websocket` | WS 握手 | 18 |
+| `test_websocket` | WS 握手与 Close 控制帧 | 24 |
+| `test_transport` | HTTP / Unix socket 生命周期 | 14 |
+| `test_core_lifetime` | 动态库初始化与注入后端生命周期 | 7 |
 | `test_fileops` | 文件路径边界（越界 / `..` / 软链接逃逸） | 18 |
 | `test_sha256` | SHA-256（NIST 官方向量 + 分块一致性） | 9 |
 
-> `make run` 除了跑这 9 个套件，还会把各套件自报的检查数求和并与根
+> `make run` 除了跑这 11 个套件，还会把各套件自报的检查数求和并与根
 > [`README.md`](../../README.md) 里写的「单元/集成 N 项检查」比对 ——
 > 数字对不上就直接失败。加测试忘了改 README 会被当场拦住。
 
@@ -160,10 +162,10 @@ sudo make run   # 编译并运行全部测试
                                                                   └─ /dev/uinput ──> 内核 ──> eventN 读回
 ```
 
-**实测结果：9 个套件、307 项检查全部通过**
+**实测结果：11 个套件、345 项检查全部通过**
 
 ```
-test_inject_uinput（35 项）
+test_inject_uinput（38 项）
   [1] 单击       事件序列正确（BTN_TOUCH / TRACKING_ID / 坐标 / 压力 全对）
   [2] 滑动       200ms 产生 12 个 MOVE，坐标从 200 单调走到 800
   [3] 双指多点   使用 2 个槽位、2 个 TRACKING_ID，BTN_TOUCH 只在首尾各置位一次
@@ -172,7 +174,7 @@ test_inject_uinput（35 项）
   [5] 异常路径   孤立的 TouchUp 安全返回
   [6] 设备能力位 内核记录的 PROP/ABS/KEY 位图逐个解码验证
 
-test_integration（39 项）
+test_integration（47 项）
   [1] Info 请求      协议往返正确
   [2] Capture 帧通道 fd 通过 SCM_RIGHTS 到达，可 mmap，
                      8,294,400 字节，渐变像素值逐个校验通过
@@ -182,6 +184,7 @@ test_integration（39 项）
   [6] 空闲超时       连上不发数据的连接会被断开，且服务不被卡死
   [7] fd 泄漏        200 次抓帧后 fd 数量不变（10 → 10）
                      —— 常驻服务最要紧的一类问题
+  [8] FrameHub 生命周期 最后一个订阅退出期间并发重订阅，验证线程停止与重启
 
 test_capture_screencap（18 项）
   正常路径 / 非方形尺寸 / 连续抓帧不泄 fd /

@@ -139,6 +139,12 @@ function Test-PortTaken {
     foreach ($n in Get-InstanceNames) { if ((Get-InstancePort $n) -eq $P) { return $true } }
     return (Test-InstanceRunning $P)
 }
+function Get-InstanceNamesForPort {
+    param([int]$P)
+    foreach ($n in Get-InstanceNames) {
+        if ((Get-InstancePort $n) -eq $P) { $n }
+    }
+}
 function New-FreePort {
     $p = $script:PortBase
     while ($p -lt 5700) {

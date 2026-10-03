@@ -74,7 +74,7 @@ SocketServer::SocketServer(SocketServer&& other) noexcept
       : path_(std::move(other.path_)),
         initSocketName_(std::move(other.initSocketName_)),
         listenFd_(other.listenFd_),
-        stop_(other.stop_),
+        stop_(other.stop_.load()),
         ownsPath_(other.ownsPath_) {
     // 转移所有权，避免 other 析构时关掉我们正在用的 fd / unlink 路径
     other.listenFd_ = -1;
@@ -90,7 +90,7 @@ SocketServer& SocketServer::operator=(SocketServer&& other) noexcept {
         path_           = std::move(other.path_);
         initSocketName_ = std::move(other.initSocketName_);
         listenFd_       = other.listenFd_;
-        stop_           = other.stop_;
+        stop_.store(other.stop_.load());
         ownsPath_       = other.ownsPath_;
 
         other.listenFd_ = -1;
@@ -192,7 +192,7 @@ bool SocketServer::Start(std::string* error) {
 }
 
 void SocketServer::Stop() {
-    stop_ = true;
+    stop_.store(true);
     if (listenFd_ >= 0) {
         // shutdown 让阻塞中的 accept 返回，避免依赖超时轮询
         shutdown(listenFd_, SHUT_RDWR);
@@ -213,11 +213,11 @@ void SocketServer::Run(const RequestHandler& handler) {
     // 所以：同一种错误连续出现就退避，并只报一次"这条路走不通"，
     // 让失败**显式**而不是变成饥饿。
     int consecutiveErrors = 0;
-    while (!stop_) {
+    while (!stop_.load()) {
         int connFd = accept4(listenFd_, nullptr, nullptr, SOCK_CLOEXEC);
         if (connFd < 0) {
             if (errno == EINTR) continue;
-            if (stop_) break;
+            if (stop_.load()) break;
             if (++consecutiveErrors <= 3) {
                 ALOGE("remote-control: accept 失败: %s", strerror(errno));
             } else if (consecutiveErrors == 4) {
@@ -278,7 +278,7 @@ void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
         //     - 或校验 cred.uid 是否在允许列表内，否则直接拒绝
     }
 
-    while (!stop_) {
+    while (!stop_.load()) {
         Request req{};
         std::string payload;
         int reqFd = -1;
@@ -330,6 +330,34 @@ int SocketServer::RecvRequest(int connFd, Request* out, std::string* payload,
         n = recvmsg(connFd, &msg, 0);
     } while (n < 0 && errno == EINTR);
 
+    int receivedFd = -1;
+    if (n >= 0) {
+        // 收到的 fd 必须先接管，再处理短包/控制数据截断等错误返回；
+        // 否则内核已安装到本进程的 SCM_RIGHTS fd 会泄漏。
+        for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg;
+             cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+            if (cmsg->cmsg_level != SOL_SOCKET ||
+                cmsg->cmsg_type != SCM_RIGHTS ||
+                cmsg->cmsg_len < CMSG_LEN(0)) {
+                continue;
+            }
+            const size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+            const int* fds = reinterpret_cast<const int*>(CMSG_DATA(cmsg));
+            for (size_t i = 0; i < count; ++i) {
+                if (receivedFd < 0) {
+                    receivedFd = fds[i];
+                } else {
+                    ALOGW("remote-control: 一次只接受一个 fd，丢弃 fd=%d", fds[i]);
+                    close(fds[i]);
+                }
+            }
+        }
+    }
+    struct ReceivedFdGuard {
+        int* fd;
+        ~ReceivedFdGuard() { if (*fd >= 0) close(*fd); }
+    } receivedFdGuard{&receivedFd};
+
     if (n == 0) return -1;                       // 对端正常关闭
 
     // SO_RCVTIMEO 到期会返回 EAGAIN/EWOULDBLOCK —— 对端连上但不发数据。
@@ -340,27 +368,14 @@ int SocketServer::RecvRequest(int connFd, Request* out, std::string* payload,
     }
 
     if (n < 0) return errno;
+    if (msg.msg_flags & MSG_CTRUNC) return EMSGSIZE;
     if (static_cast<size_t>(n) < sizeof(Request)) return EMSGSIZE;
-
-    // 收 fd：最多留一个（第一条消息里的第一个），其余关掉
-    for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg;
-         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
-        const size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-        const int* fds = reinterpret_cast<const int*>(CMSG_DATA(cmsg));
-        for (size_t i = 0; i < count; ++i) {
-            if (*outFd < 0) {
-                *outFd = fds[i];
-            } else {
-                ALOGW("remote-control: 一次只接受一个 fd，丢弃 fd=%d", fds[i]);
-                close(fds[i]);
-            }
-        }
-    }
 
     memcpy(out, buf.data(), sizeof(Request));
     const size_t payloadLen = static_cast<size_t>(n) - sizeof(Request);
     if (payloadLen > 0) payload->assign(buf.data() + sizeof(Request), payloadLen);
+    *outFd = receivedFd;
+    receivedFd = -1;
     return 0;
 }
 

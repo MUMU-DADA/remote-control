@@ -200,7 +200,9 @@ check("注入 RECENTS 键", st == 200 and d.get("ok"), str(d)[:60])
 print("\n\033[1;34m[5] 应用管理（pm/am 是 shell 脚本，曾经整类失效）\033[0m")
 st, d = req("/api/v1/apps")
 apps = d.get("apps") or d.get("packages") or []
-check("列出应用", st == 200 and len(apps) > 0, f"{len(apps)} 个")
+check("列出应用", st == 200 and isinstance(apps, list) and
+      d.get("count") == len(apps),
+      f"{len(apps)} 个（干净 ROM 允许为 0）")
 st, d = req("/api/v1/foreground")
 fg = d.get("package") or d.get("foreground") or d.get("pkg") or ""
 check("取前台应用", st == 200 and bool(fg), str(fg)[:60])

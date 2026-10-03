@@ -63,6 +63,8 @@ int32_t ScaleToRange(float normalized, int32_t maxValue) {
 
 class UinputInjector final : public InjectorBackend {
   public:
+    ~UinputInjector() override { Close(); }
+
     const char* Name() const override { return "uinput"; }
 
     bool Open(const InjectorConfig& config, std::string* error) override;
@@ -81,6 +83,7 @@ class UinputInjector final : public InjectorBackend {
     int ActiveSlotCount() const;
 
     int      fd_             = -1;
+    bool     deviceCreated_  = false;
     uint32_t rangeX_         = 0;   // ABS_MT_POSITION_X 的 maximum
     uint32_t rangeY_         = 0;
     int32_t  nextTrackingId_ = 1;
@@ -93,6 +96,7 @@ class UinputInjector final : public InjectorBackend {
 // ---------------------------------------------------------------------------
 
 bool UinputInjector::Open(const InjectorConfig& config, std::string* error) {
+    Close();
     for (int i = 0; i < kMaxSlots; ++i) slotOwner_[i] = -1;
 
     const uint32_t w = config.touchWidth  ? config.touchWidth  : kDefaultRange + 1;
@@ -183,6 +187,7 @@ bool UinputInjector::Open(const InjectorConfig& config, std::string* error) {
         if (error) *error = ErrnoString("UI_DEV_CREATE");
         return false;
     }
+    deviceCreated_ = true;
 
     // 等待系统枚举新设备
     usleep(kSettleUs);
@@ -194,10 +199,11 @@ bool UinputInjector::Open(const InjectorConfig& config, std::string* error) {
 
 void UinputInjector::Close() {
     if (fd_ >= 0) {
-        ioctl(fd_, UI_DEV_DESTROY);
+        if (deviceCreated_) ioctl(fd_, UI_DEV_DESTROY);
         close(fd_);
         fd_ = -1;
     }
+    deviceCreated_ = false;
     for (int i = 0; i < kMaxSlots; ++i) slotOwner_[i] = -1;
 }
 

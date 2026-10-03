@@ -44,14 +44,22 @@ Assert-Adb
 if ($Port -le 0) { $Port = Get-InstancePort $Name }
 if ($Port -le 0) { $Port = New-FreePort }
 if ($Port % 2 -ne 0) { Die "端口必须是偶数：$Port（模拟器拿 port+1 当 console 口）" }
+$owners = @(Get-InstanceNamesForPort $Port)
+if ($owners.Count -gt 0 -and ($owners.Count -ne 1 -or $owners[0] -ne $Name)) {
+    $ownerText = $owners -join ", "
+    Die "端口 $Port 已登记给实例 '$ownerText'；不能让 '$Name' 覆盖它（.\bin\status.ps1 查看实例）"
+}
 if (Test-InstanceRunning $Port) { Die "端口 $Port 已经有模拟器在跑（.\bin\status.ps1 看是谁）" }
-Register-Instance $Name $Port
-
 $serial  = Get-Serial  $Port
 $sysdir  = Get-SysDir  $Port
 $datadir = Get-DataDir $Port
 $logf    = Get-LogFile $Port
 $errf    = Get-ErrFile $Port
+$registeredPort = Get-InstancePort $Name
+if ($registeredPort -ne $Port -and ((Test-Path $sysdir) -or (Test-Path $datadir))) {
+    Die "端口 $Port 的工作目录已存在但不属于实例 '$Name'：$sysdir / $datadir；拒绝覆盖未登记数据"
+}
+Register-Instance $Name $Port
 
 # ---------------------------------------------------------------------------
 # 前置自检

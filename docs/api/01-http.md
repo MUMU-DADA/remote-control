@@ -34,8 +34,14 @@
 | 404 | 找不到 | `kErrNotFound` |
 | 500 | 服务端内部错 | 其他 |
 | 501 | 这台设备/这个构建不支持 | `kErrUnsupported` |
-| 503 | **服务被软开关关掉了** | — |
+| 503 | **服务被软开关关掉了**，或 HTTP 并发连接已达上限 | — |
 | 504 | 超时 | `kErrTimeout` |
+
+### 并发连接
+
+HTTP 服务默认最多保留 128 条并发连接。连接从 `accept` 后立即占用名额，
+直到请求、处理器或 WebSocket 流结束；慢速请求头也计入上限。超限时新连接
+收到 `503 Service Unavailable` 和 `Retry-After: 1`，客户端稍后重试即可。
 
 ### 鉴权
 
@@ -398,10 +404,10 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 |---|---|
 | `png/jpeg/webp/raw` | 各格式可用吗 |
 | `h264` / `h264Max` / `h264Used` | H.264 可用性、并发上限、当前占用 |
-| `backend` | `AndroidBitmap_compress`（快）或 `libjpeg/libpng`（回退） |
+| `backend` | 按格式列出当前实际后端，例如 `jpeg=AndroidBitmap_compress + webp=libwebp（内置） + png=zlib PNG`；JPEG/WebP 是否可用取决于系统 API 与编码库 |
 | `forced` | 是否被 `REMOTE_CONTROL_IMAGE_BACKEND` 强制指定 |
 
-`nativeCodecs: false` 表示这台设备只有 PNG（没有 JPEG/WebP）。
+`nativeCodecs` 只表示 Android `AndroidBitmap_compress` 原生路径是否可用，不代表格式能力。格式支持以 `codecs.jpeg/webp/png` 为准：WebP 可由内置 libwebp 提供，PNG 可由 zlib 提供；没有原生路径或 JPEG 库时，JPEG 仍可能不可用。
 
 
 ---
@@ -882,8 +888,9 @@ curl -X POST 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
 早先这里写死 64 MB，稍大的 APK 直接 `413`，网页表现就是"传不上去"。
 现在上限只受磁盘约束；真的超了会明确回 413 并带上上限值。
 
-上传完成后文件**成功失败都会删**（那是个几百 MB 的临时文件，留着没人清）。
-`?keep=1` 可以保留，调试用。
+HTTP 接收用的 spool 临时文件会在请求处理结束后删除，包括处理成功和失败；
+处理器只在请求期间使用这个路径。安装流程另有一个暂存 APK：默认安装结束后删除，
+`?keep=1` 只保留这份安装暂存文件，便于调试，不会保留 HTTP spool 文件。
 
 ### POST /download
 

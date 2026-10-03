@@ -174,9 +174,13 @@ chk("touchWidth" in t01 and "ABS" in t01,
     "01-http.md 里说明了触控空间是 ABS 范围")
 
 print("\n[10] 编码器逐格式上报（01-http.md）")
-be = pm.get("codecs", {}).get("backend", "")
-chk("jpeg=" in be and "webp=" in be and "png=" in be,
-    "codecs.backend 逐格式上报", f"实际 {be!r}")
+codecs = pm.get("codecs", {})
+be = codecs.get("backend", "")
+supported_formats = [fmt for fmt in ("jpeg", "webp", "png")
+                     if codecs.get(fmt) is True]
+chk(all(f"{fmt}=" in be for fmt in supported_formats),
+    "codecs.backend 覆盖所有可用格式",
+    f"可用格式 {supported_formats}，实际 {be!r}")
 
 print("\n[11] 文档内部的链接都能解析")
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")

@@ -130,6 +130,13 @@ echo "── [2] 平台与 ROM 配套（四种组合）"
 # =============================================================================
 mk_fake_rom() {   # mk_fake_rom <目录> <abilist64>
     local d="$1" abilist="$2"
+    local product lunch
+    if printf '%s' "$abilist" | grep -q x86_64; then
+        product=remote_control_x64_arm64
+    else
+        product=remote_control_arm64
+    fi
+    lunch="$product-userdebug"
     rm -rf "$d"; mkdir -p "$d/system" "$d/vendor"
     for f in system-qemu.img vendor-qemu.img product-qemu.img ramdisk-qemu.img \
              kernel-ranchu encryptionkey.img userdata.img advancedFeatures.ini; do
@@ -137,10 +144,19 @@ mk_fake_rom() {   # mk_fake_rom <目录> <abilist64>
     done
     cp "$X64_DIR/emulator/config.ini" "$d/config.ini"
     { echo "ro.product.cpu.abi=$(printf '%s' "$abilist" | cut -d, -f1)"
+      echo "ro.product.system.device=$product"
+      echo "ro.system.product.cpu.abilist=$abilist"
       echo "ro.system.product.cpu.abilist64=$abilist"
       echo "ro.product.device=fake_device"; } > "$d/system/build.prop"
     ( cd "$d" && find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS )
-    echo "ro.system.build.fingerprint=fake/$abilist:12/TEST/1:userdebug/test-keys" > "$d/MANIFEST.txt"
+    {
+        echo "# lunch 目标：$lunch"
+        echo "# 产品：$product（fixture）"
+        printf '%-32s = %s\n' ro.system.build.fingerprint "fake/$abilist:12/TEST/1:userdebug/test-keys"
+        printf '%-32s = %s\n' ro.product.system.device "$product"
+        printf '%-32s = %s\n' ro.system.product.cpu.abilist "$abilist"
+        printf '%-32s = %s\n' ro.system.product.cpu.abilist64 "$abilist"
+    } > "$d/MANIFEST.txt"
 }
 ROM_ARM="$SANDBOX/rom-arm64";   mk_fake_rom "$ROM_ARM" "arm64-v8a"
 ROM_X86="$SANDBOX/rom-x86_64";  mk_fake_rom "$ROM_X86" "x86_64,arm64-v8a"
@@ -183,12 +199,14 @@ echo
 echo "── [3] 真跑 release.sh 打 darwin 包（假 zip，离线）"
 # =============================================================================
 make_fake_emu_zip() {   # <输出> <宿主架构> <启动器>
-    local out="$1" arch="$2" launcher="$3" d="$SANDBOX/mkemu-a"
-    rm -rf "$d"; mkdir -p "$d/emulator/qemu/darwin-$arch" "$d/emulator/qemu/darwin-otherarch"
+    local out="$1" arch="$2" launcher="$3" d="$SANDBOX/mkemu-a" backend_dir
+    backend_dir="darwin-$arch"
+    [ "$arch" = x64 ] && backend_dir=darwin-x86_64
+    rm -rf "$d"; mkdir -p "$d/emulator/qemu/$backend_dir" "$d/emulator/qemu/darwin-otherarch"
     printf '#!/bin/sh\necho fake emulator\n' > "$d/emulator/$launcher"; chmod +x "$d/emulator/$launcher"
     local be="qemu-system-aarch64-headless"
     [ "$arch" = x64 ] && be="qemu-system-x86_64-headless"
-    printf 'fake\n' > "$d/emulator/qemu/darwin-$arch/$be"; chmod +x "$d/emulator/qemu/darwin-$arch/$be"
+    printf 'fake\n' > "$d/emulator/qemu/$backend_dir/$be"; chmod +x "$d/emulator/qemu/$backend_dir/$be"
     printf 'fake\n' > "$d/emulator/qemu/darwin-otherarch/qemu-system-other-headless"
     printf 'Pkg.Revision=0.0.0-test\nPkg.BuildId=999999\n' > "$d/emulator/source.properties"
     ( cd "$d" && zip -qr "$out" . )
@@ -241,6 +259,9 @@ print(d.get("platform",""), r.get("backend",""))
 ' "$DROOT/RELEASE.json" 2>/dev/null)"
     has "RELEASE.json 平台" "$RJ" "darwin-aarch64"
     has "RELEASE.json 后端是 darwin-aarch64" "$RJ" "emulator/qemu/darwin-aarch64/qemu-system-aarch64-headless"
+    RJ_META="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));r=d["rom"];e=d["entrypoints"];print("|".join([r["product"],r["lunch"],r["abilist"],e["start"],e["stop"],e["status"],e["verify"]]))' "$DROOT/RELEASE.json")"
+    has "Apple Silicon RELEASE.json 使用 arm64 ROM 身份与 shell 入口" "$RJ_META" \
+        "remote_control_arm64|remote_control_arm64-userdebug|arm64-v8a|bin/start-headless.sh|bin/stop.sh|bin/status.sh|bin/verify.sh"
 
     # START-HERE：占位符全替换 + 命令是 bash + 第 6 节按产品类型渲染
     SH="$(cat "$DROOT/START-HERE.md")"
@@ -251,6 +272,28 @@ print(d.get("platform",""), r.get("backend",""))
     has "START-HERE 第 6 节：ABI 只有 arm64-v8a" "$SH" "本 ROM 是 \`arm64-v8a\`"
     has "START-HERE 平台提示：Apple Silicon" "$SH" "Apple Silicon"
     has "START-HERE 验收描述已平台无关" "$SH" "宿主 / 产品类型 / 服务产物架构"
+fi
+
+# Intel Mac 的 Darwin 包使用 x86_64 ROM 和同名 shell 入口，也必须准确记录其 ROM 身份。
+make_fake_emu_zip "$SANDBOX/emu-darwin-x64.zip" x64 emulator
+RELEASE_STAGE_DIR="$SANDBOX/stage-x64" RELEASE_CACHE_DIR="$SANDBOX/cache" \
+  bash "$X64_DIR/scripts/release.sh" --platform darwin-x86_64 --version mactest \
+    --images "$ROM_X86" --out "$SANDBOX/release-x64" --no-download \
+    --darwin-emulator-zip "$SANDBOX/emu-darwin-x64.zip" \
+    --darwin-platform-tools-zip "$SANDBOX/pt-darwin.zip" \
+    > "$SANDBOX/darwin-x64.log" 2>&1
+if [ $? -eq 0 ]; then okc "release.sh --platform darwin-x86_64 跑通"; else
+    badc "release.sh --platform darwin-x86_64 失败"; tail -12 "$SANDBOX/darwin-x64.log" | sed 's/^/      /' >&2
+fi
+XZIP="$(ls "$SANDBOX/release-x64"/*darwin-x86_64*.zip 2>/dev/null | head -1)"
+if [ -n "$XZIP" ]; then
+    mkdir -p "$SANDBOX/dxx"; ( cd "$SANDBOX/dxx" && unzip -q "$XZIP" )
+    XROOT="$(ls -d "$SANDBOX/dxx"/autosnap-* | head -1)"
+    XMETA="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));r=d["rom"];e=d["entrypoints"];print("|".join([r["product"],r["lunch"],r["abilist"],e["start"],e["stop"],e["status"],e["verify"]]))' "$XROOT/RELEASE.json")"
+    has "Intel Mac RELEASE.json 使用 x86_64 ROM 身份与 shell 入口" "$XMETA" \
+        "remote_control_x64_arm64|remote_control_x64_arm64-userdebug|x86_64,arm64-v8a|bin/start-headless.sh|bin/stop.sh|bin/status.sh|bin/verify.sh"
+else
+    badc "没产出 darwin-x86_64 zip"
 fi
 
 # =============================================================================

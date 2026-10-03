@@ -8,7 +8,11 @@
 #include "test_util.h"
 
 #include <cstdio>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 #include <string>
+#include <vector>
 
 using namespace remote_control;
 using namespace remote_control_test;
@@ -82,6 +86,71 @@ void TestHandshake() {
           "解出 15 字节（不足 16）—— 被拒");
 }
 
+void TestCloseHandshake() {
+    printf("\n\033[1;34m[4] close 握手\033[0m\n");
+    int fds[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        Check(false, "创建 socketpair");
+        return;
+    }
+    timeval timeout{};
+    timeout.tv_sec = 2;
+    setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    // 客户端 close 帧（code 1000 + reason "bye"），按 RFC 6455 掩码。
+    const uint8_t maskedClose[] = {0x88, 0x85, 1, 2, 3, 4,
+                                   2, 234, 97, 125, 100};
+    const ssize_t sent = write(fds[0], maskedClose, sizeof(maskedClose));
+    WsFrame frame;
+    std::string error;
+    const bool gotFrame = WsReadFrame(fds[1], &frame, &error);
+
+    uint8_t response[7]{};
+    size_t received = 0;
+    while (received < sizeof(response)) {
+        const ssize_t n = read(fds[0], response + received,
+                               sizeof(response) - received);
+        if (n <= 0) break;
+        received += static_cast<size_t>(n);
+    }
+    Check(sent == static_cast<ssize_t>(sizeof(maskedClose)),
+          "发送客户端 close 帧");
+    Check(!gotFrame && error.empty(), "close 帧正常结束读取");
+    Check(received == sizeof(response) && response[0] == 0x88 &&
+                  response[1] == 5 && response[2] == 3 && response[3] == 232 &&
+                  response[4] == 'b' && response[5] == 'y' && response[6] == 'e',
+          "服务端返回相同 close code 和 reason");
+    close(fds[0]);
+    close(fds[1]);
+}
+
+void TestInvalidCloseFrames() {
+    printf("\n\033[1;34m[5] 非法 close 控制帧\033[0m\n");
+    const std::vector<std::vector<uint8_t>> frames = {
+        {0x08, 0x80, 1, 2, 3, 4},
+        {0x88, 0x81, 1, 2, 3, 4, 1},
+        {0x88, 0xFE, 1, 2, 3, 4, 0, 126},
+    };
+    const char* labels[] = {"拒绝分片 close 帧", "拒绝 1 字节 close 载荷",
+                            "拒绝超过 125 字节的 close 载荷"};
+    for (size_t i = 0; i < frames.size(); ++i) {
+        int fds[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            Check(false, "创建 socketpair");
+            return;
+        }
+        const ssize_t sent = write(fds[0], frames[i].data(), frames[i].size());
+        WsFrame frame;
+        std::string error;
+        const bool accepted = WsReadFrame(fds[1], &frame, &error);
+        Check(sent == static_cast<ssize_t>(frames[i].size()) && !accepted &&
+                      !error.empty(),
+              "%s", labels[i]);
+        close(fds[0]);
+        close(fds[1]);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -89,5 +158,7 @@ int main() {
     TestSha1();
     TestBase64();
     TestHandshake();
+    TestCloseHandshake();
+    TestInvalidCloseFrames();
     return Summary("WebSocket");
 }

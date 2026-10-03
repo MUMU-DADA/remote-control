@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <string>
 
 namespace remote_control {
@@ -20,7 +21,7 @@ class PngEncoder {
 
     // 尝试加载 zlib。失败时 Available() 为 false。
     bool Init(std::string* error);
-    bool Available() const { return handle_ != nullptr; }
+    bool Available() const { return available_.load(std::memory_order_acquire); }
 
     // 把 RGBA_8888 像素编成 PNG。
     //
@@ -32,7 +33,7 @@ class PngEncoder {
   private:
     PngEncoder() = default;
 
-    void* handle_ = nullptr;
+    std::atomic<bool> available_{false};
 };
 
 }  // namespace remote_control

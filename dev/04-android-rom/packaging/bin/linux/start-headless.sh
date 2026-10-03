@@ -56,15 +56,22 @@ esac
 if [ $((PORT % 2)) -ne 0 ]; then
     die "端口必须是偶数：$PORT（模拟器拿 port+1 当 console 口）"
 fi
+OWNED_PORTS="$(instance_names_for_port "$PORT")"
+if [ -n "$OWNED_PORTS" ] && [ "$OWNED_PORTS" != "$NAME" ]; then
+    die "端口 $PORT 已登记给实例 '$OWNED_PORTS'；不能让 '$NAME' 覆盖它（./bin/status.sh 查看实例）"
+fi
 if port_listening "$PORT"; then
     die "端口 $PORT 已经有模拟器在跑（./bin/status.sh 看是谁）"
 fi
-instance_register "$NAME" "$PORT"
-
 SERIAL="$(serial_for_port "$PORT")"
 SYSDIR="$(sysdir_for_port "$PORT")"
 DATADIR="$(datadir_for_port "$PORT")"
 LOGF="$(logfile_for_port "$PORT")"
+REGISTERED_PORT="$(instance_port "$NAME")"
+if [ "$REGISTERED_PORT" != "$PORT" ] && { [ -e "$SYSDIR" ] || [ -L "$SYSDIR" ] || [ -e "$DATADIR" ] || [ -L "$DATADIR" ]; }; then
+    die "端口 $PORT 的工作目录已存在但不属于实例 '$NAME'：$SYSDIR / $DATADIR；拒绝覆盖未登记数据"
+fi
+instance_register "$NAME" "$PORT"
 
 # ---------------------------------------------------------------------------
 # 前置自检：这四件事任一不满足，起不来或者起得很痛苦

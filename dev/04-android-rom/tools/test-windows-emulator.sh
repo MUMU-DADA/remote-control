@@ -56,6 +56,17 @@ rm -rf "$SANDBOX"; mkdir -p "$SANDBOX/win" "$SANDBOX/emulator"
 cp "$X64_DIR/emulator/config.ini" "$SANDBOX/emulator/config.ini"
 cp "$X64_DIR/windows/emulator.ps1" "$SANDBOX/win/emulator.ps1"
 
+config_value() {
+    awk -F= -v key="$1" '$1 == key { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' \
+        "$X64_DIR/emulator/config.ini"
+}
+CONFIG_MEMORY_MB="$(config_value hw.ramSize)"
+CONFIG_CORES="$(config_value hw.cpu.ncore)"
+[ -n "$CONFIG_MEMORY_MB" ] && [ -n "$CONFIG_CORES" ] || {
+    echo "[x] config.ini 缺少 hw.ramSize 或 hw.cpu.ncore"
+    exit 1
+}
+
 # 假的 images\：几个"镜像"文件 + 一个目录（目录在真环境里是 system\ / vendor\）
 mkdir -p "$SANDBOX/win/images/system"
 for f in system-qemu.img vendor-qemu.img userdata.img kernel-ranchu initrd config.ini; do
@@ -88,7 +99,7 @@ CREATE_OUT="$(ps create default 2>&1)"
 printf '%s' "$CREATE_OUT" | grep -q "1280x720 @320dpi  横屏" \
     && { printf '  \033[1;32m✓\033[0m %s\n' "create 打印 1280x720 @320dpi 横屏"; pass=$((pass+1)); } \
     || { printf '  \033[1;31m✗\033[0m %s\n' "create 打印 1280x720 @320dpi 横屏"; fail=$((fail+1)); }
-printf '%s' "$CREATE_OUT" | grep -q "8192 MB / 4 核" \
+printf '%s' "$CREATE_OUT" | grep -q "${CONFIG_MEMORY_MB} MB / ${CONFIG_CORES} 核" \
     && { printf '  \033[1;32m✓\033[0m %s\n' "create 打印内存/核数（都来自 config.ini）"; pass=$((pass+1)); } \
     || { printf '  \033[1;31m✗\033[0m %s\n' "create 打印内存/核数（都来自 config.ini）"; fail=$((fail+1)); }
 printf '%s' "$CREATE_OUT" | grep -q "32G" \
@@ -96,7 +107,7 @@ printf '%s' "$CREATE_OUT" | grep -q "32G" \
     || { printf '  \033[1;31m✗\033[0m %s\n' "create 打印数据分区 32G"; fail=$((fail+1)); }
 chk "default 的端口是 5580" test "$(port_of default)" = "5580"
 chk_out "create dev2" "已创建" ps create dev2
-chk_out "status dev2 读到真源的 8192" "8192" ps status dev2
+chk_out "status dev2 读到真源的 ${CONFIG_MEMORY_MB}" "$CONFIG_MEMORY_MB" ps status dev2
 chk "实例登记文件在" test -s "$SANDBOX/win/.run/instances/dev2.env"
 chk "dev2 分到 5582（5580 被 default 占了）" test "$(port_of dev2)" = "5582"
 chk "登记文件里 PORT= 一行是对的" grep -q "^PORT=5582" "$SANDBOX/win/.run/instances/dev2.env"
@@ -116,9 +127,9 @@ echo
 echo "── [2] list / status"
 chk_out "list 里有 dev2 和端口" "dev2" ps list
 chk_out "list 显示已停止" "已停止" ps list
-chk_out "status 读到真源的 8192" "8192" ps status dev2
+chk_out "status 读到真源的 ${CONFIG_MEMORY_MB}" "$CONFIG_MEMORY_MB" ps status dev2
 chk_out "status 读到真源的 32G" "32G" ps status dev2
-chk_out "status 读到真源的 4 核" "hw.cpu.ncore             4" ps status dev2
+chk_out "status 读到真源的 ${CONFIG_CORES} 核" "hw.cpu.ncore             ${CONFIG_CORES}" ps status dev2
 
 echo
 echo "── [3] clone（连状态一起复制）"

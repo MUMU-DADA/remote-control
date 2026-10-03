@@ -42,6 +42,47 @@ constexpr int kReadTimeoutSec = 30;
 constexpr int kSendTimeoutSec = 10;
 constexpr size_t kMaxHeaderBytes = 64 * 1024;
 
+thread_local HttpServer* gActiveHttpServer = nullptr;
+thread_local int gActiveHttpFd = -1;
+
+bool HasConnectionsExcept(const std::set<int>& fds, int exceptFd) {
+    for (int fd : fds) {
+        if (fd != exceptFd) return true;
+    }
+    return false;
+}
+
+struct ScopedTempFile {
+    int fd = -1;
+    std::string path;
+
+    ~ScopedTempFile() {
+        if (fd >= 0) close(fd);
+        if (!path.empty()) unlink(path.c_str());
+    }
+
+    void KeepPath() { path.clear(); }
+};
+
+bool WriteAll(int fd, const void* data, size_t size) {
+    const char* p = static_cast<const char*>(data);
+    while (size > 0) {
+        const ssize_t n = write(fd, p, size);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        p += n;
+        size -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+ssize_t SendNoSignal(int fd, const void* data, size_t size) {
+    return send(fd, data, size, MSG_NOSIGNAL);
+}
+
 std::string ToLower(const std::string& s) {
     std::string out = s;
     for (char& c : out) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
@@ -300,7 +341,7 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     }
 
     listenFd_ = fd;
-    stop_ = false;
+    stop_.store(false);
     ALOGI("HTTP API 就绪: http://%s:%u/（%s）", bindAddr_.c_str(), port_,
           token_.empty() ? "无鉴权" : "需要访问令牌");
     return true;
@@ -385,7 +426,7 @@ int HttpServer::KickAllConnections(const char* reason, int timeoutMs,
     while (waited < timeoutMs) {
         {
             std::lock_guard<std::mutex> lk(connMutex_);
-            if (connFds_.empty()) break;
+            if (!HasConnectionsExcept(connFds_, exceptFd)) break;
         }
         usleep(stepMs * 1000);
         waited += stepMs;
@@ -394,7 +435,7 @@ int HttpServer::KickAllConnections(const char* reason, int timeoutMs,
     size_t left = 0;
     {
         std::lock_guard<std::mutex> lk(connMutex_);
-        left = connFds_.size();
+        for (int fd : connFds_) if (fd != exceptFd) ++left;
     }
     ALOGI("终止了 %zu 条连接（%s），等了 %d ms%s", n - left,
           reason != nullptr ? reason : "", waited,
@@ -411,61 +452,93 @@ void HttpServer::SetTokenProvider(std::function<std::string()> fn) {
 }
 
 void HttpServer::Stop() {
-    stop_ = true;
+    stop_.store(true);
+    const int callerFd = gActiveHttpServer == this ? gActiveHttpFd : -1;
 
-    // 先把活跃连接踢掉，再关监听 fd。
+    // 先关监听，再把活跃连接踢掉。
     //
     // 顺序很重要：流式响应（MJPEG / WebSocket）的回调会一直循环到
     // write 失败为止。不主动 shutdown 的话，客户端不松手它们就永远
     // 不退出，而 main() 随后就会析构 Dispatcher —— 那些线程再去碰
     // 它的操作锁就是一个已销毁的互斥量。
-    KickAllConnections("服务关闭");
-
-    if (listenFd_ >= 0) {
-        shutdown(listenFd_, SHUT_RDWR);
-        close(listenFd_);
-        listenFd_ = -1;
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        if (listenFd_ >= 0) {
+            shutdown(listenFd_, SHUT_RDWR);
+            close(listenFd_);
+            listenFd_ = -1;
+        }
     }
+
+    KickAllConnections("服务关闭", 600, callerFd);
+
+    // Shutdown 中断读写，但不能取消已经进入 handler 的调用。等连接
+    // worker 全部退出，调用方才可以安全析构它们可能引用的服务对象。
+    // 若 Stop 从当前连接的 handler 调用，当前 worker 必须先从 handler 返回，
+    // 因此此处只等待其他连接，避免等待自己退出。
+    std::unique_lock<std::mutex> lk(connMutex_);
+    connCv_.wait(lk, [this, callerFd] {
+        return !HasConnectionsExcept(connFds_, callerFd);
+    });
 }
 
 void HttpServer::Run(const HttpHandler& handler) {
-    while (!stop_) {
+    while (!stop_.load()) {
         sockaddr_in peer{};
         socklen_t peerLen = sizeof(peer);
-        const int connFd = accept4(listenFd_, reinterpret_cast<sockaddr*>(&peer),
+        int acceptFd = -1;
+        {
+            std::lock_guard<std::mutex> lk(connMutex_);
+            if (stop_.load() || listenFd_ < 0) break;
+            acceptFd = fcntl(listenFd_, F_DUPFD_CLOEXEC, 0);
+        }
+        if (acceptFd < 0) {
+            if (stop_.load()) break;
+            ALOGW("HTTP 监听 fd 复制失败: %s", strerror(errno));
+            continue;
+        }
+        const int connFd = accept4(acceptFd,
+                                   reinterpret_cast<sockaddr*>(&peer),
                                    &peerLen, SOCK_CLOEXEC);
+        close(acceptFd);
         if (connFd < 0) {
             if (errno == EINTR) continue;
-            if (stop_) break;
+            if (stop_.load()) break;
             ALOGW("HTTP accept 失败: %s", strerror(errno));
             continue;
         }
 
-        // 并发连接上限。**每连接一线程** —— 没有上限的话，一个客户端
-        // 狂开连接就能把线程和 fd 耗光（实测原本确实没有上限）。
-        // 超限时明确回 503 再关，比默默排队或直接崩要好排查。
+        // 连接从 accept 起就占用额度，并进入 Stop 的关闭集合；否则慢速
+        // 请求头可先占满线程，却不计入连接上限，也无法被 Stop 关掉。
+        bool reserved = false;
+        bool stopping = false;
         {
-            size_t n = 0;
-            {
-                std::lock_guard<std::mutex> lk(connMutex_);
-                n = connFds_.size();
+            std::lock_guard<std::mutex> lk(connMutex_);
+            stopping = stop_.load();
+            if (!stopping && connFds_.size() < maxConns_) {
+                connFds_.insert(connFd);
+                reserved = true;
             }
-            if (n >= maxConns_) {
-                ALOGW("HTTP 连接数已达上限 %zu，拒绝新连接", maxConns_);
-                const char* body =
-                    "{\"ok\":false,\"error\":\"并发连接数已达上限，稍后重试\"}";
-                std::string head =
-                    std::string("HTTP/1.1 503 Service Unavailable\r\n"
-                                "Content-Type: application/json; charset=utf-8\r\n"
-                                "Retry-After: 1\r\n"
-                                "Content-Length: ") +
-                    std::to_string(strlen(body)) +
-                    "\r\nConnection: close\r\n\r\n" + body;
-                ssize_t ig = write(connFd, head.data(), head.size());
-                (void)ig;
+        }
+        if (!reserved) {
+            if (stopping) {
                 close(connFd);
-                continue;
+                break;
             }
+            ALOGW("HTTP 连接数已达上限 %zu，拒绝新连接", maxConns_);
+            const char* body =
+                "{\"ok\":false,\"error\":\"并发连接数已达上限，稍后重试\"}";
+            std::string head =
+                std::string("HTTP/1.1 503 Service Unavailable\r\n"
+                            "Content-Type: application/json; charset=utf-8\r\n"
+                            "Retry-After: 1\r\n"
+                            "Content-Length: ") +
+                std::to_string(strlen(body)) +
+                "\r\nConnection: close\r\n\r\n" + body;
+            ssize_t ig = SendNoSignal(connFd, head.data(), head.size());
+            (void)ig;
+            close(connFd);
+            continue;
         }
 
         timeval tv{};
@@ -618,32 +691,31 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
     // ⚠️ 阈值判断用的是 **Content-Length**，是客户端说了算的值。
     //    所以落盘这条路也不能让 body 无限增长 —— 往下写多少磁盘就是
     //    多少，最后靠 maxBody_ 兜底（它在上面已经查过了）。
-    const bool spool = (contentLength > spoolThreshold_);
-
-    std::string  spoolPath;
-    int          spoolFd = -1;
-    if (spool) {
-        const std::string dir = spoolDir_.empty() ? "/data/local/tmp"
-                                                  : spoolDir_;
-        spoolPath = dir + "/remote-control-body-" + std::to_string(getpid()) + "-" +
-                    std::to_string(reinterpret_cast<uintptr_t>(out)) + ".tmp";
-        spoolFd = open(spoolPath.c_str(),
-                       O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (spoolFd < 0) {
+    const bool shouldSpool = contentLength > spoolThreshold_;
+    ScopedTempFile spool;
+    if (shouldSpool) {
+        const std::string dir = spoolDir_.empty() ? "/data/local/tmp" : spoolDir_;
+        spool.path = dir + "/remote-control-body-" + std::to_string(getpid()) +
+                     "-XXXXXX";
+        std::vector<char> pathBuf(spool.path.begin(), spool.path.end());
+        pathBuf.push_back('\0');
+        spool.fd = mkstemp(pathBuf.data());
+        if (spool.fd < 0) {
             *errReply = HttpResponse::Error(
-                    500, "无法创建落盘文件 " + spoolPath + ": " +
+                    500, "无法创建落盘文件 " + spool.path + ": " +
                                  strerror(errno));
+            spool.path.clear();
+            return false;
+        }
+        spool.path.assign(pathBuf.data());
+        if (fcntl(spool.fd, F_SETFD, FD_CLOEXEC) < 0) {
+            *errReply = HttpResponse::Error(500, "设置落盘文件标志失败");
             return false;
         }
         // 已经把头部 buf 里带过来的那截正文写进去
-        if (!body.empty()) {
-            if (write(spoolFd, body.data(), body.size()) !=
-                static_cast<ssize_t>(body.size())) {
-                close(spoolFd);
-                unlink(spoolPath.c_str());
-                *errReply = HttpResponse::Error(500, "写落盘文件失败");
-                return false;
-            }
+        if (!body.empty() && !WriteAll(spool.fd, body.data(), body.size())) {
+            *errReply = HttpResponse::Error(500, "写落盘文件失败");
+            return false;
         }
     }
 
@@ -652,29 +724,17 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
         const ssize_t n = read(connFd, tmp, sizeof(tmp));
         if (n < 0) {
             if (errno == EINTR) continue;
-            if (spoolFd >= 0) { close(spoolFd); unlink(spoolPath.c_str()); }
             *errReply = HttpResponse::Error(400, "读请求体失败");
             return false;
         }
         if (n == 0) {
-            if (spoolFd >= 0) { close(spoolFd); unlink(spoolPath.c_str()); }
             *errReply = HttpResponse::Error(400, "请求体不完整");
             return false;
         }
-        if (spoolFd >= 0) {
-            const char* p = tmp;
-            ssize_t left = n;
-            while (left > 0) {
-                const ssize_t w = write(spoolFd, p, static_cast<size_t>(left));
-                if (w < 0) {
-                    if (errno == EINTR) continue;
-                    close(spoolFd);
-                    unlink(spoolPath.c_str());
-                    *errReply = HttpResponse::Error(500, "写落盘文件失败");
-                    return false;
-                }
-                p += w;
-                left -= w;
+        if (spool.fd >= 0) {
+            if (!WriteAll(spool.fd, tmp, static_cast<size_t>(n))) {
+                *errReply = HttpResponse::Error(500, "写落盘文件失败");
+                return false;
             }
         } else {
             body.append(tmp, static_cast<size_t>(n));
@@ -683,10 +743,12 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
     }
 
     out->bodySize = contentLength;
-    if (spoolFd >= 0) {
-        fsync(spoolFd);
-        close(spoolFd);
-        out->bodyFile = spoolPath;
+    if (spool.fd >= 0) {
+        fsync(spool.fd);
+        close(spool.fd);
+        spool.fd = -1;
+        out->bodyFile = spool.path;
+        spool.KeepPath();
         out->body.clear();          // 落盘之后内存里不留
     } else {
         body.resize(contentLength);
@@ -715,8 +777,28 @@ struct ScopeExit {
 }  // namespace
 
 void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
-    // 无论从哪条路径返回（出错 / 流式结束 / 正常写完），
-    // 都要执行一次待办的踢连接。
+    struct ActiveConnectionGuard {
+        HttpServer* previousServer = gActiveHttpServer;
+        int previousFd = gActiveHttpFd;
+        ActiveConnectionGuard(HttpServer* server, int fd) {
+            gActiveHttpServer = server;
+            gActiveHttpFd = fd;
+        }
+        ~ActiveConnectionGuard() {
+            gActiveHttpServer = previousServer;
+            gActiveHttpFd = previousFd;
+        }
+    } activeConnectionGuard{this, connFd};
+    struct ConnGuard {
+        HttpServer* self;
+        int fd;
+        ~ConnGuard() {
+            std::lock_guard<std::mutex> lk(self->connMutex_);
+            self->connFds_.erase(fd);
+            self->connCv_.notify_all();
+        }
+    } connGuard{this, connFd};
+    // Keep the connection registered until deferred kick work is also done.
     ScopeExit kickGuard([this, connFd]() { RunPendingKick(connFd); });
 
     HttpRequest req;
@@ -744,9 +826,9 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
                 "WWW-Authenticate: Bearer realm=\"remote-control\"\r\n"
                 "Content-Length: " + std::to_string(earlyDeny.body.size()) +
                 "\r\nConnection: close\r\n\r\n";
-        if (write(connFd, head.data(), head.size()) > 0) {
-            ssize_t ig = write(connFd, earlyDeny.body.data(),
-                               earlyDeny.body.size());
+        if (SendNoSignal(connFd, head.data(), head.size()) > 0) {
+            ssize_t ig = SendNoSignal(connFd, earlyDeny.body.data(),
+                                      earlyDeny.body.size());
             (void)ig;
         }
         // 正文没读。直接关会让对端收到 RST、可能看不到上面那个 401，
@@ -774,10 +856,15 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
                 "Content-Type: " + errReply.contentType + "\r\n" +
                 "Content-Length: " + std::to_string(errReply.body.size()) + "\r\n" +
                 "Connection: close\r\n\r\n" + errReply.body;
-        ssize_t ignored = write(connFd, head.data(), head.size());
+        ssize_t ignored = SendNoSignal(connFd, head.data(), head.size());
         (void)ignored;
         return;
     }
+
+    struct BodyFileGuard {
+        const std::string& path;
+        ~BodyFileGuard() { if (!path.empty()) unlink(path.c_str()); }
+    } bodyFileGuard{req.bodyFile};
 
     // 鉴权已经在 ReadRequest 的 onHeaders 回调里做完了 —— 那时候
     // 正文还没读，未授权的请求一个字节都不会落盘。
@@ -791,20 +878,6 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
     // 本来就是 abort，catch 也救不回来。
     const HttpResponse resp = handler(req);
 
-    // 登记本连接，让 Stop() 能把它踢掉
-    {
-        std::lock_guard<std::mutex> lk(connMutex_);
-        connFds_.insert(connFd);
-    }
-    struct ConnGuard {
-        HttpServer* self;
-        int fd;
-        ~ConnGuard() {
-            std::lock_guard<std::mutex> lk(self->connMutex_);
-            self->connFds_.erase(fd);
-        }
-    } connGuard{this, connFd};
-
     // ── WebSocket 升级 ──
     //
     // 必须在普通响应分支之前处理：101 响应没有 Content-Length，
@@ -815,7 +888,7 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
                 "Sec-WebSocket-Accept: " + resp.wsAccept + "\r\n\r\n";
-        if (write(connFd, head.data(), head.size()) < 0) return;
+        if (SendNoSignal(connFd, head.data(), head.size()) < 0) return;
 
         // 升级之后这条连接是长连接，不能再让它带着读超时 ——
         // ReadRequest 设了 SO_RCVTIMEO 防"连上不发数据"，但 WebSocket
@@ -869,7 +942,7 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
     head += "\r\n";
 
     // 先发头再发体，避免大响应体在内存里再拼一次
-    if (write(connFd, head.data(), head.size()) < 0) return;
+    if (SendNoSignal(connFd, head.data(), head.size()) < 0) return;
 
     if (resp.isStreaming()) {
         // 交给回调。它自己判断何时停 —— 客户端断开时 write 会失败。
@@ -887,8 +960,8 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
     }
     size_t sent = 0;
     while (sent < resp.body.size()) {
-        const ssize_t n = write(connFd, resp.body.data() + sent,
-                                resp.body.size() - sent);
+        const ssize_t n = SendNoSignal(connFd, resp.body.data() + sent,
+                                       resp.body.size() - sent);
         if (n <= 0) {
             if (n < 0 && errno == EINTR) continue;
             return;

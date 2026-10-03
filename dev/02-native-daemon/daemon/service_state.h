@@ -76,7 +76,7 @@ class ServiceState {
     // 显式指定过 —— 那种情况下不动它（用户自己知道要什么）。
     bool RebuildInjectorForDisplay(uint32_t w, uint32_t h, bool explicitRange,
                                    std::string* error);
-    const InjectorConfig& GetInjectorConfig() const;
+    InjectorConfig GetInjectorConfig() const;
 
     // ── 运行时状态（每次调用重新采集）────────────────────────────────────────
     std::string RuntimeJson() const;

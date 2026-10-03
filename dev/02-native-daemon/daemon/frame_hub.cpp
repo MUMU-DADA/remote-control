@@ -95,6 +95,7 @@ struct FrameHub::Impl {
     uint32_t captureWidth = 0;   // 0 = 原始分辨率
 
     bool threadRunning = false;
+    bool threadStopping = false;
     bool stop          = false;
     std::thread thread;
 
@@ -136,6 +137,19 @@ FrameHub& FrameHub::Instance() {
 }
 
 FrameHub::~FrameHub() {
+    if (impl_ != nullptr) {
+        std::thread toJoin;
+        {
+            std::unique_lock<std::mutex> lk(impl_->mu);
+            impl_->cv.wait(lk, [this] { return !impl_->threadStopping; });
+            impl_->stop = true;
+            impl_->cv.notify_all();
+            if (impl_->thread.joinable()) toJoin = std::move(impl_->thread);
+            impl_->threadRunning = false;
+            impl_->threadStopping = false;
+        }
+        if (toJoin.joinable()) toJoin.join();
+    }
     delete impl_;
 }
 
@@ -167,21 +181,28 @@ FrameHub::Sub::~Sub() {
         im->stats.subscribers = static_cast<int>(im->subFps.size());
         im->stats.maxFps = im->maxFps;
 
-        if (im->subFps.empty() && im->threadRunning) {
+        if (im->subFps.empty() && im->threadRunning && !im->threadStopping) {
             // 最后一个订阅者走了 —— 停线程。
             //
             // 先把它**移出来**，出了作用域再 join：
             // 抓帧线程退出时也要拿这把锁，锁内 join 会死锁。
             im->stop = true;
+            im->threadStopping = true;
             // 比对用的上一帧也放掉 —— 没人在看的时候没必要占着 3.5MB
             im->prev.reset();
             im->cv.notify_all();
             toJoin = std::move(im->thread);
-            im->threadRunning = false;
             ALOGI("抓帧线程停止（没有订阅者了）");
         }
     }
-    if (toJoin.joinable()) toJoin.join();
+    if (toJoin.joinable()) {
+        toJoin.join();
+        std::lock_guard<std::mutex> lk(im->mu);
+        im->threadRunning = false;
+        im->threadStopping = false;
+        im->stats.running = false;
+        im->cv.notify_all();
+    }
 
     if (!peer.empty()) {
         ALOGI("画面流断开 <- %s (id=%llu)", peer.c_str(),
@@ -302,7 +323,10 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, uint32_t maxWidth,
     if (impl_ == nullptr) impl_ = new Impl();
     Impl* im = impl_;
 
-    std::lock_guard<std::mutex> lk(im->mu);
+    std::unique_lock<std::mutex> lk(im->mu);
+    // The last subscriber joins outside mu because the worker needs mu to exit.
+    // Do not let a new subscriber clear stop until that join has completed.
+    im->cv.wait(lk, [im] { return !im->threadStopping; });
 
     if (im->dispatcher == nullptr) {
         if (error) *error = "FrameHub 没有配置 Dispatcher";
@@ -363,13 +387,14 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, uint32_t maxWidth,
 
                 // 序号在持锁时取，保证发布顺序和序号一致
                 const uint64_t seq = im->nextSeq++;
-                lk2.unlock();
-
                 const uint32_t capW = im->captureWidth;
                 const FramePtr prev = im->prev;
                 const uint64_t nextGen = im->changeGen + 1;
+                Dispatcher* dispatcher = im->dispatcher;
+                lk2.unlock();
+
                 const int64_t t0 = NowMs();
-                FramePtr f = CaptureOnce(im->dispatcher, seq, capW, prev, nextGen);
+                FramePtr f = CaptureOnce(dispatcher, seq, capW, prev, nextGen);
                 const int64_t dt = NowMs() - t0;
 
                 lk2.lock();

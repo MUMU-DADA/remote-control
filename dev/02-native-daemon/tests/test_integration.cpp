@@ -15,7 +15,11 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <atomic>
+#include <chrono>
 #include <fcntl.h>
+#include <future>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -25,6 +29,7 @@
 
 #include "../daemon/capture.h"
 #include "../daemon/dispatch.h"
+#include "../daemon/frame_hub.h"
 #include "../daemon/inject.h"
 #include "../daemon/protocol.h"
 #include "../daemon/socket_server.h"
@@ -179,9 +184,9 @@ void TestTapRoundTrip(int cfd, int readFd) {
     Check(Transact(cfd, req, &reply), "socket 往返成功");
     Check(reply.status == kOk, "服务端返回 ok");
 
-    // 轮询等到事件齐，而不是死等固定时长 ——
-    // 构建占满 CPU 时事件到达会被推迟，固定睡眠会造成偶发失败。
-    const auto evs = WaitEvents(readFd, 11, 3000);
+    // 这个 uinput 后端的 tap 在 event 节点读回 8 个事件；等到完整的
+    // down/up 后立即继续，避免测试自身的等待超过 socket 空闲超时。
+    const auto evs = WaitEvents(readFd, 8, 3000);
 
     Check(!evs.empty(), "内核收到了 %zu 个事件", evs.size());
     if (evs.empty()) return;
@@ -257,6 +262,85 @@ void TestProtocolRobustness(int cfd) {
                       reply.status == kOk,
               "经过上述异常后，正常请求仍可处理");
     }
+}
+
+void TestFrameHubStopRestart(Dispatcher& dispatcher, int readFd) {
+    printf("\n\033[1;34m[8] FrameHub 停止与重启\033[0m  最后订阅退出时并发重订阅\n");
+
+    FrameHub& hub = FrameHub::Instance();
+    hub.Configure(&dispatcher);
+
+    Request hold = MakeRequest(Cmd::LongPress);
+    hold.x = 100;
+    hold.y = 100;
+    hold.durationMs = 500;
+    std::thread operation([&] { dispatcher.Handle(hold, "", -1, 0); });
+    const auto touchEvents = WaitEvents(readFd, 1, 3000);
+    const bool operationStarted = CountOf(touchEvents, EV_KEY, BTN_TOUCH, 1) == 1;
+    Check(operationStarted, "长按已进入 Dispatcher 并持有操作锁");
+    if (!operationStarted) {
+        operation.join();
+        return;
+    }
+
+    std::string error;
+    auto oldSub = hub.Subscribe(60, 320, &error);
+    Check(oldSub != nullptr, "抓帧订阅建立%s%s", oldSub ? "" : ": ",
+          oldSub ? "" : error.c_str());
+    if (!oldSub) {
+        operation.join();
+        return;
+    }
+    usleep(50000);  // worker 已发起抓帧，并在 dispatcher 操作锁前等待
+
+    std::atomic<bool> oldSubDestroyed{false};
+    std::thread destroyer([sub = std::move(oldSub), &oldSubDestroyed]() mutable {
+        sub.reset();
+        oldSubDestroyed.store(true, std::memory_order_release);
+    });
+    const auto removeDeadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (hub.GetStats().subscribers != 0 &&
+           std::chrono::steady_clock::now() < removeDeadline) {
+        std::this_thread::yield();
+    }
+    Check(hub.GetStats().subscribers == 0, "最后一个订阅已从 FrameHub 移除");
+
+    auto restarting = std::async(std::launch::async, [&hub, &error] {
+        return hub.Subscribe(60, 320, &error);
+    });
+    const bool waitedForJoin =
+            restarting.wait_for(std::chrono::milliseconds(100)) ==
+            std::future_status::timeout;
+    Check(waitedForJoin, "重订阅等待旧抓帧线程 join 完成");
+
+    operation.join();
+    const auto joinDeadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(3);
+    while (!oldSubDestroyed.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < joinDeadline) {
+        std::this_thread::yield();
+    }
+    if (!oldSubDestroyed.load(std::memory_order_acquire)) {
+        Check(false, "旧订阅在线程停止后完成析构");
+        _Exit(1);  // A hung join would otherwise keep this regression test alive.
+    }
+    destroyer.join();
+    Check(true, "旧订阅在线程停止后完成析构");
+
+    auto newSub = restarting.get();
+    Check(newSub != nullptr, "旧线程退出后新订阅成功");
+    if (newSub) {
+        uint64_t lastSeq = 0;
+        const FramePtr previous = hub.Latest();
+        const uint64_t previousSeq = previous ? previous->seq : 0;
+        const FramePtr frame = newSub->WaitNext(previousSeq, 3000, &lastSeq);
+        Check(frame != nullptr && frame->seq > 0,
+              "重启后的抓帧线程产出新帧（seq=%llu）",
+              static_cast<unsigned long long>(frame ? frame->seq : 0));
+        newSub.reset();
+    }
+    Check(!hub.GetStats().running, "所有订阅退出后抓帧线程停止");
 }
 
 // 数当前进程打开的 fd 数量
@@ -461,6 +545,7 @@ int main() {
 
     TestInfo(cfd);
     TestCaptureFrame(cfd);
+    TestFrameHubStopRestart(dispatcher, readFd);
     TestTapRoundTrip(cfd, readFd);
     TestSwipeRoundTrip(cfd, readFd);
     TestProtocolRobustness(cfd);

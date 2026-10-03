@@ -96,7 +96,7 @@ verify_dest_allowlist() {
     其中 userdata-qemu.img 是表观 32 GB 的稀疏文件，而且**是跑过的用户数据** ——
     绝不能进交付包（数据泄漏 + 体积暴涨，实测把交付目录从 6.2 G 撑到 39 G）。
 
-    清理办法（先确认没有在跑的实例）：
+    手动清理办法（先确认没有在跑的实例）：
         rm -rf $PRODUCT_OUT/build.avd $PRODUCT_OUT/hardware-qemu.ini \
                $PRODUCT_OUT/emu-launch-params.txt $PRODUCT_OUT/version_num.cache \
                $PRODUCT_OUT/modem_simulator $PRODUCT_OUT/*.lock \
@@ -108,37 +108,65 @@ verify_dest_allowlist() {
 
 # 运行期垃圾：模拟器直接在产物目录里跑过就会留下这些
 #   ⚠️ userdata-qemu.img 是**表观 32 GB 的稀疏文件**，而且是**跑过的用户数据** ——
-#      它进交付包的后果是"数据泄漏 + 体积暴涨"（实测把交付目录从 6.2 G 撑到 39 G 表观）。
-#      属可再生的运行期状态，打包时清掉是对的。
+#      它进交付包的后果是"数据泄漏 + 体积暴涨"。运行期文件只从交付白名单中排除，
+#      不在打包时删除源目录内容，避免和仍在运行的模拟器争用数据文件。
 RUNTIME_JUNK="userdata-qemu.img userdata-qemu.img.qcow2 cache.img.qcow2 encryptionkey.img.qcow2 \
 hardware-qemu.ini emu-launch-params.txt version_num.cache read-snapshot.txt multiinstance.lock"
 RUNTIME_JUNK_DIRS="build.avd modem_simulator"
 
-clean_product_out_junk() {
-    local f n=0 freed=0 before after
-    before="$(du -sh --apparent-size "$PRODUCT_OUT" 2>/dev/null | cut -f1)"
+report_product_out_junk() {
+    local f n=0
     for f in $RUNTIME_JUNK; do
         [ -e "$PRODUCT_OUT/$f" ] || continue
         n=$((n + 1))
-        rm -rf "$PRODUCT_OUT/$f"
-        printf '    清掉 %s\n' "$f"
     done
     for f in $RUNTIME_JUNK_DIRS; do
         [ -d "$PRODUCT_OUT/$f" ] || continue
         n=$((n + 1))
-        rm -rf "$PRODUCT_OUT/$f"
-        printf '    清掉 %s/（目录）\n' "$f"
     done
     if [ "$n" -gt 0 ]; then
-        after="$(du -sh --apparent-size "$PRODUCT_OUT" 2>/dev/null | cut -f1)"
-        warn "产物目录里有 $n 项运行期文件（模拟器直接跑过），已清理：表观 $before → $after"
-        warn "  这类文件不该进交付包 —— 尤其 userdata-qemu.img 是**跑过的用户数据**"
+        warn "产物目录里有 $n 项运行期文件；它们不会进入交付包，源文件保留在原处"
+        warn "  尤其 userdata-qemu.img 可能含用户数据；如需清理，请先确认没有模拟器使用该目录"
     fi
 }
 
-# 闸门一：清源头（否则交付目录会被这些文件污染）
-log "清理产物目录里的运行期文件"
-clean_product_out_junk
+# 防止重建正在被模拟器用作 sysdir 的目录。模拟器会把 userdata/qcow2 等运行状态
+# 写进 sysdir；unlink 这些文件后再关机可能直接丢失用户数据。
+resolve_path() { readlink -m -- "$1" 2>/dev/null || return 1; }
+assert_sysdir_not_running() {   # <路径>；精确匹配进程 argv 中的 `-sysdir <路径>`
+    local target="$1" proc pid arg cwd candidate i
+    local -a argv
+    target="$(resolve_path "$target")" || die "无法规范化路径：$1"
+    for proc in /proc/[0-9]*/cmdline; do
+        [ -r "$proc" ] || continue
+        pid="${proc#/proc/}"; pid="${pid%/cmdline}"
+        [ "$pid" = "$$" ] && continue
+        argv=()
+        while IFS= read -r -d '' arg; do argv+=("$arg"); done < "$proc" || true
+        [ "${#argv[@]}" -ge 2 ] || continue
+        case "${argv[0]##*/}" in qemu-system-*|emulator) ;; *) continue ;; esac
+        cwd="$(resolve_path "/proc/$pid/cwd" 2>/dev/null || true)"
+        for ((i = 0; i < ${#argv[@]} - 1; i++)); do
+            [ "${argv[$i]}" = "-sysdir" ] || continue
+            candidate="${argv[$((i + 1))]}"
+            case "$candidate" in /*) ;; *) candidate="$cwd/$candidate" ;; esac
+            candidate="$(resolve_path "$candidate" 2>/dev/null || true)"
+            if [ -n "$candidate" ] && [ "$candidate" = "$target" ]; then
+                die "进程 $pid 正在以 $1 作为 -sysdir；停止该模拟器后再打包，目录内容已保留"
+            fi
+        done
+    done
+}
+
+PRODUCT_OUT_REAL="$(resolve_path "$PRODUCT_OUT")" || die "无法规范化产物路径：$PRODUCT_OUT"
+DEST_REAL="$(resolve_path "$DEST")" || die "无法规范化交付路径：$DEST"
+[ "$PRODUCT_OUT_REAL" != "$DEST_REAL" ] || die "PRODUCT_OUT 与交付目录相同：$PRODUCT_OUT_REAL；拒绝重建以避免删除 ROM 源文件"
+assert_sysdir_not_running "$PRODUCT_OUT_REAL"
+assert_sysdir_not_running "$DEST_REAL"
+
+# 运行期状态只留在源目录；下方白名单复制不会把它带进交付包。
+log "检查产物目录运行期文件（源目录不会被清理）"
+report_product_out_junk
 
 log "清空并重建 $DEST"
 rm -rf "$DEST"; mkdir -p "$DEST/system"

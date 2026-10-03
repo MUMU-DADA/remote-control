@@ -153,9 +153,8 @@ bool ServiceState::RebuildInjectorForDisplay(uint32_t w, uint32_t h,
     return true;
 }
 
-const InjectorConfig& ServiceState::GetInjectorConfig() const {
-    // 返回引用，调用方自己保证不在并发修改时用 —— 这一层是"读到就够用"，
-    // 不做拷贝是因为 InjectorConfig 里有 const char* 成员，拷贝语义不完整。
+InjectorConfig ServiceState::GetInjectorConfig() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return injectorConfig_;
 }
 
@@ -424,22 +423,24 @@ ServiceState::ApplyResult ServiceState::Apply(
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 inj = injector_;
-                config_.touchWidth  = w;
-                config_.touchHeight = h;
             }
+            InjectorConfig cfg = GetInjectorConfig();
+            cfg.touchWidth  = w;
+            cfg.touchHeight = h;
             if (inj != nullptr) {
                 // 改坐标范围要重建 uinput 设备：ABS 范围是设备创建时定死的，
-                // ioctl 改不了。Injector::Init 会替换 backend_，
-                // 旧 backend 的析构负责 UI_DEV_DESTROY。
-                InjectorConfig cfg = GetInjectorConfig();
-                cfg.touchWidth  = w;
-                cfg.touchHeight = h;
+                // ioctl 改不了。Injector::Init 先打开新设备，再释放旧设备。
                 std::string err;
                 if (!inj->Init(cfg, &err)) {
                     result.rejected.emplace_back(key, "重建注入设备失败: " + err);
                     continue;
                 }
-                SetInjectorConfig(cfg);
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                config_.touchWidth  = w;
+                config_.touchHeight = h;
+                injectorConfig_ = cfg;
             }
             result.applied.push_back(key);
             ALOGI("配置变更: %s = %s（已重建注入设备）", key.c_str(), val.c_str());

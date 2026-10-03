@@ -95,7 +95,7 @@ SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
 APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
                  $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_fileops test_sha256
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_transport test_core_lifetime test_fileops test_sha256
 
 all: $(BINS) fake_screencap
 
@@ -118,6 +118,28 @@ WS_SRCS = test_websocket.cpp $(DAEMON)/websocket.cpp $(DAEMON)/log_buffer.cpp
 
 test_websocket: $(WS_SRCS) test_util.h $(DAEMON)/websocket.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(WS_SRCS)
+
+TP_SRCS = test_transport.cpp $(DAEMON)/http_server.cpp \
+          $(DAEMON)/socket_server.cpp $(DAEMON)/websocket.cpp \
+          $(DAEMON)/log_buffer.cpp
+
+test_transport: $(TP_SRCS) test_util.h $(DAEMON)/http_server.h \
+                $(DAEMON)/socket_server.h $(DAEMON)/websocket.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(TP_SRCS)
+
+CORE_LIFETIME_SRCS = test_core_lifetime.cpp $(DAEMON)/http_client.cpp \
+                     $(DAEMON)/png_encoder.cpp $(DAEMON)/inject.cpp \
+                     $(DAEMON)/log_buffer.cpp
+
+build/fakes/libcurl.so: fakes/fake_curl.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -fPIC -shared -o $@ $<
+
+test_core_lifetime: $(CORE_LIFETIME_SRCS) test_util.h \
+                    $(DAEMON)/http_client.h $(DAEMON)/png_encoder.h \
+                    $(DAEMON)/inject.h $(DAEMON)/inject_backend.h \
+                    build/fakes/libcurl.so
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(CORE_LIFETIME_SRCS) -ldl
 
 # fileops 要的是「路径边界」那部分逻辑，所以连 http_client 一起编进来
 FO_SRCS = test_fileops.cpp $(DAEMON)/fileops.cpp $(DAEMON)/http_client.cpp $(DAEMON)/log_buffer.cpp $(DAEMON)/subprocess.cpp
@@ -168,6 +190,8 @@ _run: all
 	 ./test_json;                                j=$$?; echo; \
 	 ./test_keyboard;                            k=$$?; echo; \
 	 ./test_websocket;                           w=$$?; echo; \
+	 ./test_transport;                           t=$$?; echo; \
+	 LD_LIBRARY_PATH="$$(pwd)/build/fakes$${LD_LIBRARY_PATH:+:$${LD_LIBRARY_PATH}}" ./test_core_lifetime; q=$$?; echo; \
 	 ./test_fileops;                             f=$$?; echo; \
 	 ./test_sha256;                             s=$$?; echo; \
 	 echo "───────────────────────────────"; \
@@ -178,6 +202,8 @@ _run: all
 	 printf "  %-34s %s\n" "JSON 解析/输出"      "$$([ $$j -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "按键注入"            "$$([ $$k -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "WebSocket 握手"       "$$([ $$w -eq 0 ] && echo 通过 || echo 失败)"; \
+	 printf "  %-34s %s\n" "传输层生命周期"       "$$([ $$t -eq 0 ] && echo 通过 || echo 失败)"; \
+	 printf "  %-34s %s\n" "daemon 资源生命周期" "$$([ $$q -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "文件路径边界"         "$$([ $$f -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "SHA-256"                 "$$([ $$s -eq 0 ] && echo 通过 || echo 失败)"; \
 	 echo "───────────────────────────────"; \
@@ -191,10 +217,11 @@ _run: all
 	     printf "  %-34s %s\n" "检查数与 README 一致" \
 	         "✗ 实际 $$total，README 写 $$want —— 改了测试就要同步改 README"; r=1; \
 	 fi; \
-	 exit $$(( u + i + c + a + j + k + w + f + s + r ))
+	 exit $$(( u + i + c + a + j + k + w + t + q + f + s + r ))
 
 clean:
 	rm -rf $(WEBP_OBJ)
+	rm -f build/fakes/libcurl.so
 	rm -f $(BINS) fake_screencap
 	rm -f build/.counts
 

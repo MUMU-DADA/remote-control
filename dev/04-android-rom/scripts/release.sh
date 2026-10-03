@@ -789,8 +789,57 @@ def from_manifest(prefix):
         return ""
     for line in open(man, encoding="utf-8", errors="replace"):
         if line.startswith(prefix):
-            return line.split("=", 1)[1].strip()
+            _key, sep, value = line.partition("=")
+            return value.strip() if sep else line[len(prefix):].strip()
     return ""
+
+def manifest_property(name):
+    man = os.path.join(root, "images", "MANIFEST.txt")
+    if not os.path.exists(man):
+        return ""
+    for line in open(man, encoding="utf-8", errors="replace"):
+        key, sep, value = line.strip().partition("=")
+        if sep and key.strip() == name:
+            return value.strip()
+    return ""
+
+def property_from_buildprop(name):
+    for rel in ("system/build.prop", "vendor/build.prop", "product/build.prop", "system_ext/build.prop"):
+        path = os.path.join(root, "images", rel)
+        if not os.path.exists(path):
+            continue
+        for line in open(path, encoding="utf-8", errors="replace"):
+            key, sep, value = line.strip().partition("=")
+            if sep and key == name:
+                return value.strip()
+    return ""
+
+def product_name():
+    lunch = from_manifest("# lunch 目标：")
+    if lunch.endswith("-userdebug"):
+        return lunch[:-len("-userdebug")]
+    if lunch:
+        return lunch
+    product = from_manifest("# 产品：")
+    if product:
+        return product.split(None, 1)[0].split("（", 1)[0]
+    return manifest_property("ro.product.system.device") or \
+           property_from_buildprop("ro.product.system.device") or \
+           property_from_buildprop("ro.product.device")
+
+def lunch_target():
+    target = from_manifest("# lunch 目标：")
+    if target:
+        return target
+    product = product_name()
+    return product + "-userdebug" if product else ""
+
+def rom_abilist():
+    return manifest_property("ro.system.product.cpu.abilist") or \
+           property_from_buildprop("ro.system.product.cpu.abilist") or \
+           manifest_property("ro.system.product.cpu.abilist64") or \
+           property_from_buildprop("ro.system.product.cpu.abilist64") or \
+           manifest_property("SystemImage.Abi")
 
 def system_sha():
     sums = os.path.join(root, "images", "SHA256SUMS")
@@ -820,7 +869,21 @@ for dirpath, _dirs, names in os.walk(root):
             pass
 sums_lines = files + 1
 
-start = "bin/start-headless.sh" if plat == "linux" else "bin\\start-headless.ps1"
+if plat == "windows":
+    start = "bin\\start-headless.ps1"
+    stop = "bin\\stop.ps1"
+    status = "bin\\status.ps1"
+    verify = "bin\\verify.ps1"
+else:
+    start = "bin/start-headless.sh"
+    stop = "bin/stop.sh"
+    status = "bin/status.sh"
+    verify = "bin/verify.sh"
+product = product_name()
+lunch = lunch_target()
+abilist = rom_abilist()
+if not product or not lunch or not abilist:
+    raise SystemExit("ROM identity missing from images/MANIFEST.txt or build.prop")
 doc = {
     "name": f"autosnap-{ver}-{tag}",
     "version": ver,
@@ -829,12 +892,12 @@ doc = {
     "builtBy": "dev/04-android-rom/scripts/release.sh",
     "gitHead": git_head(),
     "rom": {
-        "product": "remote_control_x64_arm64",
-        "lunch": "remote_control_x64_arm64-userdebug",
+        "product": product,
+        "lunch": lunch,
         "fingerprint": from_manifest("ro.system.build.fingerprint"),
         "systemImgSha256": system_sha(),
         "androidApi": 31,
-        "abilist": "x86_64,arm64-v8a",
+        "abilist": abilist,
     },
     "runtime": {
         "package": os.path.basename(emu_zip),
@@ -847,14 +910,14 @@ doc = {
         #    RELEASE.json 里就写着 windows 的后端路径（实测踩到）。
         #    后端路径由 bash 侧算好传进来（platform_backend），别在 python 里再判一次。
         "backend": "emulator/" + backend,
-        "accuracy": "headless：只带本平台的 x86_64 qemu 后端",
+        "accuracy": "headless：只带本平台的 qemu 后端",
     },
     "platformTools": {"package": os.path.basename(pt_zip), "version": pt_ver, "url": pt_url, "sha1": pt_sha},
     "entrypoints": {
         "start": start,
-        "stop": "bin/stop.sh" if plat == "linux" else "bin\\stop.ps1",
-        "status": "bin/status.sh" if plat == "linux" else "bin\\status.ps1",
-        "verify": "bin/verify.sh" if plat == "linux" else "bin\\verify.ps1",
+        "stop": stop,
+        "status": status,
+        "verify": verify,
     },
     "templates": ["templates/config.ini", "templates/instance.env", "templates/README.md"],
     "files": {"count": files + 1, "bytes": total, "sha256sumsLines": sums_lines},

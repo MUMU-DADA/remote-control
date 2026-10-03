@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 namespace remote_control {
@@ -29,7 +30,10 @@ class HttpClient {
     // 尝试加载 libcurl。失败时 error 里写清楚原因，对象仍可用（Available()==false）。
     bool Init(std::string* error);
 
-    bool Available() const { return handle_ != nullptr; }
+    bool Available() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return available_;
+    }
 
     // 载入的 libcurl 版本，仅用于日志/诊断
     const std::string& version() const { return version_; }
@@ -51,7 +55,8 @@ class HttpClient {
                         std::string* error);
 
   private:
-    void* handle_ = nullptr;      // dlopen 句柄
+    mutable std::mutex mutex_;
+    bool available_ = false;
     std::string version_;
     // curl_ / globalInited_ 两个字段删了：定义出来但从没用过，
     // AOSP 的 -Werror 会因"私有字段未使用"直接编译失败。

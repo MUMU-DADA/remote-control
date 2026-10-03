@@ -76,14 +76,11 @@ Write-Log "验收 4/4：arm64 应用（纯 arm64-v8a 探针 APK）"
 # （org.remotecontrol.arm64probe → org.autosnap.arm64probe），写死就会出现
 # "装上了 Success，却 monkey 找不到 Activity"（Linux 侧实测踩过）。
 function Get-ProbePackage {
-    $p = Sh 'pm list packages -3 2>/dev/null | sed "s/^package://" | grep -i probe | sed -n "1p"'
-    if (-not $p) { $p = Sh 'pm list packages -3 2>/dev/null | sed "s/^package://" | sed -n "1p"' }
+    $p = Sh 'pm list packages -3 2>/dev/null | sed "s/^package://" | grep -i "arm64probe$" | sed -n "1p"'
     return $p
 }
 $apk = Join-Path $script:Tools "arm64-probe.apk"
 if (Test-Path $apk) {
-    $old = Get-ProbePackage
-    if ($old) { & $script:Adb -s $serial shell "pm uninstall $old" 2>$null | Out-Null }
     & $script:Adb -s $serial push $apk /data/local/tmp/probe.apk 2>$null | Out-Null
     Chk "pm install --abi arm64-v8a" (Sh "pm install --abi arm64-v8a -r /data/local/tmp/probe.apk") 'Success'
     $pkg = Get-ProbePackage

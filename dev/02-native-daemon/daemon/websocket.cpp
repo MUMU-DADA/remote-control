@@ -107,7 +107,7 @@ bool WriteFull(int fd, const void* buf, size_t n) {
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     size_t sent = 0;
     while (sent < n) {
-        const ssize_t w = write(fd, p + sent, n - sent);
+        const ssize_t w = send(fd, p + sent, n - sent, MSG_NOSIGNAL);
         if (w < 0) {
             if (errno == EINTR) continue;
             return false;
@@ -230,6 +230,20 @@ bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
             for (int i = 0; i < 8; ++i) len = (len << 8) | ext[i];
         }
 
+        const bool controlFrame = (out->opcode & 0x08) != 0;
+        if (controlFrame && !out->fin) {
+            if (error) *error = "控制帧不能分片";
+            return false;
+        }
+        if (controlFrame && len > 125) {
+            if (error) *error = "控制帧载荷不能超过 125 字节";
+            return false;
+        }
+        if (out->opcode == kWsClose && len == 1) {
+            if (error) *error = "close 帧载荷不能只有 1 字节";
+            return false;
+        }
+
         // 上限保护：不设的话一个恶意长度就能让我们尝试分配几个 GB。
         // 我们的消息都是几十字节，1 MB 已经宽松得离谱。
         constexpr uint64_t kMaxPayload = 1u << 20;
@@ -266,6 +280,10 @@ bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
             continue;   // 我们不发 ping，忽略对端的 pong
         }
         if (out->opcode == kWsClose) {
+            if (!WsWriteFrame(fd, kWsClose, out->payload)) {
+                if (error) *error = "回应 close 帧失败";
+                return false;
+            }
             if (error) error->clear();
             return false;
         }

@@ -46,8 +46,7 @@ sh_()  { "$ADB" -s "$SERIAL" shell "$1" 2>/dev/null | tr -d '\r' || true; }
 # org.autosnap.arm64probe），写死就会出现"装上了 Success，却 monkey 找不到 Activity"。
 probe_pkg() {
     local p
-    p="$(sh_ 'pm list packages -3 2>/dev/null | sed "s/^package://" | grep -i probe | sed -n "1p"')"
-    [ -n "$p" ] || p="$(sh_ 'pm list packages -3 2>/dev/null | sed "s/^package://" | sed -n "1p"')"
+    p="$(sh_ 'pm list packages -3 2>/dev/null | sed "s/^package://" | grep -i "arm64probe$" | sed -n "1p"')"
     printf '%s' "$p"
 }
 
@@ -82,8 +81,6 @@ fi
 log "验收 4/4：arm64 应用（纯 arm64-v8a 探针 APK）"
 APK="$TOOLS/arm64-probe.apk"
 if [ -s "$APK" ]; then
-    OLD="$(probe_pkg)"
-    [ -n "$OLD" ] && sh_ "pm uninstall $OLD" >/dev/null 2>&1
     "$ADB" -s "$SERIAL" push "$APK" /data/local/tmp/probe.apk >/dev/null 2>&1 || true
     chk "pm install --abi arm64-v8a" \
         "$("$ADB" -s "$SERIAL" shell 'pm install --abi arm64-v8a -r /data/local/tmp/probe.apk' 2>&1 | tr -d '\r' | tail -1 || true)" \

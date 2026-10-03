@@ -249,7 +249,7 @@ inject_binder.cpp   IInputManager：不可枚举，但 Android 12 上加载会�
 
 1. **头文件没导出。** `libvirtualtouchpad` 的 `export_include_dirs` 只有 `include/`，而 `EvdevInjector.h` 在模块根目录。外部模块 include 不到，要用就得往 include path 里塞 `..`——而 Soong 明确禁止路径逃逸（`init_rc` 上实测报 `Path is outside directory`）。
 
-2. **会丢掉主机可测性。** `EvdevInjector` 依赖 `android-base/unique_fd.h` 和 `utils/String8.h`，只能在 AOSP 树内编译。而我们的版本是纯 Linux syscall，在开发机上能跑 35 项真实设备测试（真的创建虚拟触摸屏、注入、读回校验）。
+2. **会丢掉主机可测性。** `EvdevInjector` 依赖 `android-base/unique_fd.h` 和 `utils/String8.h`，只能在 AOSP 树内编译。而我们的版本是纯 Linux syscall，在开发机上能跑 38 项真实设备测试（真的创建虚拟触摸屏、注入、读回校验）。
 
 **结论：这里自己写是有依据的取舍，不是重复造轮子。** 但官方版的能力（2 槽位）覆盖不了我们的需求（多点触控），这也是保留自研版本的理由之一。
 

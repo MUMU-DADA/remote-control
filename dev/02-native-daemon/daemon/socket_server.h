@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <string>
 
@@ -89,7 +90,7 @@ class SocketServer {
     mode_t      socketMode_ = 0660;   // 可用 --socket-mode 放宽，见 main.cpp 的说明
     std::string initSocketName_;    // init 模式下的 socket 名
     int  listenFd_ = -1;
-    bool stop_     = false;
+    std::atomic<bool> stop_{false};
     bool ownsPath_ = false;         // true 表示退出时要 unlink path_
 };
 

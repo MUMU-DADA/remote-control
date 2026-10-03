@@ -6,6 +6,8 @@
 #include <string.h>
 
 #include <cstdint>
+#include <atomic>
+#include <mutex>
 #include <vector>
 
 #include "remote_control_log.h"
@@ -33,7 +35,8 @@ struct ZlibApi {
 };
 
 ZlibApi g_z;
-bool    g_loaded = false;
+std::atomic<bool> g_loaded{false};
+std::mutex g_zlib_mutex;
 
 void PutU32(std::string* out, uint32_t v) {
     // PNG 全部是大端
@@ -109,8 +112,10 @@ PngEncoder& PngEncoder::Instance() {
 }
 
 bool PngEncoder::Init(std::string* error) {
-    if (g_loaded) {
-        handle_ = reinterpret_cast<void*>(1);
+    if (available_.load(std::memory_order_acquire)) return true;
+    std::lock_guard<std::mutex> lock(g_zlib_mutex);
+    if (g_loaded.load(std::memory_order_acquire)) {
+        available_.store(true, std::memory_order_release);
         return true;
     }
 
@@ -132,20 +137,23 @@ bool PngEncoder::Init(std::string* error) {
         return false;
     }
 
-    g_z.compress2     = reinterpret_cast<decltype(g_z.compress2)>(dlsym(h, "compress2"));
-    g_z.compressBound = reinterpret_cast<decltype(g_z.compressBound)>(dlsym(h, "compressBound"));
-    g_z.crc32         = reinterpret_cast<decltype(g_z.crc32)>(dlsym(h, "crc32"));
-    g_z.zlibVersion   = reinterpret_cast<decltype(g_z.zlibVersion)>(dlsym(h, "zlibVersion"));
+    ZlibApi api;
+    api.compress2     = reinterpret_cast<decltype(api.compress2)>(dlsym(h, "compress2"));
+    api.compressBound = reinterpret_cast<decltype(api.compressBound)>(dlsym(h, "compressBound"));
+    api.crc32         = reinterpret_cast<decltype(api.crc32)>(dlsym(h, "crc32"));
+    api.zlibVersion   = reinterpret_cast<decltype(api.zlibVersion)>(dlsym(h, "zlibVersion"));
 
-    if (g_z.compress2 == nullptr || g_z.compressBound == nullptr ||
-        g_z.crc32 == nullptr) {
+    if (api.compress2 == nullptr || api.compressBound == nullptr ||
+        api.crc32 == nullptr) {
         dlclose(h);
         if (error) *error = "zlib 缺少必需符号（compress2/compressBound/crc32）";
         return false;
     }
 
-    g_loaded = true;
-    handle_  = h;
+    // The shared function table remains valid until process exit.
+    g_z = api;
+    g_loaded.store(true, std::memory_order_release);
+    available_.store(true, std::memory_order_release);
     ALOGI("zlib 已加载: %s（PNG 编码可用）",
           g_z.zlibVersion ? g_z.zlibVersion() : "unknown");
     return true;
@@ -154,7 +162,7 @@ bool PngEncoder::Init(std::string* error) {
 std::string PngEncoder::EncodeRgba(const uint8_t* pixels, uint32_t width,
                                    uint32_t height, int compressionLevel,
                                    std::string* error) {
-    if (!g_loaded) {
+    if (!g_loaded.load(std::memory_order_acquire)) {
         if (error) *error = "zlib 未加载";
         return {};
     }

@@ -75,6 +75,11 @@ WARNING | Failed to load snapshot 'snap1'
 `run-linux.sh` 默认每次启动都 `rm -rf .run/sysdir-<port>` 重建 —— 那是"每次一台
 新机器"的语义，快照会跟着一起没。`--reuse` / `--snapshot` 会保留工作目录。
 
+发布包里的 Linux、Darwin 和 Windows `start-headless` 入口会先检查端口登记与目标
+工作目录：端口已登记给另一个实例时拒绝启动；新实例若遇到未登记但已有的数据目录，
+也会拒绝复用。这样显式指定已停止实例的端口，不会把该实例的状态当成新实例数据
+覆盖。请用对应实例名和 `--reuse`（PowerShell 为 `-Reuse`）恢复已有状态。
+
 ---
 
 ## 3. 多开一台机器

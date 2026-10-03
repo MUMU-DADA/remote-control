@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -146,7 +148,10 @@ class HttpServer {
     // 与其在文档里写"请不要这样"，不如让它在启动时就失败。
     bool Start(const Options& opts, std::string* error);
 
-    void Run(const HttpHandler& handler);   // 阻塞
+    // Run 在调用线程阻塞；销毁对象前，调用方必须在 Stop 后 join 该线程。
+    void Run(const HttpHandler& handler);
+    // 停止接收请求、关闭其他连接并等待 worker 退出。handler 可调用 Stop；
+    // 此时 Stop 等待其他 worker，当前 handler 返回后连接自行收尾。
     void Stop();
 
     // 请求踢掉所有**其它**连接，但**不立刻执行**。
@@ -182,20 +187,25 @@ class HttpServer {
     // 而重启会连带断掉所有连接，那不是"开启鉴权"，那是"重启"。
     void SetTokenProvider(std::function<std::string()> fn);
 
-    bool     running() const { return listenFd_ >= 0; }
+    bool     running() const {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        return listenFd_ >= 0;
+    }
     uint16_t port() const { return port_; }
     const std::string& bindAddr() const { return bindAddr_; }
 
   private:
-    // 活跃连接。
+    // 从 accept 后直到连接线程退出的连接。
     //
     // ⚠️ 这是为了**关闭时不崩**：连接线程是 detached 的，主线程走到
     //    main() 结尾就把 Dispatcher（含它的操作锁）析构了，而流式响应
     //    的回调还在那些线程里跑着 —— 表现是
     //      FORTIFY: pthread_mutex_lock called on a destroyed mutex
     //    Stop() 因此要主动 shutdown 掉这些连接，并等它们真的退出。
+    // 在 accept 后登记，确保未发完请求头的连接也受连接上限和 Stop 管理。
     // mutable：CheckAuth 是 const，但它要读 tokenProvider_
     mutable std::mutex      connMutex_;
+    std::condition_variable connCv_;
     // 非空 = 有一条待执行的"踢掉其它连接"请求（见 RequestKickAll）
     std::string             pendingKick_;
     std::set<int>           connFds_;
@@ -226,7 +236,7 @@ class HttpServer {
     size_t      maxConns_ = 128;
     size_t      spoolThreshold_ = 4u << 20;   // 超过就落盘
     std::string spoolDir_;                     // 空 = /data/local/tmp
-    bool        stop_ = false;
+    std::atomic<bool> stop_{false};
 };
 
 }  // namespace remote_control

@@ -41,6 +41,20 @@ using remote_control_test::LastValueOf;
 using remote_control_test::ReadDeviceBlock;
 using remote_control_test::WaitEvents;
 
+int CountNamedDevices(const std::string& deviceName) {
+    FILE* f = fopen("/proc/bus/input/devices", "r");
+    if (!f) return -1;
+
+    const std::string expected = "N: Name=\"" + deviceName + "\"";
+    char line[512];
+    int count = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (std::string(line).rfind(expected, 0) == 0) ++count;
+    }
+    fclose(f);
+    return count;
+}
+
 // ---------------------------------------------------------------------------
 // 测试用例
 // ---------------------------------------------------------------------------
@@ -354,6 +368,18 @@ int main() {
     TestDeviceProperties(kDeviceName);
 
     close(readFd);
+
+    printf("\n\033[1;34m[7] 后端重初始化\033[0m  设备热重建后释放旧 uinput 设备\n");
+    Check(CountNamedDevices(kDeviceName) == 1,
+          "初始化后恰有一个同名输入设备");
+    cfg.touchWidth = kWidth + 1;
+    const bool reinitialized = injector.Init(cfg, &err);
+    Check(reinitialized, "更改坐标范围后重新初始化成功%s%s",
+          reinitialized ? "" : ": ", reinitialized ? "" : err.c_str());
+    if (reinitialized) {
+        Check(CountNamedDevices(kDeviceName) == 1,
+              "重新初始化后旧设备已销毁，只保留一个同名设备");
+    }
 
     return remote_control_test::Summary("结果");
 }

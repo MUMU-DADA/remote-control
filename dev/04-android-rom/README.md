@@ -34,9 +34,9 @@
 | G3 能跑 arm64 应用 | ✅ **已实测**：自建探针 APK（纯 arm64-v8a）装+跑，`primaryCpuAbi=arm64-v8a`，16 条 `/system/lib64/arm64/*` 映射，JNI 返回 `kernel=x86_64` |
 | G4 Windows x86_64 跑同一份 ROM（WHPX） | ⊘ **明确不由 agent 验证**（用户决定）；工程部分已交付：脚本 + 镜像 + `preflight.ps1` + 首次运行对照表 + **同 build id 等价性**（Windows 稳定包 15917651 与 Linux 包同 build，Linux 侧实跑全绿） |
 | G5 arm32 下放（备选） | 📄 预案见 [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md) |
-| **G6 可交付的 release 包（两平台成品）** | ✅ `./scripts/release.sh` → **一个平台一个 zip**：完整无头运行环境 + 虚拟机镜像 + 模板；两个包用**同一 build id** 的模拟器；Linux 那份已解压**真启动验收**（见 [`docs/15-release-packaging.md`](docs/15-release-packaging.md)） |
+| **G6 可交付的 release 包** | ✅ `./scripts/release.sh` 默认产出 Linux + Windows 两个 zip；`--platform all` 可产出四个宿主/架构包。每包包含完整无头运行环境 + 虚拟机镜像 + 模板；默认两包使用**同一 build id** 的模拟器；Linux 那份已解压**真启动验收**（见 [`docs/15-release-packaging.md`](docs/15-release-packaging.md)） |
 | **G7 arm64 原生 ROM 产品线** | ✅ **已实测**：`PRODUCT=arm64` 全量构建 `EXIT=0`，产物全是 `ELF 64-bit ARM aarch64`，`libndk_translation*` = 0，`abilist64=arm64-v8a`（没有翻译层 —— 它是给 Apple Silicon 准备的） |
-| **G8 macOS 宿主支持** | 🟡 **代码完成、离线验证通过，缺真机**：`macos/` 备料脚本 + `packaging/bin/darwin/` 五个包内脚本 + `release.sh` 的 darwin 平台；`tools/test-macos-port.sh` **99 项全绿**；darwin 包已在 Linux 上真铺出来。**真 Mac 上的启动/开机/自启/签名未验**（见 [`docs/13-macos-port.md`](docs/13-macos-port.md) §8） |
+| **G8 macOS 宿主支持** | 🟡 **代码完成、离线验证通过，缺真机**：`macos/` 备料脚本 + `packaging/bin/darwin/` 五个包内脚本 + `release.sh` 的 darwin 平台；`tools/test-macos-port.sh` **110 项全绿**；darwin 包已在 Linux 上真铺出来。**真 Mac 上的启动/开机/自启/签名未验**（见 [`docs/13-macos-port.md`](docs/13-macos-port.md) §8） |
 
 ```bash
 # 一次性复现（构建→自检→打包→启动验收）
@@ -113,7 +113,9 @@ dev/04-android-rom/
 │   ├── check-bridge-symbols.sh     ← 翻译层动态依赖自检（启动前发现版本错配）
 │   ├── verify-clone-independent.sh ← 证明 clone 出来的实例和原实例数据互不影响
 │   ├── test-windows-emulator.sh    ← 在 Linux 上用 pwsh 实跑 windows\emulator.ps1（55 项）
-│   ├── test-release.sh             ← release 打包体检（假 ROM 端到端 + 全部脚本语法，65 项）
+│   ├── test-release.sh             ← release 打包体检（假 ROM 端到端 + 全部脚本语法，68 项）
+│   ├── test-script-safety.sh       ← 脚本命令边界、覆盖保护与并发数据目录检查（11 项）
+│   ├── test-macos-port.sh          ← macOS 移植与 darwin release 清单回归（110 项）
 │   ├── net-bridge.sh               ← 桥接模式：建 br0 把上行网卡桥进去（带自动回滚）
 │   └── net-bridge-ifup.sh          ← 模拟器拉起 TAP 时的回调，把它挂进桥
 ├── windows/                        ← Windows 侧（同一份镜像）
@@ -134,7 +136,7 @@ dev/04-android-rom/
 > | 项 | 值 | 为什么 |
 > |---|---|---|
 > | 屏幕 | **1280x720 横屏 @320dpi** | 720p 是标准 16:9；比 1440x2960 省 4.6 倍像素。横屏是把**面板本身**做成 1280x720，`/info` 报的显示尺寸和触控范围开机就一致 |
-> | CPU / 内存 | **4 核 / 8 GB** | 宿主 16 核 32G，单实例留足余量 |
+> | CPU / 内存 | **4 核 / 6 GB** | 宿主 16 核 32G，单实例留足余量 |
 > | 数据分区 | **32 GB** | 一次安装的磁盘峰值约是 APK 的 3 倍（900MB 的包峰值 2.7GB），32G 装得下 3GB 级大应用和游戏数据 |
 > | GPU | **auto（自适应）** | 宿主有可用渲染节点就走真 GPU，没有就退 `swiftshader_indirect`；启动时那一档起不来还会再退一次 |
 >

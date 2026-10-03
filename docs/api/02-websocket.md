@@ -51,7 +51,8 @@ new WebSocket('ws://host:8088/api/v1/touch?token=' + encodeURIComponent(tok))
 收到**不打掩码的客户端帧**会被明确拒绝（协议错误），而不是容忍 ——
 容忍一个协议错误比拒绝它危险得多。
 
-ping 会被自动回 pong。close 会让流正常结束。
+ping 会被自动回 pong。收到客户端的 close 帧后，服务端会回送相同载荷的 close
+帧，再结束流；客户端应等待这个响应后关闭 TCP 连接。
 
 ### 通用心跳
 

@@ -14,8 +14,26 @@
 #   make clean
 
 CXX      ?= g++
+C        ?= gcc
 CXXFLAGS ?= -std=c++20 -O1 -g -Wall -Wextra -Wno-unused-parameter
+CFLAGS   ?= -O2
 DAEMON    = daemon
+
+# Keep host builds aligned with the AOSP implementation without requiring an
+# installed jsoncpp or WebP development package.
+JSONCPP_DIR ?= ../../aosp/external/jsoncpp
+JSONCPP_SRCS = $(JSONCPP_DIR)/src/lib_json/json_reader.cpp \
+               $(JSONCPP_DIR)/src/lib_json/json_value.cpp \
+               $(JSONCPP_DIR)/src/lib_json/json_writer.cpp
+JSONCPP_INC  = -I$(JSONCPP_DIR)/include -DJSON_USE_EXCEPTION=0
+
+WEBP_DIR    = $(DAEMON)/vendor/webp
+WEBP_SRCS   = $(wildcard $(WEBP_DIR)/src/enc/*.c) \
+              $(wildcard $(WEBP_DIR)/src/dsp/*.c) \
+              $(wildcard $(WEBP_DIR)/src/utils/*.c)
+WEBP_OBJ    = build/webp
+WEBP_OBJS   = $(patsubst $(WEBP_DIR)/src/%.c,$(WEBP_OBJ)/%.o,$(WEBP_SRCS))
+WEBP_CFLAGS = -DANDROID -DWEBP_SWAP_16BIT_CSP -DWEBP_USE_THREAD -I$(WEBP_DIR)
 
 # 主机版：桩截图 + uinput 触控
 HOST_SRCS = $(DAEMON)/main.cpp \
@@ -40,7 +58,14 @@ HOST_SRCS = $(DAEMON)/main.cpp \
             $(DAEMON)/webui.cpp \
             $(DAEMON)/image_encoder.cpp \
             $(DAEMON)/websocket.cpp \
-            $(DAEMON)/config_file.cpp
+            $(DAEMON)/config_file.cpp \
+            $(DAEMON)/frame_hub.cpp \
+            $(DAEMON)/encode_pool.cpp \
+            $(DAEMON)/h264_encoder.cpp \
+            $(DAEMON)/jpeg_encoder.cpp \
+            $(DAEMON)/webp_encoder.cpp \
+            $(DAEMON)/sha256.cpp \
+            $(JSONCPP_SRCS)
 
 HOST_HDRS = $(wildcard $(DAEMON)/*.h)
 
@@ -50,8 +75,13 @@ SOCKET    = /tmp/remote-control-host.sock
 
 all: $(BIN) $(CTL)
 
-$(BIN): $(HOST_SRCS) $(HOST_HDRS)
-	$(CXX) $(CXXFLAGS) -o $@ $(HOST_SRCS)
+$(WEBP_OBJ)/%.o: $(WEBP_DIR)/src/%.c
+	@mkdir -p $(dir $@)
+	$(C) $(CFLAGS) $(WEBP_CFLAGS) -c $< -o $@
+
+$(BIN): $(HOST_SRCS) $(HOST_HDRS) $(WEBP_OBJS)
+	$(CXX) $(CXXFLAGS) $(JSONCPP_INC) -I$(WEBP_DIR) -pthread -o $@ \
+	    $(HOST_SRCS) $(WEBP_OBJS) -lm
 	@echo "编译完成: ./$(BIN)"
 
 # 设备端客户端的自检版本。
@@ -103,6 +133,7 @@ test:
 
 clean:
 	rm -f $(BIN) $(CTL)
+	rm -rf $(WEBP_OBJ)
 	@$(MAKE) -C tests clean
 
 .PHONY: all run smoke _smoke test clean

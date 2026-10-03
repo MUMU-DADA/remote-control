@@ -8,6 +8,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <mutex>
 #include <vector>
 
 #include "remote_control_log.h"
@@ -64,7 +66,8 @@ struct CurlApi {
 };
 
 CurlApi g_api;
-bool    g_loaded = false;
+std::atomic<bool> g_loaded{false};
+std::mutex g_api_mutex;
 
 // 写入回调的数据包
 struct Sink {
@@ -86,36 +89,17 @@ size_t WriteCb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     return n;
 }
 
-}  // namespace
+bool EnsureCurlLoaded(std::string* error, bool* newlyLoaded) {
+    *newlyLoaded = false;
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    if (g_loaded.load(std::memory_order_acquire)) return true;
 
-HttpClient::HttpClient() = default;
-
-HttpClient::~HttpClient() {
-    if (handle_ != nullptr) {
-        dlclose(handle_);
-        handle_ = nullptr;
-    }
-}
-
-bool HttpClient::Init(std::string* error) {
-    if (g_loaded) {
-        handle_ = g_api.easy_init ? reinterpret_cast<void*>(1) : nullptr;
-        version_ = g_api.version ? g_api.version() : "unknown";
-        return handle_ != nullptr;
-    }
-
-    // 依次试几个名字：设备上是 /system/lib64/libcurl.so。
-    // RTLD_NOW 会立刻解析所有符号，依赖缺失能当场发现而不是用到才崩。
     const char* candidates[] = {"libcurl.so", "libcurl_vendor.so", nullptr};
     void* h = nullptr;
     std::string lastErr;
     for (int i = 0; candidates[i] != nullptr; ++i) {
         h = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
         if (h != nullptr) break;
-        // ⚠️ dlerror() 只能调一次 —— 它取走错误后会清掉，第二次返回 nullptr。
-        //    写成 `dlerror() ? dlerror() : "…"` 在拼接/赋值时就会拿到
-        //    nullptr（std::string 会段错误，const char* 则得到一个空指针）。
-        //    实测：dlopen 失败时这里直接崩。
         const char* dlErr = dlerror();
         lastErr = dlErr ? dlErr : "unknown";
     }
@@ -127,38 +111,53 @@ bool HttpClient::Init(std::string* error) {
         return false;
     }
 
-    auto sym = [&](const char* name) -> void* {
-        return dlsym(h, name);
-    };
+    auto sym = [&](const char* name) -> void* { return dlsym(h, name); };
+    CurlApi api;
+    api.global_init = reinterpret_cast<CURLcode(*)(long)>(sym("curl_global_init"));
+    api.easy_init = reinterpret_cast<CURL*(*)()>(sym("curl_easy_init"));
+    api.easy_cleanup = reinterpret_cast<void(*)(CURL*)>(sym("curl_easy_cleanup"));
+    api.easy_setopt = reinterpret_cast<CURLcode(*)(CURL*, CURLoption, ...)>(
+            sym("curl_easy_setopt"));
+    api.easy_perform = reinterpret_cast<CURLcode(*)(CURL*)>(sym("curl_easy_perform"));
+    api.easy_getinfo = reinterpret_cast<CURLcode(*)(CURL*, int, ...)>(
+            sym("curl_easy_getinfo"));
+    api.easy_strerror = reinterpret_cast<const char*(*)(CURLcode)>(
+            sym("curl_easy_strerror"));
+    api.version = reinterpret_cast<const char*(*)()>(sym("curl_version"));
 
-    g_api.global_init    = reinterpret_cast<CURLcode(*)(long)>(sym("curl_global_init"));
-    g_api.easy_init      = reinterpret_cast<CURL*(*)()>(sym("curl_easy_init"));
-    g_api.easy_cleanup   = reinterpret_cast<void(*)(CURL*)>(sym("curl_easy_cleanup"));
-    g_api.easy_setopt    = reinterpret_cast<CURLcode(*)(CURL*, CURLoption, ...)>(
-                               sym("curl_easy_setopt"));
-    g_api.easy_perform   = reinterpret_cast<CURLcode(*)(CURL*)>(sym("curl_easy_perform"));
-    g_api.easy_getinfo   = reinterpret_cast<CURLcode(*)(CURL*, int, ...)>(
-                               sym("curl_easy_getinfo"));
-    g_api.easy_strerror  = reinterpret_cast<const char*(*)(CURLcode)>(
-                               sym("curl_easy_strerror"));
-    g_api.version        = reinterpret_cast<const char*(*)()>(sym("curl_version"));
-
-    if (g_api.easy_init == nullptr || g_api.easy_setopt == nullptr ||
-        g_api.easy_perform == nullptr || g_api.easy_cleanup == nullptr) {
+    if (api.easy_init == nullptr || api.easy_setopt == nullptr ||
+        api.easy_perform == nullptr || api.easy_cleanup == nullptr) {
         dlclose(h);
         if (error) *error = "libcurl 缺少必需符号（easy_init/setopt/perform）";
         return false;
     }
 
-    // 0L 表示让 curl 自己初始化；Android 上不需要 Win32 那套
-    if (g_api.global_init != nullptr) {
-        g_api.global_init(0L);
-    }
+    if (api.global_init != nullptr) api.global_init(0L);
 
-    g_loaded = true;
-    handle_  = h;
+    // Keep the DSO loaded for process lifetime: this function table is shared
+    // by every HttpClient and downloads may still be in flight.
+    g_api = api;
+    g_loaded.store(true, std::memory_order_release);
+    *newlyLoaded = true;
+    return true;
+}
+
+}  // namespace
+
+HttpClient::HttpClient() = default;
+
+HttpClient::~HttpClient() = default;
+
+bool HttpClient::Init(std::string* error) {
+    std::lock_guard<std::mutex> instanceLock(mutex_);
+    if (available_) return true;
+
+    bool newlyLoaded = false;
+    if (!EnsureCurlLoaded(error, &newlyLoaded)) return false;
+
     version_ = g_api.version ? g_api.version() : "unknown";
-    ALOGI("libcurl 已加载: %s", version_.c_str());
+    available_ = true;
+    if (newlyLoaded) ALOGI("libcurl 已加载: %s", version_.c_str());
     return true;
 }
 
@@ -169,7 +168,7 @@ bool HttpClient::DownloadToFile(const std::string& url,
                                 int64_t* writtenBytes,
                                 std::string* error) {
     if (writtenBytes) *writtenBytes = 0;
-    if (!g_loaded) {
+    if (!g_loaded.load(std::memory_order_acquire)) {
         if (error) *error = "libcurl 未加载";
         return false;
     }

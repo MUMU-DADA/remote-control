@@ -603,39 +603,61 @@ function Invoke-Clone {
     if (Test-PortTaken $p) { Die "端口 $p 已被别的实例占用" }
 
     $sSys = Get-SysDir $Src
+    $dSys = Join-Path $script:RunDir "sysdir-$p"
+    $dData = Join-Path $script:RunDir "datadir-$p"
+    if ((Test-Path $dSys) -or (Test-Path $dData)) {
+        Die "端口 $p 的目标目录已存在但没有实例登记：$dSys / $dData；请先检查并处理残留数据"
+    }
+
     Register-Instance $Dst $p
-    $dSys = Get-SysDir $Dst
+    try {
+        # 1) 先把**镜像**按新实例的目录重新链一遍（不复制实体）。
+        Build-SysDir $Dst
 
-    # 1) 先把**镜像**按新实例的目录重新链一遍（不复制实体）——
-    #    共享的只读镜像本来就不该复制，几 GB 白拷。
-    Build-SysDir $Dst
-
-    # 2) 再把**状态**文件抄过去。镜像同名的不抄（上面已经链好了）。
-    Write-Log "复制状态（含已装应用）"
-    New-Item -ItemType Directory -Force -Path $dSys | Out-Null
-    $copied = 0
-    foreach ($item in Get-ChildItem $sSys -Force) {
-        if ($script:NoLink -contains $item.Name) { continue }   # initrd 等由模拟器自己重建
-        if (Test-Path (Join-Path $script:ImagesDir $item.Name)) { continue }  # 镜像是链接，跳过
-        $dest = Join-Path $dSys $item.Name
-        if ($item.PSIsContainer) {
-            Copy-Item $item.FullName $dest -Recurse -Force -ErrorAction SilentlyContinue
-        } else {
-            Copy-Item $item.FullName $dest -Force -ErrorAction SilentlyContinue
+        # 2) 再把**状态**文件抄过去。镜像同名的不抄（上面已经链好了）。
+        Write-Log "复制状态（含已装应用）"
+        New-Item -ItemType Directory -Force -Path $dSys | Out-Null
+        $copied = 0
+        foreach ($item in Get-ChildItem $sSys -Force) {
+            if ($script:NoLink -contains $item.Name) { continue }   # initrd 等由模拟器自己重建
+            if (Test-Path (Join-Path $script:ImagesDir $item.Name)) { continue }  # 镜像是链接，跳过
+            $dest = Join-Path $dSys $item.Name
+            if ($item.PSIsContainer) {
+                Copy-Item $item.FullName $dest -Recurse -Force -ErrorAction Stop
+            } else {
+                Copy-Item $item.FullName $dest -Force -ErrorAction Stop
+            }
+            $copied++
         }
-        $copied++
-    }
-    $srcDat = Get-DataDir $Src
-    if (Test-Path $srcDat) { Copy-Item "$srcDat\*" (Get-DataDir $Dst) -Recurse -Force -ErrorAction SilentlyContinue }
-    else { New-Item -ItemType Directory -Force -Path (Get-DataDir $Dst) | Out-Null }
+        $srcDat = Get-DataDir $Src
+        New-Item -ItemType Directory -Force -Path $dData | Out-Null
+        if (Test-Path $srcDat) {
+            foreach ($item in Get-ChildItem $srcDat -Force) {
+                Copy-Item $item.FullName $dData -Recurse -Force -ErrorAction Stop
+            }
+        }
 
-    # 3) 路径/端口相关的残留全清掉，让模拟器按新路径重建
-    foreach ($f in $script:StaleAfterClone) { Remove-Item (Join-Path $dSys $f) -Force -ErrorAction SilentlyContinue }
-    if (Test-Path (Join-Path $dSys "snapshots")) {
-        Remove-Item (Join-Path $dSys "snapshots") -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Warn "源实例的快照没有复制（快照绑定了原来的硬件配置与路径）"
+        # 3) 路径/端口相关的残留全清掉，让模拟器按新路径重建
+        foreach ($f in $script:StaleAfterClone) {
+            $stale = Join-Path $dSys $f
+            if (Test-Path $stale) { Remove-Item $stale -Force -ErrorAction Stop }
+        }
+        $snapshots = Join-Path $dSys "snapshots"
+        if (Test-Path $snapshots) {
+            Remove-Item $snapshots -Recurse -Force -ErrorAction Stop
+            Write-Warn "源实例的快照没有复制（快照绑定了原来的硬件配置与路径）"
+        }
+        Copy-Item $script:ConfigFile (Join-Path $dSys "config.ini") -Force -ErrorAction Stop
+    } catch {
+        $copyError = $_
+        try {
+            Remove-Item $dSys, $dData -Recurse -Force -ErrorAction SilentlyContinue
+            Unregister-Instance $Dst
+        } catch {
+            Write-Warn "复制失败后的目标清理也未完成，请检查 $dSys / $dData 与实例登记"
+        }
+        throw $copyError
     }
-    Copy-Item $script:ConfigFile (Join-Path $dSys "config.ini") -Force
 
     Write-Ok "已复制： '$Src' → '$Dst'（端口 $p，$copied 项状态）"
     Write-Host "    下一步   .\emulator.ps1 start $Dst"

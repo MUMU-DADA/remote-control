@@ -51,15 +51,23 @@ const char* Injector::BackendName() const {
 }
 
 bool Injector::Init(const InjectorConfig& config, std::string* error) {
-    backend_ = CreateInjectorBackend();
-    if (!backend_) {
+    std::unique_ptr<InjectorBackend> candidate = CreateInjectorBackend();
+    if (!candidate) {
         if (error) *error = "没有可用的注入后端（Android.bp 里没选后端？）";
         return false;
     }
 
-    if (!backend_->Open(config, error)) {
-        backend_.reset();
+    if (!candidate->Open(config, error)) {
+        candidate->Close();
         return false;
+    }
+
+    std::unique_ptr<InjectorBackend> previous = std::move(backend_);
+    backend_ = std::move(candidate);
+    downTimeNs_ = 0;
+    if (previous) {
+        previous->Close();
+        previous.reset();
     }
 
     ALOGI("注入后端就绪: %s", backend_->Name());

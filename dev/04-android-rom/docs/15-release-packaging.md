@@ -1,6 +1,6 @@
 # 15 · release 打包：一个平台一个 zip
 
-> 一条命令产出**两个平台**的可交付包，每个包里都有三样东西：
+> 一条命令可产出多个平台的可交付包，每个包里都有三样东西：
 > **完整无头运行环境** + **对应的虚拟机镜像** + **模板**。
 > 命令：`./scripts/release.sh`　产物：`release/autosnap-<版本>-<平台>-x86_64.zip`
 
@@ -38,7 +38,7 @@
 | 解压即用 | ✅ **真启动**：`Boot completed in 25283 ms`，四组验收全绿，`stop.sh` 干净停机 | ⊘ 本机没 Windows（见 §9） |
 
 ```bash
-# 一条命令打两个平台（运行时已缓存时不重下；首次下 333 MiB + 434 MiB）
+# 一条命令打默认的 Linux / Windows 两包（运行时已缓存时不重下；首次下 333 MiB + 434 MiB）
 cd dev/04-android-rom
 ./scripts/release.sh --smoke --smoke-port 5588 --smoke-adb /usr/bin/adb
 ```
@@ -55,15 +55,17 @@ cd dev/04-android-rom
 ```
 release/
 ├── autosnap-<版本>-linux-x86_64.zip
-└── autosnap-<版本>-windows-x86_64.zip
+├── autosnap-<版本>-windows-x86_64.zip
+├── autosnap-<版本>-darwin-aarch64.zip
+└── autosnap-<版本>-darwin-x86_64.zip
 
-    解压后（以 linux 为例，windows 同构）：
+    解压后（Linux/Windows 用 x86_64 ROM；Darwin 按目标使用桥接或原生 arm64 ROM）：
     autosnap-<版本>-linux-x86_64/
     ├── START-HERE.md          ← 首读：一页纸的"解压就能跑"
     ├── RELEASE.json           ← 版本 / ROM 指纹 / 运行时 build id / 入口清单
     ├── SHA256SUMS             ← 整包逐文件校验（除自己外的每个文件都在里面）
     ├── bin/                   ← 入口：start-headless / stop / status / verify
-    ├── runtime/               ← ① 无头运行环境（模拟器 + qemu x86_64 后端 + 自带 adb）
+    ├── runtime/               ← ① 无头运行环境（模拟器 + 目标 qemu 后端 + 自带 adb）
     │   └── RUNTIME.txt        ← 包名 / 渠道 / 版本 / build id / 来源 URL / sha1
     ├── images/                ← ② 虚拟机镜像（ROM 交付目录原样）
     │   ├── system-qemu.img … kernel-ranchu … system/build.prop
@@ -74,9 +76,9 @@ release/
         └── net-bridge*.sh     ← 仅 linux 包：guest 桥接到物理 LAN
 ```
 
-**为什么两个包各自带一份镜像**：交付方要的是"一个 zip 拿走就能跑"，
+**为什么每个平台包各自带一份镜像**：交付方要的是"一个 zip 拿走就能跑"，
 而不是"再配一个镜像包"。镜像在打包机上是**硬链接**进 staging 的（不复制实体），
-所以两个 zip 的成本只是压缩时间，不是双份磁盘。
+所以多平台 zip 的成本主要是压缩时间，不是重复占用源盘空间。
 
 ---
 
@@ -85,7 +87,7 @@ release/
 ```bash
 cd dev/04-android-rom
 
-./scripts/release.sh                    # 两个平台各一个 zip（默认）
+./scripts/release.sh                    # Linux / Windows 各一个 zip（默认）
 ./scripts/release.sh --platform linux   # 只打 linux
 ./scripts/release.sh --platform all     # 四端（含 mac 的 aarch64 与 x86_64）
 ./scripts/release.sh --list             # 只打印计划（不下载、不打包）
@@ -115,7 +117,7 @@ cd dev/04-android-rom
 
 ---
 
-## 3. 运行时装的是哪一版：**两个平台同一个 build id**
+## 3. 默认 Linux / Windows 包使用同一个 build id
 
 运行时**不是**"拿本机现成的那份模拟器"，而是按 SDK 清单现取的：
 
@@ -130,7 +132,7 @@ cd dev/04-android-rom
    - windows：`emulator/qemu/windows-x86_64/qemu-system-x86_64.exe`
 5. 版本、build id、来源 URL、sha1 写进 `runtime/RUNTIME.txt`（包内可查）与 `RELEASE.json`（机读）。
 
-> **为什么钉渠道不钉"最新"**：两个平台的成品必须能说"是同一份工程"。
+> **为什么钉渠道不钉"最新"**：默认 Linux / Windows 包必须能说"是同一份工程"。
 > Stable 渠道里 linux 与 windows 是**同一次发布**（同 build id），
 > 这正是"两边跑的是同一份"最硬的证据。
 
@@ -144,6 +146,10 @@ cd dev/04-android-rom
 
 * `cp -al` **硬链接**进 staging：zip 只读，5.7 GB 不复制第二份（跨文件系统时自动退回复制）。
 * 打包前 `sha256sum -c images/SHA256SUMS` 验一遍 ROM 交付目录**没被动过**。
+* `package-rom.sh` 不会清理 `PRODUCT_OUT` 中的运行期文件。运行期状态只从白名单复制中
+  排除，源目录保持原样；若 `PRODUCT_OUT` 或交付目录正被模拟器作为 `-sysdir` 使用，
+  脚本会拒绝打包，避免删除仍在使用的 qcow2 或 userdata。打包完成后如需清理源目录，
+  先确认实例已停止，再手工处理。
 * 整包 `SHA256SUMS` 里镜像那部分**直接复用 ROM 自带的清单**（改写路径），
   只对非镜像文件现算 —— 否则 6 GB 要被哈希两遍。
 * 顺序上先写 `RELEASE.json` 再算 `SHA256SUMS`：**保证包内每个文件都在清单里**
@@ -165,17 +171,21 @@ cd dev/04-android-rom
 
 ---
 
-## 6. 包内入口脚本：同一套语义，两个平台
+## 6. 包内入口脚本：同一套语义，三个平台
 
-| | Linux | Windows |
-|---|---|---|
-| 启动（无头） | `bin/start-headless.sh` | `bin\start-headless.ps1` |
-| 停止 | `bin/stop.sh` | `bin\stop.ps1` |
-| 状态 | `bin/status.sh` | `bin\status.ps1` |
-| 验收（4 组） | `bin/verify.sh` | `bin\verify.ps1` |
-| 硬件参数 | `templates/config.ini`（**两边同一份**） | 同左 |
-| 加速 | KVM（`-accel on`，没有就退 TCG 并明确告警） | WHPX（`-accel on`，未启用会告警怎么开） |
-| 网络 | 默认 NAT；`--bridge` 可桥到物理 LAN（`tools/net-bridge*.sh`） | 只有 NAT |
+| | Linux | Windows | Darwin |
+|---|---|---|---|
+| 启动（无头） | `bin/start-headless.sh` | `bin\start-headless.ps1` | `bin/start-headless.sh` |
+| 停止 | `bin/stop.sh` | `bin\stop.ps1` | `bin/stop.sh` |
+| 状态 | `bin/status.sh` | `bin\status.ps1` | `bin/status.sh` |
+| 验收（4 组） | `bin/verify.sh` | `bin\verify.ps1` | `bin/verify.sh` |
+| 硬件参数 | `templates/config.ini`（各包使用同一配置真源） | 同左 | 同左 |
+| 加速 | KVM（`-accel on`，没有就退 TCG 并明确告警） | WHPX（`-accel on`，未启用会告警怎么开） | Hypervisor.framework（不可用时告警） |
+| 网络 | 默认 NAT；`--bridge` 可桥到物理 LAN（`tools/net-bridge*.sh`） | 只有 NAT | 只有 NAT |
+
+Darwin 的 `RELEASE.json` 使用包内 bash 入口路径；`darwin-aarch64` 清单标明原生
+arm64 产品与 ABI，`darwin-x86_64` 则标明 x86_64 桥接产品。`test-macos-port.sh` 会分别
+检查两档清单字段。
 
 三条**写死在脚本里**的规矩（都是踩出来的，别"优化"掉）：
 

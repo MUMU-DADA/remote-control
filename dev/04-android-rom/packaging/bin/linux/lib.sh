@@ -133,6 +133,13 @@ port_taken() {
     done
     return 1
 }
+instance_names_for_port() {
+    local p="$1" n
+    for n in $(instance_names); do
+        [ "$(instance_port "$n")" = "$p" ] && printf '%s\n' "$n"
+    done
+    return 0
+}
 alloc_port() {
     local p="$PORT_BASE"
     while [ "$p" -lt 5700 ]; do
