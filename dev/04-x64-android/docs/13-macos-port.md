@@ -978,6 +978,52 @@ bash release.sh --platform darwin --images .../artifacts/rom-remote_control_arm6
 
 **仍未做的**：真正打 zip（`check_zip` 的结构自检、`--smoke`）与在真 Mac 上启动。
 
+#### 7.0.14 把 macOS 那层的验证固化成 `tools/test-macos-port.sh`（本轮）
+
+前面 §7.0.8 / §7.0.13 的验证都是**会话里的临时脚本**，跑完就散了。
+本轮把它固化成仓库脚本，跟项目已有的 `tools/test-release.sh` 同一套路子
+（假 zip + 假 ROM，**不联网、不要真 Mac、一分钟跑完**）：
+
+```bash
+bash tools/test-macos-port.sh        # 91 项
+bash tools/test-release.sh           # 65 项（原有的，linux/windows）
+```
+
+**为什么值得固化**：macOS 那一层的代码平时只有"在 Mac 上跑"才会被走到。
+这些断言就是把 Linux 构建机**伪装成一台 Mac**——不这么做，那部分代码
+要等到有人第一次在 Mac 上解压才第一次被执行。
+
+配套给 `release.sh` 补了 `--darwin-emulator-zip` / `--darwin-platform-tools-zip`：
+linux/windows 早就有对应的覆盖参数，darwin 缺了这两个就**离线测不了**
+（原来 darwin 分支只有联网走 SDK 清单这一条路）。
+
+五组覆盖：
+
+| 组 | 验什么 |
+|---|---|
+| [0] 静态 | 全部脚本语法；darwin 脚本不许出现 bash 4 语法（`declare -A` / `mapfile` / `${v^^}`）；没有指向旧目录名 `packaging/bin/macos` 的**代码**引用 |
+| [1] 平台分派 | 六个派生函数 × 三个平台（tag / 后端目录 / host-os / host-arch / guest 架构 / 后端路径）逐值比对 |
+| [2] 平台–ROM 配套 | 六种组合的接受/拒绝（`darwin/aarch64`+arm64 ✓、`darwin/aarch64`+x86_64 ✗、`darwin/x64`+x86_64 ✓、`linux`+arm64 ✗、`both`+x86_64 ✓、`all`+x86_64 ✗） |
+| [3] 真打 darwin 包 | 假 zip 离线跑完 `release.sh` → 断言产物结构、`bin/` 五脚本+可执行位、`RUNTIME.txt` 后端、**`RELEASE.json` 的后端**（这轮修过）、START-HERE 无残留占位符 / 命令是 bash 不是 powershell / 第 6 节按产品类型渲染 / Apple Silicon 提示 |
+| [4] 回归 | 同一个假 ROM 打 linux 包，第 6 节必须仍是**桥产品**的行、且不带 Apple Silicon 提示 |
+| [5] mac 版 lib.sh | 命令 stub（`uname`/`sysctl`/`system_profiler`/`ps`/`df`）伪装 macOS，验 `hv_usable`、GPU 自适应、按架构取后端路径、进程枚举（含"不误算调用者自己的命令行"）、`build_sysdir` 的 initrd/config.ini 实文件规则；另断言 **`verify.sh` 的架构判据是读 ELF 头**而不是信设备自述 |
+
+**这个测试脚本自己也有过 4 个缺陷，都在注释里留了记录**（因为每一条都是"检查写得不对 →
+开始骗人"，值得后来人看见）：
+
+1. **自指误报**：检查"有没有旧目录名残留"时，那串字面量就写在检查脚本里 → 每次必然命中自己。
+2. **只查代码不查文档**：`docs/13-macos-port.md` 里「`packaging/bin/macos` → `darwin`」
+   是记录改名的**历史说明**，不是残留引用。把它算进去就是天天误报，
+   然后所有人学会忽略这个检查 —— **那比没有检查更糟**。
+3. **抽函数块时不要 source `common.sh`**：它在非 Linux/未配置时会 `die`，
+   而 `die` 会 `exit` 掉整个子 shell → 四项断言全空，看着像"函数坏了"。
+4. **漏了 `uname` stub**：`lib.sh` 开头就有平台守卫（非 Darwin 拒绝加载）。
+   漏了它，[5] 组全空 —— 也是"看着像坏了，其实是守卫在正常工作"。
+   现在**守卫本身也占一个断言**。
+
+另：那几条 bash 4 语法检查必须先**剔掉注释行**再查 —— 这几条恰好写在 lib.sh 的注释里
+当反例（"只用 bash 3.2 语法：无 declare -A…"），不剔注释就会把说明文字判成违规。
+
 ### 7.1 仍需在真机上验的
 
 | # | 事项 | 为什么重要 | 怎么验 | 状态 |

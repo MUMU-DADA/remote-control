@@ -65,8 +65,10 @@ while [ $# -gt 0 ]; do
         --zip-level)  ZIP_LEVEL="${2:?}"; shift ;;
         --linux-emulator-zip)   EMU_ZIP_OVERRIDE[linux]="${2:?}"; shift ;;
         --windows-emulator-zip) EMU_ZIP_OVERRIDE[windows]="${2:?}"; shift ;;
+        --darwin-emulator-zip)  EMU_ZIP_OVERRIDE[darwin]="${2:?}"; shift ;;
         --linux-platform-tools-zip)   PT_ZIP_OVERRIDE[linux]="${2:?}"; shift ;;
         --windows-platform-tools-zip) PT_ZIP_OVERRIDE[windows]="${2:?}"; shift ;;
+        --darwin-platform-tools-zip)  PT_ZIP_OVERRIDE[darwin]="${2:?}"; shift ;;
         --smoke-port) SMOKE_PORT="${2:?}"; shift ;;
         --smoke-adb)  SMOKE_ADB="${2:?}"; SMOKE_ADB_EXPLICIT="${2:?}"; shift ;;
         --list|--dry-run) LIST_ONLY=1 ;;
