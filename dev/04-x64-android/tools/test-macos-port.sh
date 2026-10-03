@@ -86,10 +86,14 @@ echo "── [1] 平台分派（五个派生函数 × 三个平台）"
 #    而 die 会 exit 掉整个子 shell → 四项断言全空（第一次跑就是这样，看着像函数坏了）。
 #    这几张分派表是自包含的（只依赖 PLATFORMS / DARWIN_ARCH 两个变量），直接抽出来 eval。
 DISPATCH_SRC="$SANDBOX/dispatch.sh"
-sed -n '/^platform_backend_dir() {/,/^platform_list() {/p' "$X64_DIR/scripts/release.sh" | head -n -1 > "$DISPATCH_SRC"
+# ⚠️ 起点是 **target_platform**，不是 platform_backend_dir ——
+#    引入「目标」之后 target_platform/target_arch 定义在它**前面**，
+#    从 platform_backend_dir 开始抽就抽不到它们，四个断言会**全空**
+#    （而且空值看起来像"函数坏了"，不是"抽取范围错了" —— 实测踩到）。
+sed -n '/^target_platform() {/,/^platform_list() {/p' "$X64_DIR/scripts/release.sh" | head -n -1 > "$DISPATCH_SRC"
 
-disp() {   # disp <平台> [darwin-arch] → "tag|后端目录|hostos|hostarch|guest架构|后端路径"
-    PLATFORMS="$1" DARWIN_ARCH="${2:-aarch64}" bash -c '
+disp() {   # disp <目标名> → "tag|后端目录|hostos|hostarch|guest架构|后端路径"
+    bash -c '
         set -uo pipefail
         source "'"$DISPATCH_SRC"'"
         printf "%s|%s|%s|%s|%s|%s" "$(platform_tag "$1")" "$(platform_backend_dir "$1")" \
@@ -102,10 +106,23 @@ if [ -s "$DISPATCH_SRC" ] && grep -q "^platform_backend\|^platform_backend()" "
 else
     badc "分派函数块没抽出来 —— 检查 release.sh 里那几张表是否还是连续的一块"
 fi
-chk "linux"   "$(disp linux -)"            "linux-x86_64|linux-x86_64|linux|x64|x86_64|qemu/linux-x86_64/qemu-system-x86_64-headless"
-chk "windows" "$(disp windows -)"          "windows-x86_64|windows-x86_64|windows|x64|x86_64|qemu/windows-x86_64/qemu-system-x86_64.exe"
-chk "darwin/aarch64" "$(disp darwin aarch64)" "darwin-aarch64|darwin-aarch64|macosx|aarch64|arm64-v8a|qemu/darwin-aarch64/qemu-system-aarch64-headless"
-chk "darwin/x64"     "$(disp darwin x64)"     "darwin-x64|darwin-x64|macosx|x64|x86_64|qemu/darwin-x64/qemu-system-x86_64-headless"
+chk "目标 linux"          "$(disp linux)"           "linux-x86_64|linux-x86_64|linux|x64|x86_64|qemu/linux-x86_64/qemu-system-x86_64-headless"
+chk "目标 windows"        "$(disp windows)"         "windows-x86_64|windows-x86_64|windows|x64|x86_64|qemu/windows-x86_64/qemu-system-x86_64.exe"
+chk "目标 darwin-aarch64" "$(disp darwin-aarch64)"  "darwin-aarch64|darwin-aarch64|macosx|aarch64|arm64-v8a|qemu/darwin-aarch64/qemu-system-aarch64-headless"
+# ⚠️ 目录名是 darwin-**x86_64**，而 SDK 包里那份叫 emulator-darwin_**x64**-*.zip。
+#    照着包名猜目录名会猜错（实测：报"运行时里没有后端"）。
+chk "目标 darwin-x86_64"  "$(disp darwin-x86_64)"   "darwin-x86_64|darwin-x86_64|macosx|x64|x86_64|qemu/darwin-x86_64/qemu-system-x86_64-headless"
+
+# 目标展开：这几条是"一次调用出几端"的定义
+tlist() { PLATFORMS="$1" DARWIN_ARCH="$2" bash -c '
+        set -uo pipefail
+        source "'"$DISPATCH_SRC"'"
+        target_list' 2>/dev/null; }
+chk "both 展开（默认值语义不变）" "$(tlist both aarch64)"       "linux windows"
+chk "all 展开（含 mac 两端）"     "$(tlist all aarch64)"        "linux windows darwin-aarch64 darwin-x86_64"
+chk "darwin + both"              "$(tlist darwin both)"        "darwin-aarch64 darwin-x86_64"
+chk "darwin + x64"               "$(tlist darwin x64)"         "darwin-x86_64"
+chk "darwin 默认档"              "$(tlist darwin aarch64)"     "darwin-aarch64"
 
 # =============================================================================
 echo
@@ -128,11 +145,14 @@ mk_fake_rom() {   # mk_fake_rom <目录> <abilist64>
 ROM_ARM="$SANDBOX/rom-arm64";   mk_fake_rom "$ROM_ARM" "arm64-v8a"
 ROM_X86="$SANDBOX/rom-x86_64";  mk_fake_rom "$ROM_X86" "x86_64,arm64-v8a"
 
-pair_ok() {   # pair_ok <描述> <期望 0/1> <平台> <arch> <ROM>
-    local desc="$1" want="$2" plat="$3" arch="$4" rom="$5"
+pair_ok() {   # pair_ok <描述> <期望 0/1> <平台> <arch> <主ROM> [arm64ROM]
+    # ⚠️ **两个 ROM 都要显式给**：不给 --images-arm64 的话，darwin-aarch64 会去
+    #    自动发现 artifacts/rom-remote_control_arm64（构建机上真有那份），
+    #    于是"故意给错的 ROM"这个用例根本测不到它想测的东西（实测踩到）。
+    local desc="$1" want="$2" plat="$3" arch="$4" rom="$5" rom64="${6:-$SANDBOX/rom-arm64}"
     RELEASE_STAGE_DIR="$SANDBOX/stage" RELEASE_CACHE_DIR="$SANDBOX/cache" \
       bash "$X64_DIR/scripts/release.sh" --platform "$plat" ${arch:+--darwin-arch "$arch"} \
-        --images "$rom" --list --out "$SANDBOX/out" > "$SANDBOX/pair.log" 2>&1
+        --images "$rom" --images-arm64 "$rom64" --list --out "$SANDBOX/out" > "$SANDBOX/pair.log" 2>&1
     local got=0; grep -q "不配套" "$SANDBOX/pair.log" && got=1
     if [ "$got" = "$want" ]; then
         okc "$desc（$( [ "$want" = 0 ] && echo 接受 || echo 拒绝 )）"
@@ -142,11 +162,21 @@ pair_ok() {   # pair_ok <描述> <期望 0/1> <平台> <arch> <ROM>
     fi
 }
 pair_ok "darwin/aarch64 + arm64 ROM"  0 darwin aarch64 "$ROM_ARM"
-pair_ok "darwin/aarch64 + x86_64 ROM" 1 darwin aarch64 "$ROM_X86"
-pair_ok "darwin/x64 + x86_64 ROM"     0 darwin x64     "$ROM_X86"
+pair_ok "darwin/aarch64 + x86_64 ROM（arm64 那份也是 x86_64）" 1 darwin aarch64 "$ROM_X86" "$ROM_X86"
+pair_ok "darwin/x86_64 + x86_64 ROM"  0 darwin x64     "$ROM_X86"
 pair_ok "linux + arm64 ROM"           1 linux  ""      "$ROM_ARM"
 pair_ok "both + x86_64 ROM"           0 both   ""      "$ROM_X86"
-pair_ok "all + x86_64 ROM"            1 all    ""      "$ROM_X86"
+# ⚠️ `all` + 只有 x86_64 ROM：**不再拒绝** —— 它会用显式给的 arm64 那份（这里故意给 x86_64
+#    的来触发拒绝，验证"两个 ROM 都要对"这条规则仍然生效）
+pair_ok "all + 两份都给 x86_64"        1 all    ""      "$ROM_X86" "$ROM_X86"
+pair_ok "all + 两份都正确"             0 all    ""      "$ROM_X86" "$ROM_ARM"
+
+# arm64 ROM 缺失时的报错要**可操作**（告诉你怎么打出来），不是一句"目录不存在"
+miss_out="$(RELEASE_STAGE_DIR="$SANDBOX/stage" RELEASE_CACHE_DIR="$SANDBOX/cache" \
+  bash "$X64_DIR/scripts/release.sh" --platform all --images "$ROM_X86" \
+    --images-arm64 "$SANDBOX/does-not-exist" --list --out "$SANDBOX/out" 2>&1 || true)"
+has "缺 arm64 ROM 时指出怎么打" "$miss_out" "PRODUCT=arm64 ./scripts/build-rom.sh"
+has "缺 arm64 ROM 时给出替代方案" "$miss_out" "--darwin-arch x64"
 
 # =============================================================================
 echo

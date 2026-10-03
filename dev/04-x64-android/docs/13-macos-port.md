@@ -1079,6 +1079,79 @@ linux/windows 早就有对应的覆盖参数，darwin 缺了这两个就**离线
 这是同一个模式今天第三次出现（bash 4 语法、旧目录名、`-sysdir`），
 所以现在规则统一成：**凡是"检查代码里出现的字符串"，一律先 `strip_comments`**。
 
+#### 7.0.16 release 现在能一次出 mac 的**两端**（本轮）
+
+**问题**：`--platform darwin --darwin-arch aarch64|x64` 一次只能出一档；
+而且更根本的是——**一次调用只认一份 ROM**，而
+`darwin-aarch64` 要 arm64 原生 ROM、`darwin-x86_64`/linux/windows 要 x86_64 桥 ROM。
+所以想要"mac 两端都有"，得手工跑两次、还得自己记住哪次配哪份 ROM。
+
+**改法：引入「目标」= 平台 + 宿主架构。** 四个目标：
+
+```
+linux          windows          darwin-aarch64          darwin-x86_64
+```
+
+`platform_*` 那几张分派表改成按**目标名**解析，darwin 的架构**从名字里取**
+（原来存在全局 `DARWIN_ARCH` 里，一次调用只能有一档 —— 这是出不了两端的真正原因）。
+
+展开规则：
+
+| 写法 | 展开成 | 说明 |
+|---|---|---|
+| `--platform both`（默认） | `linux windows` | **语义不变**，不能因为加了 mac 就改掉默认行为 |
+| `--platform all` | `linux windows darwin-aarch64 darwin-x86_64` | **"全出"就包含 mac 两端** |
+| `--platform darwin` | 由 `--darwin-arch` 决定 | `aarch64`（默认）/ `x64` / `both` |
+| `--platform darwin-x86_64` | 它自己 | 目标名也允许直接写 |
+
+**ROM 也按目标解析**（这是第二半）：
+
+```bash
+--images       <x86_64 桥 ROM>    # 默认取当前 PRODUCT 的产物
+--images-arm64 <arm64 原生 ROM>   # 默认取 artifacts/rom-remote_control_arm64
+```
+
+优先级（高的在前）：`--images-arm64` → `--images`（**且它确实是 arm64 那份**）→ 约定目录。
+
+> ⚠️ 第一版把"约定目录"放在最前，于是 `--images <某个 arm64 ROM>` 被**悄悄丢掉**、
+> 改用 artifacts 里那份 —— **显式参数被忽略比报错更糟**（测试台抓到的）。
+> 现在显式优先。
+
+**验证**：`--platform all --stage-only` 真跑出四个包，逐项核对：
+
+| 目标 | 后端 | 用的 ROM | `bin/` | START-HERE |
+|---|---|---|---|---|
+| `linux-x86_64` | `qemu/linux-x86_64/…` | x86_64 桥 | linux 那套 | KVM 加速行 ✓ |
+| `windows-x86_64` | `qemu/windows-x86_64/…exe` | x86_64 桥 | windows 那套 | WHPX + powershell ✓ |
+| `darwin-aarch64` | `qemu/darwin-aarch64/…aarch64-headless` | **arm64 原生**（`abilist64=arm64-v8a`） | darwin 那套 | Apple Silicon 提示 + Hypervisor ✓ |
+| `darwin-x86_64` | `qemu/darwin-x86_64/…x86_64-headless` | x86_64 桥（`x86_64,arm64-v8a`） | darwin 那套 | **Intel Mac 提示** + Hypervisor ✓，且**不出现** Apple Silicon 提示 |
+
+四份整包 `SHA256SUMS` 都可校验（447 / 435 / 401 / 403 行）。
+`tools/test-macos-port.sh` 加到 **107 项**（新增目标展开、缺 arm64 ROM 的报错文案等断言）。
+
+**本轮实跑又抓到五个真问题**（都是"读代码看不出来"的）：
+
+1. **目录名猜错**：SDK 包名是 `emulator-darwin_**x64**-*.zip`，但包内后端目录是
+   `darwin-**x86_64**`。aarch64 那档三者恰好同写法（所以照着包名猜能蒙对），x64 那档一猜就错。
+   报错是"运行时里没有后端"——**是那行检查救了这一次**。
+   （`darwin` 这档有**三套命名**：SDK 包名 `darwin_x64` / 清单 host-arch 字段 `x64` /
+   包内目录 `darwin-x86_64`。代码注释里列了表。）
+2. **平台名 vs 目标名**：凡是 `[ "$plat" = darwin ]` 这类比较，拿到目标名之后**永远为假**。
+   其中两处**不报错、只是内容错**：`render_start_here` 把目标名当平台名传进 python，
+   于是"Apple Silicon 提示"变成空、第 6 节的"加速"行写成 **Windows 的**。
+3. **`cp .../bin/$plat/.`**：按目标名去找 `packaging/bin/darwin-aarch64/`（实际是 `bin/darwin/`）。
+4. **`rom_guest_arch` 不接参数**：只读全局 `$ROM_DIR`，而断言是按目标传 ROM 的
+   → **每个目标都拿主 ROM 去比** → 配套检查看起来跑了、结论是错的。
+5. **`target_list` 的 `both` 分支漏改**：还在产出 `darwin-x64` 这个没有后端映射的旧名。
+
+**另外修了一个下载健壮性问题**（因为 `all` 现在要下**四个**模拟器包，这个脆弱点被放大）：
+`fetch_zip` 原来用 `curl -fL --retry 3`，**扛不住**腾讯镜像的
+`HTTP/2 stream … INTERNAL_ERROR`（那不在 curl 认得出来该重试的类别里，加 `--retry` 等于没加）。
+改成 `--http1.1` + `-C -` 断点续传 + 显式三次重试 + `--speed-time/--speed-limit`
+（让**卡住**的传输自己早点失败，否则日志上看起来像"还在下载"）。
+——同一份逻辑在 `macos/fetch-emulator.sh` 里早就有过这个修法，**release.sh 是另一份实现、没跟着修**，
+这正是"同一件事两处实现"的代价。
+
 ### 7.1 仍需在真机上验的
 
 | # | 事项 | 为什么重要 | 怎么验 | 状态 |

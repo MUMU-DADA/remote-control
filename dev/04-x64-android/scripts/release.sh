@@ -34,10 +34,19 @@ PACKAGING_DIR="$X64_DIR/packaging"
 # staging 与缓存可以指到别处（测试用沙箱时必需；也方便把大文件放别的盘）
 CACHE_DIR="${RELEASE_CACHE_DIR:-$RUN_DIR/release-cache}"
 STAGE_DIR="${RELEASE_STAGE_DIR:-$RUN_DIR/release-stage}"
+# 主 ROM：默认是当前 PRODUCT 的产物（默认 PRODUCT=x64_arm64 → x86_64 桥 ROM）。
+# 它服务于 linux / windows / darwin-x64 这三个目标。
 ROM_DIR="$ARTIFACTS_DIR/rom-$PRODUCT_NAME"
+# arm64 原生 ROM：服务于 darwin-aarch64。
+# 没显式给就按约定找 —— 它的名字由 PRODUCT=arm64 决定（PRODUCT_NAME=remote_control_arm64）。
+ROM_DIR_ARM64=""
+ROM_DIR_ARM64_DEFAULT="$ARTIFACTS_DIR/rom-remote_control_arm64"
+# --images 是否被显式给过（决定 darwin-aarch64 能不能把主 ROM 当自己那份用）
+IMAGES_EXPLICIT=0
 
 PLATFORMS="both"
-# darwin 平台的宿主架构：aarch64（Apple Silicon，默认）/ x64（Intel Mac）。
+# darwin 要出哪一档：aarch64（Apple Silicon）/ x64（Intel Mac）/ both（两档都出）。
+# `--platform all` 会把 both 当成默认，因为"全出"就该包含 mac 的两端。
 # ⚠️ 它与 ROM 的 guest 架构是两件事：
 #   · aarch64 宿主只带 arm64 guest 后端 → 必须配 arm64 原生 ROM
 #   · x64 宿主带 x86_64 guest 后端   → 配现有的 x86_64+翻译层 ROM
@@ -58,17 +67,25 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --platform)   PLATFORMS="${2:?}"; shift ;;
         --darwin-arch) DARWIN_ARCH="${2:?}"; shift ;;
+        --images-arm64) ROM_DIR_ARM64="${2:?}"; shift ;;
         --version)    VERSION="${2:?}"; shift ;;
         --channel)    CHANNEL="${2:?}"; shift ;;
-        --images)     ROM_DIR="${2:?}"; shift ;;
+        --images)     ROM_DIR="${2:?}"; IMAGES_EXPLICIT=1; shift ;;   # 主 ROM（x86_64 那三个目标用）
         --out)        RELEASE_DIR="${2:?}"; shift ;;
         --zip-level)  ZIP_LEVEL="${2:?}"; shift ;;
         --linux-emulator-zip)   EMU_ZIP_OVERRIDE[linux]="${2:?}"; shift ;;
         --windows-emulator-zip) EMU_ZIP_OVERRIDE[windows]="${2:?}"; shift ;;
-        --darwin-emulator-zip)  EMU_ZIP_OVERRIDE[darwin]="${2:?}"; shift ;;
+        # ⚠️ darwin 的覆盖要**同时设三个键**：目标名是 darwin-aarch64 / darwin-x64，
+        #    而用户只会写 --darwin-emulator-zip（他不知道目标名这层）。
+        #    只设 [darwin] 的话，加了 both 之后两个目标都查不到覆盖 → 静默去联网。
+        --darwin-emulator-zip)  EMU_ZIP_OVERRIDE[darwin]="${2:?}"
+                                EMU_ZIP_OVERRIDE[darwin-aarch64]="${2:?}"
+                                EMU_ZIP_OVERRIDE[darwin-x86_64]="${2:?}"; shift ;;
         --linux-platform-tools-zip)   PT_ZIP_OVERRIDE[linux]="${2:?}"; shift ;;
         --windows-platform-tools-zip) PT_ZIP_OVERRIDE[windows]="${2:?}"; shift ;;
-        --darwin-platform-tools-zip)  PT_ZIP_OVERRIDE[darwin]="${2:?}"; shift ;;
+        --darwin-platform-tools-zip)  PT_ZIP_OVERRIDE[darwin]="${2:?}"
+                                      PT_ZIP_OVERRIDE[darwin-aarch64]="${2:?}"
+                                      PT_ZIP_OVERRIDE[darwin-x86_64]="${2:?}"; shift ;;
         --smoke-port) SMOKE_PORT="${2:?}"; shift ;;
         --smoke-adb)  SMOKE_ADB="${2:?}"; SMOKE_ADB_EXPLICIT="${2:?}"; shift ;;
         --list|--dry-run) LIST_ONLY=1 ;;
@@ -88,58 +105,91 @@ while [ $# -gt 0 ]; do
 done
 
 case "$PLATFORMS" in
-    linux|windows|darwin|both|all) ;;
-    *) die "--platform 只能是 linux / windows / darwin / both / all（现在：$PLATFORMS）" ;;
+    linux|windows|darwin|both|all|darwin-aarch64|darwin-x86_64) ;;
+    *) die "--platform 只能是 linux / windows / darwin[-aarch64|-x86_64] / both / all（现在：$PLATFORMS）" ;;
 esac
 case "$DARWIN_ARCH" in
-    aarch64|x64) ;;
-    *) die "--darwin-arch 只能是 aarch64（Apple Silicon）或 x64（Intel Mac）（现在：$DARWIN_ARCH）" ;;
+    aarch64|x64|both) ;;
+    *) die "--darwin-arch 只能是 aarch64（Apple Silicon）/ x64（Intel Mac）/ both（两档都出）（现在：$DARWIN_ARCH）" ;;
 esac
 case "$ZIP_LEVEL" in ''|*[!0-9]*) die "--zip-level 要是 0..9 的数字" ;; esac
 
-# 后端目录名：三种平台，darwin 还要分宿主架构。
-# ⚠️ darwin 的目录名用的是**连字符**（darwin-aarch64），不是 host-os 的下划线形式 ——
-#    实测自 SDK 包内 emulator/qemu/darwin-aarch64/（见 docs/13-macos-port.md §7.0.2）。
-platform_backend_dir() {   # platform_backend_dir <平台>
-    case "$1" in
+# ===========================================================================
+# 「目标」= 平台 + 宿主架构
+#
+# 四个目标名： linux / windows / darwin-aarch64 / darwin-x64
+#
+# ⚠️ 为什么要有"目标"这一层，而不是继续用"平台"：
+#    三种平台里只有 darwin 分两档，而这两档**必须能同时出现在一次调用里**
+#    （用户要的就是"mac 的 x64 端和 arm64 端一起出"）。
+#    原来架构存在全局变量 DARWIN_ARCH 里 —— 一次调用只能有一档。
+#    现在架构**从目标名里取**，全局那个降级为"`--platform darwin` 时默认出哪一档"。
+#
+# 下面这些函数名保留 `platform_` 前缀（改动面小），但**参数是目标名**。
+# ===========================================================================
+target_platform() {   # target_platform <目标> → linux | windows | darwin
+    case "$1" in darwin-*) printf 'darwin' ;; *) printf '%s' "$1" ;; esac
+}
+target_arch() {   # target_arch <目标> → aarch64 | x64 |（非 darwin 为空）
+    case "$1" in darwin-aarch64) printf 'aarch64' ;; darwin-x86_64) printf 'x64' ;; *) printf '' ;; esac
+}
+
+# 后端目录名。
+#
+# ⚠️⚠️ darwin 这档有**三套命名**，别照着一处猜另一处（实测踩到）：
+#      SDK 包名                emulator-darwin_x64-*.zip     ← 下划线 + x64
+#      清单里的 host-arch 字段  x64                           ← 选包用（platform_hostarch）
+#      **包内的后端目录**       darwin-x86_64                 ← 连字符 + x86_64（本函数）
+#    aarch64 那档三者恰好都是 aarch64 的写法，所以"照着包名猜目录名"能蒙对；
+#    x64 那档一猜就错，报错是"运行时里没有后端"（这行检查救了这一次）。
+#
+#    另外：darwin-x86_64 包里**有** qemu-system-aarch64-headless —— Intel Mac 上技术上
+#    能跨架构跑 arm64 guest，但那是全系统模拟，正是 docs/09-why-not-full-arm64-sim.md
+#    用 28 轮实验否决掉的路线（性能不可接受）。所以"Intel Mac 配 x86_64 ROM"不变，
+#    别因为"包里有那个文件"就改这一条。
+platform_backend_dir() {   # platform_backend_dir <目标>
+    case "$(target_platform "$1")" in
         linux)   printf 'linux-x86_64' ;;
         windows) printf 'windows-x86_64' ;;
-        darwin)  case "$DARWIN_ARCH" in aarch64) printf 'darwin-aarch64' ;; x64) printf 'darwin-x64' ;; esac ;;
+        darwin)  printf 'darwin-%s' "$([ "$(target_arch "$1")" = aarch64 ] && printf aarch64 || printf x86_64)" ;;
     esac
 }
-# 该平台的后端可执行文件名（darwin 按宿主架构取 aarch64 或 x86_64 后端）
-platform_backend() {   # platform_backend <平台>
-    case "$1" in
+# 该目标的后端可执行文件名（darwin 按目标名里的架构取 aarch64 或 x86_64 后端）
+platform_backend() {   # platform_backend <目标>
+    case "$(target_platform "$1")" in
         linux)   printf 'qemu/linux-x86_64/qemu-system-x86_64-headless' ;;
         windows) printf 'qemu/windows-x86_64/qemu-system-x86_64.exe' ;;
-        darwin)  case "$DARWIN_ARCH" in
+        darwin)  case "$(target_arch "$1")" in
                      aarch64) printf 'qemu/darwin-aarch64/qemu-system-aarch64-headless' ;;
-                     x64)     printf 'qemu/darwin-x64/qemu-system-x86_64-headless' ;;
+                     # ⚠️ darwin-**x86_64**（不是 darwin-x64）—— 见 platform_backend_dir 的说明
+                     x64)     printf 'qemu/darwin-x86_64/qemu-system-x86_64-headless' ;;
                  esac ;;
     esac
 }
-# 该平台 guest 端要什么架构（用于错误信息与验收口径，不参与构建）
-platform_guest_arch() {   # platform_guest_arch <平台>
+# 该目标 guest 端要什么架构（**决定用哪份 ROM**，也用于错误信息）
+platform_guest_arch() {   # platform_guest_arch <目标>
     case "$1" in
-        darwin) case "$DARWIN_ARCH" in aarch64) printf 'arm64-v8a' ;; x64) printf 'x86_64' ;; esac ;;
-        *)      printf 'x86_64' ;;
+        darwin-aarch64) printf 'arm64-v8a' ;;
+        *)              printf 'x86_64' ;;
     esac
 }
-platform_tag()    { case "$1" in linux) printf 'linux-x86_64' ;; windows) printf 'windows-x86_64' ;; darwin) printf 'darwin-%s' "$DARWIN_ARCH" ;; esac; }
+# 包名后缀。linux/windows 补 -x86_64；darwin 那两档的名字本身就是后缀
+# （darwin-aarch64 / darwin-x64），所以直接透传 —— 这也是目标名取成这样的原因。
+# 包名后缀。三档都是 <os>-<arch> 的形式，且与模拟器包内的后端目录名一致 ——
+# 这样"包里是哪个后端"和"zip 叫什么"一眼对得上，少一处要记的映射。
+platform_tag()    { case "$1" in linux) printf 'linux-x86_64' ;; windows) printf 'windows-x86_64' ;; darwin-*) printf '%s' "$1" ;; esac; }
 platform_label()  { case "$1" in
-    linux)   printf 'Linux x86_64（KVM）' ;;
-    windows) printf 'Windows x86_64（WHPX）' ;;
-    darwin)  case "$DARWIN_ARCH" in
-                 aarch64) printf 'macOS Apple Silicon（Hypervisor.framework）' ;;
-                 x64)     printf 'macOS Intel（Hypervisor.framework）' ;;
-             esac ;;
+    linux)          printf 'Linux x86_64（KVM）' ;;
+    windows)        printf 'Windows x86_64（WHPX）' ;;
+    darwin-aarch64) printf 'macOS Apple Silicon（Hypervisor.framework）' ;;
+    darwin-x86_64)  printf 'macOS Intel（Hypervisor.framework）' ;;
 esac; }
-platform_hostos() { case "$1" in linux) printf 'linux' ;; windows) printf 'windows' ;; darwin) printf 'macosx' ;; esac; }
-# 该平台宿主的 CPU 架构（**选包用**，与 guest 架构无关）。
+platform_hostos() { case "$(target_platform "$1")" in linux) printf 'linux' ;; windows) printf 'windows' ;; darwin) printf 'macosx' ;; esac; }
+# 该目标宿主的 CPU 架构（**选包用**，与 guest 架构无关）。
 # SDK 清单里 linux/windows 只有 x64；macosx 下 aarch64 与 x64 都有。
-platform_hostarch() {   # platform_hostarch <平台>
-    case "$1" in
-        darwin) printf '%s' "$DARWIN_ARCH" ;;
+platform_hostarch() {   # platform_hostarch <目标>
+    case "$(target_platform "$1")" in
+        darwin) printf '%s' "$(target_arch "$1")" ;;
         *)      printf 'x64' ;;
     esac
 }
@@ -148,13 +198,33 @@ platform_hostarch() {   # platform_hostarch <平台>
 #    加 macOS 时我一度把 both 改成三个平台，结果**默认调用直接失败**
 #    （因为 darwin/aarch64 需要 arm64 ROM，而默认那份是 x86_64 SROM）——
 #    等于把所有人的默认行为弄坏了。三平台要用 `all`。
-platform_list() {
+# 把 PLATFORMS + DARWIN_ARCH 展开成**目标列表**。
+#
+# ⚠️ 展开规则（每条都有理由）：
+#   · `both` 仍是 linux + windows —— 它是默认值，语义不能变（改坏了所有人的默认行为）；
+#   · `all`  = linux + windows + **darwin 的两档** —— "全出"就该包含 mac 的两端，
+#              这也是用户要的"x64 端和 arm64 端"；
+#   · `darwin` 单列时，出哪档由 --darwin-arch 决定（aarch64 / x64 / both）；
+#   · 目标名里的 `-aarch64`/`-x64` 也允许直接写（如 --platform darwin-x64）。
+target_list() {
+    local darwin_targets
+    case "$DARWIN_ARCH" in
+        both)    darwin_targets="darwin-aarch64 darwin-x86_64" ;;
+        aarch64) darwin_targets="darwin-aarch64" ;;
+        x64)     darwin_targets="darwin-x86_64" ;;
+    esac
     case "$PLATFORMS" in
-        both) printf 'linux windows' ;;
-        all)  printf 'linux windows darwin' ;;
-        *)    printf '%s' "$PLATFORMS" ;;
+        both)    printf 'linux windows' ;;
+        # all 固定出两档（不跟 --darwin-arch 走）——"全出"就该包含 mac 的两端
+        all)     printf 'linux windows darwin-aarch64 darwin-x86_64' ;;
+        darwin)  printf '%s' "$darwin_targets" ;;
+        darwin-aarch64|darwin-x86_64)
+                 printf '%s' "$PLATFORMS" ;;
+        *)       printf '%s' "$PLATFORMS" ;;
     esac
 }
+# 兼容旧名（还有别的脚本/文档在叫它）
+platform_list() { target_list; }
 
 require_tools() {
     local t missing=""
@@ -212,18 +282,66 @@ resolve_version() {
 ROM_REQUIRED="system-qemu.img vendor-qemu.img product-qemu.img ramdisk-qemu.img \
 kernel-ranchu encryptionkey.img userdata.img advancedFeatures.ini config.ini"
 
-check_rom() {
-    [ -d "$ROM_DIR" ] || die "ROM 交付目录不存在：$ROM_DIR
-    先打 ROM： ./scripts/package-rom.sh"
-    local missing="" f
-    for f in $ROM_REQUIRED; do [ -s "$ROM_DIR/$f" ] || missing="$missing $f"; done
-    [ -s "$ROM_DIR/system/build.prop" ] || missing="$missing system/build.prop"
-    [ -z "$missing" ] || die "ROM 交付目录不全，缺：$missing
-    重新打： ./scripts/package-rom.sh"
+# 这个目标该用哪份 ROM。
+#
+# 判据是 **guest 架构**（platform_guest_arch），不是平台名：
+# 平台名与"用哪份 ROM"不是一回事 —— darwin 的两档就要用两份不同的 ROM，
+# 而 darwin-x64 与 linux/windows 用的是同一份。
+rom_dir_for_target() {   # rom_dir_for_target <目标> → 打印 ROM 目录
+    case "$(platform_guest_arch "$1")" in
+        arm64-v8a)
+            # ⚠️ 优先级不能反：**用户显式给的优先于"约定的默认"**。
+            #    第一版这里直接返回约定目录，于是 `--images <某个 arm64 ROM>` 被
+            #    悄悄丢掉、改用 artifacts/ 里那份 —— 显式参数被忽略比报错更糟。
+            if [ -n "$ROM_DIR_ARM64" ]; then printf '%s' "$ROM_DIR_ARM64"; return; fi
+            # 只指了一份 ROM 且它确实是 arm64 的 → 就用它（"我只有这一份"的直觉）
+            if [ "$IMAGES_EXPLICIT" = 1 ] && [ "$(rom_guest_arch "$ROM_DIR")" = arm64 ]; then
+                printf '%s' "$ROM_DIR"; return
+            fi
+            printf '%s' "$ROM_DIR_ARM64_DEFAULT" ;;
+        *)  printf '%s' "$ROM_DIR" ;;
+    esac
 }
 
+# 这次调用会用到的**所有** ROM（去重）—— 自检、指纹、--list 都要遍历它
+all_rom_dirs() {
+    local t seen="" d
+    for t in $(target_list); do
+        d="$(rom_dir_for_target "$t")"
+        case " $seen " in *" $d "*) ;; *) seen="$seen $d"; printf '%s\n' "$d" ;; esac
+    done
+}
+
+check_rom() {
+    # 逐个检查**这次会用到的每份 ROM**（可能两份：x86_64 桥 + arm64 原生）
+    local d missing f
+    while IFS= read -r d; do
+        if [ ! -d "$d" ]; then
+            # arm64 那份缺了要给"怎么打出来"的指引 —— 它不是默认产物
+            if [ "$d" = "${ROM_DIR_ARM64:-$ROM_DIR_ARM64_DEFAULT}" ]; then
+                die "arm64 ROM 交付目录不存在：$d
+    目标 $(target_list) 里含 darwin-aarch64，它需要**原生 arm64** ROM（与默认那份不通用）。
+    打出来：
+        PRODUCT=arm64 ./scripts/build-rom.sh && PRODUCT=arm64 ./scripts/package-rom.sh
+    或者用 --images-arm64 <目录> 指到别处。
+    只想出 Intel Mac 那档： --darwin-arch x64"
+            fi
+            die "ROM 交付目录不存在：$d
+    先打 ROM： ./scripts/package-rom.sh"
+        fi
+        missing=""
+        for f in $ROM_REQUIRED; do [ -s "$d/$f" ] || missing="$missing $f"; done
+        [ -s "$d/system/build.prop" ] || missing="$missing system/build.prop"
+        [ -z "$missing" ] || die "ROM 交付目录不全（$d），缺：$missing
+    重新打： ./scripts/package-rom.sh"
+    done <<EOF
+$(all_rom_dirs)
+EOF
+}
+
+# rom_fingerprint [目录] —— 不给就用主 ROM
 rom_fingerprint() {
-    grep -m1 '^ro\.system\.build\.fingerprint' "$ROM_DIR/MANIFEST.txt" 2>/dev/null | sed 's/.*= *//' || true
+    grep -m1 '^ro\.system\.build\.fingerprint' "${1:-$ROM_DIR}/MANIFEST.txt" 2>/dev/null | sed 's/.*= *//' || true
 }
 
 # ---------------------------------------------------------------------------
@@ -314,7 +432,31 @@ fetch_zip() {   # fetch_zip <url> <sha1> <目标文件> [大小字节]
     log "下载 $(basename "$out")$([ "$size" != 0 ] && printf '（%s MiB）' "$((size / 1048576))")"
     # 交互终端给进度条，重定向到日志时给静默：否则日志会被进度条刷爆
     local prog="--progress-bar"; [ -t 2 ] || prog="-sS"
-    curl -fL --retry 3 "$prog" -o "$out.part" "$url" || die "下载失败：$url"
+
+    # ⚠️ 这一段是踩出来的，别简化：
+    #   · `--retry 3` **扛不住** HTTP/2 的 stream 级错误
+    #     （实测：`curl: (92) HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR`），
+    #     因为那不在 curl 认得出来该重试的类别里 —— 加了等于没加；
+    #   · 所以用**显式重试循环** + `--http1.1`（该镜像的 HTTP/2 不稳）+ `-C -`（断点续传，
+    #     重试从断点接着下，不从头再来）；
+    #   · `--speed-time 20 --speed-limit 20480` 让**卡住的**传输自己早点失败，
+    #     否则会一直吊着，日志上看起来像"还在下载"（这个更像 bug 的 bug 最难查）。
+    # 同一份逻辑在 macos/fetch-emulator.sh 里也有一份，两边改要一起改。
+    local attempt rc=1
+    for attempt in 1 2 3; do
+        [ "$attempt" -gt 1 ] && warn "第 $attempt 次尝试（断点续传）"
+        # shellcheck disable=SC2086
+        curl -fL --http1.1 -C - --retry 2 --retry-delay 2 \
+             --speed-time 20 --speed-limit 20480 \
+             $prog -o "$out.part" "$url" && { rc=0; break; }
+        rc=$?
+        warn "下载中断（curl 退出码 $rc）：$(basename "$out")"
+        sleep $((attempt * 3))
+    done
+    [ "$rc" = 0 ] || die "下载失败（试了 $attempt 次）：$url
+    网络/镜像问题可以：① 重跑本命令（会断点续传）；
+    ② 手工把包放到缓存目录 $CACHE_DIR/ 再重跑；
+    ③ 用 --<平台>-emulator-zip <本地 zip> 直接指定。"
     mv -f "$out.part" "$out"
     local got; got="$(sha1sum "$out" | cut -d' ' -f1)"
     [ "$got" = "$want" ] || die "$(basename "$out") sha1 不匹配：期望 $want，实得 $got"
@@ -355,7 +497,7 @@ prepare_runtime() {   # prepare_runtime <平台>
     #    要带条件信息就用真正的 if。
     if [ ! -s "$backend" ]; then
         local arch_note=""
-        [ "$plat" = darwin ] && arch_note="（--darwin-arch=$DARWIN_ARCH）"
+        [ "$(target_platform "$plat")" = darwin ] && arch_note="（目标=$plat）"
         die "运行时里没有后端：$backend
     这个包带不动本 ROM（guest 是 $(platform_guest_arch "$plat")，别的架构后端不行）。
     平台=$plat$arch_note"
@@ -378,7 +520,7 @@ prepare_runtime() {   # prepare_runtime <平台>
     unzip -q -o "$pt_zip" -d "$rt"
     # ⚠️ darwin 的 adb 也叫 `adb`（不是 adb.exe），与 linux 相同 ——
     #    但**包名不同**（platform-tools_r<v>-darwin.zip），且两种 Mac 共用同一份。
-    local adbname="adb"; [ "$plat" = windows ] && adbname="adb.exe"
+    local adbname="adb"; [ "$(target_platform "$plat")" = windows ] && adbname="adb.exe"
     [ -s "$rt/platform-tools/$adbname" ] || die "platform-tools 里没有 $adbname"
 
     # 只用得上本平台的 x86_64 后端：别的架构后端（若包里有）删掉省体积
@@ -426,21 +568,23 @@ EOF
 # staging：铺出包里的目录树（结果路径放到 STAGED_ROOT）
 # ---------------------------------------------------------------------------
 STAGED_ROOT=""
-stage_release() {   # stage_release <平台>
-    local plat="$1" tag root
+stage_release() {   # stage_release <目标> <ROM 目录>
+    local plat="$1" rom="$2" tag root
     tag="$(platform_tag "$plat")"
     root="$STAGE_DIR/autosnap-$VERSION-$tag"
     rm -rf "$root"; mkdir -p "$root"
 
     log "[$plat] 镜像 → images/（硬链接，不复制实体）"
-    cp -al "$ROM_DIR" "$root/images" 2>/dev/null || { warn "硬链接不可用（跨文件系统？），退回复制"; cp -a "$ROM_DIR" "$root/images"; }
+    cp -al "$rom" "$root/images" 2>/dev/null || { warn "硬链接不可用（跨文件系统？），退回复制"; cp -a "$rom" "$root/images"; }
 
     log "[$plat] 运行时 → runtime/"
     cp -a "$STAGE_DIR/runtime-$plat" "$root/runtime"
 
     log "[$plat] 入口脚本 + 模板"
     mkdir -p "$root/bin" "$root/templates" "$root/tools"
-    cp -a "$PACKAGING_DIR/bin/$plat/." "$root/bin/"
+    # ⚠️ 这里是**平台名**（packaging/bin/linux|windows|darwin/），不是目标名 ——
+    #    目标名会是 darwin-aarch64，照它去找会 cp 失败（实测踩到）。
+    cp -a "$PACKAGING_DIR/bin/$(target_platform "$plat")/." "$root/bin/"
     chmod +x "$root"/bin/* 2>/dev/null || true
     cp -a "$PACKAGING_DIR/templates/." "$root/templates/"
     cp -f "$EMULATOR_CONFIG" "$root/templates/config.ini"     # 硬件唯一真源
@@ -454,7 +598,7 @@ EOF
     [ -s "$RUN_DIR/arm64-probe" ] && cp -f "$RUN_DIR/arm64-probe" "$root/tools/"
     # 桥接工具只进 linux 包：macOS 没有 -net-tap 等价物，Windows 侧也没实现
     # （三平台一致的口径，见 docs/13-macos-port.md §3.5）
-    if [ "$plat" = linux ]; then
+    if [ "$(target_platform "$plat")" = linux ]; then
         cp -f "$X64_DIR/tools/net-bridge.sh" "$root/tools/" 2>/dev/null || true
         cp -f "$X64_DIR/tools/net-bridge-ifup.sh" "$root/tools/" 2>/dev/null || true
     fi
@@ -465,14 +609,22 @@ EOF
 }
 
 # START-HERE.md 的占位符替换（多行块用 python3 做，不比 sed 打架）
-render_start_here() {   # render_start_here <平台> <root>
-    local plat="$1" root="$2" tag; tag="$(platform_tag "$plat")"
-    python3 - "$PACKAGING_DIR/START-HERE.md" "$root/START-HERE.md" "$plat" \
+render_start_here() {   # render_start_here <目标> <root> <ROM 目录>
+    local plat="$1" root="$2" rom="$3" tag; tag="$(platform_tag "$plat")"
+    # ⚠️ 第二个位置参数给的是 **平台名**（target_platform），不是目标名：
+    #    这个 python 里到处是 `plat == "windows"` / `plat == "darwin"` 的分支，
+    #    传目标名（darwin-aarch64）进去，两处会**静默走错**：
+    #      · "Apple Silicon 提示" 变成空
+    #      · 第 6 节的"加速"行写成 Windows 的
+    #    —— 包能打出来、自检也过，只是文档内容是错的。目标名单独作为最后一个参数给。
+    python3 - "$PACKAGING_DIR/START-HERE.md" "$root/START-HERE.md" "$(target_platform "$plat")" \
              "autosnap-$VERSION-$tag" "$VERSION" "$(platform_label "$plat")" \
-             "$(date '+%Y-%m-%d %H:%M:%S %z')" "$(rom_fingerprint)" \
-             "$(du -sh --apparent-size "$ROM_DIR" | cut -f1)" "$ROM_DIR" <<'PY'
+             "$(date '+%Y-%m-%d %H:%M:%S %z')" "$(rom_fingerprint "$rom")" \
+             "$(du -sh --apparent-size "$rom" | cut -f1)" "$rom" "$plat" <<'PY'
 import os, sys
-(tpl, out, plat, rootdir, ver, label, built, fp, imgsize, romdir_abs) = sys.argv[1:11]
+(tpl, out, plat, rootdir, ver, label, built, fp, imgsize, romdir_abs, target) = sys.argv[1:12]
+# plat  = 平台名（linux / windows / darwin）—— 分支判断用它
+# target= 目标名（含架构，如 darwin-aarch64）—— 判"哪一档"用它
 
 # ⚠️ 这里**没有 tag 变量**：tag 已经折进 rootdir（autosnap-<版本>-<平台tag>）。
 #    判宿主架构要用 rootdir.endswith("aarch64")，写 tag 会 NameError（实测踩到）。
@@ -573,7 +725,7 @@ subs = {
     # 对 arm64 原生包是错的（那份没有翻译层，也不跑 x86 应用）。
     "@GUEST_DESC@": ("arm64-v8a 原生，**无翻译层** —— 跑不了纯 x86/x86_64 应用，"
                      "应用需自带 arm64-v8a 库")
-                    if plat == "darwin" and rootdir.endswith("aarch64")
+                    if plat == "darwin" and target.endswith("aarch64")
                     else "x86_64，另有 ARM64 用户态翻译层（可跑 arm64 应用）",
     "@ENTRY_NAMES@": "start-headless / stop / status / verify",
     "@TOOLS_EXTRA@": "（另有 net-bridge.sh / net-bridge-ifup.sh：guest 桥接到物理 LAN）" if plat == "linux" else "",
@@ -581,7 +733,7 @@ subs = {
     "@PLATFORM_HINT@": "\n> ⚠️ **这台是 Apple Silicon**：只能跑 arm64 原生 ROM。"
                        "现有 x86_64 ROM 在 Apple Silicon 上**没有**可用的模拟器后端"
                        "（不是慢，是根本没有那条路 —— 见包内 runtime/RUNTIME.txt 的后端路径）。\n"
-                       if plat == "darwin" and rootdir.endswith("aarch64")
+                       if plat == "darwin" and target.endswith("aarch64")
                        else "\n> ⚠️ **这台是 Intel Mac**：可跑现有 x86_64 ROM；"
                             "arm64 原生 ROM 在 Intel 上同样没有后端。\n"
                        if plat == "darwin" else "",
@@ -598,8 +750,8 @@ PY
 }
 
 # RELEASE.json + SHA256SUMS
-write_manifest() {   # write_manifest <平台> <root>
-    local plat="$1" root="$2" tag; tag="$(platform_tag "$plat")"
+write_manifest() {   # write_manifest <目标> <root> <ROM 目录>
+    local plat="$1" root="$2" rom="$3" tag; tag="$(platform_tag "$plat")"
     local emu_zip emu_url emu_sha emu_ver emu_build _emubase pt_zip pt_url pt_sha pt_ver
     IFS='|' read -r emu_zip emu_url emu_sha emu_ver emu_build _emubase pt_zip pt_url pt_sha pt_ver \
         < "$STAGE_DIR/.runtime-$plat.meta"
@@ -607,7 +759,7 @@ write_manifest() {   # write_manifest <平台> <root>
     if [ "$VERIFY_IMAGES" = 1 ]; then
         log "[$plat] 校验镜像（sha256sum -c images/SHA256SUMS，$(du -sh "$root/images" | cut -f1)）"
         ( cd "$root/images" && sha256sum -c SHA256SUMS --quiet ) \
-            || die "镜像与 SHA256SUMS 不符（$ROM_DIR 可能被改过；--no-verify-images 可跳过）"
+            || die "镜像与 SHA256SUMS 不符（$rom 可能被改过；--no-verify-images 可跳过）"
     fi
 
     log "[$plat] RELEASE.json"
@@ -615,7 +767,7 @@ write_manifest() {   # write_manifest <平台> <root>
     #    否则 RELEASE.json 自己不在清单里（"包内每个文件都可校验"就不成立了）。
     local n
     n="$(python3 - "$root" "$VERSION" "$plat" "$tag" "$emu_zip" "$emu_url" "$emu_sha" "$emu_ver" "$emu_build" \
-             "$pt_zip" "$pt_url" "$pt_sha" "$pt_ver" "$ROM_DIR" "$PROJECT_ROOT" \
+             "$pt_zip" "$pt_url" "$pt_sha" "$pt_ver" "$rom" "$PROJECT_ROOT" \
              "$(platform_backend "$plat")" <<'PY'
 import json, os, subprocess, sys
 (root, ver, plat, tag, emu_zip, emu_url, emu_sha, emu_ver, emu_build,
@@ -753,9 +905,9 @@ check_zip() {   # check_zip <平台> <zip>：结构自检（三样东西都在�
     listing="$STAGE_DIR/.listing-$plat.txt"
     unzip -Z1 "$zip" > "$listing"
     entries="$(wc -l < "$listing")"
-    adbname="adb"; [ "$plat" = windows ] && adbname="adb.exe"
+    adbname="adb"; [ "$(target_platform "$plat")" = windows ] && adbname="adb.exe"
     for must in \
-        "$name/bin/start-headless.$([ "$plat" = windows ] && echo ps1 || echo sh)" \
+        "$name/bin/start-headless.$([ "$(target_platform "$plat")" = windows ] && echo ps1 || echo sh)" \
         "$name/runtime/emulator/$(platform_backend "$plat")" \
         "$name/runtime/platform-tools/$adbname" \
         "$name/images/system-qemu.img" \
@@ -775,9 +927,9 @@ check_zip() {   # check_zip <平台> <zip>：结构自检（三样东西都在�
 
 # 按平台挑冒烟用的 adb：**macOS 上没有 /usr/bin/adb**（那是 linux 的路径），
 # 不换的话 darwin 包在 Mac 上冒烟会永远走"没有可用的 adb，只做结构检查"这条静默分支。
-resolve_smoke_adb() {   # resolve_smoke_adb <平台> → 打印 adb 路径（可能不存在）
+resolve_smoke_adb() {   # resolve_smoke_adb <目标> → 打印 adb 路径（可能不存在）
     if [ -n "${SMOKE_ADB_EXPLICIT:-}" ]; then printf '%s' "$SMOKE_ADB_EXPLICIT"; return; fi
-    case "$1" in
+    case "$(target_platform "$1")" in
         darwin) printf '/usr/local/bin/adb' ;;
         *)      printf '%s' "$SMOKE_ADB" ;;
     esac
@@ -789,9 +941,9 @@ resolve_smoke_adb() {   # resolve_smoke_adb <平台> → 打印 adb 路径（可
 #    平台"就是这么来的），但冒烟意味着**真去执行包里的模拟器** ——
 #    那是 Mach-O 二进制，在 Linux 上只会 "cannot execute binary file"。
 #    不判的话，冒烟会以一条与代码无关的报错失败，把打包整体拖挂。
-host_can_smoke() {   # host_can_smoke <平台> → 0 能
+host_can_smoke() {   # host_can_smoke <目标> → 0 能
     local plat="$1" us; us="$(uname -s)"
-    case "$plat" in
+    case "$(target_platform "$plat")" in
         linux)  [ "$us" = "Linux" ] ;;
         darwin) [ "$us" = "Darwin" ] ;;
         windows) return 1 ;;   # windows 侧的冒烟在 Windows 机器上做（见 windows/README）
@@ -847,9 +999,14 @@ require_tools
 resolve_version
 check_rom
 
-log "发布版本：$VERSION   平台：$PLATFORMS   压缩级别：-$ZIP_LEVEL"
-log "ROM：${ROM_DIR#"$PROJECT_ROOT"/}（$(du -sh "$ROM_DIR" | cut -f1)）"
-log "指纹：$(rom_fingerprint)"
+log "发布版本：$VERSION   平台：$PLATFORMS（darwin:$DARWIN_ARCH）   压缩级别：-$ZIP_LEVEL"
+log "目标：$(target_list)"
+# 每个用到的 ROM 各报一行（可能两份：x86_64 桥 + arm64 原生）
+while IFS= read -r _rd; do
+    log "ROM：${_rd#"$PROJECT_ROOT"/}（$(du -sh "$_rd" | cut -f1)，指纹 $(rom_fingerprint "$_rd")）"
+done <<EOF
+$(all_rom_dirs)
+EOF
 
 # ---------------------------------------------------------------------------
 # 「目标平台」与「这份 ROM 的 guest 架构」必须配套 —— 不配套就**明确拒绝**，
@@ -863,10 +1020,17 @@ log "指纹：$(rom_fingerprint)"
 #
 # 判据取 ROM 的 build.prop（**文件里的事实**，不是我们以为的产品名）。
 # ---------------------------------------------------------------------------
-rom_guest_arch() {   # → arm64 / x86_64 / unknown
+# rom_guest_arch [ROM 目录] → arm64 / x86_64 / unknown
+#
+# ⚠️ **必须接目录参数。** 原来只读全局 $ROM_DIR —— 而调用方
+#    （assert_rom_matches_platforms）是按目标传各自 ROM 的，
+#    参数被忽略的后果是"每个目标都拿主 ROM 去比"：
+#    检查看起来跑了，结论却是错的（假失败，或更糟：该拦的没拦住）。
+rom_guest_arch() {
+    local rom="${1:-$ROM_DIR}"
     local abi abilist
-    abi="$(sed -n 's/^ro\.product\.cpu\.abi=//p' "$ROM_DIR/system/build.prop" 2>/dev/null | tail -1)"
-    abilist="$(sed -n 's/^ro\.system\.product\.cpu\.abilist64=//p' "$ROM_DIR/system/build.prop" 2>/dev/null | tail -1)"
+    abi="$(sed -n 's/^ro\.product\.cpu\.abi=//p' "$rom/system/build.prop" 2>/dev/null | tail -1)"
+    abilist="$(sed -n 's/^ro\.system\.product\.cpu\.abilist64=//p' "$rom/system/build.prop" 2>/dev/null | tail -1)"
     if [ "$abi" = "arm64-v8a" ] && ! printf '%s' "$abilist" | grep -q x86_64; then
         printf 'arm64'
     elif printf '%s' "$abilist" | grep -q x86_64; then
@@ -877,34 +1041,40 @@ rom_guest_arch() {   # → arm64 / x86_64 / unknown
 }
 
 assert_rom_matches_platforms() {
-    local rom_arch plat need bad=""
-    rom_arch="$(rom_guest_arch)"
-    [ "$rom_arch" = unknown ] && { warn "读不出 ROM 的 guest 架构（$ROM_DIR/system/build.prop）—— 跳过配套检查"; return 0; }
-    for plat in $(platform_list); do
-        case "$plat" in
-            darwin) need="$([ "$DARWIN_ARCH" = aarch64 ] && printf arm64 || printf x86_64)" ;;
-            *)      need="x86_64" ;;
+    local t rom rom_arch need want bad="" ok=""
+    for t in $(target_list); do
+        rom="$(rom_dir_for_target "$t")"
+        want="$(platform_guest_arch "$t")"
+        rom_arch="$(rom_guest_arch "$rom")"
+        if [ "$rom_arch" = unknown ]; then
+            warn "[$t] 读不出 guest 架构（$rom/system/build.prop）—— 跳过这一项的配套检查"
+            continue
+        fi
+        case "$want" in
+            arm64-v8a) want=arm64 ;;
+            *)         want=x86_64 ;;
         esac
-        if [ "$need" != "$rom_arch" ]; then
+        if [ "$want" != "$rom_arch" ]; then
             # ⚠️ 用 $'\n' 而不是 \n —— 双引号里的 \n 是**字面反斜杠 n**，
             #    die 出去就是一行里带着 \n 字样（实测踩到，很难看）。
-            bad="$bad"$'\n'"    - $plat 需要 guest=$need 的 ROM，当前 ROM 是 guest=$rom_arch"
+            bad="$bad"$'\n'"    - $t 需要 guest=$want 的 ROM，而 $(basename "$rom") 是 guest=$rom_arch"
+        else
+            ok="$ok $t"
         fi
     done
     if [ -n "$bad" ]; then
-        die "目标平台与这份 ROM 不配套：$bad
+        die "目标与 ROM 不配套：$bad
 
-    一次调用只能打一份 ROM（ROM_DIR=$ROM_DIR）。
-    正确的做法是分两次：
-      # arm64 原生 ROM（Apple Silicon）
+    规则：**darwin-aarch64 要原生 arm64 ROM，其余（linux/windows/darwin-x64）要 x86_64 桥 ROM。**
+    两份 ROM 不通用，所以分别指定：
+      --images       <x86_64 桥 ROM 目录>     # 默认取当前 PRODUCT 的产物
+      --images-arm64 <arm64 原生 ROM 目录>    # 默认取 artifacts/rom-remote_control_arm64
+    打 arm64 那份：
       PRODUCT=arm64 ./scripts/build-rom.sh && PRODUCT=arm64 ./scripts/package-rom.sh
-      ./scripts/release.sh --platform darwin --darwin-arch aarch64 --images ../artifacts/rom-remote_control_arm64
-
-      # x86_64 + 翻译层 ROM（linux / windows / Intel Mac）
-      ./scripts/release.sh --platform both         # linux + windows（默认值就是这个）
+    只出 Intel Mac 那档（不需要 arm64 ROM）： --darwin-arch x64
     见 docs/13-macos-port.md §4（三个产品的分工）。"
     fi
-    log "平台与 ROM 配套检查通过：guest=$rom_arch，平台=$(platform_list)"
+    log "目标与 ROM 配套检查通过：$ok"
 }
 assert_rom_matches_platforms
 
@@ -916,7 +1086,7 @@ if [ "$LIST_ONLY" = 1 ]; then
     if [ -s "$MANIFEST_XML" ]; then
         # ⚠️ 原来这里写死 `for p in linux windows` —— 加了 darwin 之后 --list 会
         #    **假装没有 darwin**（用户以为三个平台都列了）。改成跟 platform_list 走。
-        for p in $(platform_list); do
+        for p in $(target_list); do
             # ⚠️ 第二参是 **host-os**（platform_hostos → macosx/linux/windows），
             #    不是平台名（darwin/linux/windows）—— 两者只差 darwin→macosx 这一处，
             #    传错的话 lookup 会**静默**返回空，界面显示"清单里没有这个组合"，
@@ -924,17 +1094,29 @@ if [ "$LIST_ONLY" = 1 ]; then
             rec="$(sdk_archive emulator "$(platform_hostos "$p")" "$(platform_hostarch "$p")" 2>/dev/null || true)"
             if [ -n "$rec" ]; then
                 IFS=$'\t' read -r u s sh v c <<<"$rec"
-                printf '  %-8s %-12s %s（%s，%s MiB，sha1 %s…）\n' "$p" "$(platform_hostarch "$p")" \
-                    "$(basename "$u")" "$v" "$((s / 1048576))" "$(printf '%s' "$sh" | cut -c1-10)"
+                printf '  %-14s %-8s %-40s（%s，%s MiB）\n' "$p" "$(platform_hostarch "$p")" \
+                    "$(basename "$u")" "$v" "$((s / 1048576))"
             else
-                printf '  %-8s %-12s （清单里没有这个组合）\n' "$p" "$(platform_hostarch "$p")"
+                printf '  %-14s %-8s （清单里没有这个组合）\n' "$p" "$(platform_hostarch "$p")"
             fi
+        done
+        printf '  目标与 ROM 的搭配：\n'
+        for p in $(target_list); do
+            # ⚠️ 这里必须借一个变量：bash **不允许** ${$(命令)#前缀} 这种嵌套
+            #    （参数展开里不能再放命令替换）。写成 ${$(...)} 是语法错。
+            _rd="$(rom_dir_for_target "$p")"
+            printf '    %-14s guest=%-8s ← %s\n' "$p" "$(platform_guest_arch "$p")" \
+                "${_rd#"$PROJECT_ROOT"/}"
         done
     else
         printf '  （还没有 SDK 清单缓存：正式跑一次会先下载 %s/repository2-3.xml）\n' "$SDK_MIRROR"
     fi
-    printf '  打包内容   runtime/（无头模拟器 + adb） + images/（%s） + templates/ + bin/ + START-HERE.md\n' \
-        "$(du -sh --apparent-size "$ROM_DIR" | cut -f1)"
+    printf '  打包内容   runtime/（无头模拟器 + adb） + images/ + templates/ + bin/ + START-HERE.md\n'
+    while IFS= read -r _rd; do
+        printf '    images ← %s（%s）\n' "${_rd#"$PROJECT_ROOT"/}" "$(du -sh --apparent-size "$_rd" | cut -f1)"
+    done <<EOF
+$(all_rom_dirs)
+EOF
     exit 0
 fi
 
@@ -945,25 +1127,26 @@ flock -n 9 || die "另一个 release 打包实例正在跑（锁：$RUN_DIR/rele
 if [ "$ZIP_ONLY" = 0 ]; then
     # 只有真的需要"按清单找包"时才去下载清单（全程用本地 zip 覆盖时可以完全离线）
     need_sdk=0
-    for plat in $(platform_list); do
+    for plat in $(target_list); do
         [ -n "${EMU_ZIP_OVERRIDE[$plat]:-}" ] || need_sdk=1
         [ -n "${PT_ZIP_OVERRIDE[$plat]:-}" ] || need_sdk=1
     done
     [ "$need_sdk" = 1 ] && fetch_manifest
-    for plat in $(platform_list); do prepare_runtime "$plat"; done
+    for plat in $(target_list); do prepare_runtime "$plat"; done
 else
     log "--zip-only：复用 $STAGE_DIR 里已有的运行时与 staging"
 fi
 
 ZIPS=()
-for plat in $(platform_list); do
+for plat in $(target_list); do
     if [ "$ZIP_ONLY" = 1 ]; then
         root="$STAGE_DIR/autosnap-$VERSION-$(platform_tag "$plat")"
         [ -d "$root" ] || die "--zip-only 但 staging 不在：$root"
     else
-        stage_release "$plat"; root="$STAGED_ROOT"
-        render_start_here "$plat" "$root"
-        write_manifest "$plat" "$root"
+        # 这个目标用哪份 ROM（可能与其他目标不同 —— darwin-aarch64 用的是 arm64 那份）
+        stage_release "$plat" "$(rom_dir_for_target "$plat")"; root="$STAGED_ROOT"
+        render_start_here "$plat" "$root" "$(rom_dir_for_target "$plat")"
+        write_manifest "$plat" "$root" "$(rom_dir_for_target "$plat")"
     fi
     if [ "$STAGE_ONLY" = 1 ]; then
         log "[$plat] --stage-only：只铺到 ${root#"$PROJECT_ROOT"/}（$(du -sh "$root" | cut -f1)）"
@@ -986,7 +1169,7 @@ if [ "$SMOKE" = 1 ]; then
     # ⚠️ 原来只按 zip 名里有没有 "linux" 来决定冒不冒烟，而且只覆盖 linux。
     #    现在按 **platform_list 的实际顺序**逐个试，并把平台名传进去 ——
     #    darwin（以及将来的平台）也能被冒烟，能不能跑由 host_can_smoke 判。
-    for plat in $(platform_list); do
+    for plat in $(target_list); do
         for z in "${ZIPS[@]}"; do
             case "$(basename "$z")" in
                 *"$(platform_tag "$plat")"*) smoke_linux "$z" "$plat" ;;
