@@ -159,7 +159,9 @@ run: all
 	fi
 
 _run: all
-	@./test_inject_uinput;                       u=$$?; echo; \
+	@mkdir -p build; : > build/.counts; \
+	 export RC_TEST_COUNT_FILE=$$(pwd)/build/.counts; \
+	 ./test_inject_uinput;                       u=$$?; echo; \
 	 ./test_integration;                         i=$$?; echo; \
 	 ./test_capture_screencap ./fake_screencap;  c=$$?; echo; \
 	 ./test_appops;                              a=$$?; echo; \
@@ -178,10 +180,22 @@ _run: all
 	 printf "  %-34s %s\n" "WebSocket 握手"       "$$([ $$w -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "文件路径边界"         "$$([ $$f -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "SHA-256"                 "$$([ $$s -eq 0 ] && echo 通过 || echo 失败)"; \
-	 exit $$(( u + i + c + a + j + k + w + f + s ))
+	 echo "───────────────────────────────"; \
+	 total=$$(awk '{n+=$$1} END{print n+0}' build/.counts 2>/dev/null); \
+	 want=$$(sed -n 's|.*单元/集成 \*\*\([0-9]*\) 项检查\*\*.*|\1|p' ../../../README.md | head -1); \
+	 if [ -z "$$want" ]; then \
+	     printf "  %-34s %s\n" "检查数与 README 一致" "✗ 读不出 README 里的声明"; r=1; \
+	 elif [ "$$total" = "$$want" ]; then \
+	     printf "  %-34s %s\n" "检查数与 README 一致" "$$total 项"; r=0; \
+	 else \
+	     printf "  %-34s %s\n" "检查数与 README 一致" \
+	         "✗ 实际 $$total，README 写 $$want —— 改了测试就要同步改 README"; r=1; \
+	 fi; \
+	 exit $$(( u + i + c + a + j + k + w + f + s + r ))
 
 clean:
 	rm -rf $(WEBP_OBJ)
 	rm -f $(BINS) fake_screencap
+	rm -f build/.counts
 
 .PHONY: all run _run clean

@@ -60,6 +60,13 @@
 /dev/02-native-daemon/tools/cliptool/build/*
 !/dev/02-native-daemon/tools/cliptool/build/cliptool.jar
 
+# tests/Makefile 的中间产物：build/webp 下的 .o，以及 build/.counts
+# （后者是 `make run` 用来核对 README 检查数的临时计数文件）
+/dev/02-native-daemon/tests/build/
+
+# Python 字节码缓存（tools/*.py 被 import 或 py_compile 时生成）
+__pycache__/
+
 # --- AOSP 构建输出 ---
 # 正常情况下会落在 aosp/out/
 out/

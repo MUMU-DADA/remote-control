@@ -7,6 +7,7 @@
 
 #include <cstdint>   // uint16_t 等；不要依赖 <linux/input.h> 间接引入
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -49,6 +50,26 @@ inline void Info(const char* fmt, ...) {
 
 inline int Summary(const char* title) {
     printf("\n\033[1m=== %s ===\033[0m\n", title);
+    // 把本次的检查数报给调用方。
+    //
+    // 为什么需要：README 里自报了「单元/集成 N 项检查」，而这个 N 是 9 个
+    // 二进制各自的 gChecks 之和 —— 只有真跑一遍才知道。不设闸门的话它一定会
+    // 烂（实测就烂过：新增 test_sha256 的 9 项后，README 仍停在 298）。
+    // `make run` 用这个文件求和并与 README 比对。
+    //
+    // 不设 RC_TEST_COUNT_FILE 时行为完全不变，单独跑某个测试不受影响。
+    if (const char* path = getenv("RC_TEST_COUNT_FILE")) {
+        if (FILE* f = fopen(path, "a")) {
+            fprintf(f, "%d\n", gChecks);
+            fclose(f);
+        } else {
+            // 不能静默 —— 少一行就会让 make run 算出的总数偏小，
+            // 而那种偏差看起来像"README 写错了"，会把人引到错的方向。
+            fprintf(stderr, "警告：写不了计数文件 %s（%s），"
+                            "make run 的总数核对会不准\n",
+                    path, strerror(errno));
+        }
+    }
     if (gFailed == 0) {
         printf("\033[1;32m全部通过\033[0m  (%d 项检查)\n", gChecks);
         return 0;

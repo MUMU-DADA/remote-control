@@ -137,11 +137,9 @@ int main() {
 
     RmTree("/tmp/remote-control-fileops-test");
 
-    printf("\n\033[1;32m全部通过\033[0m  (%d 项检查)\n", remote_control_test::gChecks);
-    if (remote_control_test::gFailed > 0) {
-        printf("\033[1;31m%d / %d 项失败\033[0m\n", remote_control_test::gFailed,
-               remote_control_test::gChecks);
-        return 1;
-    }
-    return 0;
+    // 用公共 Summary()，不要自己拼 —— 这里原来就是手写的，于是踩了两个坑：
+    //   ① gChecks 没被上报给 `make run` 的总数核对（少一套，README 对不上）；
+    //   ② "全部通过" 打在了 gFailed 判断**之前** —— 有失败时会先打"全部通过"
+    //      再打失败行，自相矛盾。
+    return remote_control_test::Summary("文件路径边界");
 }
