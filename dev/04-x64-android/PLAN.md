@@ -226,3 +226,37 @@ system   system.img sha256 = 243298b2fb1aa4d9631ddd1435ef8bc8b0a2266cdf65d67bf00
 | 并发打包互相踩 | 两个 `package-rom.sh` 实例同时跑（被 kill 的旧实例仍在写 `MANIFEST.txt`），导致清单里出现 `MANIFEST.txt` 自己的哈希 | 加 `flock` 互斥锁（`flock -n 9 \|\| die`） |
 
 修完后交付目录复核：**`sha256sum -c SHA256SUMS` 20/20 通过**。
+
+---
+
+## 第 13 轮（本轮）：release 打包 —— 一个平台一个 zip
+
+> 需求：新增 release 打包输出脚本；zip 里要有**虚拟机完整无头运行环境 + 对应的虚拟机镜像 + 模板**；
+> 打包脚本要能输出 **linux 和 windows 两个平台**的成品。
+>
+> （第 12 轮是文档收口轮，只在 README/文档索引上落笔，没在 PLAN 单列。）
+
+| 动作 | 结果 |
+|---|---|
+| `scripts/release.sh`（新增） | ✅ 一条命令产两个平台的 zip；`--list` / `--stage-only` / `--zip-only --reuse-zip` / `--smoke` 都可单独跑 |
+| `packaging/`（新增） | ✅ 包内骨架的**源码**：`bin/linux`（lib/start-headless/stop/status/verify）+ `bin/windows`（同名同语义的 ps1）+ `START-HERE.md` 模板 + `templates/README.md` |
+| 运行时取法 | ✅ 按 SDK 清单 + 渠道 + `host-os` 现取**同一 build id**（Stable：`emulator-{linux,windows}_x64-16428233.zip`，37.2.12 / build 16428233），sha1 校验后解包，只留本平台的 x86_64 后端；版本与来源写进包内 `runtime/RUNTIME.txt` 与 `RELEASE.json` |
+| 镜像进包方式 | ✅ `cp -al` 硬链接进 staging（5.7 GB 不复制第二份），打包前 `sha256sum -c images/SHA256SUMS` 验一遍，整包清单直接复用 ROM 那份（只改写路径） |
+| `tools/test-release.sh`（新增） | ✅ **65 项**：假 ROM + 假运行时端到端真跑 `release.sh` + 全部脚本语法（bash -n / pwsh 语法分析）+ 包内自述与 Windows 工作目录构建 |
+| `docs/15-release-packaging.md` | ✅ 包结构、怎么打、运行时装哪一版、模板是什么、怎么验、**6 条坑记录**、上限与后续 |
+| 真包实测 | ✅ 两个 zip 都产出并解压核验：Linux 那份**真启动**（`Boot completed in 25283 ms`）+ 四组验收全绿 + 包内 `SHA256SUMS` 逐文件校验通过 |
+
+### 这一轮踩到并修掉的 6 个真问题
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | `curl: (6) Could not resolve host: emulator-linux_x64-16428233.zip` | SDK 清单里的 `complete/url` 是**相对路径**，直接当 URL 用 | 不以 `http` 开头就拼 `$SDK_MIRROR/` |
+| 2 | 包内 `sha256sum -c` 必然失败 | 清单的中间文件写在包根，被自己的 `find` 收进清单，打完包就消失了 | 中间文件挪到 staging 目录 |
+| 3 | 清单里没有 `RELEASE.json`、且行数对不上 | 先算清单后写 json；计数又漏算了 `RELEASE.json` | 先写 `RELEASE.json` 再算 `SHA256SUMS`，计数按"除自己之外"算 |
+| 4 | 清单漏 `images/MANIFEST.txt` | ROM 自带的 `SHA256SUMS` 是在写 `MANIFEST.txt` **之前**算的（`package-rom.sh` 的顺序），所以镜像里有文件不在那份清单里 | 用 `comm` 找出"镜像里清单没覆盖的文件"补算（`comm` 必须与 `sort` 同用 `LC_ALL=C`） |
+| 5 | 结构自检把 `system-qemu.img`/后端/模板**全报成缺失** | `unzip -Z1 \| grep -qxF` 里 grep 一命中就退出，unzip 吃 SIGPIPE(141)，`pipefail` 下成了"明明有却报没有" | 清单先落成文件再比对（`smoke_linux` 里 `unzip ... \| head -1` 是同一个坑，一起修了） |
+| 6 | 第 4 组验收没打印失败项就退出 | `adb shell pidof` 找不到进程返回非 0，`set -e` 把脚本**静默**带走 | helper 一律 `\|\| true`；包名改成**从设备上发现**（`pm list packages -3`），不再写死 `org.remotecontrol.arm64probe`（真包名已是 `org.autosnap.arm64probe`） |
+
+> 教训和第 12 轮一样：**"命令没报错"不等于"事情做成了"**。
+> 这轮 6 个问题里有 4 个是"看起来成功、其实清单/自检是错的"，
+> 全靠 `tools/test-release.sh` 的假端到端 + 真包的 `--smoke` 两次才逼出来。

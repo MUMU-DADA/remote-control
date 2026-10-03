@@ -19,10 +19,14 @@
 | G3 能跑 arm64 应用 | ✅ **已实测**：自建探针 APK（纯 arm64-v8a）装+跑，`primaryCpuAbi=arm64-v8a`，16 条 `/system/lib64/arm64/*` 映射，JNI 返回 `kernel=x86_64` |
 | G4 Windows x86_64 跑同一份 ROM（WHPX） | ⊘ **明确不由 agent 验证**（用户决定）；工程部分已交付：脚本 + 镜像 + `preflight.ps1` + 首次运行对照表 + **同 build id 等价性**（Windows 稳定包 15917651 与 Linux 包同 build，Linux 侧实跑全绿） |
 | G5 arm32 下放（备选） | 📄 预案见 [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md) |
+| **G6 可交付的 release 包（两平台成品）** | ✅ `./scripts/release.sh` → **一个平台一个 zip**：完整无头运行环境 + 虚拟机镜像 + 模板；两个包用**同一 build id** 的模拟器；Linux 那份已解压**真启动验收**（见 [`docs/15-release-packaging.md`](docs/15-release-packaging.md)） |
 
 ```bash
 # 一次性复现（构建→自检→打包→启动验收）
 ./scripts/accept.sh
+
+# 打 release：两个平台各一个 zip（含无头运行环境 + 镜像 + 模板）
+./scripts/release.sh
 ```
 
 ---
@@ -79,13 +83,20 @@ dev/04-x64-android/
 │   ├── package-rom.sh              ← 打包可交付 ROM 目录（SHA256SUMS + MANIFEST.txt）
 │   ├── run-linux.sh                ← Linux/KVM 启动 + 验收（含 arm64 应用）
 │   ├── emulator.sh                 ← 实例生命周期（Linux）：建/起/停/强杀/重启/重置/删除/复制
+│   ├── release.sh                  ← **打 release**：一个平台一个 zip（无头运行环境 + 镜像 + 模板）
 │   └── status.sh                   ← 一眼看清 载荷/注入/构建/产物/设备
+├── packaging/                      ← release 包的**骨架**（进 zip 的那一层，源码）
+│   ├── START-HERE.md               ← 包内首读（占位符由 release.sh 填）
+│   ├── bin/linux/                  ← 包内入口：start-headless / stop / status / verify（bash）
+│   └── bin/windows/                ← 同名同语义的 PowerShell 版
+├── release/                        ← **release 产物**（zip，已 gitignore）
 ├── tools/
 │   ├── build-probe-apk.sh          ← 自建 arm64 探针 APK（纯 arm64-v8a，16 KB）
 │   ├── arm64-probe/                ← 探针源码（manifest / Activity / JNI）
 │   ├── check-bridge-symbols.sh     ← 翻译层动态依赖自检（启动前发现版本错配）
 │   ├── verify-clone-independent.sh ← 证明 clone 出来的实例和原实例数据互不影响
 │   ├── test-windows-emulator.sh    ← 在 Linux 上用 pwsh 实跑 windows\emulator.ps1（55 项）
+│   ├── test-release.sh             ← release 打包体检（假 ROM 端到端 + 全部脚本语法，65 项）
 │   ├── net-bridge.sh               ← 桥接模式：建 br0 把上行网卡桥进去（带自动回滚）
 │   └── net-bridge-ifup.sh          ← 模拟器拉起 TAP 时的回调，把它挂进桥
 ├── windows/                        ← Windows 侧（同一份镜像）
@@ -166,6 +177,30 @@ cd dev/04-x64-android
 （`tools/test-windows-emulator.sh`，55 项）见
 [`docs/12-emulator-control.md`](docs/12-emulator-control.md)。
 
+### 打 release：两个平台各一个 zip
+
+```bash
+./scripts/release.sh                  # linux + windows 两个成品
+./scripts/release.sh --platform linux # 只打一个平台
+./scripts/release.sh --list           # 只看计划（不下载、不打包）
+./scripts/release.sh --smoke          # 打完解压 linux 那份**真启动验收**
+```
+
+产物 `release/autosnap-<版本>-<平台>-x86_64.zip`，每个包里三样东西：
+
+| 进包的东西 | 来源 | 为什么在包里 |
+|---|---|---|
+| `runtime/` **完整无头运行环境** | SDK 模拟器包（含 `qemu-system-x86_64-headless` / `...\.exe`）+ platform-tools 的 adb，按 host-os + 渠道现取并校验 sha1 | 交付方不用装 Android SDK，也不用联网 |
+| `images/` **虚拟机镜像** | `artifacts/rom-<product>/` 交付目录（硬链接进 staging，不复制实体） | 就是这份 ROM 本体（含翻译层） |
+| `templates/` **模板** | `emulator/config.ini`（硬件唯一真源）+ 实例登记模板 | 改屏幕/内存/核数/数据分区只改这里，不用重编 ROM |
+
+外加 `bin/`（起 / 停 / 看状态 / 验收四个入口，两个平台各一套）、`START-HERE.md`（首读）、
+`RELEASE.json`（版本 + ROM 指纹 + 运行时 build id）、**整包 `SHA256SUMS`**。
+细节与全部坑记录见 [`docs/15-release-packaging.md`](docs/15-release-packaging.md)。
+
+> 两个平台用的是**同一个 build id** 的模拟器（Stable 渠道里 linux/windows 同版本发布），
+> 所以"两个成品是同一份工程"有据可依；build id 写在包内 `runtime/RUNTIME.txt` 与 `RELEASE.json` 里。
+
 Windows 侧：同一份打包产物 + `emulator.exe` + WHPX，见 [`windows/README.md`](windows/README.md)。
 
 
@@ -218,4 +253,7 @@ framework、`/system` 里塞不进东西、也没法做交付裁剪。自编之�
 - **网络桥接模式**（让模拟器落到物理局域网，`-net-tap`） → [`docs/10-network-bridge.md`](docs/10-network-bridge.md)
 - **快照与多实例**（7 秒从快照恢复、一键再开一台机器、MAC 硬限制） → [`docs/11-snapshots-and-multi.md`](docs/11-snapshots-and-multi.md)
 - **实例生命周期控制**（建/起/停/强杀/重启/重置/删除/复制，GPU 自适应） → [`docs/12-emulator-control.md`](docs/12-emulator-control.md)
+- **release 打包**（两个平台各一个 zip：无头运行环境 + 镜像 + 模板；怎么验、踩了哪些坑） → [`docs/15-release-packaging.md`](docs/15-release-packaging.md)
+- **加 macOS 支持**（arm64 ROM 产品 + 第三套宿主脚本，计划） → [`docs/13-macos-port.md`](docs/13-macos-port.md)
+- **把服务做成 macOS 被控端**（API 等价性与权限模型调研） → [`docs/14-macos-host-notes.md`](docs/14-macos-host-notes.md)
 - 进度与阶段 → [`PLAN.md`](PLAN.md)
