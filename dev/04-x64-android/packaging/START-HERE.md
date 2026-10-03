@@ -6,12 +6,12 @@
 | 项 | 值 |
 |---|---|
 | 发布版本 | `@VER@` |
-| 平台 | @PLATFORM_LABEL@（guest 是 x86_64，另有 ARM64 用户态翻译层） |
+| 平台 | @PLATFORM_LABEL@（guest：@GUEST_DESC@） |
 | 打包时间 | @BUILT_AT@ |
 | ROM 指纹 | `@ROM_FINGERPRINT@` |
 | 运行时 | `@RUNTIME_PKG@`（@RUNTIME_VER@ build @BUILD_ID@） |
 | 镜像 | `images/`（@IMAGES_SIZE@，含 `SHA256SUMS` + `MANIFEST.txt`） |
-
+@PLATFORM_HINT@
 ---
 
 ## 1. 快速开始
