@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -15,7 +16,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <ctime>
 #include <unistd.h>
 #include <memory>
 
@@ -113,13 +113,35 @@ ReplyPacket MakeJsonError(uint32_t cmd, uint32_t status, const std::string& mess
 //
 // pm install 只接受文件路径，不能从 stdin 读，所以要中转一次。
 // 顺序读而不是按 st_size —— 客户端可能用管道而不是 memfd。
-bool SpillFdToTempFile(int fd, const std::string& path, int64_t maxBytes,
-                       int64_t* written, std::string* error) {
-    const int out = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+//
+// 由 mkstemp 原子创建文件并返回已打开的 fd。不要先拼一个可预测的
+// 文件名再 open(O_TRUNC)：临时目录可能被本地低权限进程写入，竞态下
+// 会把 APK 内容写进它预先放置的符号链接目标。
+bool SpillFdToTempFile(int fd, const std::string& dir, int64_t maxBytes,
+                       int64_t* written, std::string* path, std::string* error) {
+    std::string tmpl = dir + "/remote-control-install-XXXXXX";
+    std::vector<char> tmplBuf(tmpl.begin(), tmpl.end());
+    tmplBuf.push_back('\0');
+    const int out = mkstemp(tmplBuf.data());
     if (out < 0) {
         if (error) *error = std::string("创建临时文件失败: ") + strerror(errno);
         return false;
     }
+    if (fcntl(out, F_SETFD, FD_CLOEXEC) != 0) {
+        const int savedErrno = errno;
+        close(out);
+        unlink(tmplBuf.data());
+        if (error) *error = std::string("设置临时文件标志失败: ") +
+                            strerror(savedErrno);
+        return false;
+    }
+    if (path) *path = tmplBuf.data();
+
+    const auto fail = [&]() {
+        close(out);
+        unlink(tmplBuf.data());
+    };
+
     // 从头读，不依赖调用方的偏移
     lseek(fd, 0, SEEK_SET);
 
@@ -130,25 +152,25 @@ bool SpillFdToTempFile(int fd, const std::string& path, int64_t maxBytes,
         if (n == 0) break;
         if (n < 0) {
             if (errno == EINTR) continue;
-            close(out);
-            unlink(path.c_str());
-            if (error) *error = std::string("读取 fd 失败: ") + strerror(errno);
+            const int savedErrno = errno;
+            fail();
+            if (error) *error = std::string("读取 fd 失败: ") + strerror(savedErrno);
             return false;
         }
         if (maxBytes > 0 && total + n > maxBytes) {
-            close(out);
-            unlink(path.c_str());
+            fail();
             if (error) *error = "内容超过上限 " + std::to_string(maxBytes) + " 字节";
             return false;
         }
         ssize_t off = 0;
         while (off < n) {
             const ssize_t w = write(out, buf.data() + off, static_cast<size_t>(n - off));
-            if (w < 0) {
-                if (errno == EINTR) continue;
-                close(out);
-                unlink(path.c_str());
-                if (error) *error = std::string("写临时文件失败: ") + strerror(errno);
+            if (w <= 0) {
+                if (w < 0 && errno == EINTR) continue;
+                const int savedErrno = w == 0 ? EIO : errno;
+                fail();
+                if (error) *error = std::string("写临时文件失败: ") +
+                                    strerror(savedErrno);
                 return false;
             }
             off += w;
@@ -170,11 +192,15 @@ int64_t FreeBytes(const std::string& path) {
 }
 
 std::string TempDir() {
-    const char* candidates[] = {"/data/local/tmp", "/data/tmp", "/tmp", nullptr};
+    // The service directory is owned by the service account and is not
+    // writable by ordinary apps.  Keep public locations only as development
+    // fallbacks for the manual /data/local/tmp deployment.
+    const char* candidates[] = {"/data/misc/remote-control", "/data/local/tmp",
+                                "/data/tmp", "/tmp", nullptr};
     for (int i = 0; candidates[i] != nullptr; ++i) {
         struct stat st{};
         if (stat(candidates[i], &st) == 0 && S_ISDIR(st.st_mode) &&
-            access(candidates[i], W_OK) == 0) {
+            access(candidates[i], W_OK | X_OK) == 0) {
             return candidates[i];
         }
     }
@@ -607,10 +633,7 @@ ReplyPacket Dispatcher::HandleInstallApp(const Request& req, int reqFd) {
     if (dir.empty()) {
         return MakeJsonError(req.cmd, kErrIo, "找不到可写的临时目录");
     }
-    char nameBuf[128];
-    snprintf(nameBuf, sizeof(nameBuf), "/remote-control-install-%d-%ld.apk", getpid(),
-             static_cast<long>(time(nullptr)));
-    const std::string tmp = dir + nameBuf;
+    std::string tmp;
 
     // 上限和 HTTP 层共用同一个常量 —— 见 protocol.h 里的说明。
     // 以前这里是写死的 2GB，而 HTTP 层放行 4GB：用户传完 3GB 的 APK
@@ -632,6 +655,11 @@ ReplyPacket Dispatcher::HandleInstallApp(const Request& req, int reqFd) {
     {
         struct stat fst{};
         if (fstat(reqFd, &fst) == 0 && fst.st_size > 0) {
+            if (fst.st_size > kMaxApk) {
+                return MakeJsonError(req.cmd, kErrIo,
+                                     "内容超过上限 " + std::to_string(kMaxApk) +
+                                     " 字节");
+            }
             const int64_t need = static_cast<int64_t>(fst.st_size) * 3 +
                                  256LL * 1024 * 1024;
             const int64_t freeB = FreeBytes(dir);
@@ -651,7 +679,7 @@ ReplyPacket Dispatcher::HandleInstallApp(const Request& req, int reqFd) {
     }
 
     int64_t written = 0;
-    if (!SpillFdToTempFile(reqFd, tmp, kMaxApk, &written, &error)) {
+    if (!SpillFdToTempFile(reqFd, dir, kMaxApk, &written, &tmp, &error)) {
         return MakeJsonError(req.cmd, kErrIo, error);
     }
     if (written == 0) {

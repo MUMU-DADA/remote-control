@@ -129,7 +129,8 @@ class HttpServer {
         // 大于它的（APK、文件上传）走磁盘不会被 OOM 干掉。
         size_t      spoolThresholdBytes = 4u << 20;   // 4MB
 
-        // 落盘目录。空 = /data/local/tmp。
+        // 落盘目录。空 = 优先 /data/misc/remote-control，不可用时回退到
+        // /data/local/tmp 等开发环境目录。
         // 要选一个 **installer 能读到** 的地方（pm install 用的是
         // 它自己的权限，不是我们的）。
         std::string spoolDir;
@@ -235,7 +236,7 @@ class HttpServer {
     // 一个客户端狂开连接就能把线程和 fd 耗光（实测没有上限）。
     size_t      maxConns_ = 128;
     size_t      spoolThreshold_ = 4u << 20;   // 超过就落盘
-    std::string spoolDir_;                     // 空 = /data/local/tmp
+    std::string spoolDir_;                     // 空 = 选择服务目录或开发回退目录
     std::atomic<bool> stop_{false};
 };
 

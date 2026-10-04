@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -46,7 +47,12 @@ class Value {
         return type_ == kNumber ? num_ : def;
     }
     int64_t     asInt(int64_t def = 0) const {
-        return type_ == kNumber ? static_cast<int64_t>(num_) : def;
+        // int64_t 最大值转成 double 会舍入到 2^63，所以上界必须排除。
+        if (type_ != kNumber || !std::isfinite(num_) ||
+            num_ < -0x1p63 || num_ >= 0x1p63) {
+            return def;
+        }
+        return static_cast<int64_t>(num_);
     }
     const std::string& asString() const {
         static const std::string kEmpty;
