@@ -18,6 +18,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "android_properties.h"
+
 #include "config_file.h"
 #include "thread_util.h"
 #include "remote_control_log.h"
@@ -43,6 +45,37 @@ using namespace remote_control;
 
 namespace {
 
+#if defined(__ANDROID__)
+bool ParseConfigBool(const std::string& value, bool fallback) {
+    if (value == "1" || value == "true" || value == "yes" || value == "on") return true;
+    if (value == "0" || value == "false" || value == "no" || value == "off") return false;
+    return fallback;
+}
+#endif
+
+void ApplyFirstBootProperties(PersistedConfig* cfg) {
+#if defined(__ANDROID__)
+    const std::string enabled = AndroidProperty("vendor.qemu.rc.enabled");
+    const std::string bind = AndroidProperty("vendor.qemu.rc.bind");
+    const std::string port = AndroidProperty("vendor.qemu.rc.port");
+    const std::string auth = AndroidProperty("vendor.qemu.rc.auth");
+    const std::string token = AndroidProperty("vendor.qemu.rc.token");
+    if (!enabled.empty()) cfg->enabled = ParseConfigBool(enabled, cfg->enabled);
+    if (!bind.empty()) cfg->bind = bind;
+    if (!port.empty()) {
+        char* end = nullptr;
+        const long value = strtol(port.c_str(), &end, 10);
+        if (end != nullptr && *end == '\0' && value > 0 && value <= 65535) {
+            cfg->port = static_cast<int>(value);
+        }
+    }
+    if (!auth.empty()) cfg->auth = ParseConfigBool(auth, cfg->auth);
+    if (!token.empty()) cfg->token = token;
+#else
+    (void)cfg;
+#endif
+}
+
 SocketServer* gServer = nullptr;
 
 void OnSignal(int /*sig*/) {
@@ -67,7 +100,7 @@ void PrintUsage(const char* argv0) {
   --config <路径>       配置文件，默认 /data/misc/remote-control/remote-control.conf
   --http-bind <地址>    启用 HTTP/JSON API 并绑定该地址（如 0.0.0.0 对外）
                         不指定则由配置文件决定；配置文件不存在时首启为
-                        127.0.0.1:8088 且**无鉴权**（对外必须显式写 0.0.0.0）
+                        0.0.0.0:8088，开启鉴权并生成随机令牌
   --http-port <端口>    HTTP 端口，默认 8088
   --http-token <令牌>   访问令牌。给了就等于开启鉴权；
                         不给则由配置文件的 auth=/token= 决定
@@ -248,6 +281,10 @@ int main(int argc, char** argv) {
                 break;
             }
             case kOptHttpToken:
+                if (optarg[0] == '\0') {
+                    fprintf(stderr, "错误: --http-token 不能为空；关闭鉴权请设置 auth=0\n");
+                    return 1;
+                }
                 httpToken = optarg;
                 cliToken = true;
                 break;
@@ -517,42 +554,65 @@ int main(int argc, char** argv) {
     // 所以它能生效；而调试时 `--http-port 9999` 这种一次性覆盖
     // 也不会被文件悄悄改掉。
     //
-    // 首启（文件不存在）就是"无鉴权 + 127.0.0.1 + 8088"，
-    // 和产品要求一致。
+    // 首启先接收 release 模板的 boot 属性，随后以 guest 持久配置为准。
     {
         PersistedConfig cfg;
         std::string cfgErr;
+        const bool firstBoot = access(configPath.c_str(), F_OK) != 0 && errno == ENOENT;
         if (!ConfigFile::Load(configPath, &cfg, &cfgErr)) {
             ALOGW("读取配置 %s 失败，用默认值: %s", configPath.c_str(),
                   cfgErr.c_str());
         }
+        if (firstBoot) {
+            ApplyFirstBootProperties(&cfg);
+        }
         if (!cliBind)  httpBind  = cfg.bind;
         if (!cliPort)  httpPort  = static_cast<uint16_t>(cfg.port);
-        if (!cliToken) httpToken = cfg.token;
+        if (!cliToken) httpToken = cfg.auth ? cfg.token : "";
 
         // auth=1 但还没有令牌 → 生成一个并写回文件。
         //
         // 只在这里生成（而不是每次启动都生成）：令牌一旦变了，
         // 已经配好它的客户端就全部失效，用户还得再去文件里看一眼。
-        if (cfg.auth && httpToken.empty()) {
+        if (cfg.auth && httpToken.empty() && !cliToken) {
             const std::string fresh = ConfigFile::GenerateToken();
             if (fresh.empty()) {
                 // 拿不到安全的随机数就**不要假装开了鉴权** ——
                 // 用弱令牌比明说"没开"更危险。
-                ALOGE("无法生成随机令牌，鉴权未启用（接口将无鉴权）");
+                ALOGE("无法生成随机令牌，拒绝启动 HTTP 服务");
+                return 1;
             } else {
                 httpToken = fresh;
                 cfg.token = fresh;
                 cfg.tokenWasGenerated = true;
                 std::string saveErr;
                 if (!ConfigFile::Save(configPath, cfg, &saveErr)) {
-                    ALOGW("令牌已生成但写回 %s 失败: %s", configPath.c_str(),
+                    ALOGE("令牌已生成但无法持久化到 %s: %s", configPath.c_str(),
                           saveErr.c_str());
+                    return 1;
                 }
                 ALOGI("已生成访问令牌并写入 %s —— 用 `grep token %s` 查看",
                       configPath.c_str(), configPath.c_str());
             }
         }
+        if (firstBoot && !ConfigFile::Save(configPath, cfg, &cfgErr)) {
+            ALOGE("首次写入服务配置 %s 失败: %s", configPath.c_str(), cfgErr.c_str());
+            return 1;
+        }
+#if defined(__ANDROID__)
+        // API 保存的 ADB 开关跨重启保留；模板只决定新实例的初始状态。
+        if (AndroidProperty("persist.sys.rc.adb").empty()) {
+            const std::string adb = AndroidProperty("vendor.qemu.rc.adb", "1");
+            if (!SetAndroidProperty("persist.sys.rc.adb", adb == "0" ? "0" : "1")) {
+                ALOGE("无法持久化 ADB 初始状态");
+                return 1;
+            }
+        }
+        // init 清除只用于首启交接的 token，避免凭据长期驻留在属性区。
+        if (!SetAndroidProperty("sys.rc.config_ready", "1")) {
+            ALOGW("无法清理首次启动凭据属性");
+        }
+#endif
         // 服务对外开关也持久化在同一个文件里
         ServiceState::Instance().SetServingPersistPath(configPath);
         // enabled=0 表示"不对外提供服务"，而不是"别启动" ——

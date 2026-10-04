@@ -865,10 +865,12 @@ bool FileOps::UploadToStorage(const std::string& root,
         }
     }
     // Android's shared-storage FUSE mount can reject both renameat2 and
-    // hard links. Serialize daemon uploads and use renameat there; the final
-    // existence check preserves no-overwrite behavior for all daemon writers.
+    // hard links, including EACCES when SELinux rejects link permission even
+    // though rename is allowed. Serialize daemon uploads and use renameat;
+    // the final existence check preserves no-overwrite behavior for daemon writers.
     if (!published && (savedErrno == ENOSYS || savedErrno == EINVAL ||
-                       savedErrno == ENOTSUP || savedErrno == EOPNOTSUPP)) {
+                       savedErrno == ENOTSUP || savedErrno == EOPNOTSUPP ||
+                       savedErrno == EPERM || savedErrno == EACCES)) {
         std::lock_guard<std::mutex> lock(gUploadPublishMutex);
         struct stat existing{};
         if (fstatat(directoryFd, filename.c_str(), &existing,

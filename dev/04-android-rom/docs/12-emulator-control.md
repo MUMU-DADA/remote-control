@@ -18,7 +18,7 @@
 
 ```bash
 ./scripts/emulator.sh create  dev2             # 建一台（备好工作目录，不启动）
-./scripts/emulator.sh start   dev2             # 启动 + 等开机完成
+./scripts/emulator.sh start   dev2             # 启动 + 等 HTTP 服务就绪
 ./scripts/emulator.sh start   dev2 --no-wait   # 起了就返回
 ./scripts/emulator.sh stop    dev2             # 优雅关机（等进程真的退出）
 ./scripts/emulator.sh kill    dev2             # 强制关闭（SIGKILL）
@@ -35,7 +35,7 @@
 | `--port N` | 指定端口（默认从 5580 起偶数自动分配） |
 | `--gpu M` | 覆盖 GPU 档位（`host`/`swiftshader_indirect`/…）。**给了就不自动回退** |
 | `--memory MB` / `--cores N` | 覆盖 config.ini 里的值 |
-| `--no-wait` | 启动后不等开机 |
+| `--no-wait` | console 就绪后返回，不等 HTTP 管理服务 |
 | `--gui` | 带窗口启动（默认 `-no-window`，服务器上用） |
 | `--bridge` / `--nat` | **仅 Linux**：强行桥接 / 强行 NAT（默认自动，见 §6） |
 
@@ -47,7 +47,18 @@ Windows 侧对应 `-Port` / `-Gpu` / `-Memory` / `-Cores` / `-NoWait` / `-Gui` /
 ## 1. 实例是什么
 
 **实例名 ↔ 端口一一对应**，名字到端口的映射登记在 `.run/instances/<名字>.env`。
-默认实例名 `default`（端口 5580）。
+默认实例名 `default`（console 端口 5580，ADB 端口 5581）。
+
+普通启动、状态查询和关机使用 emulator console 认证与 HTTP 管理接口，
+**不要求 ADB**。console 的 `redir` 将宿主 `127.0.0.1:18088` 转发到 guest
+服务端口（默认 8088）；第二个实例默认使用 18089，按 console 端口递增。
+console 认证文件默认是 `~/.emulator_console_auth_token`。
+
+首次启动从 `emulator/config.ini` 的 `service.*` 读取服务开关、绑定地址、
+端口、鉴权和 ADB 开关。空令牌由宿主生成并保存到
+`.run/instances/<名字>.token`，权限 0600；脚本只输出文件位置。
+复用实例沿用已保存的 guest 服务设置与令牌，修改模板后需 `reset` 才会
+应用新值。鉴权实例若丢失令牌文件，恢复该文件后才能继续启动和关机。
 
 工作目录沿用 `run-linux.sh` 的**按端口派生**规则，所以两套脚本可以混用 ——
 `emulator.sh` 建的机器，`run-linux.sh --port 5584 --reuse` 照样能起来做验收：
@@ -73,7 +84,7 @@ Windows 侧对应 `-Port` / `-Gpu` / `-Memory` / `-Cores` / `-NoWait` / `-Gui` /
 |---|---|---|
 | 屏幕 | 1280x720 横屏 @320dpi | `hw.lcd.*` / `skin.*` |
 | CPU / 内存 | 4 核 / 6144 MB | `hw.cpu.ncore` / `hw.ramSize` |
-| 数据分区 | 32G | `disk.dataPartition.size` |
+| 数据分区 | 16G | `disk.dataPartition.size` |
 | GPU | `auto`（自适应） | `hw.gpu.mode` |
 
 > ⚠️ **不要在命令行上写死这些值。** 命令行**优先于** config.ini ——
@@ -87,11 +98,11 @@ Windows 侧对应 `-Port` / `-Gpu` / `-Memory` / `-Cores` / `-NoWait` / `-Gui` /
 ```
 config.ini（唯一真源 dev/04-android-rom/emulator/config.ini）：
   hw.ramSize               6144
-  disk.dataPartition.size  32G
+  disk.dataPartition.size  16G
 
 上次启动**实际生效**的（hardware-qemu.ini）：
   hw.ramSize               6144
-  disk.dataPartition.size  32g
+  disk.dataPartition.size  16g
 ```
 
 ---
@@ -123,39 +134,26 @@ ERROR | Could not start renderer
 
 ## 4. 各命令的注意事项
 
-### `stop` —— 先 `sync`，再 kill
+### `stop` —— 请求 Android 正常关机
 
-> ⚠️ **`adb emu kill` 不是优雅关机，是硬断电。** 它给 QEMU 发信号让它立刻
-> 终止，guest 根本没机会卸载文件系统或提交日志。
->
-> 实测（`tools/verify-kill-is-hard-poweroff.sh`，同一台实例三组对照）：
->
-> | 做法 | 重启后 |
-> |---|---|
-> | 写入后 `sync` 再关 | **在** |
-> | 写入后不 sync 直接关 | **没了** |
-> | 写入后等 **15 秒**再关 | **还是没了** |
->
-> 后果不是"丢最后一点"，而是**最近写的东西整个没**，而且毫无征兆。
-> 项目早期那条悬案「模拟器 `/data` 不持久（根因未查明）」就是它
-> （另一半原因是 `run-linux.sh` 不带 `--reuse` 会 `rm -rf` 工作目录，
-> 那是设计如此）。
->
-> 所以 `stop` / `kill` 都会**先 `adb shell sync` 再 kill**。手动关机的话
-> 记得自己先 `adb -s <序列号> shell sync`。
+`stop` 通过已认证的 `POST /api/v1/power` 请求 `shutdown`，由 Android
+执行同步和卸载文件系统，再等待模拟器进程实际退出，最多 60 秒。
+进程退出前重启会撞上 `multiinstance.lock`，报
+`another emulator instance is currently running`。
 
-### `stop` 等的是**进程退出**，不是"命令返回"
+关机时 HTTP 连接可能先断开。脚本会检查进程是否已经退出；确认退出后
+仍报告成功。HTTP 服务或令牌不可用、或超时仍在运行时，普通 `stop` 会
+报告失败，由调用者选择 `kill`；发行包的对应入口使用 `--force`。
 
-`adb emu kill` 只是递个关机请求，guest 还要走完关机流程（卸载 `/data`、
-收 qcow2）。这时候就重启会撞上 `multiinstance.lock`，第二台报
-`another emulator instance is currently running`。所以 `stop` 最多等 60 秒
-直到进程真的没了，超时会明确让你改用 `kill`。
+历史实测（`tools/verify-kill-is-hard-poweroff.sh`）中，写入后未经 `sync`
+就执行 `adb emu kill` 会丢失文件，等待 15 秒后硬停止仍会丢失。
+因此正常关机依赖 Android 的关机流程。
 
-### `kill` —— 先请它关，再 SIGKILL
+### `kill` —— console 硬停止，再 SIGKILL
 
-强杀之前仍然会发一次 `adb emu kill` 并等 2 秒。不是为了"更快"，是因为
-正常路径能把 qcow2 元数据落盘，直接 SIGKILL 会丢一点最后一次写入。
-强杀是为了"现在就关掉"，差那 1~2 秒不值当。
+`kill` 先发送 emulator console 的 `kill`，等待 2 秒，仍运行时再向
+模拟器进程发送 SIGKILL。这条路径用于卡住的实例，未落盘数据可能丢失。
+`stop` / `kill` / `status` 都不调用 ADB。
 
 ### `reset` —— 不可逆
 
@@ -187,6 +185,8 @@ reset 一次，新参数就全生效**（尤其是 `disk.dataPartition.size` —
 | `snapshots/` | 快照里的 `hardware.ini` 绑定了存档时的硬件配置与路径，换实例一定对不上（模拟器会拒绝加载），不如不复制 |
 
 `config.ini` 会用当前真源重新覆盖一份，保证新实例带上最新的硬件参数。
+克隆 guest 已在 `/data` 保存服务设置与令牌，Linux 脚本会同时复制其宿主
+服务元数据和 `.token` 文件；新实例使用独立 console 和宿主 HTTP 端口。
 
 Windows 克隆时任一状态文件复制失败都会使操作失败，并清理目标目录与新登记；
 不会把部分复制的实例报告为成功。Linux 侧的复制命令也受脚本错误处理约束，
@@ -213,9 +213,9 @@ Windows 克隆时任一状态文件复制失败都会使操作失败，并清理
 
 | | `run-linux.sh` | `emulator.sh` |
 |---|---|---|
-| 目的 | **启动并验收 ROM**（ABI / 翻译层 / arm64 应用） | **管实例的命**（建、起、停、复制……） |
+| 目的 | **启动 ROM**，显式 `--verify` 验收 ABI / 翻译层 / arm64 应用 | **管实例的命**（建、起、停、复制……） |
 | 默认语义 | 每次全新冷启动（`rm -rf` 工作目录） | 保留状态；要清就明确 `reset` |
-| 附带 | 跑 4 项验收 | 只起停，不做验收 |
+| 附带 | 普通启动等 HTTP 就绪；`--verify` 才跑 4 项 ADB 验收 | 只起停，不做验收 |
 | 硬件参数 | 从 config.ini 读 | 同左 |
 
 两边共用同一套工作目录与硬件参数，可以混着用。
@@ -276,7 +276,12 @@ reset / delete`，断言文件系统层面的结果 —— **绝不碰真的 `im
 INSTANCE-MANIFEST.json   名字 / 时间 / ROM 指纹 / 需要哪些镜像
 sysdir/…                 实例状态（**不含**指向 ROM 的符号链接）
 datadir/…
+host-service.env         Linux guest 服务设置（不含宿主端口）
+host-service.token       Linux guest 服务访问令牌
 ```
+
+Linux 导出会携带 guest 的宿主服务凭据，归档权限为 0600。导入恢复同一
+组凭据；这仅验证了宿主脚本处理，`import` 的 guest 数据恢复限制仍如下。
 
 两个设计要点：
 

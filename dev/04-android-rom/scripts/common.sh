@@ -129,6 +129,37 @@ config_get() {   # config_get <键> [默认值]
     if [ -n "$v" ]; then printf '%s' "$v"; else printf '%s' "$def"; fi
 }
 
+# Guest remote-control service properties.  These are passed as qemu.rc.*;
+# the emulator's property bridge exposes them inside Android as vendor.qemu.rc.*.
+# Keeping this in the development scripts makes their behavior match packaged
+# launchers and keeps service.* in emulator/config.ini as the single source.
+build_service_property_args() {   # build_service_property_args [test-instance]
+    local test_instance="${1:-0}" enabled bind port auth token adb_enabled
+    enabled="${SERVICE_ENABLED:-$(config_get service.enabled 1)}"
+    bind="${SERVICE_BIND:-$(config_get service.bind 0.0.0.0)}"
+    port="${SERVICE_GUEST_PORT:-$(config_get service.port 8088)}"
+    auth="${SERVICE_AUTH:-$(config_get service.auth 1)}"
+    token="${SERVICE_TOKEN-$(config_get service.token '')}"
+    adb_enabled="${SERVICE_ADB:-$(config_get service.adb_enabled 1)}"
+    case "$enabled:$auth:$adb_enabled" in
+        0:0:0|0:0:1|0:1:0|0:1:1|1:0:0|1:0:1|1:1:0|1:1:1) ;;
+        *) die "service.enabled/auth/adb_enabled 只能是 0 或 1" ;;
+    esac
+    case "$port" in ''|*[!0-9]*) die "service.port 必须是 1-65535 的整数" ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "service.port 必须是 1-65535 的整数"
+    [[ "$bind" =~ ^[A-Za-z0-9.:_-]+$ ]] || die "service.bind 格式不受支持：$bind"
+    [[ "$token" =~ ^[A-Za-z0-9_-]{0,80}$ ]] || die "service.token 仅支持 80 字节内的字母、数字、下划线和连字符"
+    if [ "$test_instance" = 1 ]; then auth=0; token=""; fi
+    SERVICE_PROPERTY_ARGS=(
+        -prop "qemu.rc.enabled=$enabled"
+        -prop "qemu.rc.bind=$bind"
+        -prop "qemu.rc.port=$port"
+        -prop "qemu.rc.auth=$auth"
+        -prop "qemu.rc.adb=$adb_enabled"
+    )
+    [ -z "$token" ] || SERVICE_PROPERTY_ARGS+=(-prop "qemu.rc.token=$token")
+}
+
 # 宿主有没有**可用的** GPU 渲染节点。
 #
 # ⚠️ 不能只看 /dev/dri 目录在不在 —— 容器里经常挂着一个空目录。
@@ -167,11 +198,12 @@ gpu_mode_reason() {   # 给日志用的一句话解释
 # ---------------------------------------------------------------------------
 # 实例：名字 ↔ 端口。状态文件在 .run/instances/<名字>.env
 #
-# 端口从 5580 起偶数分配（模拟器要求偶数：console 口 = port+1）。
+# 端口从 5580 起偶数分配（console 口 = port，ADB 口 = port+1）。
 # 工作目录沿用 run-linux.sh 的按端口派生规则，两边可以混用：
 #   .run/sysdir-<port>/  .run/datadir-<port>/  .run/emulator-<port>.log
 INSTANCES_DIR="$RUN_DIR/instances"
 EMULATOR_PORT_BASE="${EMULATOR_PORT_BASE:-5580}"
+PORT_BASE="$EMULATOR_PORT_BASE"
 
 instance_file() { printf '%s/%s.env' "$INSTANCES_DIR" "$1"; }
 
@@ -190,6 +222,14 @@ instance_names() {
         [ -s "$f" ] || continue
         basename "$f" .env
     done
+}
+
+instance_names_for_port() {
+    local p="$1" n
+    for n in $(instance_names); do
+        [ "$(instance_port "$n")" = "$p" ] && printf '%s\n' "$n"
+    done
+    return 0
 }
 
 port_taken() {   # 已被登记的实例占用？
@@ -223,6 +263,20 @@ EOF
 
 instance_unregister() { rm -f "$(instance_file "$1")"; }
 
+# Copy only guest service values: console/host HTTP ports belong to the new
+# instance.  The cloned guest already persists its token inside /data.
+copy_instance_service_metadata() { # <source-instance> <destination-instance>
+    local key value
+    for key in SERVICE_PORT SERVICE_ENABLED SERVICE_AUTH SERVICE_BIND SERVICE_ADB; do
+        value="$(instance_service_value "$1" "$key")"
+        [ -z "$value" ] || printf '%s=%s\n' "$key" "$value" >> "$(instance_file "$2")"
+    done
+    if [ -s "$(service_token_file "$1")" ]; then
+        (umask 077; cp "$(service_token_file "$1")" "$(service_token_file "$2")")
+        chmod 600 "$(service_token_file "$2")"
+    fi
+}
+
 # 找某个端口上的模拟器主进程。
 #
 # ⚠️ 不能用 `pgrep -f "qemu-system.* -port N"` —— **它会把调用者自己匹配上**：
@@ -247,4 +301,13 @@ emu_pid_for_port() {
 }
 
 instance_running() { [ -n "$(emu_pid_for_port "$(instance_port "$1")")" ]; }
+
+require_adb() { [ -x "$ADB" ] || die "显式诊断需要 ADB：$ADB（可用 ADB=/path/to/adb 覆盖）"; }
+
+# Console auth, NAT redirection, and service HTTP readiness.  This is sourced
+# after the instance helpers because console.sh resolves instance metadata at
+# call time and therefore does not require ADB for ordinary lifecycle actions.
+CONSOLE_HELPER="$X64_DIR/packaging/bin/linux/console.sh"
+require_console_helper() { [ -r "$CONSOLE_HELPER" ] || die "找不到模拟器 console helper：$CONSOLE_HELPER"; }
+if [ -r "$CONSOLE_HELPER" ]; then source "$CONSOLE_HELPER"; fi
 

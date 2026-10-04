@@ -13,13 +13,13 @@
 packaging/
 ├── START-HERE.md               ← 包内首读。含 @VER@ / @PLATFORM@ 等占位符，打包时替换
 ├── bin/
-│   ├── linux/                  ← 进 linux 包：bin/ 下 5 个 bash 脚本
+│   ├── linux/                  ← 进 linux 包：生命周期脚本及 console/storage helpers
 │   │   ├── lib.sh              公共函数（路径、config.ini、实例登记、adb/模拟器定位）
 │   │   ├── start-headless.sh   无头启动（默认 -no-window，后台 + 等开机）
 │   │   ├── stop.sh             优雅停（**先 sync 再 kill**，见下）
 │   │   ├── status.sh           实例/进程/开机状态 + ROM 指纹
 │   │   └── verify.sh           4 组验收（ABI / 翻译层 / arm64 机器码 / arm64 应用）
-│   └── windows/                ← 进 windows 包：同名同语义的 PowerShell 版
+│   └── windows/                ← 进 windows 包：同名同语义的 PowerShell 版及存储 helper
 │       ├── common.ps1
 │       ├── start-headless.ps1
 │       ├── stop.ps1
@@ -33,7 +33,7 @@ packaging/
 
 | 进包路径 | 来源 |
 |---|---|
-| `templates/config.ini` | `../emulator/config.ini`（硬件参数的唯一真源） |
+| `templates/config.ini` | `../emulator/config.ini`（硬件参数与 guest 首次服务配置的唯一真源） |
 | `templates/instance.env` | `release.sh` 生成的实例登记模板 |
 | `tools/net-bridge*.sh` | `../tools/`（**仅 linux 包**；Windows 侧 `-net-tap` 没实现） |
 | `tools/arm64-probe.apk` | `../artifacts/arm64-probe.apk`（验收用，12 KB） |
@@ -50,7 +50,6 @@ packaging/
    `config.ini` 同理：要按包内真源覆盖，链过去会写穿。
    **每套**宿主脚本的工作目录构建逻辑里都各自写了一条 `NO_LINK` 名单。
 
-2. **停机器必须先 `adb shell sync`，再 `adb emu kill`。**
-   `emu kill` 是**硬断电**不是关机。实测：写完不 sync 直接停，最近写的数据
-   **整个消失**（等 15 秒再停也一样没）。`stop.sh` / `stop.ps1` 里这一步带着
-   注释，别"优化"掉。
+2. **通过包内 stop 脚本请求正常关机。**
+   `stop.sh` / `stop.ps1` 经 HTTP 请求 Android 关机，等待文件系统卸载和模拟器退出。
+   `--force` / `-Force` 才允许硬停止；直接 `kill -9` 或 console kill 可能丢失未落盘数据。

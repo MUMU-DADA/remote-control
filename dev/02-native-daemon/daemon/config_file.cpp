@@ -52,8 +52,8 @@ bool ConfigFile::Load(const std::string& path, PersistedConfig* out,
     FILE* f = fopen(path.c_str(), "re");
     if (f == nullptr) {
         if (errno == ENOENT) {
-            // 首启就是这个状态。不是错误 —— 用默认值（无鉴权、8088、启用）。
-            ALOGI("配置文件 %s 不存在，使用默认配置（无鉴权）", path.c_str());
+            // 首启默认开启鉴权；产品启动时还会用 release 模板覆盖这些默认值。
+            ALOGI("配置文件 %s 不存在，使用安全默认配置", path.c_str());
             return true;
         }
         if (error) {
@@ -88,9 +88,9 @@ bool ConfigFile::Load(const std::string& path, PersistedConfig* out,
                 ALOGW("%s:%d 端口不合法(%s)，忽略", path.c_str(), lineno, val.c_str());
             }
         } else if (key == "bind") {
-            out->bind = val.empty() ? "127.0.0.1" : val;
+            out->bind = val.empty() ? "0.0.0.0" : val;
         } else if (key == "auth") {
-            out->auth = ParseBool(val, false);
+            out->auth = ParseBool(val, out->auth);
         } else if (key == "token") {
             out->token = val;
         } else {
@@ -104,12 +104,12 @@ bool ConfigFile::Load(const std::string& path, PersistedConfig* out,
 std::string ConfigFile::Serialize(const PersistedConfig& cfg) {
     std::string s;
     s += "# remote-control 配置 —— 由上位应用或手工编辑，守护进程启动时读取。\n";
-    s += "# 改完之后需要重启服务才生效。\n";
+    s += "# enabled 为软开关；监听地址与端口需要重启服务才生效。\n";
     s += "\n";
-    s += "# 服务是否应当运行\n";
+    s += "# 服务对外软开关；关闭后仍可使用管理入口恢复\n";
     s += "enabled=" + std::string(cfg.enabled ? "1" : "0") + "\n";
     s += "\n";
-    s += "# 监听地址。127.0.0.1 = 仅本机；0.0.0.0 = 对外（注意鉴权设置）\n";
+    s += "# 监听地址。127.0.0.1 = 仅本机；0.0.0.0 = 对外（鉴权默认开启）\n";
     s += "bind=" + cfg.bind + "\n";
     s += "\n";
     s += "# HTTP 监听端口\n";

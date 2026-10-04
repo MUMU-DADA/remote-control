@@ -27,22 +27,15 @@ param(
     [switch]$WipeData,
     [switch]$NoWait,
     [switch]$Verify,
-    [switch]$Stop
+    [switch]$Stop,
+    [switch]$Force,
+    [switch]$TestInstance
 )
 
 $ErrorActionPreference = "Stop"
 $serial = "emulator-$Port"
+$LASTEXITCODE = 0
 
-function Find-Emulator {
-    if ($EmulatorDir) { return (Join-Path $EmulatorDir "emulator.exe") }
-    foreach ($c in @("$PSScriptRoot\sdk\emulator\emulator.exe",
-                     "$env:ANDROID_SDK_ROOT\emulator\emulator.exe",
-                     "$env:ANDROID_HOME\emulator\emulator.exe",
-                     "$env:LOCALAPPDATA\Android\Sdk\emulator\emulator.exe")) {
-        if (Test-Path $c) { return $c }
-    }
-    throw "找不到 emulator.exe：先跑 .\fetch-emulator.ps1，或用 -EmulatorDir 指定"
-}
 function Find-Adb {
     foreach ($c in @("$PSScriptRoot\sdk\platform-tools\adb.exe",
                      "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe",
@@ -54,102 +47,44 @@ function Find-Adb {
     throw "找不到 adb.exe"
 }
 
-function Get-ConfigValue {
-    param([string]$Key, [string]$Default = "")
-    $cfg = Join-Path $PSScriptRoot "..\emulator\config.ini"
-    if (-not (Test-Path $cfg)) { return $Default }
-    $pat = "^\s*" + [regex]::Escape($Key) + "\s*=\s*(.+?)\s*$"
-    $hit = Select-String -Path $cfg -Pattern $pat -ErrorAction SilentlyContinue | Select-Object -Last 1
-    if ($hit) { return $hit.Matches[0].Groups[1].Value }
-    return $Default
+# Reuse the named-instance lifecycle path.  Normal start/stop uses local
+# console + HTTP and therefore works even when guest ADB is disabled.
+$manager = Join-Path $PSScriptRoot "emulator.ps1"
+$instance = "run-$Port"
+$previousEnv = @{}
+$overrides = @{
+    AUTOSNAP_IMAGES = $ImagesDir
+    AUTOSNAP_RUN_DIR = (Join-Path $DataDir ".instances")
+    AUTOSNAP_DATA_DIR = (Join-Path $DataDir "guest")
 }
-
-# GPU 自适应：宿主有真显卡（不是 Microsoft Basic/Remote 兜底适配器）就用 host。
-function Test-HostGpu {
-    try {
-        $g = @(Get-CimInstance Win32_VideoController -ErrorAction Stop |
-               Where-Object { $_.Name -and $_.Name -notmatch 'Microsoft\s+(Basic|Remote)' })
-        return ($g.Count -gt 0)
-    } catch { return $false }
-}
-function Resolve-GpuMode {
-    param([string]$Want)
-    if ([string]::IsNullOrWhiteSpace($Want) -or $Want -eq "auto") {
-        if (Test-HostGpu) { return "host" } else { return "swiftshader_indirect" }
+if ($EmulatorDir) { $overrides["AUTOSNAP_EMULATOR"] = Join-Path $EmulatorDir "emulator.exe" }
+try {
+    foreach ($key in $overrides.Keys) {
+        $previousEnv[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+        [Environment]::SetEnvironmentVariable($key, $overrides[$key], "Process")
     }
-    return $Want
+    if ($Stop) {
+        & $manager stop $instance -Port $Port -Force:$Force
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        exit 0
+    }
+    if (-not $Verify) {
+        if ($WipeData -and (Test-Path (Join-Path $overrides["AUTOSNAP_RUN_DIR"] "instances\$instance.env"))) {
+            & $manager reset $instance -Yes -Force:$Force
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+        & $manager start $instance -Port $Port -Memory $MemoryMB -Cores $Cores -Gpu $Gpu `
+            -Gui:(-not $Headless) -NoWait:$NoWait -TestInstance:$TestInstance
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+} finally {
+    foreach ($key in $overrides.Keys) { [Environment]::SetEnvironmentVariable($key, $previousEnv[$key], "Process") }
 }
-
-$adb = Find-Adb
-
-if ($Stop) {
-    & $adb -s $serial emu kill 2>$null
-    Write-Host "==> 已停 $serial"
+if (-not $Verify) {
+    Write-Host "==> 已启动；用 -Verify 执行需要 ADB 的设备验收"
     exit 0
 }
-
-# ---------------------------------------------------------------- 启动
-if (-not $Verify) {
-    $emu = Find-Emulator
-    foreach ($f in @("system.img","vendor.img","ramdisk.img","kernel-ranchu")) {
-        if (-not (Test-Path (Join-Path $ImagesDir $f))) {
-            throw "镜像缺失：$ImagesDir\$f（先跑 .\fetch-images.ps1）"
-        }
-    }
-    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-    if ($WipeData) { Remove-Item "$DataDir\*" -Recurse -Force -ErrorAction SilentlyContinue }
-
-    # 构建模式：模拟器需要 ANDROID_PRODUCT_OUT 才会认 -sysdir
-    $env:ANDROID_PRODUCT_OUT = $ImagesDir
-
-    # 屏幕/内存/核数/GPU：与 Linux 侧**同一份** ..\emulator\config.ini。
-    # ROM 自带的是 goldfish 的 config.ini.xl（1440x2960 @560dpi），这里覆盖掉。
-    # 不参与 AOSP 构建，改完不用重编 ROM。
-    $cfg = Join-Path $PSScriptRoot "..\emulator\config.ini"
-    if (Test-Path $cfg) {
-        Copy-Item $cfg (Join-Path $ImagesDir "config.ini") -Force
-        $lw = Get-ConfigValue "hw.lcd.width" "1280"
-        $lh = Get-ConfigValue "hw.lcd.height" "720"
-        Write-Host ("==> 显示配置：{0}x{1} @{2}dpi（..\emulator\config.ini）" -f `
-                    $lw, $lh, (Get-ConfigValue "hw.lcd.density" "320"))
-    } else {
-        Write-Host "==> 未找到 ..\emulator\config.ini，沿用 ROM 自带显示配置" -ForegroundColor Yellow
-    }
-    if ($MemoryMB -le 0) { $MemoryMB = [int](Get-ConfigValue "hw.ramSize" "6144") }
-    if ($Cores    -le 0) { $Cores    = [int](Get-ConfigValue "hw.cpu.ncore" "4") }
-    $gpuAuto = [string]::IsNullOrWhiteSpace($Gpu)
-    $Gpu = Resolve-GpuMode $Gpu
-    Write-Host ("==> 硬件：-memory {0} -cores {1} -gpu {2}{3}" -f $MemoryMB, $Cores, $Gpu,
-                $(if ($gpuAuto) { "（自适应）" } else { "（命令行指定）" }))
-
-    $args = @("-sysdir", $ImagesDir, "-datadir", $DataDir, "-port", $Port,
-              "-gpu", $Gpu, "-accel", "on",          # on = WHPX/Hyper-V
-              "-memory", $MemoryMB, "-cores", $Cores)
-    if ($Headless)   { $args += "-no-window" }
-    if (-not $NoSnapshot) { } else { $args += "-no-snapshot" }
-    if ($WipeData)   { $args += "-wipe-data" }
-
-    Write-Host "==> 启动（WHPX）：$emu $($args -join ' ')" -ForegroundColor Cyan
-    $proc = Start-Process -FilePath $emu -ArgumentList $args -PassThru `
-                          -RedirectStandardOutput "$DataDir\emulator-$Port.out.log" `
-                          -RedirectStandardError  "$DataDir\emulator-$Port.err.log"
-    Write-Host "    PID $($proc.Id)"
-
-    if ($NoWait) { Write-Host "==> 起了就返回（--Verify 做验收）"; exit 0 }
-
-    Write-Host "==> 等开机（WHPX 下通常几十秒）"
-    & $adb -s $serial wait-for-device
-    $ok = $false
-    for ($i = 0; $i -lt 40; $i++) {
-        $bc = (& $adb -s $serial shell getprop sys.boot_completed 2>$null) -join ""
-        if ($bc.Trim() -eq "1") { $ok = $true; break }
-        Start-Sleep -Seconds 5
-    }
-    if (-not $ok) { throw "开机超时，看 $DataDir\emulator-$Port.err.log" }
-    & $adb -s $serial root 2>$null | Out-Null
-    & $adb -s $serial wait-for-device
-    Write-Host "==> 开机完成" -ForegroundColor Green
-}
+$adb = Find-Adb
 
 # ---------------------------------------------------------------- 验收
 function Get-Prop([string]$name) {

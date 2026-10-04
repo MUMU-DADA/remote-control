@@ -1,0 +1,6 @@
+vendor.qemu.rc.enabled u:object_r:vendor_remote_control_boot_prop:s0 exact bool
+vendor.qemu.rc.bind u:object_r:vendor_remote_control_boot_prop:s0 exact string
+vendor.qemu.rc.port u:object_r:vendor_remote_control_boot_prop:s0 exact int
+vendor.qemu.rc.auth u:object_r:vendor_remote_control_boot_prop:s0 exact bool
+vendor.qemu.rc.token u:object_r:vendor_remote_control_boot_prop:s0 exact string
+vendor.qemu.rc.adb u:object_r:vendor_remote_control_boot_prop:s0 exact bool

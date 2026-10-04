@@ -39,6 +39,9 @@ param(
     [switch]$NoWait,
     [switch]$Gui,
     [switch]$Yes,
+    [switch]$Force,
+    [switch]$TestInstance,
+    [int]$TimeoutSec = 60,
     [switch]$Help
 )
 
@@ -48,9 +51,9 @@ Set-StrictMode -Version 2.0
 $script:DefaultName   = "default"
 $script:PortBase      = 5580
 $script:X64Dir        = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$script:ConfigFile    = Join-Path $script:X64Dir "emulator\config.ini"
-$script:ImagesDir     = Join-Path $PSScriptRoot "images"
-$script:RunDir        = Join-Path $PSScriptRoot ".run"
+$script:ConfigFile    = if ($env:AUTOSNAP_CONFIG) { $env:AUTOSNAP_CONFIG } else { Join-Path $script:X64Dir "emulator\config.ini" }
+$script:ImagesDir     = if ($env:AUTOSNAP_IMAGES) { $env:AUTOSNAP_IMAGES } else { Join-Path $PSScriptRoot "images" }
+$script:RunDir        = if ($env:AUTOSNAP_RUN_DIR) { $env:AUTOSNAP_RUN_DIR } else { Join-Path $PSScriptRoot ".run" }
 $script:InstancesDir  = Join-Path $script:RunDir "instances"
 
 # 这几个文件**不能链接**，必须各实例一份实文件：
@@ -66,6 +69,7 @@ $script:GpuMode = ""
 $script:GpuAuto = $true
 $script:MemMB   = 0
 $script:CoreN   = 0
+$script:Service = $null
 
 # 路径/端口相关的运行期残留：clone 之后必须删掉，让模拟器按新路径重建。
 # hardware-qemu.ini 里的 disk.*.path 全是**绝对路径**，照抄过去两台机器
@@ -141,26 +145,12 @@ function Resolve-GpuMode {
 # ---------------------------------------------------------------------------
 # 工具查找
 # ---------------------------------------------------------------------------
-function Find-Adb {
-    $cands = @(
-        (Join-Path $PSScriptRoot "sdk\platform-tools\adb.exe"),
-        (Join-Path $env:ANDROID_SDK_ROOT "platform-tools\adb.exe"),
-        (Join-Path $env:ANDROID_HOME     "platform-tools\adb.exe"),
-        (Join-Path $env:LOCALAPPDATA     "Android\Sdk\platform-tools\adb.exe")
-    )
-    foreach ($c in $cands) { if ($c -and (Test-Path $c)) { return $c } }
-    $cmd = Get-Command adb.exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-    Die "找不到 adb.exe（先跑 .\fetch-emulator.ps1，或用 Android SDK 的 platform-tools）"
-}
-
 function Find-Emulator {
-    $cands = @(
-        (Join-Path $PSScriptRoot "sdk\emulator\emulator.exe"),
-        (Join-Path $env:ANDROID_SDK_ROOT "emulator\emulator.exe"),
-        (Join-Path $env:ANDROID_HOME     "emulator\emulator.exe"),
-        (Join-Path $env:LOCALAPPDATA     "Android\Sdk\emulator\emulator.exe")
-    )
+    if ($env:AUTOSNAP_EMULATOR -and (Test-Path -LiteralPath $env:AUTOSNAP_EMULATOR)) { return $env:AUTOSNAP_EMULATOR }
+    $cands = @((Join-Path $PSScriptRoot "sdk\emulator\emulator.exe"))
+    if ($env:ANDROID_SDK_ROOT) { $cands += Join-Path $env:ANDROID_SDK_ROOT "emulator\emulator.exe" }
+    if ($env:ANDROID_HOME) { $cands += Join-Path $env:ANDROID_HOME "emulator\emulator.exe" }
+    if ($env:LOCALAPPDATA) { $cands += Join-Path $env:LOCALAPPDATA "Android\Sdk\emulator\emulator.exe" }
     foreach ($c in $cands) { if ($c -and (Test-Path $c)) { return $c } }
     Die "找不到 emulator.exe（先跑 .\fetch-emulator.ps1）"
 }
@@ -197,12 +187,12 @@ function Register-Instance {
                 -Value "# 由 emulator.ps1 维护，手改也行（PORT 一行就够）`nPORT=$P"
 }
 
-function Unregister-Instance { param([string]$N) Remove-Item (Get-InstanceFile $N) -Force -ErrorAction SilentlyContinue }
+function Unregister-Instance { param([string]$N) Remove-Item (Get-InstanceFile $N), (Join-Path $script:InstancesDir "$N.token") -Force -ErrorAction SilentlyContinue }
 
 function Assert-Instance { param([string]$N) if (-not (Test-Instance $N)) { Die "没有叫 '$N' 的实例（.\emulator.ps1 list 看有哪些）" } }
 
 function Get-SysDir  { param([string]$N) Join-Path $script:RunDir "sysdir-$(Get-InstancePort $N)" }
-function Get-DataDir { param([string]$N) Join-Path $script:RunDir "datadir-$(Get-InstancePort $N)" }
+function Get-DataDir { param([string]$N) if ($env:AUTOSNAP_DATA_DIR) { return $env:AUTOSNAP_DATA_DIR }; Join-Path $script:RunDir "datadir-$(Get-InstancePort $N)" }
 function Get-LogFile { param([string]$N) Join-Path $script:RunDir "emulator-$(Get-InstancePort $N).log" }
 function Get-ErrFile { param([string]$N) Join-Path $script:RunDir "emulator-$(Get-InstancePort $N).err.log" }
 function Get-Serial  { param([string]$N) "emulator-$(Get-InstancePort $N)" }
@@ -292,6 +282,7 @@ function Build-SysDir {
         Die "镜像目录不完整：$($script:ImagesDir)`n    先拉镜像： .\fetch-images.ps1"
     }
     $sysdir = Get-SysDir $N
+    Optimize-ImageStorage $script:ImagesDir
     New-Item -ItemType Directory -Force -Path $sysdir | Out-Null
 
     $kinds = @{}
@@ -319,6 +310,7 @@ function Build-SysDir {
     if ($missing.Count -gt 0) { Die "工作目录缺文件：$($missing -join ', ')（镜像链接没建成）" }
 
     $how = if ($kinds.Count -gt 0) { ($kinds.Keys | Sort-Object) -join "/" } else { "（无）" }
+    Optimize-ImageStorage $sysdir
     Write-Log "镜像已就位（$how）"
 }
 
@@ -343,9 +335,13 @@ function Invoke-Create {
     Write-Host ("    显示     {0}x{1} @{2}dpi  {3}" -f $w, $h, (Get-ConfigValue "hw.lcd.density" "320"),
                 $(if ([int]$w -gt [int]$h) { "横屏" } else { "竖屏" }))
     Write-Host ("    内存/核  {0} MB / {1} 核" -f (Get-ConfigValue "hw.ramSize" "6144"), (Get-ConfigValue "hw.cpu.ncore" "4"))
-    Write-Host ("    数据分区 {0}（实际占用看 qcow2 长到多大）" -f (Get-ConfigValue "disk.dataPartition.size" "32G"))
+    Write-Host ("    数据分区 {0}（实际占用看 qcow2 长到多大）" -f (Get-ConfigValue "disk.dataPartition.size" "16G"))
     Write-Host "    下一步   .\emulator.ps1 start $N"
 }
+
+# 常规生命周期共享 release 的 console/HTTP helper，实例文件函数仍使用名字。
+. (Join-Path $script:X64Dir "packaging\bin\windows\console.ps1")
+. (Join-Path $script:X64Dir "packaging\bin\windows\storage.ps1")
 
 # ---------------------------------------------------------------------------
 # start
@@ -379,36 +375,12 @@ function Start-Emu {
            "-gpu", $GpuMode, "-accel", "on",
            "-memory", "$script:MemMB", "-cores", "$script:CoreN",
            "-no-boot-anim", "-no-audio", "-no-snapshot")
+    if ($script:Service) { $a += $script:Service.Properties }
     if (-not $Gui) { $a += "-no-window" }
 
     Remove-Item $logf, $errf -Force -ErrorAction SilentlyContinue
     $script:EmuProc = Start-Process -FilePath $Emu -ArgumentList $a -PassThru -WindowStyle Hidden `
                                     -RedirectStandardOutput $logf -RedirectStandardError $errf
-}
-
-function Wait-Adb {
-    param([string]$Serial, [int]$TimeoutSec = 60)
-    $adb = Find-Adb
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        $state = (& $adb -s $Serial get-state 2>$null) -join ""
-        if ($state.Trim() -eq "device") { return $true }
-        if ($script:EmuProc -and $script:EmuProc.HasExited) { return $false }
-        Start-Sleep -Seconds 5
-    }
-    return $false
-}
-
-function Wait-Boot {
-    param([string]$Serial, [int]$TimeoutSec = 300)
-    $adb = Find-Adb
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        $bc = (& $adb -s $Serial shell getprop sys.boot_completed 2>$null) -join ""
-        if ($bc.Trim() -eq "1") { return $true }
-        Start-Sleep -Seconds 3
-    }
-    return $false
 }
 
 function Invoke-Start {
@@ -418,7 +390,9 @@ function Invoke-Start {
 
     $emu = Find-Emulator
     Resolve-Hw
-    $serial = Get-Serial $N
+    $p = Get-InstancePort $N
+    $reuseService = -not [string]::IsNullOrWhiteSpace((Get-InstanceValue $N "SERVICE_AUTH"))
+    $script:Service = Initialize-ServiceInstance $N $p -Reuse:$reuseService -TestInstance:$TestInstance
 
     if ($script:GpuAuto) {
         Write-Log ("硬件参数： -memory $script:MemMB  -cores $script:CoreN  -gpu $script:GpuMode（自适应：$(Get-GpuReason)）")
@@ -437,7 +411,7 @@ function Invoke-Start {
         if ($g -ne $script:GpuMode) { Write-Warn "上一档（$script:GpuMode）没起来，退到 $g" }
         Start-Emu $N $emu $g
         Write-Host "    PID $($script:EmuProc.Id)"
-        if (Wait-Adb $serial 60) { $started = $true; $used = $g; break }
+        if (Wait-ConsoleReady $p 60) { $started = $true; $used = $g; break }
         $tail = (Get-Content (Get-ErrFile $N) -Tail 2 -ErrorAction SilentlyContinue) -join " "
         Write-Warn "没起来（$tail）"
         Stop-Process -Id $script:EmuProc.Id -Force -ErrorAction SilentlyContinue
@@ -446,14 +420,19 @@ function Invoke-Start {
     if (-not $started) { Die "起不来；看 $(Get-LogFile $N) 和 $(Get-ErrFile $N)" }
 
     Write-Ok "已启动 '$N'（-gpu $used -memory $script:MemMB -cores $script:CoreN，端口 $(Get-InstancePort $N)）"
-    if ($NoWait) { Write-Host "后续： adb -s $serial shell getprop sys.boot_completed"; return }
+    if (-not (Add-ConsoleRedirect $p $script:Service.HttpPort $script:Service.GuestPort)) {
+        Die "无法建立服务端口转发：宿主 $($script:Service.HttpPort) → guest $($script:Service.GuestPort)"
+    }
+    if ($NoWait) { Write-Host "后续： .\emulator.ps1 status $N"; return }
 
-    Write-Log "等开机完成（WHPX 下通常几十秒）"
-    if (-not (Wait-Boot $serial 300)) { Write-Warn "等开机超时（300s）—— 看 $(Get-ErrFile $N)"; return }
-    $adb = Find-Adb
-    & $adb -s $serial root 2>$null | Out-Null
-    & $adb -s $serial wait-for-device 2>$null | Out-Null
-    Write-Ok "开机完成"
+    Write-Log "等 remote-control 服务就绪（WHPX 下通常几十秒）"
+    $deadline = (Get-Date).AddSeconds(300)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-ServiceReady $p) { Write-Ok "开机完成"; return }
+        if (-not (Test-InstanceRunning $N)) { break }
+        Start-Sleep -Seconds 2
+    }
+    Die "等服务超时（300s）—— 看 $(Get-ErrFile $N)"
 }
 
 # ---------------------------------------------------------------------------
@@ -463,34 +442,8 @@ function Invoke-Stop {
     param([string]$N)
     Assert-Instance $N
     $p = Get-InstancePort $N
-    $procs = @(Get-EmuProcess $p)
-    if ($procs.Count -eq 0) { Write-Warn "实例 '$N' 没在跑"; return $true }
-
-    # ⚠️⚠️ 关机前先让 guest 把脏页落盘。
-    #
-    #    `adb emu kill` **不是优雅关机，是硬断电** —— QEMU 收到信号就立刻终止，
-    #    guest 没机会卸载文件系统或提交日志。
-    #    实测（Linux 侧 tools/verify-kill-is-hard-poweroff.sh，同一台实例
-    #    三组对照）：sync 后再关 → 数据在；不 sync 直接关 → 数据没了；
-    #    不 sync 等 15 秒再关 → **还是没了**。
-    #    后果不是"丢最后一点"，而是最近写的东西整个没，且毫无征兆 ——
-    #    项目早期那条"模拟器 /data 不持久（根因未查明）"就是它。
-    $adb = Find-Adb
-    Write-Log "让 guest 把脏页落盘（sync）"
-    & $adb -s (Get-Serial $N) shell sync 2>$null | Out-Null
-    Start-Sleep -Seconds 1
-
-    Write-Log "请 guest 自己关机（adb emu kill）"
-    & $adb -s (Get-Serial $N) emu kill 2>$null | Out-Null
-
-    # ⚠️ 等的是**进程真的退出**，不是"命令返回了"。emu kill 只是递个关机请求，
-    #    guest 还要走完流程（卸载 /data、收 qcow2）；这中间就重启会撞上
-    #    multiinstance.lock，第二台报 another emulator instance is running。
-    for ($i = 0; $i -lt 30; $i++) {
-        if (@(Get-EmuProcess $p).Count -eq 0) { Write-Ok "已停止 '$N'"; return $true }
-        Start-Sleep -Seconds 2
-    }
-    Write-Warn "'$N' 60 秒还没退（guest 卡住了？）—— 用 kill 强制关闭"
+    if (Stop-Instance $p $TimeoutSec -Force:$Force) { Write-Ok "已停止 '$N'"; return $true }
+    Write-Warn "'$N' 没停掉；检查服务令牌或显式 -Force 后重试"
     return $false
 }
 
@@ -498,30 +451,14 @@ function Invoke-Kill {
     param([string]$N)
     Assert-Instance $N
     $p = Get-InstancePort $N
-    $procs = @(Get-EmuProcess $p)
-    if ($procs.Count -eq 0) { Write-Warn "实例 '$N' 没在跑"; return }
-
-    Write-Log "强制关闭 '$N'（Stop-Process -Force）"
-    # 先**落盘**、再请它关、最后强杀。emu kill 本身已经是硬断电
-    # （见 stop 里那段实测），SIGKILL 只会更狠 —— 不 sync 的话
-    # 最近写入的数据会静默消失。多花一秒换数据安全，值。
-    $adb = Find-Adb
-    & $adb -s (Get-Serial $N) shell sync 2>$null | Out-Null
-    & $adb -s (Get-Serial $N) emu kill 2>$null | Out-Null
-    Start-Sleep -Seconds 2
-    foreach ($pr in @(Get-EmuProcess $p)) { Stop-Process -Id $pr.ProcessId -Force -ErrorAction SilentlyContinue }
-
-    for ($i = 0; $i -lt 15; $i++) {
-        if (@(Get-EmuProcess $p).Count -eq 0) { Write-Ok "已强制关闭 '$N'"; return }
-        Start-Sleep -Seconds 1
-    }
-    Die "'$N' 的进程杀不掉，手动看： Get-Process qemu-system-*"
+    if (Stop-Instance $p 0 -Force) { Write-Ok "已强制关闭 '$N'"; return }
+    Die "'$N' 的进程杀不掉"
 }
 
 function Invoke-Restart {
     param([string]$N)
     Assert-Instance $N
-    if (-not (Invoke-Stop $N)) { Invoke-Kill $N }
+    if (-not (Invoke-Stop $N)) { Die "实例未停止；未修改数据，请显式 -Force 后重试" }
     Invoke-Start $N
 }
 
@@ -531,7 +468,7 @@ function Invoke-Restart {
 function Invoke-Reset {
     param([string]$N)
     Assert-Instance $N
-    if (Test-InstanceRunning $N) { Write-Log "先停掉 '$N'"; if (-not (Invoke-Stop $N)) { Invoke-Kill $N } }
+    if (Test-InstanceRunning $N) { Write-Log "先停掉 '$N'"; if (-not (Invoke-Stop $N)) { Die "实例未停止；未修改数据，请显式 -Force 后重试" } }
 
     if (-not $Yes) {
         Write-Host "[!] 重置 '$N' 会清空数据分区（已装应用 / 应用数据 / sdcard / 快照）" -ForegroundColor Yellow
@@ -552,7 +489,16 @@ function Invoke-Reset {
     foreach ($d in @("build.avd", "snapshots", "tmpAdbCmds")) {
         Remove-Item (Join-Path $sysdir $d) -Recurse -Force -ErrorAction SilentlyContinue
     }
-    New-Item -ItemType Directory -Force -Path (Get-DataDir $N) | Out-Null
+    $datadir = Get-DataDir $N
+    $dataItem = Get-Item -LiteralPath $datadir -Force -ErrorAction SilentlyContinue
+    if ($dataItem -and ($dataItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        [IO.Directory]::Delete($dataItem.FullName, $false)
+    } elseif ($dataItem) {
+        Remove-Item -LiteralPath $datadir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $datadir | Out-Null
+    Remove-Item -LiteralPath (Get-ServiceTokenFile $N) -Force -ErrorAction SilentlyContinue
+    Register-Instance $N (Get-InstancePort $N)
     Write-Ok "已重置 '$N'（下次启动是全新机器）"
 }
 
@@ -562,7 +508,7 @@ function Invoke-Reset {
 function Invoke-Delete {
     param([string]$N)
     Assert-Instance $N
-    if (Test-InstanceRunning $N) { Write-Log "先停掉 '$N'"; if (-not (Invoke-Stop $N)) { Invoke-Kill $N } }
+    if (Test-InstanceRunning $N) { Write-Log "先停掉 '$N'"; if (-not (Invoke-Stop $N)) { Die "实例未停止；未修改数据，请显式 -Force 后重试" } }
 
     if (-not $Yes) {
         Write-Host "[!] 删除 '$N' 会删掉整个工作目录（含已装应用与快照）" -ForegroundColor Yellow
@@ -596,7 +542,7 @@ function Invoke-Clone {
     if (Test-Instance $Dst) { Die "实例 '$Dst' 已经存在" }
     if (Test-InstanceRunning $Src) {
         Write-Log "复制前先停掉源实例 '$Src'（跑着的时候 qcow2 还在写，抄出来是脏的）"
-        if (-not (Invoke-Stop $Src)) { Invoke-Kill $Src }
+        if (-not (Invoke-Stop $Src)) { Die "源实例未停止；未复制数据，请显式 -Force 后重试" }
     }
 
     $p = if ($Port -gt 0) { $Port } else { New-FreePort }
@@ -648,6 +594,18 @@ function Invoke-Clone {
             Write-Warn "源实例的快照没有复制（快照绑定了原来的硬件配置与路径）"
         }
         Copy-Item $script:ConfigFile (Join-Path $dSys "config.ini") -Force -ErrorAction Stop
+        # /data contains the persisted daemon configuration too.  The clone's
+        # host token must match it; only the host redirection port is new.
+        $srcGuestPort = Get-InstanceValue $Src "SERVICE_PORT"
+        if ($srcGuestPort) {
+            Set-InstanceService $Dst (18088 + [int](($p - $script:PortBase) / 2)) ([int]$srcGuestPort) `
+                (Get-InstanceValue $Src "SERVICE_ENABLED") (Get-InstanceValue $Src "SERVICE_AUTH") `
+                (Get-InstanceValue $Src "SERVICE_BIND") (Get-InstanceValue $Src "SERVICE_ADB")
+            if (Test-Path -LiteralPath (Get-ServiceTokenFile $Src)) {
+                Copy-Item -LiteralPath (Get-ServiceTokenFile $Src) -Destination (Get-ServiceTokenFile $Dst) -Force
+                Protect-ServiceTokenFile (Get-ServiceTokenFile $Dst)
+            }
+        }
     } catch {
         $copyError = $_
         try {
@@ -670,9 +628,7 @@ function Get-InstanceState {
     param([string]$N)
     $p = Get-InstancePort $N
     if (@(Get-EmuProcess $p).Count -eq 0) { return "已停止" }
-    $adb = Find-Adb
-    $bc = (& $adb -s "emulator-$p" shell getprop sys.boot_completed 2>$null) -join ""
-    if ($bc.Trim() -eq "1") { return "运行中(已开机)" }
+    if (Test-ServiceReady $p) { return "运行中(服务已就绪)" }
     return "运行中(启动中)"
 }
 
@@ -744,7 +700,7 @@ if (-not (Test-Path $script:ConfigFile)) { Write-Warn "找不到 $($script:Confi
 switch ($Command.ToLower()) {
     "create"  { Invoke-Create  $(if ($Name) { $Name } else { $script:DefaultName }) }
     "start"   { Invoke-Start   $(if ($Name) { $Name } else { $script:DefaultName }) }
-    "stop"    { [void](Invoke-Stop  $(if ($Name) { $Name } else { $script:DefaultName })) }
+    "stop"    { if (-not (Invoke-Stop $(if ($Name) { $Name } else { $script:DefaultName }))) { exit 1 } }
     "kill"    { Invoke-Kill    $(if ($Name) { $Name } else { $script:DefaultName }) }
     "restart" { Invoke-Restart $(if ($Name) { $Name } else { $script:DefaultName }) }
     "reset"   { Invoke-Reset   $(if ($Name) { $Name } else { $script:DefaultName }) }
