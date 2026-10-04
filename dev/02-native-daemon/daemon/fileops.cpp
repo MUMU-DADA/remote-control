@@ -10,13 +10,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 
 #include "remote_control_log.h"
+#include "stale_temp_cleanup.h"
 #include "subprocess.h"
 
 #if !defined(SYS_renameat2) && defined(__NR_renameat2)
@@ -30,6 +34,92 @@ constexpr int64_t kDefaultMaxDownload = 512LL << 20;   // 512 MB
 constexpr int     kDefaultTimeoutSec  = 300;
 constexpr size_t  kMaxPathComponents  = 256;
 constexpr size_t  kMaxDeleteDepth     = 256;
+constexpr size_t  kMaxUploadFilenameBytes = 200;
+constexpr char    kUploadTempPrefix[] = ".remote-control-upload-";
+constexpr uint64_t kUploadFreeSpaceReserveBytes = 64ull << 20;
+std::mutex gUploadPublishMutex;
+
+bool IsUploadBasename(const std::string& name) {
+    if (name.empty() || name.size() > kMaxUploadFilenameBytes ||
+        name == "." || name == ".." ||
+        name.compare(0, sizeof(kUploadTempPrefix) - 1,
+                     kUploadTempPrefix) == 0) {
+        return false;
+    }
+    for (unsigned char c : name) {
+        if (c == '/' || c == '\\' || c == 0 || c < 0x20 || c == 0x7f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string FileUri(const std::string& path) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string uri = "file://";
+    uri.reserve(uri.size() + path.size());
+    for (unsigned char c : path) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' ||
+            c == '.' || c == '~') {
+            uri += static_cast<char>(c);
+        } else {
+            uri += '%';
+            uri += kHex[c >> 4];
+            uri += kHex[c & 0x0f];
+        }
+    }
+    return uri;
+}
+
+bool WriteAll(int fd, const char* data, size_t size) {
+    size_t offset = 0;
+    while (offset < size) {
+        const ssize_t n = write(fd, data + offset, size - offset);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) {
+            errno = EIO;
+            return false;
+        }
+        offset += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+bool CopyUpload(int destinationFd, int sourceFd, const char* memory,
+                size_t size) {
+    if (sourceFd < 0) {
+        return size == 0 || (memory != nullptr && WriteAll(destinationFd, memory, size));
+    }
+
+    struct stat sourceStat{};
+    if (fstat(sourceFd, &sourceStat) != 0 || !S_ISREG(sourceStat.st_mode) ||
+        sourceStat.st_size < 0 || static_cast<uint64_t>(sourceStat.st_size) != size) {
+        errno = EINVAL;
+        return false;
+    }
+
+    char buffer[64 * 1024];
+    size_t offset = 0;
+    while (offset < size) {
+        const size_t want = std::min(sizeof(buffer), size - offset);
+        const ssize_t n = pread(sourceFd, buffer, want, static_cast<off_t>(offset));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) {
+            errno = EIO;
+            return false;
+        }
+        if (!WriteAll(destinationFd, buffer, static_cast<size_t>(n))) return false;
+        offset += static_cast<size_t>(n);
+    }
+    return true;
+}
 
 std::string JoinPath(const std::string& a, const std::string& b) {
     if (a.empty()) return b;
@@ -72,6 +162,10 @@ std::string RelativeTo(const std::string& root, const std::string& abs) {
 bool RelativeParts(const std::string& base, const std::string& abs,
                    std::vector<std::string>* parts) {
     parts->clear();
+    if (base.find('\0') != std::string::npos ||
+        abs.find('\0') != std::string::npos) {
+        return false;
+    }
     if (abs == base) return true;
     if (!IsUnder(abs, base)) return false;
     const std::string rel = abs.substr(base.size() + 1);
@@ -89,7 +183,11 @@ bool RelativeParts(const std::string& base, const std::string& abs,
 }
 
 int OpenDirNoFollow(const std::string& path) {
-    if (path.empty() || path[0] != '/') return -1;
+    if (path.empty() || path[0] != '/' ||
+        path.find('\0') != std::string::npos) {
+        errno = EINVAL;
+        return -1;
+    }
     // Ancestors only anchor openat; O_PATH needs traversal permission without
     // asking to list rootfs or other directories outside the allowed storage.
     int fd = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -292,6 +390,10 @@ bool FileOps::ResolveInside(const std::string& root,
                             const std::string& input,
                             std::string* out, std::string* error) {
     if (out == nullptr) return false;
+    if (input.find('\0') != std::string::npos) {
+        if (error) *error = "路径含 NUL 字节";
+        return false;
+    }
     if (root.empty() || root[0] != '/') {
         if (error) *error = "下载目录未初始化";
         return false;
@@ -615,13 +717,202 @@ bool FileOps::Download(const std::string& url, const std::string& filename,
     return true;
 }
 
+bool FileOps::Upload(const std::string& directory, const std::string& filename,
+                     int sourceFd, const char* memory, size_t size,
+                     std::string* savedPath, std::string* error) {
+    std::string path;
+    if (!UploadToStorage(root_, storageRoot_, NormalizeAlias(directory), filename,
+                         sourceFd, memory, size, &path, error)) {
+        return false;
+    }
+    NotifyMediaScanner(path);
+    if (savedPath) *savedPath = std::move(path);
+    return true;
+}
+
+bool FileOps::UploadToStorage(const std::string& root,
+                              const std::string& storageRoot,
+                              const std::string& directory,
+                              const std::string& filename,
+                              int sourceFd, const char* memory, size_t size,
+                              std::string* savedPath, std::string* error) {
+    if (!IsUploadBasename(filename)) {
+        if (error) {
+            *error = "文件名必须是 1 到 " +
+                     std::to_string(kMaxUploadFilenameBytes) +
+                     " 字节的 basename，且不能含路径分隔符或控制字符";
+        }
+        return false;
+    }
+    if (sourceFd < 0 && size > 0 && memory == nullptr) {
+        if (error) *error = "上传正文为空指针";
+        return false;
+    }
+
+    std::string directoryAbs;
+    if (!ResolveInside(root, storageRoot, directory, &directoryAbs, error)) {
+        return false;
+    }
+    const std::string& bound = storageRoot.empty() ? root : storageRoot;
+    const int directoryFd = OpenPathDirNoFollow(bound, directoryAbs, error);
+    if (directoryFd < 0) return false;
+    const size_t staleTemps = RemoveStaleTempFiles(directoryFd,
+                                                   kUploadTempPrefix);
+    if (staleTemps > 0) {
+        ALOGI("清理了 %zu 个中断上传临时文件: %s", staleTemps,
+              directoryAbs.c_str());
+    }
+
+    if (size > 0) {
+        struct statvfs space{};
+        if (fstatvfs(directoryFd, &space) != 0) {
+            const int savedErrno = errno;
+            close(directoryFd);
+            if (error) {
+                const char* prefix =
+                        (savedErrno == ENOSPC || savedErrno == EDQUOT)
+                                ? "上传空间不足: "
+                                : "检查上传目标空间失败: ";
+                *error = std::string(prefix) + strerror(savedErrno);
+            }
+            return false;
+        }
+        const uint64_t blocks = static_cast<uint64_t>(space.f_bavail);
+        const uint64_t blockSize = static_cast<uint64_t>(
+                space.f_frsize != 0 ? space.f_frsize : space.f_bsize);
+        const uint64_t available = blockSize != 0 &&
+                                           blocks > UINT64_MAX / blockSize
+                                   ? UINT64_MAX
+                                   : blocks * blockSize;
+        const uint64_t needed = static_cast<uint64_t>(size) +
+                                kUploadFreeSpaceReserveBytes;
+        if (available < needed) {
+            close(directoryFd);
+            if (error) *error = "上传空间不足: 目标可用空间不足";
+            return false;
+        }
+    }
+
+    static std::atomic<uint64_t> nextTemp{0};
+    std::string tempName;
+    int outputFd = -1;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        tempName = kUploadTempPrefix +
+                   std::to_string(static_cast<long long>(getpid())) + "-" +
+                   std::to_string(nextTemp.fetch_add(1, std::memory_order_relaxed));
+        outputFd = openat(directoryFd, tempName.c_str(),
+                          O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                          0644);
+        if (outputFd >= 0 || errno != EEXIST) break;
+    }
+    if (outputFd < 0) {
+        const int savedErrno = errno;
+        close(directoryFd);
+        if (error) {
+            const char* prefix = (savedErrno == ENOSPC || savedErrno == EDQUOT)
+                                         ? "上传空间不足: "
+                                         : "创建上传临时文件失败: ";
+            *error = std::string(prefix) + strerror(savedErrno);
+        }
+        return false;
+    }
+
+    bool ok = CopyUpload(outputFd, sourceFd, memory, size);
+    int savedErrno = errno;
+    if (ok && fsync(outputFd) != 0) {
+        ok = false;
+        savedErrno = errno;
+    }
+    if (close(outputFd) != 0 && ok) {
+        ok = false;
+        savedErrno = errno;
+    }
+    if (!ok) {
+        unlinkat(directoryFd, tempName.c_str(), 0);
+        close(directoryFd);
+        if (error) {
+            const char* prefix = (savedErrno == ENOSPC || savedErrno == EDQUOT)
+                                         ? "上传空间不足: "
+                                         : "写入上传文件失败: ";
+            *error = std::string(prefix) + strerror(savedErrno);
+        }
+        return false;
+    }
+
+    constexpr unsigned int kRenameNoReplace = 1u;
+    bool published = false;
+    bool tempStillExists = true;
+#if defined(SYS_renameat2)
+    if (syscall(SYS_renameat2, directoryFd, tempName.c_str(), directoryFd,
+                filename.c_str(), kRenameNoReplace) == 0) {
+        published = true;
+        tempStillExists = false;
+    } else {
+        savedErrno = errno;
+    }
+#else
+    savedErrno = ENOSYS;
+#endif
+    // Older Android kernels may not implement renameat2. A same-directory
+    // hard link also publishes the complete inode atomically without replace.
+    if (!published && (savedErrno == ENOSYS || savedErrno == EINVAL ||
+                       savedErrno == ENOTSUP || savedErrno == EOPNOTSUPP)) {
+        if (linkat(directoryFd, tempName.c_str(), directoryFd,
+                   filename.c_str(), 0) == 0) {
+            published = true;
+        } else {
+            savedErrno = errno;
+        }
+    }
+    // Android's shared-storage FUSE mount can reject both renameat2 and
+    // hard links. Serialize daemon uploads and use renameat there; the final
+    // existence check preserves no-overwrite behavior for all daemon writers.
+    if (!published && (savedErrno == ENOSYS || savedErrno == EINVAL ||
+                       savedErrno == ENOTSUP || savedErrno == EOPNOTSUPP)) {
+        std::lock_guard<std::mutex> lock(gUploadPublishMutex);
+        struct stat existing{};
+        if (fstatat(directoryFd, filename.c_str(), &existing,
+                    AT_SYMLINK_NOFOLLOW) == 0) {
+            savedErrno = EEXIST;
+        } else if (errno != ENOENT) {
+            savedErrno = errno;
+        } else if (renameat(directoryFd, tempName.c_str(), directoryFd,
+                            filename.c_str()) == 0) {
+            published = true;
+            tempStillExists = false;
+        } else {
+            savedErrno = errno;
+        }
+    }
+    if (!published) {
+        unlinkat(directoryFd, tempName.c_str(), 0);
+        close(directoryFd);
+        if (error) {
+            if (savedErrno == EEXIST) {
+                *error = "目标已存在: " + filename;
+            } else if (savedErrno == ENOSPC || savedErrno == EDQUOT) {
+                *error = "上传空间不足: " + std::string(strerror(savedErrno));
+            } else {
+                *error = "发布上传文件失败: " + std::string(strerror(savedErrno));
+            }
+        }
+        return false;
+    }
+    if (tempStillExists) unlinkat(directoryFd, tempName.c_str(), 0);
+    (void)fsync(directoryFd);
+    close(directoryFd);
+
+    if (savedPath) *savedPath = JoinPath(directoryAbs, filename);
+    return true;
+}
+
 void FileOps::NotifyMediaScanner(const std::string& absPath) {
     // 新文件要让系统"下载"应用和文件管理器看到，得让 MediaScanner 扫一下。
     // 走 broadcast 是标准做法（DownloadManager 内部也是这么做的）。
     CommandResult r;
     RunCommand({"/system/bin/am", "broadcast",
                 "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
-                "-d", "file://" + absPath},
+                "-d", FileUri(absPath)},
                10000, 4096, &r, nullptr);
     // 失败不影响下载本身，只影响它多快出现在列表里
 }
@@ -653,6 +944,8 @@ bool FileOps::List(const std::string& relPath, std::vector<FileEntry>* out,
     dirent* ent;
     while ((ent = readdir(d)) != nullptr) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        if (strncmp(ent->d_name, kUploadTempPrefix,
+                    sizeof(kUploadTempPrefix) - 1) == 0) continue;
         struct stat st{};
         if (fstatat(dirfd(d), ent->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
         const std::string childAbs = JoinPath(abs, ent->d_name);

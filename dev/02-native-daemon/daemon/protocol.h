@@ -28,16 +28,20 @@ constexpr uint32_t kMagic = 0x44545541;
 //   6 = 服务对外开关、运行中应用、历史日志、日志流
 constexpr uint32_t kProtocolVersion = 7;
 
-// 单次上传的字节上限（HTTP 请求体 / APK）。
+// 单次上传的字节上限（HTTP 请求体 / APK / 普通文件）。
 //
 // ⚠️ 放这里是因为有**两处**独立的限制必须一致，而它们以前是分开写的：
 //     · http_server.h 的 Options::maxBodyBytes（请求体接收上限）
 //     · dispatch.cpp 的 kMaxApk（安装路径的落盘上限）
-//    结果就是 HTTP 层放行 4GB，安装路径却在 2GB 处拒掉 —— 用户传完
+//    结果就是 HTTP 层放行 4 GiB，安装路径却在 2 GiB 处拒掉 —— 用户传完
 //    才失败，而且报错说的是"APK 超过限制"，看起来像传输出问题。
 //
 //    现在两处都从这里取。改一个地方就够了。
-constexpr size_t kMaxUploadBytes = 4ull << 30;   // 4 GB
+constexpr uint64_t kMaxUploadBytes = 4ull << 30;   // 4 GiB
+constexpr size_t kMaxHttpUploadBytes =
+        sizeof(size_t) >= sizeof(uint64_t)
+                ? static_cast<size_t>(kMaxUploadBytes)
+                : static_cast<size_t>(-1);
 
 enum class Cmd : uint32_t {
     Info       = 1,   // 查询显示参数，不产生副作用

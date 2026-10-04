@@ -18,6 +18,7 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <iterator>
 #include <vector>
@@ -751,6 +752,76 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
     return resp;
 }
 
+HttpResponse RestApi::HandleFileUpload(const HttpRequest& req) {
+    const std::string filename = req.queryParam("name");
+    if (filename.empty()) {
+        return HttpResponse::Error(400, "上传需要 name 文件名参数");
+    }
+    std::string contentType = req.header("content-type", "");
+    std::transform(contentType.begin(), contentType.end(), contentType.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    if (contentType.rfind("multipart/form-data", 0) == 0) {
+        return HttpResponse::Error(
+                400, "上传正文应为文件原始字节，不支持 multipart/form-data");
+    }
+
+    std::string initError;
+    {
+        std::lock_guard<std::mutex> lock(uploadFileOpsMutex_);
+        if (!uploadFileOpsInitialized_) {
+            if (!uploadFileOps_.Init(&initError)) {
+                return HttpResponse::Error(500, initError);
+            }
+            uploadFileOpsInitialized_ = true;
+        }
+    }
+
+    int sourceFd = -1;
+    if (!req.bodyFile.empty()) {
+        sourceFd = open(req.bodyFile.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (sourceFd < 0) {
+            return HttpResponse::Error(500, "打开上传暂存文件失败: " +
+                                                std::string(strerror(errno)));
+        }
+    } else if (req.bodySize != 0 && req.bodySize != req.body.size()) {
+        return HttpResponse::Error(400, "上传正文长度不一致");
+    }
+    struct FdGuard {
+        int fd;
+        ~FdGuard() { if (fd >= 0) close(fd); }
+    } sourceGuard{sourceFd};
+
+    std::string savedPath;
+    std::string uploadError;
+    const size_t size = req.bodyFile.empty() ? req.body.size() : req.bodySize;
+    if (!uploadFileOps_.Upload(req.queryParam("path", ""), filename,
+                               sourceFd, req.body.data(), size,
+                               &savedPath, &uploadError)) {
+        int status = 500;
+        if (uploadError.rfind("目标已存在:", 0) == 0) {
+            status = 409;
+        } else if (uploadError.rfind("上传空间不足:", 0) == 0) {
+            status = 507;
+        } else if (uploadError.rfind("文件名", 0) == 0 ||
+                   uploadError.rfind("路径", 0) == 0 ||
+                   uploadError.rfind("目标必须", 0) == 0 ||
+                   uploadError.rfind("路径不在", 0) == 0) {
+            status = 400;
+        } else if (uploadError.rfind("打开目录", 0) == 0) {
+            status = 404;
+        }
+        return HttpResponse::Error(status, uploadError);
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("name", filename)
+        .Field("path", savedPath).Field("bytes", static_cast<uint64_t>(size))
+     .EndObj();
+    return HttpResponse::Json(201, w.str());
+}
+
 // ── 手势 ────────────────────────────────────────────────────────────────────
 HttpResponse RestApi::HandleGesture(const HttpRequest& req, Cmd cmd,
                                     bool needsEnd) {
@@ -1041,9 +1112,11 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
         // 看不到"服务端实际在按多少抓" —— 那会让"我明明要 10fps 为什么
         // 设备这么烫"变成一个查不出来的问题。
         //
-        // 这里如实报出来。activeFps=0 表示没有订阅者、一次都没在抓。
+        // 这里报告最高目标帧率和当前探测间隔。activeFps=0 表示没有订阅者。
         .Key("capture").Obj()
             .Field("activeFps", static_cast<int64_t>(h.maxFps))
+            .Field("nextIntervalMs", static_cast<int64_t>(h.captureIntervalMs))
+            .Field("adaptive", h.adaptiveCapture)
             .Field("subscribers", static_cast<int64_t>(h.subscribers))
             .Field("frames", h.frames)
             .Field("lastCaptureMs", h.lastCaptureMs)
@@ -1051,8 +1124,8 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
             // 抓帧按所有订阅者里**最大的 maxWidth** ——
             // SurfaceFlinger 的 DisplayCaptureArgs.width 是源头降采样。
             .Field("captureWidth", static_cast<int64_t>(h.captureWidth))
-            // served/misses：取帧时"最新帧已备好"和"没等到"的次数。
-            // misses 高 = 抓帧跟不上需求，客户端在等。
+            // served/misses：取帧时"最新帧已备好"和"等待超时未有新帧"的次数。
+            // 静帧退避会增加 misses，不表示画面变化帧丢失。
             .Field("served", h.served)
             .Field("misses", h.misses)
             .Field("running", h.running)
@@ -1390,7 +1463,8 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
         std::string err;
         // 上报目标帧率 —— 抓帧线程按所有订阅者的**最高**需求跑。
         // 消费者来了直接拿最新帧，不用等一次抓帧（那是"变卡"的根源）。
-        st->hubSub = FrameHub::Instance().Subscribe(p.fps, p.maxWidth, &err);
+        st->hubSub = FrameHub::Instance().Subscribe(
+                p.fps, p.maxWidth, p.skipUnchanged, &err);
         if (!st->hubSub) {
             ALOGW("订阅共享抓帧失败: %s", err.c_str());
             return {};
@@ -1854,6 +1928,9 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                             }
                         } else if (t == "skipUnchanged") {
                             p.skipUnchanged = (v.num("v", 1) != 0);
+                            if (st.hubSub) {
+                                st.hubSub->SetSkipUnchanged(p.skipUnchanged);
+                            }
                             st.haveChangeGen = false;   // 重新开始判定
                             if (!sendText(std::string("{\"t\":\"ack\","
                                     "\"skipUnchanged\":") +
@@ -1881,6 +1958,7 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                             st.haveChangeGen = false;
                             st.needKeyFrame = true;
                             nextFrameAt = NowMs();
+                            if (st.hubSub) st.hubSub->RequestFrame();
                         }
                     }
                 }
@@ -2329,6 +2407,12 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         return Call(Cmd::Download,
                     PackArgs({url, b.str("filename"), b.str("subdir")}),
                     0, -1);
+    }
+    if (res == "files" && seg.size() == 4 && seg[3] == "upload") {
+        if (method != "POST") {
+            return HttpResponse::Error(405, "files/upload 只支持 POST");
+        }
+        return HandleFileUpload(req);
     }
     if (res == "files") {
         if (method == "GET") {
