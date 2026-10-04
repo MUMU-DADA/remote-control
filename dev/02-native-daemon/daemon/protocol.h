@@ -74,11 +74,11 @@ enum class Cmd : uint32_t {
     InstallApp    = 15,  // fd = APK 内容（memfd），payload: 无
                          // flags & kFlagReplace 控制 -r
                          // → {"installed":true,"package":..}
-    Download      = 16,  // payload: "<url>[\0<filename>]"
+    Download      = 16,  // payload: "<url>[\0<filename>[\0<subdir>]]"
                          // → {"path":"/sdcard/Download/..","bytes":N}
     FileOp        = 17,  // payload: "<op>[\0<path>[\0<arg>]]"
                          // op: list|stat|mkdir|delete|rename|exists
-                         // → 随 op 不同，见 docs/09-file-and-app-api.md
+                         // → 随 op 不同，见 docs/api/01-http.md
 
     // ── 手势 / 按键 / 剪贴板（v4）────────────────────────────────────────
     //

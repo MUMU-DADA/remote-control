@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <fcntl.h>
+#include <limits>
 #include <unistd.h>
 
 #include "thread_util.h"
@@ -660,26 +661,51 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
         return false;
     }
 
-    // 头读完了，正文**还没读** —— 给调用方一个提前拒绝的机会
-    // （鉴权就走这里，见 ServeConnection）。
-    if (onHeaders && !onHeaders(*out)) return false;
-
-    const std::string clStr = out->header("content-length");
+    // Content-Length 必须是唯一的、非空的十进制无符号整数。不能直接
+    // 用 strtoll：它会接受前导 +/-，也会静默忽略尾随字符；溢出后再
+    // 转成 size_t 还可能绕回小数值，导致服务端少读正文并错位解析。
+    // 重复头部也一律拒绝，避免不同解析器对两个值取首个/最后一个产生
+    // 请求走私差异。
+    bool hasContentLength = false;
+    std::string clStr;
+    for (const auto& header : out->headers) {
+        if (header.first != "content-length") continue;
+        if (hasContentLength) {
+            *errReply = HttpResponse::Error(400, "Content-Length 重复");
+            return false;
+        }
+        hasContentLength = true;
+        clStr = header.second;
+    }
     size_t contentLength = 0;
-    if (!clStr.empty()) {
-        char* end = nullptr;
-        const long long v = strtoll(clStr.c_str(), &end, 10);
-        if (v < 0) {
+    if (hasContentLength) {
+        if (clStr.empty()) {
             *errReply = HttpResponse::Error(400, "Content-Length 非法");
             return false;
         }
-        contentLength = static_cast<size_t>(v);
+        constexpr size_t kSizeMax = std::numeric_limits<size_t>::max();
+        for (const char c : clStr) {
+            if (c < '0' || c > '9') {
+                *errReply = HttpResponse::Error(400, "Content-Length 非法");
+                return false;
+            }
+            const size_t digit = static_cast<size_t>(c - '0');
+            if (contentLength > (kSizeMax - digit) / 10) {
+                *errReply = HttpResponse::Error(400, "Content-Length 非法");
+                return false;
+            }
+            contentLength = contentLength * 10 + digit;
+        }
         if (contentLength > maxBody_) {
             *errReply = HttpResponse::Error(413, "请求体超过上限 " +
                                                      std::to_string(maxBody_) + " 字节");
             return false;
         }
     }
+
+    // 头读完了，正文**还没读** —— 给调用方一个提前拒绝的机会
+    // （鉴权就走这里，见 ServeConnection）。
+    if (onHeaders && !onHeaders(*out)) return false;
 
     // ── 大请求体落盘 ──
     //

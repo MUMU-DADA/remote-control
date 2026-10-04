@@ -2,7 +2,7 @@
 //
 // ⚠️ 安全边界：本模块的所有路径参数都来自客户端，而 remote-control 以 root 运行。
 //    一个 "../.." 就能删掉 /data。所以每个入口都强制走 ResolveInside()，
-//    把路径约束在下载目录内 —— 这是硬性约束，不是"最好也做一下"。
+//    把路径约束在共享存储边界内 —— 这是硬性约束，不是"最好也做一下"。
 //
 // 下载用 libcurl（运行时 dlopen，见 http_client.h）。
 
@@ -56,7 +56,7 @@ class FileOps {
                   const std::string& subdir, int64_t maxBytes, int timeoutSec,
                   std::string* savedRelPath, int64_t* bytes, std::string* error);
 
-    // ── 文件操作（路径均相对下载目录）────────────────────────────────────────
+    // ── 文件操作（相对路径相对下载目录，绝对路径限于共享存储根）──────────────
     bool List(const std::string& relPath, std::vector<FileEntry>* out,
               std::string* error);
     bool Stat(const std::string& relPath, FileEntry* out, std::string* error);

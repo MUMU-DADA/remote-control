@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -14,6 +15,7 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <iterator>
 #include <vector>
 
 #include "remote_control_log.h"
@@ -71,19 +73,57 @@ std::vector<std::string> Segments(const std::string& path) {
 
 // 把参数拼成 NUL 分隔的 payload。
 //
-// **空的尾参数会被省略** —— 协议的约定是"没给的参数就是没给"，
-// 而不是"给了一个空字符串"。比如 Download 的 filename 为空时，
-// 服务端应该自己去 URL 里推断，而不是收到一个空文件名。
+// **只省略尾部空参数** —— 协议的约定是"没给的参数就是没给"，
+// 而不是"给了一个空字符串"。中间空参数必须保留位置，比如
+// Download 的 filename 为空、但 subdir 不为空时，不能把 subdir
+// 错当成 filename。
 std::string PackArgs(std::initializer_list<std::string> args) {
+    // 只省略尾部空参数；中间空参数要保留位置。
+    size_t count = args.size();
+    while (count > 0) {
+        auto it = args.begin();
+        std::advance(it, static_cast<ptrdiff_t>(count - 1));
+        if (!it->empty()) break;
+        --count;
+    }
+
     std::string out;
-    bool first = true;
+    size_t i = 0;
     for (const auto& a : args) {
-        if (a.empty() && !first) continue;
-        if (!first) out.push_back('\0');
+        if (i >= count) break;
+        if (i > 0) out.push_back('\0');
         out += a;
-        first = false;
+        ++i;
     }
     return out;
+}
+
+bool IsPathUnder(const std::string& path, const std::string& base) {
+    if (path == base) return true;
+    return path.size() > base.size() &&
+           path.compare(0, base.size(), base) == 0 &&
+           path[base.size()] == '/';
+}
+
+// ?path= 只接受共享存储中的已有文件。安装接口会在处理结束后清理该
+// 路径；如果允许任意可读路径，远端请求就能让 root daemon 删除 /etc/passwd
+// 等与安装无关的文件。
+bool IsSharedStoragePath(const std::string& path) {
+    char canonicalPath[PATH_MAX];
+    if (realpath(path.c_str(), canonicalPath) == nullptr) return false;
+
+    const char* roots[] = {
+        "/storage/emulated/0",
+        "/sdcard",
+        "/data/media/0",
+        nullptr,
+    };
+    for (const char** root = roots; *root != nullptr; ++root) {
+        char canonicalRoot[PATH_MAX];
+        if (realpath(*root, canonicalRoot) == nullptr) continue;
+        if (IsPathUnder(canonicalPath, canonicalRoot)) return true;
+    }
+    return false;
 }
 
 bool ParseJsonBody(const HttpRequest& req, json::Value* out, HttpResponse* err) {
@@ -364,12 +404,18 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
         }
         ALOGI("收到上传的 APK: %s（%zu 字节）", path.c_str(), req.bodySize);
         }
-    } else if (access(path.c_str(), R_OK) != 0) {
-        return HttpResponse::Error(404, "找不到文件: " + path);
+    } else {
+        if (!IsSharedStoragePath(path)) {
+            return HttpResponse::Error(
+                    400, "path 必须指向共享存储中的已有文件");
+        }
+        if (access(path.c_str(), R_OK) != 0) {
+            return HttpResponse::Error(404, "找不到文件: " + path);
+        }
     }
 
     // 交给 InstallApp。它按 fd 顺序读，所以这里把文件打开成 fd。
-    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         // 打开失败也要删 —— 上传上来的文件已经落地了，
         // 不删就是垃圾。只有 keep=1 才留。
@@ -1869,8 +1915,15 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
     }
     if (res == "files") {
         if (method == "GET") {
-            // ?op=roots 问边界；默认 list
+            // GET 只允许查询操作。此前这里把任意 op 都转发到 FileOp，
+            // 导致带 query 的 GET 也能触发 delete/mkdir 等写操作；
+            // 写操作必须走 POST，避免预取、重试或链接扫描误触发变更。
             const std::string op = req.queryParam("op", "list");
+            if (op != "roots" && op != "list" && op != "stat" &&
+                op != "exists") {
+                return HttpResponse::Error(
+                        405, "GET /files 只支持 roots/list/stat/exists");
+            }
             return Call(Cmd::FileOp,
                         PackArgs({op, req.queryParam("path")}), 0, -1);
         }

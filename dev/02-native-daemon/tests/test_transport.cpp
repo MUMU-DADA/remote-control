@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -276,8 +277,50 @@ void TestHttpSpoolCleanup() {
     RemoveDirectoryContents(spoolDir);
 }
 
+void TestHttpContentLengthValidation() {
+    printf("\n\033[1;34m[5] HTTP Content-Length 校验\033[0m\n");
+    HttpServer server;
+    HttpServer::Options options;
+    options.port = 0;
+    options.maxBodyBytes = 1024;
+    std::string error;
+    if (!server.Start(options, &error)) {
+        Check(false, "启动 HTTP server: %s", error.c_str());
+        return;
+    }
+    std::thread runner([&]() { server.Run([](const HttpRequest&) {
+        return HttpResponse::Text(200, "handled");
+    }); });
+
+    const std::string overflow =
+            std::to_string(std::numeric_limits<size_t>::max()) + "0";
+    const std::vector<std::string> invalid = {
+        "Content-Length: 1x\r\n",
+        "Content-Length: +1\r\n",
+        "Content-Length: " + overflow + "\r\n",
+        "Content-Length: 0\r\nContent-Length: 0\r\n",
+    };
+    for (const std::string& header : invalid) {
+        const int fd = ConnectHttp(server.port());
+        if (fd < 0) {
+            Check(false, "连接到 Content-Length 校验 server");
+            continue;
+        }
+        const std::string request = "POST / HTTP/1.1\r\nHost: localhost\r\n" +
+                                    header + "\r\n";
+        const bool sent = SendAll(fd, request.data(), request.size());
+        const std::string response = ReadToClose(fd);
+        close(fd);
+        Check(sent && response.find("400 Bad Request") != std::string::npos,
+              "拒绝非法或重复 Content-Length");
+    }
+
+    server.Stop();
+    runner.join();
+}
+
 void TestUnixShortPacketFdCleanup() {
-    printf("\n\033[1;34m[5] Unix socket 短包 fd 清理\033[0m\n");
+    printf("\n\033[1;34m[6] Unix socket 短包 fd 清理\033[0m\n");
     char pathTemplate[] = "/tmp/remote-control-transport-sock-XXXXXX";
     const int tempFd = mkstemp(pathTemplate);
     if (tempFd < 0) {
@@ -414,6 +457,7 @@ int main() {
     TestHttpStopWaitsForHandler();
     TestHttpStopFromHandler();
     TestHttpSpoolCleanup();
+    TestHttpContentLengthValidation();
     TestUnixShortPacketFdCleanup();
     return remote_control_test::Summary("传输层生命周期");
 }

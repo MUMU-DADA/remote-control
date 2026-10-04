@@ -9,7 +9,10 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
+#include <set>
 #include <string>
 
 #include "protocol.h"
@@ -92,6 +95,14 @@ class SocketServer {
     int  listenFd_ = -1;
     std::atomic<bool> stop_{false};
     bool ownsPath_ = false;         // true 表示退出时要 unlink path_
+
+    // 每连接一个 detached worker。停止时必须先 shutdown 它们并等待退出，
+    // 否则主线程析构 Dispatcher/SocketServer 后，worker 仍可能访问悬空的
+    // handler 或 stop_。connFds_ 中的 fd 由 worker 持有，SocketServer 只负责
+    // shutdown 唤醒；worker 退出时从集合移除并关闭 fd。
+    mutable std::mutex connMutex_;
+    std::condition_variable connCv_;
+    std::set<int> connFds_;
 };
 
 }  // namespace remote_control

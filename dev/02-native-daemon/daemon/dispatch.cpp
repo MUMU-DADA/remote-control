@@ -730,7 +730,12 @@ ReplyPacket Dispatcher::HandleFileOp(const Request& req,
     if (op == "list") {
         std::vector<FileEntry> entries;
         if (!fileOps_->List(path, &entries, &error)) {
-            return MakeJsonError(req.cmd, kErrNotFound, error);
+            const uint32_t st = error.rfind("路径不存在:", 0) == 0
+                                        ? kErrNotFound
+                                        : (error.rfind("无法访问路径:", 0) == 0
+                                                   ? kErrIo
+                                                   : kErrBadArg);
+            return MakeJsonError(req.cmd, st, error);
         }
         w.Obj().Field("ok", true).Field("dir", path.empty() ? "." : path)
                                 .Field("storage", fileOps_->storageRoot())
@@ -751,12 +756,28 @@ ReplyPacket Dispatcher::HandleFileOp(const Request& req,
         FileEntry e;
         const bool found = fileOps_->Stat(path, &e, &error);
         if (op == "exists") {
+            if (!found && error.rfind("路径不存在:", 0) != 0) {
+                // exists 只能把真正的 ENOENT 报告为 false。越界、软链接
+                // 逃逸和其它访问错误不能被吞成"不存在"，否则调用方会
+                // 误以为请求合法且目标只是尚未创建。
+                const uint32_t st = error.rfind("无法访问路径:", 0) == 0
+                                            ? kErrIo
+                                            : kErrBadArg;
+                return MakeJsonError(req.cmd, st, error);
+            }
             w.Obj().Field("ok", true).Field("exists", found)
                                     .Field("path", path)
              .EndObj();
             return MakeJsonReply(req.cmd, w.str());
         }
-        if (!found) return MakeJsonError(req.cmd, kErrNotFound, error);
+        if (!found) {
+            const uint32_t st = error.rfind("路径不存在:", 0) == 0
+                                        ? kErrNotFound
+                                        : (error.rfind("无法访问路径:", 0) == 0
+                                                   ? kErrIo
+                                                   : kErrBadArg);
+            return MakeJsonError(req.cmd, st, error);
+        }
         w.Obj().Field("ok", true).Field("name", e.name).Field("path", e.path)
                                 .Field("dir", e.isDir).Field("size", e.size)
                                 .Field("mtime", e.mtime)
