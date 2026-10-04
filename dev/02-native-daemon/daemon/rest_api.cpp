@@ -654,22 +654,33 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
         }
         size_t off = 0;
         bool ok = true;
+        int writeError = 0;
         while (off < req.body.size()) {
             const ssize_t n = write(wfd, req.body.data() + off,
                                     req.body.size() - off);
             if (n < 0) {
                 if (errno == EINTR) continue;
+                writeError = errno;
+                ok = false;
+                break;
+            }
+            if (n == 0) {
+                writeError = EIO;
                 ok = false;
                 break;
             }
             off += static_cast<size_t>(n);
         }
-        fsync(wfd);
+        if (ok && fsync(wfd) != 0) {
+            writeError = errno;
+            ok = false;
+        }
         close(wfd);
         if (!ok) {
             unlink(path.c_str());
             return HttpResponse::Error(500, std::string("写 APK 失败: ") +
-                                                strerror(errno));
+                                                strerror(writeError == 0 ? EIO :
+                                                         writeError));
         }
         ALOGI("收到上传的 APK: %s（%zu 字节）", path.c_str(), req.bodySize);
         }

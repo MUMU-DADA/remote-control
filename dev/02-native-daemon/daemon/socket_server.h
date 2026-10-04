@@ -14,6 +14,8 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include "protocol.h"
 
@@ -37,14 +39,17 @@ class SocketServer {
 
     // 放宽 socket 文件权限。
     //
-    // 默认 0660 只允许属主和同组访问。上位应用以自己的 UID 运行时不在此列，
-    // 需要放宽到 0666。**这是一个真实的安全权衡**：放宽后同一台设备上
-    // 任何进程都能控制这个服务（截图、注入触控、装应用、删下载目录里的文件），
-    // 所以默认保守，由部署方显式决定。
+    // 默认 0660 只允许属主和同组访问。文件权限只是第一层边界；连接建立后还会用
+    // SO_PEERCRED 拒绝其它 UID。放宽后其它 UID 仍可占用连接/制造日志噪声，
+    // 但不能执行控制命令。
     //
-    // 生产环境的更好做法是建一个专用 AID、让客户端进程加入该组，
-    // 并在 ServeConnection 里按 SO_PEERCRED 校验 uid —— 那段 TODO 还在。
-    void SetSocketMode(mode_t mode) { socketMode_ = mode; }
+    // 生产环境如果确实需要跨 UID 的 socket 客户端，可在启动前显式设置
+    // 允许的 UID；默认只允许 daemon 自己的有效 UID。
+    void SetSocketMode(mode_t mode);
+
+    // 设置允许连接的对端 UID。必须在 Run() 前调用；默认值 -1 表示使用
+    // daemon 当前的有效 UID（geteuid()）。SO_PEERCRED 失败时连接始终拒绝。
+    void SetAllowedPeerUid(uid_t uid) { allowedPeerUid_ = static_cast<int64_t>(uid); }
 
     ~SocketServer();
 
@@ -103,6 +108,9 @@ class SocketServer {
     std::atomic<int> wakeWriteFd_{-1};
     std::atomic<bool> stop_{false};
     bool ownsPath_ = false;         // true 表示退出时要 unlink path_
+    int64_t     allowedPeerUid_ = -1; // -1 = 当前进程有效 UID；见 SetAllowedPeerUid()
+    struct stat pathIdentity_{};
+    bool pathIdentityValid_ = false;
 
     // 每连接一个 detached worker。停止时必须先 shutdown 它们并等待退出，
     // 否则主线程析构 Dispatcher/SocketServer 后，worker 仍可能访问悬空的

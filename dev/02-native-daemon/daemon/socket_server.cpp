@@ -65,6 +65,61 @@ std::string ErrnoString(int e) {
     return std::string(strerror(e)) + " (errno=" + std::to_string(e) + ")";
 }
 
+// Only remove a stale socket inode.  In particular, never follow a symlink or
+// delete a regular file when a path is mistyped or replaced between launches.
+bool RemoveStaleSocket(const std::string& path, std::string* error) {
+    struct stat st{};
+    if (lstat(path.c_str(), &st) != 0) {
+        if (errno == ENOENT) return true;
+        if (error) *error = "检查旧 socket 失败: " + ErrnoString(errno);
+        return false;
+    }
+    if (!S_ISSOCK(st.st_mode)) {
+        if (error) *error = "socket 路径已存在且不是 Unix socket: " + path;
+        return false;
+    }
+
+    // A pathname can belong to another live daemon.  Do not unlink it just
+    // because this process is starting: that would disconnect the running
+    // instance and turn a restart race into a local denial of service.
+    const int probe = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (probe < 0) {
+        if (error) *error = "创建 socket 探测 fd 失败: " + ErrnoString(errno);
+        return false;
+    }
+    {
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        memcpy(addr.sun_path, path.c_str(), path.size());
+        if (connect(probe, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            close(probe);
+            if (error) *error = "socket 已被活动实例使用: " + path;
+            return false;
+        }
+        const int connectError = errno;
+        close(probe);
+        if (connectError != ECONNREFUSED && connectError != ENOENT) {
+            if (error) *error = "探测已有 socket 失败: " + ErrnoString(connectError);
+            return false;
+        }
+    }
+    if (unlink(path.c_str()) != 0 && errno != ENOENT) {
+        if (error) *error = "删除旧 socket 失败: " + ErrnoString(errno);
+        return false;
+    }
+    return true;
+}
+
+void RemoveSocketPathIfOwned(const std::string& path,
+                             const struct stat* expected) {
+    struct stat st{};
+    if (lstat(path.c_str(), &st) == 0 && S_ISSOCK(st.st_mode) &&
+        (expected == nullptr ||
+         (st.st_dev == expected->st_dev && st.st_ino == expected->st_ino))) {
+        (void)unlink(path.c_str());
+    }
+}
+
 }  // namespace
 
 SocketServer SocketServer::FromInitSocket(const std::string& name) {
@@ -79,6 +134,15 @@ SocketServer SocketServer::FromPath(const std::string& path) {
     return s;
 }
 
+void SocketServer::SetSocketMode(mode_t mode) {
+    std::lock_guard<std::mutex> lk(connMutex_);
+    socketMode_ = mode;
+    if (listenFd_ >= 0 && fchmod(listenFd_, socketMode_) < 0) {
+        ALOGW("remote-control: fchmod(socket, %04o) 失败: %s",
+              static_cast<unsigned>(socketMode_), strerror(errno));
+    }
+}
+
 SocketServer::SocketServer(SocketServer&& other) noexcept
       : path_(std::move(other.path_)),
         initSocketName_(std::move(other.initSocketName_)),
@@ -86,12 +150,16 @@ SocketServer::SocketServer(SocketServer&& other) noexcept
         wakeReadFd_(other.wakeReadFd_),
         wakeWriteFd_(other.wakeWriteFd_.load()),
         stop_(other.stop_.load()),
-        ownsPath_(other.ownsPath_) {
+        ownsPath_(other.ownsPath_),
+        allowedPeerUid_(other.allowedPeerUid_),
+        pathIdentity_(other.pathIdentity_),
+        pathIdentityValid_(other.pathIdentityValid_) {
     // 转移所有权，避免 other 析构时关掉我们正在用的 fd / unlink 路径
     other.listenFd_ = -1;
     other.wakeReadFd_ = -1;
     other.wakeWriteFd_.store(-1);
     other.ownsPath_ = false;
+    other.pathIdentityValid_ = false;
 }
 
 SocketServer& SocketServer::operator=(SocketServer&& other) noexcept {
@@ -101,7 +169,9 @@ SocketServer& SocketServer::operator=(SocketServer&& other) noexcept {
         if (wakeReadFd_ >= 0) close(wakeReadFd_);
         const int oldWakeWrite = wakeWriteFd_.exchange(-1);
         if (oldWakeWrite >= 0) close(oldWakeWrite);
-        if (ownsPath_ && !path_.empty()) unlink(path_.c_str());
+        if (ownsPath_ && !path_.empty()) {
+            RemoveSocketPathIfOwned(path_, pathIdentityValid_ ? &pathIdentity_ : nullptr);
+        }
 
         path_           = std::move(other.path_);
         initSocketName_ = std::move(other.initSocketName_);
@@ -110,11 +180,15 @@ SocketServer& SocketServer::operator=(SocketServer&& other) noexcept {
         wakeWriteFd_.store(other.wakeWriteFd_.load());
         stop_.store(other.stop_.load());
         ownsPath_       = other.ownsPath_;
+        allowedPeerUid_ = other.allowedPeerUid_;
+        pathIdentity_ = other.pathIdentity_;
+        pathIdentityValid_ = other.pathIdentityValid_;
 
         other.listenFd_ = -1;
         other.wakeReadFd_ = -1;
         other.wakeWriteFd_.store(-1);
         other.ownsPath_ = false;
+        other.pathIdentityValid_ = false;
     }
     return *this;
 }
@@ -132,7 +206,7 @@ SocketServer::~SocketServer() {
     const int wakeWrite = wakeWriteFd_.exchange(-1);
     if (wakeWrite >= 0) close(wakeWrite);
     if (ownsPath_ && !path_.empty()) {
-        unlink(path_.c_str());
+        RemoveSocketPathIfOwned(path_, pathIdentityValid_ ? &pathIdentity_ : nullptr);
     }
 }
 
@@ -186,8 +260,13 @@ bool SocketServer::Start(std::string* error) {
         return false;
     }
 
-    // 路径可能残留自上次异常退出
-    unlink(path_.c_str());
+    // 路径可能残留自上次异常退出，但只允许清理真正的 socket inode。
+    // 误配成普通文件或符号链接时直接失败，不能替调用方删除它。
+    if (!RemoveStaleSocket(path_, error)) {
+        close(listenFd_);
+        listenFd_ = -1;
+        return false;
+    }
 
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
@@ -200,12 +279,26 @@ bool SocketServer::Start(std::string* error) {
         return false;
     }
 
+    // Remember the exact inode we created.  A path can be replaced after
+    // bind() by another process; cleanup must never unlink that replacement.
+    struct stat pathStat{};
+    // AF_UNIX socket fstat() and pathname lstat() use different kernel
+    // pseudo-filesystems on Linux, so their device/inode pairs are not
+    // comparable.  The lstat type check still catches a replacement by a
+    // regular file; the recorded pathname identity protects later cleanup.
+    if (lstat(path_.c_str(), &pathStat) != 0 || !S_ISSOCK(pathStat.st_mode)) {
+        if (error) *error = "bind 后 socket 路径被替换";
+        close(listenFd_);
+        listenFd_ = -1;
+        return false;
+    }
+    pathIdentity_ = pathStat;
+    pathIdentityValid_ = true;
+
     // 只允许属主和同组访问。调用方 UID 还会在 ServeConnection 里二次校验。
-    // 默认 0660：属主与同组可访问。要放宽用 --socket-mode（例如让上位应用
-    // 以自己的 UID 连进来）。放宽的代价是同一台设备上任何进程都能控制服务，
-    // 所以默认保守，由部署方显式决定。
-    if (chmod(path_.c_str(), socketMode_) < 0) {
-        ALOGW("remote-control: chmod(%s, %04o) 失败: %s", path_.c_str(),
+    // 默认 0660：属主与同组可访问。需要跨 UID 时必须同时显式配置允许的 UID。
+    if (fchmod(listenFd_, socketMode_) < 0) {
+        ALOGW("remote-control: fchmod(socket, %04o) 失败: %s",
               static_cast<unsigned>(socketMode_), strerror(errno));
     }
 
@@ -213,7 +306,7 @@ bool SocketServer::Start(std::string* error) {
         if (error) *error = "listen() 失败: " + ErrnoString(errno);
         close(listenFd_);
         listenFd_ = -1;
-        unlink(path_.c_str());
+        RemoveSocketPathIfOwned(path_, &pathIdentity_);
         return false;
     }
 
@@ -222,7 +315,7 @@ bool SocketServer::Start(std::string* error) {
     if (!CreateWakePipe(error)) {
         close(listenFd_);
         listenFd_ = -1;
-        unlink(path_.c_str());
+        RemoveSocketPathIfOwned(path_, &pathIdentity_);
         ownsPath_ = false;
         return false;
     }
@@ -406,13 +499,22 @@ void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
     // --- 校验调用方 UID ---
     ucred cred{};
     socklen_t len = sizeof(cred);
-    if (getsockopt(connFd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0) {
-        ALOGI("remote-control: 新连接 pid=%d uid=%d gid=%d", cred.pid, cred.uid, cred.gid);
-        // TODO(鉴权): 在这里按 cred.uid / cred.pid 做白名单。
-        //   当前仅依赖 socket 文件权限 (0660) 做粗粒度控制。
-        //   生产环境建议：
-        //     - 建一个专用的 AID（如 AID_REMOTE_CONTROL），客户端进程加入该组
-        //     - 或校验 cred.uid 是否在允许列表内，否则直接拒绝
+    if (getsockopt(connFd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0 ||
+        len != sizeof(cred)) {
+        ALOGW("remote-control: 获取对端凭据失败，拒绝连接: %s", strerror(errno));
+        shutdown(connFd, SHUT_RDWR);
+        return;
+    }
+
+    ALOGI("remote-control: 新连接 pid=%d uid=%d gid=%d", cred.pid, cred.uid, cred.gid);
+    const int64_t allowedUid =
+            allowedPeerUid_ >= 0 ? allowedPeerUid_
+                                 : static_cast<int64_t>(geteuid());
+    if (static_cast<int64_t>(cred.uid) != allowedUid) {
+        ALOGW("remote-control: 拒绝未授权 UID=%d（允许 UID=%lld）",
+              cred.uid, static_cast<long long>(allowedUid));
+        shutdown(connFd, SHUT_RDWR);
+        return;
     }
 
     while (!stop_.load()) {

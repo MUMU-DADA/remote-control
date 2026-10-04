@@ -83,7 +83,7 @@ service remote-control /system/bin/remote-control-launch
     user shell                      # 见 §4.4
     group shell uhid graphics
     seclabel u:r:remote_control:s0  # 下划线，见 §4.1
-    socket remote-control seqpacket 0666 system system   # 见 §4.5
+    # 当前实现由 daemon 自己 bind socket，并按 SO_PEERCRED 校验 UID
     disabled
     restart_period 5                # 崩了 5 秒后拉起（等于默认值，写出来是为了显式）
 
@@ -163,11 +163,16 @@ su 2000(shell)   读 /sdcard/...  → OK                     写 → WRITE_OK
 
 ### 4.5 socket 权限与上位应用不兼容
 
-`.rc:41` 现为 `socket remote-control seqpacket 0660 system system` → POSIX 上只有 system UID 能连；
-上位应用是 `untrusted_app` 自己的 UID，**连不上**。而 `docs/02-architecture.md:111` 明确写着
-"**init 模式下 `--socket-mode` 无效**"，`daemon/main.cpp` 的用法说明也写着"放宽到 0666 才能让上位应用以自己的 UID 连入"。
+当前 `remote-control.rc` 不再声明 init 管理的 socket，daemon 自己 bind
+`/data/misc/remote-control/remote-control.sock` 并设置 `0660`；上位应用是
+`untrusted_app` 自己的 UID，默认**连不上**。而 `docs/02-architecture.md:111` 明确写着
+"**init 模式下 `--socket-mode` 无效**"；当前 Unix socket 连接还会经过
+`SO_PEERCRED` 校验，跨 UID 客户端必须显式使用 `--socket-peer-uid`，不能只靠
+把文件模式放宽到 `0666`。
 
-**修法**：这一行改 `0666`，真正的边界交给 SELinux 域（`sepolicy/remote_control_controller.te` 已为此写好）。
+当前服务自己 bind `/data/misc/remote-control/remote-control.sock`，配置为 `0660`，
+并在连接建立后用 `SO_PEERCRED` 校验 UID。若确实需要跨 UID 的 Unix socket 客户端，
+应显式增加 `--socket-peer-uid <uid>`，同时配置对应的 SELinux 规则；不能只改文件模式。
 
 ---
 
@@ -315,7 +320,7 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 | §4.2 脚本 | `integrate-sepolicy.sh` 不再按连字符找文件；顺带发现它**从来没接进过树** |
 | §4.3 镜像 | 产品清单补 `PRODUCT_PACKAGES`，**还要补 `PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST`** —— 只写前者会撞 artifact path requirement，构建直接失败（计划里没提这条） |
 | §4.4 UID | 改 `user shell`（`/sdcard` 是 FUSE 挡的，加 sepolicy 也没用） |
-| §4.5 socket | 改 `0666` |
+| §4.5 socket | 默认 `0660`，跨 UID 时显式配置 `--socket-peer-uid` |
 
 **两处计划里没写、但会挡住构建的**：
 

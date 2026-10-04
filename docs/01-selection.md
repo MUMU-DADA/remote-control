@@ -400,7 +400,7 @@ RemoteControlInputService    →  注入（InputManager.injectInputEvent）✅
 | 可枚举的东西 | 方式 |
 |---|---|
 | 服务本身 | `dumpsys`、`service list`、`ps` |
-| socket | `/dev/socket/remote-control`（或 `/data/local/tmp/remote-control.sock`）的文件权限和 SELinux 标签 |
+| socket | `/data/misc/remote-control/remote-control.sock` 的文件权限、`SO_PEERCRED` UID 校验和 SELinux 标签（开发期可用 `--socket` 指定路径） |
 | HTTP 端口 | 默认 8088，`netstat` 可见 |
 | SELinux domain | `sesearch`、`dmesg` 里的 avc 记录 |
 | 二进制 | `/system/bin/remote-control` 或 `/data/local/tmp/remote-control` |
