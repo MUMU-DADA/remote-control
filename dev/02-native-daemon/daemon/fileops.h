@@ -62,6 +62,7 @@ class FileOps {
     bool Stat(const std::string& relPath, FileEntry* out, std::string* error);
     bool Mkdir(const std::string& relPath, bool parents, std::string* error);
     bool Delete(const std::string& relPath, bool recursive, std::string* error);
+    // 原子重命名；目标已存在时拒绝，不会静默覆盖。
     bool Rename(const std::string& fromRel, const std::string& toRel,
                 std::string* error);
 

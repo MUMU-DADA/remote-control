@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <cmath>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -98,6 +99,28 @@ std::string PackArgs(std::initializer_list<std::string> args) {
     return out;
 }
 
+// 读取外部 JSON 手势时不能直接把 double 转成 uint32_t：负数、无穷大和
+// 超范围转换的结果不可依赖，还可能让 Injector 长时间阻塞 worker。
+bool ParseGestureMs(const json::Value& body, const char* key,
+                   uint32_t defaultValue, uint32_t* out,
+                   HttpResponse* error) {
+    if (!body.has(key)) {
+        *out = defaultValue;
+        return true;
+    }
+    const json::Value& v = body[key];
+    const double raw = v.asDouble(std::numeric_limits<double>::quiet_NaN());
+    if (!v.isNumber() || !std::isfinite(raw) || raw < 0.0 ||
+        raw > static_cast<double>(kMaxGestureMs) || std::floor(raw) != raw) {
+        *error = HttpResponse::Error(
+                400, std::string(key) + " 必须是 0 到 " +
+                             std::to_string(kMaxGestureMs) + " 的整数毫秒值");
+        return false;
+    }
+    *out = static_cast<uint32_t>(raw);
+    return true;
+}
+
 bool IsPathUnder(const std::string& path, const std::string& base) {
     if (path == base) return true;
     return path.size() > base.size() &&
@@ -105,25 +128,106 @@ bool IsPathUnder(const std::string& path, const std::string& base) {
            path[base.size()] == '/';
 }
 
-// ?path= 只接受共享存储中的已有文件。安装接口会在处理结束后清理该
-// 路径；如果允许任意可读路径，远端请求就能让 root daemon 删除 /etc/passwd
-// 等与安装无关的文件。
-bool IsSharedStoragePath(const std::string& path) {
-    char canonicalPath[PATH_MAX];
-    if (realpath(path.c_str(), canonicalPath) == nullptr) return false;
+// Walk an already canonical absolute path without following any symlink.
+// The returned parent fd remains valid even if another process renames a
+// directory in the meantime; callers can therefore unlinkat() the same entry
+// safely after pm has consumed the opened fd.
+bool OpenAbsoluteParentNoFollow(const std::string& path, int* parentFd,
+                                std::string* leaf, std::string* error) {
+    if (path.empty() || path[0] != '/') return false;
+    std::vector<std::string> parts;
+    size_t i = 1;
+    while (i < path.size()) {
+        size_t slash = path.find('/', i);
+        if (slash == std::string::npos) slash = path.size();
+        if (slash > i) parts.emplace_back(path, i, slash - i);
+        i = slash + 1;
+    }
+    if (parts.empty()) return false;
+    *leaf = parts.back();
+    parts.pop_back();
+    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        if (error) *error = "无法打开文件父目录: " + std::string(strerror(errno));
+        return false;
+    }
+    for (const std::string& part : parts) {
+        const int next = openat(fd, part.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            const int savedErrno = errno;
+            close(fd);
+            if (error) *error = "无法打开文件父目录: " + std::string(strerror(savedErrno));
+            return false;
+        }
+        close(fd);
+        fd = next;
+    }
+    *parentFd = fd;
+    return true;
+}
 
+// ?path= 只接受共享存储中的已有普通文件。realpath() 只用于确定允许
+// 边界，真正打开和后续删除都通过 canonical path 的目录 fd 完成，避免
+// "检查后父目录被换成软链接" 的 TOCTOU。
+bool OpenSharedStorageFile(const std::string& path, int* outFd,
+                           std::string* canonicalPath, std::string* error) {
+    char canonical[PATH_MAX];
+    if (realpath(path.c_str(), canonical) == nullptr) {
+        if (error) *error = "文件不存在或无法解析: " + path;
+        return false;
+    }
     const char* roots[] = {
         "/storage/emulated/0",
         "/sdcard",
         "/data/media/0",
         nullptr,
     };
+    bool allowed = false;
     for (const char** root = roots; *root != nullptr; ++root) {
         char canonicalRoot[PATH_MAX];
-        if (realpath(*root, canonicalRoot) == nullptr) continue;
-        if (IsPathUnder(canonicalPath, canonicalRoot)) return true;
+        if (realpath(*root, canonicalRoot) != nullptr &&
+            IsPathUnder(canonical, canonicalRoot)) {
+            allowed = true;
+            break;
+        }
     }
-    return false;
+    if (!allowed) {
+        if (error) *error = "path 必须指向共享存储中的已有文件";
+        return false;
+    }
+    int parentFd = -1;
+    std::string leaf;
+    if (!OpenAbsoluteParentNoFollow(canonical, &parentFd, &leaf, error)) return false;
+    const int fd = openat(parentFd, leaf.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        const int savedErrno = errno;
+        close(parentFd);
+        if (error) *error = "无法打开 " + path + ": " + strerror(savedErrno);
+        return false;
+    }
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        const int savedErrno = errno;
+        close(fd);
+        close(parentFd);
+        if (error) *error = "APK 路径不是普通文件: " + path +
+                             (savedErrno ? (" (" + std::string(strerror(savedErrno)) + ")") : "");
+        return false;
+    }
+    close(parentFd);
+    *outFd = fd;
+    *canonicalPath = canonical;
+    return true;
+}
+
+bool UnlinkAbsoluteNoFollow(const std::string& path) {
+    int parentFd = -1;
+    std::string leaf;
+    if (!OpenAbsoluteParentNoFollow(path, &parentFd, &leaf, nullptr)) return false;
+    const bool ok = unlinkat(parentFd, leaf.c_str(), 0) == 0;
+    close(parentFd);
+    return ok;
 }
 
 bool ParseJsonBody(const HttpRequest& req, json::Value* out, HttpResponse* err) {
@@ -344,6 +448,7 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
     std::string path = req.queryParam("path", "");
     const bool fromBody = path.empty();
     bool spooled = false;      // 用的是 HttpServer 落盘的临时文件
+    std::string cleanupPath;
 
     if (fromBody) {
         if (req.bodySize == 0 && req.body.empty()) {
@@ -375,13 +480,22 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
         //    不需要 installer 能读到这个文件：`pm install <路径>` 是
         //    **调用者进程**（我们，shell 身份）自己读文件再流给
         //    package installer 的，所以只要我们自己读得到就行。
-        path = "/data/misc/remote-control/upload-" + std::to_string(getpid()) + ".apk";
-
-        const int wfd = open(path.c_str(),
-                             O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0660);
+        path = "/data/misc/remote-control/upload-" + std::to_string(getpid()) +
+               "-XXXXXX";
+        std::vector<char> uploadPath(path.begin(), path.end());
+        uploadPath.push_back('\0');
+        const int wfd = mkstemp(uploadPath.data());
         if (wfd < 0) {
             return HttpResponse::Error(500, "无法创建 " + path + ": " +
                                                 strerror(errno));
+        }
+        path.assign(uploadPath.data());
+        if (fcntl(wfd, F_SETFD, FD_CLOEXEC) < 0) {
+            const int savedErrno = errno;
+            close(wfd);
+            unlink(path.c_str());
+            return HttpResponse::Error(500, "设置上传文件标志失败: " +
+                                                std::string(strerror(savedErrno)));
         }
         size_t off = 0;
         bool ok = true;
@@ -405,13 +519,29 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
         ALOGI("收到上传的 APK: %s（%zu 字节）", path.c_str(), req.bodySize);
         }
     } else {
-        if (!IsSharedStoragePath(path)) {
-            return HttpResponse::Error(
-                    400, "path 必须指向共享存储中的已有文件");
+        int sharedFd = -1;
+        std::string sharedError;
+        if (!OpenSharedStorageFile(path, &sharedFd, &cleanupPath, &sharedError)) {
+            return HttpResponse::Error(404, sharedError.empty() ?
+                                                "找不到或无法打开文件" : sharedError);
         }
-        if (access(path.c_str(), R_OK) != 0) {
-            return HttpResponse::Error(404, "找不到文件: " + path);
+        // Keep the securely opened fd; the generic open(path) below would
+        // reintroduce the check/use race.  It is already O_NOFOLLOW and points
+        // at the canonical file validated above.
+        const int fd = sharedFd;
+        const bool replace = req.queryParam("replace", "1") != "0";
+        const uint32_t flags = replace ? static_cast<uint32_t>(kFlagReplace) : 0u;
+        HttpResponse resp = Call(Cmd::InstallApp, "", flags, fd);
+        close(fd);
+        if (req.queryParam("keep", "0") != "1") {
+            if (UnlinkAbsoluteNoFollow(cleanupPath)) {
+                ALOGI("安装%s，已删除 %s", resp.status == 200 ? "成功" : "失败",
+                      cleanupPath.c_str());
+            } else {
+                ALOGW("安装后删除 %s 失败", cleanupPath.c_str());
+            }
         }
+        return resp;
     }
 
     // 交给 InstallApp。它按 fd 顺序读，所以这里把文件打开成 fd。
@@ -487,7 +617,7 @@ HttpResponse RestApi::HandleGesture(const HttpRequest& req, Cmd cmd,
     r.y     = static_cast<int32_t>(pick("y", "y1"));
     r.x2    = static_cast<int32_t>(pick("x2", "x2"));
     r.y2    = static_cast<int32_t>(pick("y2", "y2"));
-    r.durationMs = static_cast<uint32_t>(b.num("ms", 0));
+    if (!ParseGestureMs(b, "ms", 0, &r.durationMs, &err)) return err;
     if (b.flag("long")) r.flags |= kFlagKeyLongPress;
 
     ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
@@ -565,7 +695,12 @@ bool RestApi::HandleTouchEvent(const std::string& text, std::string* reply) {
     r.y         = static_cast<int32_t>(v.num("y", 0));
     r.x2        = static_cast<int32_t>(v.num("x2", 0));
     r.y2        = static_cast<int32_t>(v.num("y2", 0));
-    r.durationMs = static_cast<uint32_t>(v.num("ms", 0));
+    HttpResponse gestureErr;
+    if (!ParseGestureMs(v, "ms", 0, &r.durationMs, &gestureErr)) {
+        // HttpResponse::Error 已经用 JSON writer 正确转义了错误文本。
+        *reply = gestureErr.body;
+        return false;
+    }
     if (v.num("pressure", 0) > 0) {
         r.pressure = static_cast<float>(v.num("pressure", 0));
     }
@@ -1832,7 +1967,7 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         r.magic = kMagic; r.cmd = static_cast<uint32_t>(Cmd::Tap);
         r.x = static_cast<int32_t>(b.num("x"));
         r.y = static_cast<int32_t>(b.num("y"));
-        r.durationMs = static_cast<uint32_t>(b.num("ms", kDefaultTapMs));
+        if (!ParseGestureMs(b, "ms", kDefaultTapMs, &r.durationMs, &err)) return err;
         ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
         ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Tap), p.reply.status);
         if (p.fd >= 0) close(p.fd);
@@ -1855,7 +1990,7 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         r.y  = static_cast<int32_t>(b.num("y1"));
         r.x2 = static_cast<int32_t>(b.num("x2"));
         r.y2 = static_cast<int32_t>(b.num("y2"));
-        r.durationMs = static_cast<uint32_t>(b.num("ms", kDefaultSwipeMs));
+        if (!ParseGestureMs(b, "ms", kDefaultSwipeMs, &r.durationMs, &err)) return err;
         ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
         ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Swipe), p.reply.status);
         if (p.fd >= 0) close(p.fd);

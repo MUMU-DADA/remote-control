@@ -78,6 +78,77 @@ struct Sink {
     bool      overflow = false;
 };
 
+struct OutputTarget {
+    int parentFd = -1;
+    int fd = -1;
+    std::string leaf;
+};
+
+// Open the destination by walking every path component from /.  This keeps
+// the directory fd alive while curl writes, so replacing a parent directory
+// with a symlink cannot redirect the output or the cleanup unlink().
+bool OpenOutputNoFollow(const std::string& path, OutputTarget* out,
+                        std::string* error) {
+    if (path.empty() || path[0] != '/') {
+        if (error) *error = "下载目标必须是绝对路径";
+        return false;
+    }
+    std::vector<std::string> parts;
+    size_t i = 1;
+    while (i < path.size()) {
+        size_t slash = path.find('/', i);
+        if (slash == std::string::npos) slash = path.size();
+        if (slash > i) parts.emplace_back(path, i, slash - i);
+        i = slash + 1;
+    }
+    if (parts.empty()) {
+        if (error) *error = "下载目标不能是根目录";
+        return false;
+    }
+    out->leaf = parts.back();
+    parts.pop_back();
+    int parent = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (parent < 0) {
+        if (error) *error = "打开下载目标目录失败: " + std::string(strerror(errno));
+        return false;
+    }
+    for (const std::string& part : parts) {
+        if (part == "." || part == "..") {
+            if (error) *error = "下载目标不能包含 . 或 .. 路径段";
+            close(parent);
+            return false;
+        }
+        const int next = openat(parent, part.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            const int savedErrno = errno;
+            close(parent);
+            if (error) *error = "打开下载目标目录失败: " + std::string(strerror(savedErrno));
+            return false;
+        }
+        close(parent);
+        parent = next;
+    }
+    const int fd = openat(parent, out->leaf.c_str(),
+                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                          0666);
+    if (fd < 0) {
+        const int savedErrno = errno;
+        close(parent);
+        if (error) *error = "无法创建 " + path + ": " + strerror(savedErrno);
+        return false;
+    }
+    out->parentFd = parent;
+    out->fd = fd;
+    return true;
+}
+
+void UnlinkOutput(OutputTarget* out) {
+    if (out->parentFd >= 0 && !out->leaf.empty()) {
+        unlinkat(out->parentFd, out->leaf.c_str(), 0);
+    }
+}
+
 size_t WriteCb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     Sink* s = static_cast<Sink*>(userdata);
     const size_t total = size * nmemb;
@@ -184,18 +255,14 @@ bool HttpClient::DownloadToFile(const std::string& url,
     // ResolveInside() 已经检查过路径，但目录中的其它进程仍可在检查后
     // 把最终文件替换成软链接。O_NOFOLLOW 让这一步失败关闭，避免 curl
     // 以 daemon 身份跟随链接覆盖边界外文件。
-    const int outFd = open(destPath.c_str(),
-                           O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
-                           0666);
-    if (outFd < 0) {
-        if (error) *error = "无法创建 " + destPath + ": " + strerror(errno);
-        return false;
-    }
-    FILE* fp = fdopen(outFd, "wb");
+    OutputTarget target;
+    if (!OpenOutputNoFollow(destPath, &target, error)) return false;
+    FILE* fp = fdopen(target.fd, "wb");
     if (fp == nullptr) {
         const int savedErrno = errno;
-        close(outFd);
-        unlink(destPath.c_str());
+        close(target.fd);
+        UnlinkOutput(&target);
+        close(target.parentFd);
         if (error) *error = "无法打开 " + destPath + ": " + strerror(savedErrno);
         return false;
     }
@@ -203,7 +270,8 @@ bool HttpClient::DownloadToFile(const std::string& url,
     CURL* curl = g_api.easy_init();
     if (curl == nullptr) {
         fclose(fp);
-        unlink(destPath.c_str());
+        UnlinkOutput(&target);
+        close(target.parentFd);
         if (error) *error = "curl_easy_init 失败";
         return false;
     }
@@ -241,7 +309,8 @@ bool HttpClient::DownloadToFile(const std::string& url,
     fclose(fp);
 
     if (rc != CURLE_OK || sink.overflow) {
-        unlink(destPath.c_str());   // 不留半截文件
+        UnlinkOutput(&target);   // 不留半截文件
+        close(target.parentFd);
         if (error) {
             if (sink.overflow) {
                 *error = "文件超过上限 " + std::to_string(maxBytes) + " 字节，已中止";
@@ -253,6 +322,8 @@ bool HttpClient::DownloadToFile(const std::string& url,
         }
         return false;
     }
+
+    close(target.parentFd);
 
     if (writtenBytes) *writtenBytes = sink.written;
     ALOGI("下载完成 %s → %s（%lld 字节, HTTP %ld）", url.c_str(), destPath.c_str(),

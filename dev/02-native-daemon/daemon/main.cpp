@@ -45,8 +45,9 @@ namespace {
 SocketServer* gServer = nullptr;
 
 void OnSignal(int /*sig*/) {
-    // Stop() 只做 shutdown()，是异步信号安全的
-    if (gServer != nullptr) gServer->Stop();
+    // 这里只能调用异步信号安全的唤醒路径；Stop() 会加锁并等待
+    // 条件变量，不能直接在信号处理器中调用。
+    if (gServer != nullptr) gServer->SignalStop();
 }
 
 void PrintUsage(const char* argv0) {
@@ -691,6 +692,10 @@ int main(int argc, char** argv) {
         return packet;
     });
 
+    // Run() 返回只代表 accept 循环结束；连接 worker 是 detached 的，
+    // 仍可能正在执行最后一条请求。先显式等待它们退出，再销毁
+    // Dispatcher/Capture 等被 handler 引用的对象。
+    server.Stop();
     gServer = nullptr;
     httpServer.Stop();
     if (httpThreadStarted) pthread_join(httpThread, nullptr);

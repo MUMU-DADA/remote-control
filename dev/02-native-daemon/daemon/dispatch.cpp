@@ -308,6 +308,10 @@ ReplyPacket Dispatcher::HandleTouch(const Request& req) {
 
     switch (static_cast<Cmd>(req.cmd)) {
         case Cmd::Tap: {
+            if (req.durationMs > kMaxGestureMs) {
+                return MakeJsonError(req.cmd, kErrBadArg,
+                                     "手势时长超过上限");
+            }
             const TouchPoint p = PointFromRequest(req);
             const uint32_t ms =
                     req.durationMs > 0 ? req.durationMs : kDefaultTapMs;
@@ -315,6 +319,10 @@ ReplyPacket Dispatcher::HandleTouch(const Request& req) {
             break;
         }
         case Cmd::Swipe: {
+            if (req.durationMs > kMaxGestureMs) {
+                return MakeJsonError(req.cmd, kErrBadArg,
+                                     "手势时长超过上限");
+            }
             TouchPoint from = PointFromRequest(req);
             TouchPoint to   = from;
             to.x = req.x2;
@@ -1146,6 +1154,10 @@ ReplyPacket Dispatcher::HandleGesture(const Request& req) {
     std::string error;
     bool ok = false;
     const char* name = "?";
+
+    if (req.durationMs > kMaxGestureMs) {
+        return MakeJsonError(req.cmd, kErrBadArg, "手势时长超过上限");
+    }
 
     switch (static_cast<Cmd>(req.cmd)) {
         case Cmd::LongPress: {
