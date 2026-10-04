@@ -305,7 +305,7 @@ ws.send(JSON.stringify({t:'up',   x:110, y:210, id:0}));
 
 | 事件 | 是否回复 | 为什么 |
 |---|---|---|
-| `down` / `up` / `cancel` | ✅ `{"ok":true,"t":"up"}` | 状态变化，值得确认 |
+| `down` / `up` / `cancel` | ✅ 回显对应事件名，如 `{"ok":true,"t":"down"}` | 状态变化，值得确认 |
 | `move` | ❌ **不回复** | 最高频。回一个等于把上行流量翻倍，而客户端不需要 |
 | `move` 出错时 | ✅ `{"ok":false,…}` | 出错必须知道 |
 | 其他（见下） | ✅ | |
@@ -375,7 +375,7 @@ ws://host:8088/api/v1/logstream?since=0
 |---|---|
 | `seq` | 单调序号。客户端记下它，断线重连时用 `?since=<seq>` 续上 |
 | `ms` | 单调时钟（毫秒） |
-| `level` | `0`=Info `1`=Warn `2`=Error `3`=Debug |
+| `level` | `0`=Debug `1`=Info `2`=Warn `3`=Error |
 | `tag` | 一般空 |
 | `text` | 日志正文，**不含时间前缀**（时间在落盘文件里有，接口里用 `ms`） |
 
@@ -437,12 +437,11 @@ dGhlIHNhbXBsZSBub25jZQ==  →  s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
 
 ### 操作锁
 
-流式回调里的每次注入/抓帧都会走 `Dispatcher::Handle`，
-而锁在**那一层**。所以同一时刻只有一个操作在执行 ——
-一次抓帧（~23ms）会让同时在跑的触控事件排队最多 23ms。
+触控流回调中的注入会调用 `Dispatcher::Handle`，并与 HTTP、Unix socket 上的触控等有状态操作共用 `opMutex_`；同一时刻这类操作只执行一个，以免并发注入破坏手势状态。
 
-锁放这里而不是调用方，是因为**流式回调是在处理器返回之后才跑的**：
-早先锁在 HTTP 处理器里，对流式响应完全无效（那时锁早就释放了）。
+`Info` 和 `Capture` 在 Dispatcher 前置分支绕过 `opMutex_`。画面流抓帧由 Capture 后端自己的锁保护，因此不会因触控操作排队；调用同一后端的抓帧仍会串行。
+
+`opMutex_` 放在 Dispatcher 而非 HTTP 处理器，是因为**流式回调在处理器返回之后才运行**；HTTP 处理器中的锁无法覆盖回调里的触控注入。
 
 ---
 

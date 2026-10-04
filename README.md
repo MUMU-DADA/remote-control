@@ -13,7 +13,7 @@
 |---|---|
 | 目标 Android | **12**（编译期 API 30；运行时下限 Android 8，见 [`docs/03-reference.md`](docs/03-reference.md)） |
 | 架构 | native daemon（`remote-control`） |
-| 协议 | **v7，33 条命令**，三条传输走同一个 `Dispatcher` |
+| 协议 | **v7，33 条命令**；HTTP/JSON 与 Unix socket 共用 `Dispatcher`，WebSocket 提供实时流 |
 | 截图 | ✅ SurfaceFlinger 直连（8–12 ms/帧）／screencap exec（~197 ms） |
 | 触控 | ✅ `/dev/uinput`（Android 12 的 `IInputManager` 是 Java-only，native 调不了） |
 | 应用管理 | ✅ 列表、启动、停止、APK 安装（上传上限 4 GiB） |
@@ -98,8 +98,8 @@ AutoSnapshotAndroid/
 │   ├── 06-capture-performance.md 抓帧与编码性能实测、调优、测量纪律
 │   ├── 07-dependencies.md        ⭐ 依赖清单：用了什么库、为什么不用手写
 │   ├── 08-input-injection.md     备选注入路径：Java 系统服务 / 特权 APK
-│   ├── 09-deployment-and-update.md  ⭐ 固化（开机自启/保活）+ 热替换通道【计划】
-│   ├── evidence/                 实机验证证据（截图 + 自检输出）
+│   ├── 09-deployment-and-update.md  ⭐ 固化（开机自启/保活）已实施；热替换不做
+│   ├── evidence/                 KVM Android 模拟器运行验证证据（截图 + 自检输出）
 │   └── api/                      ⭐ **接口权威文档**（HTTP / WebSocket / socket / 配置 / 错误码 / 调试）
 │
 ├── tools/                     ← 环境与构建脚本

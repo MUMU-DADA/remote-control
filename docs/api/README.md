@@ -17,23 +17,20 @@
 
 ---
 
-## 三条传输，一套实现
+## 三种接入方式，共享操作命令
 
-同一个 `Dispatcher` 处理所有请求，三种传输只是不同的"外壳"：
+HTTP/JSON 和 Unix socket 的设备操作、查询命令共享 `Dispatcher`；HTTP 还提供实时流、网页和部分管理/上传路由。因此两种 API 有大量共用能力，但并不完全相同：
 
 | 传输 | 地址 | 适合 | 不适合 |
 |---|---|---|---|
 | **HTTP/JSON** | `http://host:8088/api/v1/...` | 任何语言、任何工具（curl、浏览器、脚本） | 高频事件（每次都要 TCP 往返 + HTTP 解析） |
-| **WebSocket** | `ws://host:8088/api/v1/{stream,touch,logstream}` | 实时双向：画面、触控、日志 | 一次性调用 |
-| **Unix socket** | `/data/local/tmp/remote-control.sock`（SEQPACKET） | 本机、零拷贝传大块数据（截图/APK） | 跨机器 |
+| **WebSocket（HTTP Upgrade）** | `ws://host:8088/api/v1/{stream,touch,logstream}` | 实时画面、触控、日志 | 一次性调用；它运行在 HTTP 监听器上 |
+| **Unix socket** | `/data/local/tmp/remote-control.sock`（SEQPACKET） | 本机；用 `SCM_RIGHTS` 传递截图、APK 等 fd | 跨机器；HTTP 专属路由和 WebSocket 流 |
 
-**能力完全一致**：HTTP 能做的 Unix socket 都能做，反之亦然。
-两条路都走同一个 `Dispatcher`，不存在"某个功能只有一种传输支持"。
+`/stream`、`/touch`、`/logstream` 是 WebSocket 路由；只有 `/stream` 另支持无 Upgrade 的 MJPEG，`/touch` 和 `/logstream` 仅支持 WebSocket。ADB 管理、网页和 `/files/upload` 也属于 HTTP 侧扩展；其余是否有对应 socket 命令请以 [03-socket.md](03-socket.md) 的命令表为准。
 
-> ⚠️ 操作锁在 `Dispatcher::Handle` 里 —— 也就是说**两条传输的操作是串行的**。
-> 这是刻意的：`Injector` 是有状态的（按下/抬起、槽位映射、手势 downTime），
-> 并发注入会互相破坏手势。代价是一次抓帧（~23ms）会让同时在跑的触控事件
-> 排队最多 23ms。
+> ⚠️ 触控等有状态操作，以及其它非 `Info`/`Capture` 命令，共用 `Dispatcher::Handle` 中的 `opMutex_`，跨 HTTP 和 Unix socket 串行执行，以保护 `Injector` 的手势状态。
+> `Info`/`Capture` 在分发前置分支绕过此锁；`Capture` 由抓帧后端自己的锁保护，所以抓帧不会因触控操作而排队。同一后端的抓帧仍会串行执行。
 
 ---
 
@@ -145,8 +142,9 @@ curl -H "Authorization: Bearer <令牌>" http://host:8088/api/v1/config
 `POST /api/v1/service {"on":false}` **不会停进程**，只是不再对外提供服务。
 
 - 进程继续运行（pid 不变）
-- 所有 `/api/` 返回 `503`
-- **网页本身和开关接口仍然放行** —— 否则你就把自己锁在门外了
+- 普通业务 API 返回 `503`
+- `/api/v1/service`、`/api/v1/adb`、`/api/v1/power` 和 `/api` 索引仍可访问，且仍须通过 HTTP 鉴权
+- **网页本身也仍然放行** —— 否则用户够不着开关
 
 真停进程需要杀 PID 或改 supervisor；那是另一个层面的操作。
 

@@ -13,7 +13,7 @@
 退出码 0 = 全部一致；非 0 = 有文档与实际不符。
 """
 import json
-import re, urllib.request, urllib.error, urllib.parse, re, sys, os
+import re, urllib.request, urllib.error, urllib.parse, sys, os
 
 # 默认地址可被参数或 REMOTE_CONTROL_BASE 覆盖 —— 设备 IP 会变，
 # 写死一个只会让人以为"检查通过了"而其实连的是别的东西。
@@ -37,6 +37,10 @@ def chk(cond, what, detail=""):
     else:    bad += 1; print(f"  \033[1;31m✗\033[0m {what}  {detail}")
 
 d = api("/describe")
+if "__err" in d:
+    print(f"无法读取 {B}/describe：{d['__err']}")
+    print("请确认服务可达，并在启用鉴权时设置 REMOTE_CONTROL_TOKEN。")
+    sys.exit(2)
 cmds = d.get("commands", [])
 print("\n[1] 命令数 / 版本")
 chk(d.get("protocolVersion") == 7, "protocolVersion = 7", f"实际 {d.get('protocolVersion')}")
@@ -51,7 +55,7 @@ chk(all(int(v) == d.get("protocolVersion") for v in _doc_pv),
     "文档示例里的 protocolVersion 与实际一致",
     f"文档里出现 {sorted(set(_doc_pv))}，实际 {d.get('protocolVersion')}")
 chk(len(cmds) == 33, "命令 33 条", f"实际 {len(cmds)}")
-# README 里写"32 条命令"
+# 文档中提到的命令总数应与服务一致。
 for f in ("README.md","03-socket.md","01-http.md"):
     t = open(os.path.join(DOCS,f),encoding='utf-8').read()
     nums = set(re.findall(r'(\d+)\s*条命令', t))
@@ -62,8 +66,10 @@ print("\n[2] 命令号表（03-socket.md）")
 t = open(os.path.join(DOCS,"03-socket.md"),encoding='utf-8').read()
 docmap = dict(re.findall(r'\|\s*(\d+)\s*\|\s*`(\w+)`\s*\|\s*\d+\s*\|', t))
 real = {str(c["cmd"]): c["name"] for c in cmds}
-mismatch = [(k, docmap.get(k), real.get(k)) for k in real if docmap.get(k) != real.get(k)]
-chk(not mismatch, "32 条命令的编号与名称全部对应", str(mismatch[:3]))
+mismatch = [(k, docmap.get(k), real.get(k))
+            for k in sorted(set(docmap) | set(real))
+            if docmap.get(k) != real.get(k)]
+chk(not mismatch, f"{len(real)} 条命令的编号与名称全部对应", str(mismatch[:3]))
 
 print("\n[3] HTTP 端点数（README/01-http）")
 t = open(os.path.join(DOCS,"01-http.md"),encoding='utf-8').read()

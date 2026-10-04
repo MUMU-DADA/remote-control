@@ -1,7 +1,7 @@
 # HTTP/JSON API 完整参考
 
 > 基础地址：`http://<设备IP>:8088/api/v1`
-> 所有响应都是 UTF-8 JSON，除了截图和文件下载（二进制）。
+> 管理和控制端点通常返回 UTF-8 JSON。`/capture` 返回图像字节；`/stream` 返回 MJPEG，或在带 `Upgrade` 头时升级为 WebSocket。APK 安装和文件上传接受原始二进制请求体；`POST /download` 是设备端下载，响应为 JSON 元数据。
 
 ---
 
@@ -16,7 +16,7 @@
 {"ok": false, "status": 4099, "error": "不认识的键: nonsense。可用: home back …"}
 ```
 
-`status` 是协议状态码（见 [05-errors.md](05-errors.md)），
+`status` 通常是协议状态码；HTTP 路由和传输层专属错误会保留 HTTP 状态码。映射见 [05-errors.md](05-errors.md)。
 `error` 是**服务端的原话**。
 
 > 💡 `error` 字段值得直接显示给用户。它写的是"为什么"，
@@ -27,15 +27,23 @@
 
 | HTTP | 含义 | 协议状态 |
 |---|---|---|
-| 200 | 成功 | `kOk` (0) |
-| 400 | 参数错 / 未知资源 | `kErrBadCmd` `kErrBadArg` `kErrPayload` |
+| 200 | 成功 | 通常为 `kOk` (0)；成功 JSON 不一定含 `status` 字段 |
+| 201 | 文件上传成功 | — |
+| 400 | 参数错 / 未知路由 / 请求格式错 | `kErrBadCmd`、`kErrBadArg` 或 `kErrPayload`，视错误来源而定 |
 | 401 | 需要令牌（[04-config.md](04-config.md)） | — |
 | 403 | 权限不足 | `kErrPermission` |
 | 404 | 找不到 | `kErrNotFound` |
+| 405 | 此资源不接受该 HTTP 方法 | HTTP 状态码原样放入 JSON `status` |
+| 409 | 上传目标已存在 | HTTP 状态码原样放入 JSON `status` |
+| 413 | 请求体或文件超过限制 | HTTP 状态码原样放入 JSON `status` |
+| 429 | 上传配额正被占用 | HTTP 状态码原样放入 JSON `status` |
 | 500 | 服务端内部错 | 其他 |
 | 501 | 这台设备/这个构建不支持 | `kErrUnsupported` |
 | 503 | **服务被软开关关掉了**，或 HTTP 并发连接已达上限 | — |
 | 504 | 超时 | `kErrTimeout` |
+| 507 | 上传空间不足 | HTTP 状态码原样放入 JSON `status` |
+
+并非每个资源对错误方法都返回 405；未匹配的路由/方法组合也可能按未知路由返回 400。
 
 ### 并发连接
 
@@ -50,7 +58,7 @@ HTTP 服务默认最多保留 128 条并发连接。连接从 `accept` 后立即
 ```bash
 curl -H "Authorization: Bearer <令牌>" ...
 curl -H "X-Remote-Control-Token: <令牌>" ...
-curl "http://host:8088/api/v1/config?token=<令牌>"      # 给 <img>/WebSocket 用
+curl "http://host:8088/api/v1/stream?token=<令牌>"      # 给 <img>/WebSocket 等无法设置请求头的场景
 ```
 
 `GET /`（网页本身）**不校验** —— 它只是静态页面，而用户得先打开它
@@ -473,9 +481,11 @@ curl -X POST http://host:8088/api/v1/service \
 | | 关闭后 |
 |---|---|
 | 进程 | **继续运行，pid 不变** |
-| `/api/` 下的一切 | `503` |
+| 普通业务 API | `503` |
+| `/api/v1/service`、`/api/v1/adb`、`/api/v1/power` | **仍可访问**，仍须通过 HTTP 鉴权 |
+| `/api`、`/api/v1` 索引 | **200** |
 | `GET /`（网页本身） | **200**（否则用户够不着开关） |
-| 本接口 | **200**（重新开启的入口） |
+| 开关接口 | **200**（重新开启的入口） |
 
 做真停进程的话就没人能开回来了 —— 网页打不开、接口不通，
 只能跑到机器跟前救。状态持久化到配置文件，重启后保持。
@@ -623,8 +633,7 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 步数按 `ms × 60 / 1000` 估（钳在 2..240），也就是尽量贴着 60Hz 发，
 太少会看着像"跳"过去。响应只有 `{"ok":true}`，不回显坐标。
 
-### POST /touch（WebSocket）
-### POST /touch（WebSocket）
+### GET /touch（WebSocket）
 
 流式触控。`down` / `move` / `up` 三个原语 ——
 **拖拽跟手必须用它，别用一连串 POST**。

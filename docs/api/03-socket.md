@@ -12,11 +12,11 @@
 | | Unix socket | HTTP |
 |---|---|---|
 | 跨机器 | ❌ 只能本机 | ✅ |
-| 传大块数据（截图/APK） | ✅ **零拷贝**（memfd + `SCM_RIGHTS`） | ⚠️ 要过一次内存 |
+| 大块请求/响应数据 | APK 请求和截图响应可用 fd 传递（`SCM_RIGHTS`） | 上传请求体和截图响应走 HTTP 正文 |
 | 权限模型 | 文件权限 + `SO_PEERCRED`（`--socket-mode` / `--socket-peer-uid`） | 令牌 |
 | 用起来 | 得自己按结构体打包 | curl / 任何 HTTP 客户端 |
 
-**能力完全一致** —— 两条路走同一个 `Dispatcher`。
+常见设备操作和查询共用 `Dispatcher`，但 HTTP 还提供 `/stream` 的 WebSocket/MJPEG 流、仅限 WebSocket 的 `/touch` 与 `/logstream`，以及 ADB 管理、网页和文件上传等路由；它们没有对应的 socket 命令。
 
 ---
 
@@ -64,8 +64,10 @@ struct Request {          // 44 字节
 
 ### 应答
 
-服务端回一个 `Reply` 结构体（40 字节），若命令产生了数据，
-**同一个 `sendmsg` 里带一个 fd**（通过 `SCM_RIGHTS` 辅助数据）。
+服务端回一个 `Reply` 结构体（40 字节），并可在同一个 `sendmsg` 中
+通过 `SCM_RIGHTS` 附带一个 fd。`Info` 直接使用结构体字段；`Capture`
+的 fd 中是图像字节；其他命令的 JSON 成功或错误正文通过 fd 返回，
+`dataSize` 是该 JSON 正文的字节数。协议拒绝的无效请求可能只有结构体应答。
 
 ```c
 struct Reply {            // 40 字节
@@ -86,8 +88,10 @@ struct Reply {            // 40 字节
 
 ### fd 传递
 
-产生数据的命令（`Capture` / `InstallApp` 的反向 / 下载）通过
-`SCM_RIGHTS` 回一个 **memfd**，里面是完整数据。
+`Capture` 的响应 fd 是装有图像数据的 **memfd**。`InstallApp` 则在请求侧
+接收一个 fd，内容是 APK；安装结果（成功或失败）以 JSON memfd 应答。
+`Download` 在设备上保存文件，响应 fd 里是 JSON 元数据，**不是下载文件本身**。
+其余 JSON 命令的响应也经 memfd 返回。
 
 ```c
 union { char buf[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } u;
@@ -96,7 +100,8 @@ msg.msg_controllen = sizeof(u.buf);
 // recvmsg 之后从 cmsg 里取 fd，mmap dataSize 字节
 ```
 
-**没有大小上限** —— 所以截图不必分块，一次给完整帧。
+fd 内容不占 `SOCK_SEQPACKET` 消息正文空间，因此截图可作为单个完整文件传递，
+无需拆成多个协议包；实际尺寸取决于图像分辨率和编码格式。
 
 请求侧使用 `recvmsg` 接收伴随 fd。服务端每个请求最多保留一个 fd，额外 fd
 会立即关闭；短于 `Request` 的包或 ancillary 数据被截断时，请求会被拒绝，
@@ -109,7 +114,7 @@ msg.msg_controllen = sizeof(u.buf);
 ### Python
 
 ```python
-import socket, struct, array, mmap, os
+import socket, struct, array, mmap
 
 MAGIC = 0x44545541
 CMD_CAPTURE = 2
@@ -119,18 +124,19 @@ REQ = struct.Struct("<IIIIiiiiIff")     # 44 字节
 REP = struct.Struct("<IIIIIIIIQ")       # 40 字节（含显式 reserved）
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+# 手动/开发服务示例；路径必须与 daemon 的 --socket 参数一致。
 s.connect("/data/local/tmp/remote-control.sock")
 
 # 发一个截图请求：magic, cmd, flags, pointerId, x, y, x2, y2, ms, pressure, size
 req = REQ.pack(MAGIC, CMD_CAPTURE, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0)
 
-# 收 fd 需要 SCM_RIGHTS
+# Capture 不需要请求 fd；响应会通过 SCM_RIGHTS 返回图像 memfd
 fds = array.array("i")
-msg, ancdata, flags, addr = s.sendmsg(
-    [req], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+sent = s.sendmsg([req])
+assert sent == len(req)
 
-data = b"\0" * socket.CMSG_LEN(4)
-msg, ancdata, flags, addr = s.recvmsg(REP.size, socket.CMSG_LEN(4))
+msg, ancdata, flags, addr = s.recvmsg(REP.size, socket.CMSG_SPACE(4))
+assert not flags & socket.MSG_CTRUNC
 for level, typ, cdata in ancdata:
     if level == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
         fds.frombytes(cdata[:len(cdata) - (len(cdata) % fds.itemsize)])
@@ -138,6 +144,7 @@ for level, typ, cdata in ancdata:
 magic, status, cmd, w, h, stride, fmt, _res, size = REP.unpack(msg)
 assert magic == MAGIC and status == 0, f"status={status}"
 
+assert len(fds) == 1
 fd = fds[0]
 buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 # buf 里是 RGBA 像素：w × h，每行 stride 像素
@@ -166,15 +173,15 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 | 8 | `KeyEvent` | 4 | `<键名或键码>` | 按键注入。键名表与三个映射坑见 [01-http.md](01-http.md) 的 `POST /key` |
 | 10 | `ListApps` | 2 | 无（用 flags） | 应用列表 |
 | 11 | `AppInfo` | 2 | `<包名>` | 应用详情 |
-| 12 | `LaunchApp` | 2 | `<包名>[,activity]` | 启动 |
+| 12 | `LaunchApp` | 2 | `<包名>[\0<activity>]` | 启动 |
 | 13 | `KillApp` | 2 | `<包名>` | 强制停止 |
 | 14 | `ForegroundApp` | 2 | 无 | 当前前台应用 |
 | 15 | `InstallApp` | 2 | 无（**fd = APK**） | 安装 |
-| 16 | `Download` | 2 | `<url>[,filename[,subdir]]` | 下载 |
-| 17 | `FileOp` | 2 | `<op>[,path[,arg]]` | 文件操作（边界 = 共享存储根，op 含 `roots` 可问出边界；见 [01-http.md](01-http.md) 的 `/files`） |
+| 16 | `Download` | 2 | `<url>[\0<filename>[\0<subdir>]]` | 下载 |
+| 17 | `FileOp` | 2 | `<op>[\0<path>[\0<arg>]]` | 文件操作（边界 = 共享存储根，op 含 `roots` 可问出边界；见 [01-http.md](01-http.md) 的 `/files`） |
 | 20 | `Describe` | 3 | 无 | 能力清单 |
 | 21 | `GetConfig` | 3 | 无 | 配置 + 运行时状态 |
-| 22 | `SetConfig` | 3 | `<key>\0<value>` | 热改配置 |
+| 22 | `SetConfig` | 3 | 重复的 `<key>\0<value>` 对 | 热改配置 |
 | 23 | `SelfTest` | 3 | 无 | 环境自检 |
 | 24 | `Stats` | 3 | 无 | 请求统计 |
 | 25 | `Log` | 3 | `[sinceSeq]` | 取日志 |
@@ -238,14 +245,13 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 ## 超时与并发
 
 - 连接是并发处理的（每连接一个线程）
-- **操作是串行的** —— 锁在 `Dispatcher::Handle` 里。
-  `Injector` 是有状态的（按下/抬起、槽位映射、手势 downTime），
-  并发注入会互相破坏手势
+- 触控等有状态操作及其它非 `Info`/`Capture` 命令共用 `Dispatcher::Handle` 的 `opMutex_`，并在 HTTP 与 Unix socket 请求间串行执行，保护 `Injector` 的按下/抬起、槽位映射和手势 `downTime`
+- `Info`/`Capture` 在 Dispatcher 前置分支绕过 `opMutex_`；抓帧使用后端自己的锁，不会因触控排队。同一后端的抓帧仍串行
 - 空闲连接会被服务端断开（防止"连上不发数据"占住线程）
 
 ---
 
 ## 相关
 
-- [01-http.md](01-http.md) —— 同样的能力，HTTP 版本
+- [01-http.md](01-http.md) —— 对应设备命令的 HTTP/JSON 端点与请求、响应格式
 - [05-errors.md](05-errors.md) —— `status` 的完整取值

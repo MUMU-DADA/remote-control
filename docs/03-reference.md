@@ -99,8 +99,9 @@ ICC 段（完整证据链见 `tools/bench/README.md`）。
 | 0 | 3.3 ms | 24.8 ms | 快 3.1x，体积 +22% |
 | **2** | **5.2 ms** | 38.8 ms | **快 2.0x，体积 +3.6%** ← 用的这个 |
 | 3（Skia） | 10.3 ms | 78.5 ms | — |
+| 6 | 21.8 ms | 126.5 ms | 慢 2.1x，体积 -5.8% |
 
-### ⚠️ 编码器现在**按格式选**（2024 实测推翻原设计）
+### ⚠️ 编码器现在**按格式选**（2026 实测推翻原设计）
 
 原先的逻辑是"`AndroidBitmap_compress` 可用就用它"。**实测发现它在
 WebP/PNG 上比内置编码器慢一倍** —— 所谓"原生快路径"其实是慢路径：
@@ -127,7 +128,6 @@ WebP/PNG 上比内置编码器慢一倍** —— 所谓"原生快路径"其实�
 
 两个开关：`REMOTE_CONTROL_FORCE_FALLBACK=1` 全走内置；`REMOTE_CONTROL_PREFER_NATIVE=1` 全走 Skia。
 `/params` 的 `codecs.backend` 逐格式报出当前选择。
-| 6 | 21.8 ms | 126.5 ms | 慢 2.1x，体积 -5.8% |
 
 Skia 用 3 是为了跟 Chrome 对齐，不是因为它最优。
 `thread_level=1` 只快 5%（libwebp 的线程只并行熵编码），没采用。

@@ -334,7 +334,7 @@ python3 rc_client.py --socket /tmp/remote-control.sock swipe 540 1600 540 400
 | 项 | 状态 | 说明 |
 |---|---|---|
 | 帧通道零拷贝优化（直接导出 dmabuf） | ⏳ **未做** | 现在仍是 `memcpy` 进 memfd。全仓库没有 dmabuf 相关代码 |
-| 请求处理并发 | 🤔 **刻意不做** | `Dispatcher::Handle()` 里串行是**有意的**：`Injector` 有状态（按下/抬起、槽位映射、手势 downTime），并发注入会互相破坏手势。编码侧已用 `encode_pool` 限流；HTTP 已有独立线程，不会和触控互相排队 |
+| 请求处理并发 | 🤔 **刻意限制** | `Dispatcher::Handle()` 用共享的 `opMutex_` 串行化触控等有状态操作及其它非 `Info`/`Capture` 命令，HTTP 与 Unix socket 共用此锁。`Info`/`Capture` 在前置分支绕过它；抓帧由 Capture 后端自己的锁保护，不会因触控排队，但同一后端的抓帧仍串行。编码侧另由 `encode_pool` 限流 |
 | 文本输入（`input text` 那类） | ⏳ **未做** | 按键注入（`keyboard.cpp`）已有；整串文本输入没有 |
 | 剪贴板写入 | ⛔ **平台做不到** | Android 10+ 只允许前台应用写。**不是本项目的缺陷**，见 [`docs/api/01-http.md`](../../docs/api/01-http.md) 第五节 |
 | 热替换（启动后换二进制） | ⛔ **实测否决** | 三条 neverallow 互相咬住，两条绕开的路也都不通。见 [`docs/09`](../../docs/09-deployment-and-update.md) §9.2–9.5 |

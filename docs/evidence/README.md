@@ -1,6 +1,18 @@
-# 实机验证证据
+# Android 12 模拟器运行验证
 
-`emulator-android12-shot.png` —— **remote-control 在真实 Android 12 上抓的第一帧**。
+本页记录 `remote-control` 在 Android 12 userdebug x86_64 运行环境中的截图、触控冒烟验证。
+测试运行于 KVM 加速的 Android 模拟器，不是实体 Android 设备；首帧见
+[`emulator-android12-shot.png`](emulator-android12-shot.png)。
+
+## 证据索引
+
+| 分组 | 文件 |
+|---|---|
+| 应用界面 | [`app-white.png`](app-white.png)、[`app-clipboard.png`](app-clipboard.png)、[`app-clipboard2.png`](app-clipboard2.png)、[`app-v2.png`](app-v2.png)、[`app-v2-auth.png`](app-v2-auth.png)、[`app-v2-bottom.png`](app-v2-bottom.png)、[`v7-apps.png`](v7-apps.png)、[`v7-collapse.png`](v7-collapse.png) |
+| 控制器应用 | [`controller-app-1.png`](controller-app-1.png)、[`controller-app-2.png`](controller-app-2.png)、[`controller-app-3.png`](controller-app-3.png)、[`controller-app-4.png`](controller-app-4.png)、[`controller-app-5.png`](controller-app-5.png)、[`controller-app-6.png`](controller-app-6.png)、[`controller-app-7.png`](controller-app-7.png)、[`controller-app-8.png`](controller-app-8.png) |
+| Web UI 与 WebView | [`webui.png`](webui.png)、[`webui-v5.png`](webui-v5.png)、[`webui-v5-final.png`](webui-v5-final.png)、[`webui-v6.png`](webui-v6.png)、[`webui-v6-log.png`](webui-v6-log.png)、[`webui-v6-logbox.png`](webui-v6-logbox.png)、[`webui-ws-fixed.png`](webui-ws-fixed.png)、[`webui-ws-final.png`](webui-ws-final.png)、[`webui-streaming-touch.png`](webui-streaming-touch.png)、[`webview-probe.png`](webview-probe.png) |
+| API 与画面流 | [`http-api-capture.png`](http-api-capture.png)、[`stream-debug.png`](stream-debug.png)、[`stream-jpeg-q50.jpg`](stream-jpeg-q50.jpg)、[`stream-jpeg-q75.jpg`](stream-jpeg-q75.jpg) |
+| 2026-10-04 流优化数据 | [完整记录与文件索引](stream-opt-2026-10-04/README.md)，包括前后版本测量、浏览器验证、构建与设备检查 |
 
 ## 环境
 
