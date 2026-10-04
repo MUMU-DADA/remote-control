@@ -58,6 +58,9 @@ void TestBase64() {
     std::string raw;
     Check(Base64Decode("Zm9vYmFy", &raw) && raw == "foobar", "解码往返");
     Check(!Base64Decode("!!!非法!!!", &raw), "非法字符被拒");
+    Check(!Base64Decode("Zg=", &raw), "长度不是 4 的倍数被拒");
+    Check(!Base64Decode("Zh==", &raw), "非零 padding bit 被拒");
+    Check(!Base64Decode("Zm=9", &raw), "padding 出现在中间被拒");
     // 二进制往返（SHA-1 摘要是二进制，会含 0x00 和高位字节）
     const std::string digest = Sha1("abc");
     std::string back;
@@ -151,6 +154,35 @@ void TestInvalidCloseFrames() {
     }
 }
 
+void TestInvalidFrameHeaders() {
+    printf("\n\033[1;34m[6] 非法帧头\033[0m\n");
+    const std::vector<std::vector<uint8_t>> frames = {
+        {0xC1, 0x80, 1, 2, 3, 4},                 // RSV1
+        {0x80, 0x80, 1, 2, 3, 4},                 // continuation
+        {0x8B, 0x80, 1, 2, 3, 4},                 // unknown opcode
+        {0x82, 0xFF, 0x80, 0, 0, 0, 0, 0, 0, 0, // 64-bit length high bit
+         0, 1},
+    };
+    const char* labels[] = {"拒绝 RSV 扩展位", "拒绝 continuation 帧",
+                            "拒绝未知操作码", "拒绝非法 63 位长度"};
+    for (size_t i = 0; i < frames.size(); ++i) {
+        int fds[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            Check(false, "创建 socketpair");
+            return;
+        }
+        const ssize_t sent = write(fds[0], frames[i].data(), frames[i].size());
+        WsFrame frame;
+        std::string error;
+        const bool accepted = WsReadFrame(fds[1], &frame, &error);
+        Check(sent == static_cast<ssize_t>(frames[i].size()) && !accepted &&
+                      !error.empty(),
+              "%s", labels[i]);
+        close(fds[0]);
+        close(fds[1]);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -160,5 +192,6 @@ int main() {
     TestHandshake();
     TestCloseHandshake();
     TestInvalidCloseFrames();
+    TestInvalidFrameHeaders();
     return Summary("WebSocket");
 }

@@ -110,6 +110,21 @@ ssize_t SendNoSignal(int fd, const void* data, size_t size) {
     return send(fd, data, size, MSG_NOSIGNAL);
 }
 
+bool SendAllNoSignal(int fd, const void* data, size_t size) {
+    const char* p = static_cast<const char*>(data);
+    while (size > 0) {
+        const ssize_t n = SendNoSignal(fd, p, size);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        p += n;
+        size -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
 std::string ToLower(const std::string& s) {
     std::string out = s;
     for (char& c : out) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
@@ -562,8 +577,7 @@ void HttpServer::Run(HttpHandler handler) {
                             "Content-Length: ") +
                 std::to_string(strlen(body)) +
                 "\r\nConnection: close\r\n\r\n" + body;
-            ssize_t ig = SendNoSignal(connFd, head.data(), head.size());
-            (void)ig;
+            (void)SendAllNoSignal(connFd, head.data(), head.size());
             close(connFd);
             continue;
         }
@@ -711,11 +725,16 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
         pos = eol + 2;
     }
 
-    // 正文：只支持 Content-Length。chunked 对请求体是罕见的，
-    // 真遇到了明确拒绝比半懂不懂地解析更安全。
-    const std::string te = out->header("transfer-encoding");
-    if (!te.empty() && ToLower(te).find("chunked") != std::string::npos) {
-        *errReply = HttpResponse::Error(400, "不支持 Transfer-Encoding: chunked");
+    // 正文：只支持 Content-Length。Transfer-Encoding 对这里的请求体
+    // 不做解析，明确拒绝比半懂不懂地解析更安全。
+    for (const auto& header : out->headers) {
+        if (header.first != "transfer-encoding") continue;
+        // This parser only implements Content-Length framing.  Accepting an
+        // unknown transfer coding and then falling back to Content-Length can
+        // make this endpoint disagree with a proxy in front of it, enabling
+        // request smuggling.  Even an empty field is malformed, so reject the
+        // header rather than silently switching framing rules.
+        *errReply = HttpResponse::Error(400, "不支持 Transfer-Encoding");
         return false;
     }
 
@@ -936,23 +955,40 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
                 "WWW-Authenticate: Bearer realm=\"remote-control\"\r\n"
                 "Content-Length: " + std::to_string(earlyDeny.body.size()) +
                 "\r\nConnection: close\r\n\r\n";
-        if (SendNoSignal(connFd, head.data(), head.size()) > 0) {
-            ssize_t ig = SendNoSignal(connFd, earlyDeny.body.data(),
-                                      earlyDeny.body.size());
-            (void)ig;
+        if (SendAllNoSignal(connFd, head.data(), head.size())) {
+            (void)SendAllNoSignal(connFd, earlyDeny.body.data(),
+                                  earlyDeny.body.size());
         }
         // 正文没读。直接关会让对端收到 RST、可能看不到上面那个 401，
         // 所以先把在途数据**限量**排掉（上限 1MB，超了就直接关）——
         // 不能无限排，否则又变成"未授权也能让我们读 4GB"。
         {
-            timeval tiny{};
-            tiny.tv_usec = 200 * 1000;
-            setsockopt(connFd, SOL_SOCKET, SO_RCVTIMEO, &tiny, sizeof(tiny));
+            constexpr auto kDrainBudget = std::chrono::milliseconds(200);
+            const auto drainDeadline = std::chrono::steady_clock::now() +
+                                       kDrainBudget;
             char sink[16 * 1024];
             size_t drained = 0;
             while (drained < (1u << 20)) {
-                const ssize_t n = read(connFd, sink, sizeof(sink));
-                if (n <= 0) break;
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= drainDeadline) break;
+                const auto remaining = std::chrono::duration_cast<
+                        std::chrono::milliseconds>(drainDeadline - now).count();
+                pollfd pfd{connFd, POLLIN | POLLHUP | POLLERR, 0};
+                const int waitMs = remaining > INT_MAX ? INT_MAX
+                                                        : static_cast<int>(remaining);
+                int pr;
+                do {
+                    pr = poll(&pfd, 1, waitMs);
+                } while (pr < 0 && errno == EINTR);
+                if (pr <= 0) break;
+                const ssize_t n = recv(connFd, sink, sizeof(sink), MSG_DONTWAIT);
+                if (n <= 0) {
+                    if (n < 0 && (errno == EINTR || errno == EAGAIN ||
+                                 errno == EWOULDBLOCK)) {
+                        continue;
+                    }
+                    break;
+                }
                 drained += static_cast<size_t>(n);
             }
         }
@@ -966,8 +1002,7 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
                 "Content-Type: " + errReply.contentType + "\r\n" +
                 "Content-Length: " + std::to_string(errReply.body.size()) + "\r\n" +
                 "Connection: close\r\n\r\n" + errReply.body;
-        ssize_t ignored = SendNoSignal(connFd, head.data(), head.size());
-        (void)ignored;
+        (void)SendAllNoSignal(connFd, head.data(), head.size());
         return;
     }
 
@@ -998,7 +1033,7 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
                 "Sec-WebSocket-Accept: " + resp.wsAccept + "\r\n\r\n";
-        if (SendNoSignal(connFd, head.data(), head.size()) < 0) return;
+        if (!SendAllNoSignal(connFd, head.data(), head.size())) return;
 
         // 升级之后这条连接是长连接，不能再让它带着读超时 ——
         // ReadRequest 设了 SO_RCVTIMEO 防"连上不发数据"，但 WebSocket
@@ -1052,7 +1087,7 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
     head += "\r\n";
 
     // 先发头再发体，避免大响应体在内存里再拼一次
-    if (SendNoSignal(connFd, head.data(), head.size()) < 0) return;
+    if (!SendAllNoSignal(connFd, head.data(), head.size())) return;
 
     if (resp.isStreaming()) {
         // 交给回调。它自己判断何时停 —— 客户端断开时 write 会失败。

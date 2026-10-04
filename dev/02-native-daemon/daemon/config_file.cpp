@@ -125,15 +125,28 @@ std::string ConfigFile::Serialize(const PersistedConfig& cfg) {
 
 bool ConfigFile::Save(const std::string& path, const PersistedConfig& cfg,
                       std::string* error) {
-    // 原子替换：先写临时文件再 rename。
-    // 直接覆写的话，上位应用可能在守护进程写到一半时读到半个文件。
-    const std::string tmp = path + ".tmp";
+    // 原子替换：每次使用不可预测的临时名称，避免固定 .tmp 被符号链接
+    // 劫持，也避免两个并发保存互相截断对方的内容。
+    std::string tmp = path + ".tmp.XXXXXX";
     const std::string body = Serialize(cfg);
 
-    // 加 O_CLOEXEC：这是 root 进程，别把这个 fd 泄漏给子进程
-    const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0660);
+    // mkstemp 以 O_CREAT|O_EXCL 打开文件；先建成 0600，再显式设成配置文件
+    // 需要的权限，避免依赖调用方 umask。
+    const int fd = mkstemp(tmp.data());
     if (fd < 0) {
         if (error) *error = "写 " + tmp + " 失败: " + strerror(errno);
+        return false;
+    }
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        if (error) *error = "设置 " + tmp + " close-on-exec 失败: " + strerror(errno);
+        close(fd);
+        unlink(tmp.c_str());
+        return false;
+    }
+    if (fchmod(fd, 0660) != 0) {
+        if (error) *error = "设置 " + tmp + " 权限失败: " + strerror(errno);
+        close(fd);
+        unlink(tmp.c_str());
         return false;
     }
     size_t sent = 0;
@@ -146,16 +159,39 @@ bool ConfigFile::Save(const std::string& path, const PersistedConfig& cfg,
             unlink(tmp.c_str());
             return false;
         }
+        if (n == 0) {
+            if (error) *error = "写入失败: write 返回 0";
+            close(fd);
+            unlink(tmp.c_str());
+            return false;
+        }
         sent += static_cast<size_t>(n);
     }
     // fsync 再 rename：不然掉电后可能 rename 成功但内容还没落盘
-    fsync(fd);
+    if (fsync(fd) != 0) {
+        if (error) *error = std::string("同步配置文件失败: ") + strerror(errno);
+        close(fd);
+        unlink(tmp.c_str());
+        return false;
+    }
     close(fd);
 
     if (rename(tmp.c_str(), path.c_str()) != 0) {
         if (error) *error = "替换 " + path + " 失败: " + strerror(errno);
         unlink(tmp.c_str());
         return false;
+    }
+
+    // 尽力同步父目录，使 rename 本身在掉电后也能恢复；某些 Android
+    // 文件系统不允许对目录 fsync，这种情况下内容原子性仍然成立。
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos
+                                    ? "."
+                                    : (slash == 0 ? "/" : path.substr(0, slash));
+    const int dirFd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd >= 0) {
+        (void)fsync(dirFd);
+        close(dirFd);
     }
     return true;
 }

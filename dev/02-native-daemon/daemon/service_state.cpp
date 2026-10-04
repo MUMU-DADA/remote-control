@@ -158,7 +158,7 @@ InjectorConfig ServiceState::GetInjectorConfig() const {
     return injectorConfig_;
 }
 
-void ServiceState::SetSocketChmodHook(void (*hook)(uint32_t)) {
+void ServiceState::SetSocketChmodHook(std::function<void(uint32_t)> hook) {
     std::lock_guard<std::mutex> lock(mutex_);
     socketChmodHook_ = hook;
 }
@@ -384,16 +384,16 @@ ServiceState::ApplyResult ServiceState::Apply(
                 result.rejected.emplace_back(key, "需要八进制权限位（如 0660/0666）");
                 continue;
             }
-            void (*hook)(uint32_t) = nullptr;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 socketMode_ = static_cast<uint32_t>(m);
                 config_.socketMode = socketMode_;
-                hook = socketChmodHook_;
+                // Invoke while holding mutex_: SetSocketChmodHook({}) during
+                // shutdown then waits for an in-flight update to finish,
+                // preventing a detached config watcher from calling a stale
+                // callback that captures the SocketServer stack object.
+                if (socketChmodHook_) socketChmodHook_(static_cast<uint32_t>(m));
             }
-            // 真正作用到已经在监听的 socket 文件上 ——
-            // 不然"改成功了"只是改了个数字，用户下次连接仍然是老权限
-            if (hook != nullptr) hook(static_cast<uint32_t>(m));
             result.applied.push_back(key);
             ALOGI("配置变更: socket-mode = %s", val.c_str());
             continue;

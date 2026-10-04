@@ -1,6 +1,8 @@
 # Unix socket 二进制协议
 
-> 地址：`/data/local/tmp/remote-control.sock`（默认）或 init 创建的 `/dev/socket/remote-control`
+> 地址：手动模式由 `--socket` 指定；当前生产 rc 使用
+> `/data/misc/remote-control/remote-control.sock`。`--init-socket` / `/dev/socket/remote-control`
+> 仅保留作历史兼容模式。
 > 类型：**`SOCK_SEQPACKET`**，不是 `SOCK_STREAM`
 
 ---
@@ -11,7 +13,7 @@
 |---|---|---|
 | 跨机器 | ❌ 只能本机 | ✅ |
 | 传大块数据（截图/APK） | ✅ **零拷贝**（memfd + `SCM_RIGHTS`） | ⚠️ 要过一次内存 |
-| 权限模型 | 文件权限（`--socket-mode`） | 令牌 |
+| 权限模型 | 文件权限 + `SO_PEERCRED`（`--socket-mode` / `--socket-peer-uid`） | 令牌 |
 | 用起来 | 得自己按结构体打包 | curl / 任何 HTTP 客户端 |
 
 **能力完全一致** —— 两条路走同一个 `Dispatcher`。

@@ -91,43 +91,45 @@ capture_*.cpp  → memfd（逐行 memcpy，步长用 getStride()）
 
 **未采用的优化**：直接导出 `GraphicBuffer` 的 dmabuf fd（省掉一次 memcpy）。代价是客户端需要理解 gralloc 布局，可移植性差，属于后续优化项。
 
-### 3.2 socket 由 init 创建
+### 3.2 socket 由 daemon 自己 bind
+
+当前生产形态由 init 负责拉起进程，daemon 自己在
+`/data/misc/remote-control/remote-control.sock` 创建并监听 Unix socket：
 
 ```
-init 读取 remote-control.rc 里的 `socket remote-control seqpacket 0660 system system`
+init 启动 /system/bin/remote-control
      │
-     ├─ 创建 /dev/socket/remote-control
-     ├─ 自动打上 SELinux 标签 remote_control_socket
-     ├─ listen()
-     └─ 通过环境变量 ANDROID_SOCKET_remote-control 把 fd 传给 remote-control
+     ├─ daemon 检查残留路径，只清理 Unix socket
+     ├─ bind() + listen()，设置 `--socket-mode`（默认 0660）
+     └─ 用 SO_PEERCRED 校验每条连接的对端 UID
 ```
 
-**好处**：
+这样 socket 路径、权限和连接鉴权都由同一份 daemon 逻辑管理；路径被替换时，
+daemon 的退出清理也会校验它仍是自己创建的 socket。`--socket <路径>` 可用于
+开发期手动部署，权限同样由 `--socket-mode` 决定。
 
-1. 标签和权限由 init 保证，不需要 daemon 自己 `chmod`/`chown`
-2. 服务崩溃重启时 socket 不会丢
-3. 避免 race condition（先 bind 还是先降权）
-
-开发期的手动模式（`--socket <路径>`，默认 `/data/local/tmp/remote-control.sock`）保留，用于阶段 1 免 sepolicy 原型；此时文件权限由 `--socket-mode`（默认 0660）决定。init 模式下 `--socket-mode` 无效——init 建的文件我们不去改。
+`--init-socket <名字>` 仍保留为历史兼容模式，用于接管 init 通过
+`ANDROID_SOCKET_<名字>` 传入的已监听 fd；当前 `remote-control.rc` 不声明 init
+socket，也不把 `/dev/socket/remote-control` 作为生产入口。
 
 ### 3.3 鉴权分层
 
 ```
 Unix socket：
-  第一层：socket 文件权限（init 模式 0660 system:system；手动模式由 --socket-mode 决定）
-  第二层：SO_PEERCRED 取对端 uid/pid          → 记录进日志
-  第三层：（待实现）uid 白名单校验
+  第一层：socket 文件权限（手动模式由 --socket-mode 决定）
+  第二层：SO_PEERCRED 取对端 uid/pid          → 记录并校验 UID
+  第三层：需要跨 UID 时显式配置 --socket-peer-uid
 
 HTTP / WebSocket：
   第一层：绑定地址（内置默认 127.0.0.1，要对外必须显式写 0.0.0.0）
   第二层：可选 Bearer 令牌（配置 auth=1；三种携带方式见 api/04-config.md）
 ```
 
-`socket_server.cpp` 里 `ServeConnection()` 已经取到 `SO_PEERCRED` 并打日志，鉴权钩子留在那里。
+`socket_server.cpp` 里 `ServeConnection()` 会拒绝凭据获取失败或不在允许范围内的连接。
 
 > ⚠️ **首启默认无鉴权。** 在无鉴权且 bind 被改成 `0.0.0.0` 的情况下，同一网络里任何人都能看屏幕、点屏幕、按键、读剪贴板、装应用。这个不对称是有意的：让"对外"成为一个需要主动做的决定。
 
-**生产环境建议**：socket 侧建一个专用 AID（如 `AID_REMOTE_CONTROL`），需要调用的客户端进程加入该组；或校验 `cred.uid` 是否在允许列表内。HTTP 侧开启 `auth=1`。
+**生产环境建议**：socket 侧建一个专用 AID（如 `AID_REMOTE_CONTROL`），需要调用的客户端进程加入该组；若确实跨 UID，显式设置 `--socket-peer-uid` 并配套 SELinux 规则。HTTP 侧开启 `auth=1`。
 
 ---
 
@@ -275,13 +277,8 @@ android::ProcessState::self()->startThreadPool();
 开机
   │
   ├─ init 解析 /system/etc/init/remote-control.rc
-  ├─ init 创建 /dev/socket/remote-control（打标签、设置权限）
-  │
-  ▼
-on property:sys.boot_completed=1
-  │
-  ├─ init fork/exec /system/bin/remote-control --init-socket remote-control
-  ├─ 应用 seclabel u:r:remote-control:s0（SELinux 域转换）
+  ├─ init 在 sys.boot_completed=1 后启动 /system/bin/remote-control
+  ├─ 应用 seclabel u:r:remote_control:s0（SELinux 域转换）
   │
   ▼
 main()
@@ -290,7 +287,7 @@ main()
   ├─ 解析命令行 + 读 /data/misc/remote-control/remote-control.conf（优先级：CLI > 配置文件 > 内置默认）
   ├─ Capture::Init()                      → 连接 SurfaceFlinger，解析显示
   ├─ Injector::Init()                     → 打开 /dev/uinput，注册虚拟设备
-  ├─ SocketServer::Start()                → 接管 init 传来的 fd（或自己 bind）
+  ├─ SocketServer::Start()                → bind /data/misc/remote-control/...
   ├─ 降权（--uid/--gid，可选）             ← 必须在上面这些 fd 都拿到之后
   ├─ signal(SIGTERM / SIGINT / SIGPIPE)
   ├─ HttpServer::Start()                  → 独立 pthread 跑 HTTP + WebSocket

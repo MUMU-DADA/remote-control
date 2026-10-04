@@ -3,10 +3,15 @@
 #include "websocket.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
+#include <chrono>
+#include <climits>
+#include <utility>
 #include <vector>
 
 #include "remote_control_log.h"
@@ -86,6 +91,7 @@ struct Sha1Ctx {
 
 const char kBase64Chars[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+constexpr auto kFrameReadTimeout = std::chrono::seconds(2);
 
 // 从 fd 精确读 n 字节（处理短读）
 bool ReadFull(int fd, void* buf, size_t n) {
@@ -96,6 +102,44 @@ bool ReadFull(int fd, void* buf, size_t n) {
         if (r == 0) return false;                       // 对端关闭
         if (r < 0) {
             if (errno == EINTR) continue;
+            return false;
+        }
+        got += static_cast<size_t>(r);
+    }
+    return true;
+}
+
+// Once a frame has started, require its header and payload to arrive by one
+// absolute deadline.  The first byte is still read without a deadline so an
+// otherwise idle WebSocket can remain open indefinitely.
+bool ReadFullUntil(int fd, void* buf, size_t n,
+                   std::chrono::steady_clock::time_point deadline) {
+    uint8_t* p = static_cast<uint8_t*>(buf);
+    size_t got = 0;
+    while (got < n) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            errno = ETIMEDOUT;
+            return false;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - now).count();
+        pollfd pfd{fd, POLLIN | POLLHUP | POLLERR, 0};
+        const int waitMs = remaining > INT_MAX ? INT_MAX :
+                           static_cast<int>(remaining);
+        int pr;
+        do {
+            pr = poll(&pfd, 1, waitMs);
+        } while (pr < 0 && errno == EINTR);
+        if (pr == 0) {
+            errno = ETIMEDOUT;
+            return false;
+        }
+        if (pr < 0) return false;
+        const ssize_t r = read(fd, p + got, n - got);
+        if (r == 0) return false;
+        if (r < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
             return false;
         }
         got += static_cast<size_t>(r);
@@ -159,31 +203,54 @@ std::string Base64Encode(const std::string& data) {
 }
 
 bool Base64Decode(const std::string& in, std::string* out) {
-    // 反向表：-1 表示非法字符
-    static int8_t rev[256];
-    static bool inited = false;
-    if (!inited) {
-        memset(rev, -1, sizeof(rev));
-        for (int i = 0; i < 64; ++i) {
-            rev[static_cast<uint8_t>(kBase64Chars[i])] = static_cast<int8_t>(i);
-        }
-        inited = true;
-    }
-
     out->clear();
-    uint32_t acc = 0;
-    int bits = 0;
-    for (char c : in) {
-        if (c == '=' || c == '\n' || c == '\r') continue;
-        const int8_t v = rev[static_cast<uint8_t>(c)];
-        if (v < 0) return false;
-        acc = (acc << 6) | static_cast<uint32_t>(v);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out->push_back(static_cast<char>((acc >> bits) & 0xFF));
+    if (in.size() % 4 != 0) return false;
+
+    // Function-local static initialization is synchronized by the language;
+    // unlike the old mutable `inited` flag, concurrent handshakes are safe.
+    static const std::array<int8_t, 256> rev = [] {
+        std::array<int8_t, 256> table{};
+        table.fill(-1);
+        for (int i = 0; i < 64; ++i) {
+            table[static_cast<uint8_t>(kBase64Chars[i])] = static_cast<int8_t>(i);
         }
+        return table;
+    }();
+
+    std::string decoded;
+    decoded.reserve((in.size() / 4) * 3);
+    for (size_t i = 0; i < in.size(); i += 4) {
+        const char c0 = in[i];
+        const char c1 = in[i + 1];
+        const char c2 = in[i + 2];
+        const char c3 = in[i + 3];
+        const int8_t v0 = rev[static_cast<uint8_t>(c0)];
+        const int8_t v1 = rev[static_cast<uint8_t>(c1)];
+        if (v0 < 0 || v1 < 0) return false;
+
+        if (c2 == '=') {
+            // One output byte: the low four bits of the second sextet are
+            // padding and must be zero; the final character must also pad.
+            if (c3 != '=' || (v1 & 0x0F) != 0 || i + 4 != in.size()) return false;
+            decoded.push_back(static_cast<char>((v0 << 2) | (v1 >> 4)));
+            continue;
+        }
+        const int8_t v2 = rev[static_cast<uint8_t>(c2)];
+        if (v2 < 0) return false;
+        decoded.push_back(static_cast<char>((v0 << 2) | (v1 >> 4)));
+        decoded.push_back(static_cast<char>((v1 << 4) | (v2 >> 2)));
+
+        if (c3 == '=') {
+            // Two output bytes: the low two bits of the third sextet must be
+            // zero and padding is only valid in the final quartet.
+            if ((v2 & 0x03) != 0 || i + 4 != in.size()) return false;
+            continue;
+        }
+        const int8_t v3 = rev[static_cast<uint8_t>(c3)];
+        if (v3 < 0) return false;
+        decoded.push_back(static_cast<char>((v2 << 6) | v3));
     }
+    *out = std::move(decoded);
     return true;
 }
 
@@ -209,8 +276,14 @@ bool WsComputeAccept(const std::string& key, std::string* acceptOut) {
 bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
     for (;;) {   // ping 会被自动回应，然后继续等真正的数据帧
         uint8_t hdr[2];
-        if (!ReadFull(fd, hdr, 2)) {
+        if (!ReadFull(fd, hdr, 1)) {
             if (error) error->clear();     // 对端正常关闭，不算错误
+            return false;
+        }
+        const auto frameDeadline = std::chrono::steady_clock::now() +
+                                   kFrameReadTimeout;
+        if (!ReadFullUntil(fd, hdr + 1, 1, frameDeadline)) {
+            if (error) *error = "读帧头失败";
             return false;
         }
 
@@ -219,13 +292,34 @@ bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
         const bool masked = (hdr[1] & 0x80) != 0;
         uint64_t len = hdr[1] & 0x7F;
 
+        if ((hdr[0] & 0x70) != 0) {
+            if (error) *error = "不支持 RSV1/RSV2/RSV3 扩展位";
+            return false;
+        }
+        if (out->opcode != kWsText && out->opcode != kWsBinary &&
+            out->opcode != kWsClose && out->opcode != kWsPing &&
+            out->opcode != kWsPong) {
+            if (error) *error = "未知或不支持的操作码";
+            return false;
+        }
+
         if (len == 126) {
             uint8_t ext[2];
-            if (!ReadFull(fd, ext, 2)) { if (error) *error = "读长度失败"; return false; }
+            if (!ReadFullUntil(fd, ext, 2, frameDeadline)) {
+                if (error) *error = "读长度失败";
+                return false;
+            }
             len = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
         } else if (len == 127) {
             uint8_t ext[8];
-            if (!ReadFull(fd, ext, 8)) { if (error) *error = "读长度失败"; return false; }
+            if (!ReadFullUntil(fd, ext, 8, frameDeadline)) {
+                if (error) *error = "读长度失败";
+                return false;
+            }
+            if ((ext[0] & 0x80) != 0) {
+                if (error) *error = "帧长度不是合法的 63 位无符号数";
+                return false;
+            }
             len = 0;
             for (int i = 0; i < 8; ++i) len = (len << 8) | ext[i];
         }
@@ -237,6 +331,10 @@ bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
         }
         if (controlFrame && len > 125) {
             if (error) *error = "控制帧载荷不能超过 125 字节";
+            return false;
+        }
+        if (!out->fin) {
+            if (error) *error = "不支持分片帧";
             return false;
         }
         if (out->opcode == kWsClose && len == 1) {
@@ -260,10 +358,14 @@ bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
         }
 
         uint8_t mask[4];
-        if (!ReadFull(fd, mask, 4)) { if (error) *error = "读掩码失败"; return false; }
+        if (!ReadFullUntil(fd, mask, 4, frameDeadline)) {
+            if (error) *error = "读掩码失败";
+            return false;
+        }
 
         out->payload.assign(static_cast<size_t>(len), '\0');
-        if (len > 0 && !ReadFull(fd, &out->payload[0], static_cast<size_t>(len))) {
+        if (len > 0 && !ReadFullUntil(fd, &out->payload[0],
+                                      static_cast<size_t>(len), frameDeadline)) {
             if (error) *error = "读载荷失败";
             return false;
         }
@@ -285,12 +387,6 @@ bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
                 return false;
             }
             if (error) error->clear();
-            return false;
-        }
-        // 分片：我们不做续帧。消息都很小，客户端也不会分片；
-        // 真收到就明确拒绝，而不是拼一个半截的消息。
-        if (!out->fin) {
-            if (error) *error = "不支持分片帧";
             return false;
         }
         return true;

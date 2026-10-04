@@ -121,7 +121,7 @@ test_websocket: $(WS_SRCS) test_util.h $(DAEMON)/websocket.h
 
 TP_SRCS = test_transport.cpp $(DAEMON)/http_server.cpp \
           $(DAEMON)/socket_server.cpp $(DAEMON)/websocket.cpp \
-          $(DAEMON)/log_buffer.cpp
+          $(DAEMON)/log_buffer.cpp $(DAEMON)/config_file.cpp
 
 test_transport: $(TP_SRCS) test_util.h $(DAEMON)/http_server.h \
                 $(DAEMON)/socket_server.h $(DAEMON)/websocket.h
