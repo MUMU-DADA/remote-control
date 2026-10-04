@@ -4,6 +4,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -180,15 +181,29 @@ bool HttpClient::DownloadToFile(const std::string& url,
         return false;
     }
 
-    FILE* fp = fopen(destPath.c_str(), "wb");
-    if (fp == nullptr) {
+    // ResolveInside() 已经检查过路径，但目录中的其它进程仍可在检查后
+    // 把最终文件替换成软链接。O_NOFOLLOW 让这一步失败关闭，避免 curl
+    // 以 daemon 身份跟随链接覆盖边界外文件。
+    const int outFd = open(destPath.c_str(),
+                           O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                           0666);
+    if (outFd < 0) {
         if (error) *error = "无法创建 " + destPath + ": " + strerror(errno);
+        return false;
+    }
+    FILE* fp = fdopen(outFd, "wb");
+    if (fp == nullptr) {
+        const int savedErrno = errno;
+        close(outFd);
+        unlink(destPath.c_str());
+        if (error) *error = "无法打开 " + destPath + ": " + strerror(savedErrno);
         return false;
     }
 
     CURL* curl = g_api.easy_init();
     if (curl == nullptr) {
         fclose(fp);
+        unlink(destPath.c_str());
         if (error) *error = "curl_easy_init 失败";
         return false;
     }

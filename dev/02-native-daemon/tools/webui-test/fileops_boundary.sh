@@ -32,6 +32,7 @@ should_ok   "删除相对目录"             -X POST "$B/files" -H 'Content-Type
 
 echo
 echo "── 越界必须被拒 ──"
+should_fail "GET 不允许写操作"       "$B/files?op=delete&path=/sdcard"
 should_fail "列 /data"                 "$B/files?path=/data"
 should_fail "列 /system"               "$B/files?path=/system"
 should_fail "列 /"                     "$B/files?path=/"
@@ -39,8 +40,13 @@ should_fail "列 /data/local/tmp"       "$B/files?path=/data/local/tmp"
 should_fail ".. 逃逸"                  "$B/files?path=/sdcard/../../data"
 should_fail "相对路径 .. 逃逸"         "$B/files?path=../../data"
 should_fail "删 /system/bin"           -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"delete","path":"/system/bin","recursive":true}'
+should_fail "删共享存储根"               -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"delete","path":"/sdcard","recursive":true}'
 should_fail "mkdir 到 /data"           -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"mkdir","path":"/data/evil"}'
 should_fail "重命名跨出边界"           -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"rename","path":"/sdcard/x","to":"/data/evil"}'
+should_fail "重命名共享存储根"           -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"rename","path":"/sdcard","to":"/sdcard/remote-control-root-renamed"}'
+should_ok   "准备覆盖测试源目录"         -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"mkdir","path":"/sdcard/remote-control-root-target-testdir"}'
+should_fail "覆盖共享存储根"             -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"rename","path":"/sdcard/remote-control-root-target-testdir","to":"/sdcard"}'
+should_ok   "清理覆盖测试源目录"         -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"delete","path":"/sdcard/remote-control-root-target-testdir","recursive":true}'
 
 echo
 echo "── 软链接逃逸 ──"

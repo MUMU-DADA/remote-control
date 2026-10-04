@@ -1707,14 +1707,14 @@ function fsLoad() {
       box.innerHTML = es.map(e => {
         const sz = e.dir ? '' : ('  ' + fmtSize(e.size));
         const click = e.dir
-          ? 'onclick="fsGoto(' + JSON.stringify(e.path).replace(/"/g, '&quot;') + ')"'
+          ? 'onclick="fsGoto(' + esc(JSON.stringify(e.path)) + ')"'
           : '';
         return '<div class="row" style="margin:1px 0;align-items:center">'
              + '<span style="flex:1;cursor:' + (e.dir ? 'pointer' : 'default')
              + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap" ' + click + '>'
              + (e.dir ? '📁 ' : '📄 ') + esc(e.name) + '<span class="dim">' + sz + '</span></span>'
              + '<button style="padding:1px 6px;font-size:11px" onclick="fsDel('
-             + JSON.stringify(e.path).replace(/"/g, '&quot;') + ',' + e.dir + ')">删</button>'
+             + esc(JSON.stringify(e.path)) + ',' + e.dir + ')">删</button>'
              + '</div>';
       }).join('');
       fsMsg('共 ' + d.count + ' 项');

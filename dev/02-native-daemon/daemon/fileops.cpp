@@ -196,23 +196,30 @@ bool FileOps::ResolveInside(const std::string& root,
     // ../ 检查形同虚设 —— 因为文件系统层面它确实"在"下载目录下。
     {
         char rootReal[PATH_MAX];
-        if (realpath(bound.c_str(), rootReal) != nullptr) {
-            std::string probe = full;
-            while (!probe.empty() && probe != "/") {
-                char real[PATH_MAX];
-                if (realpath(probe.c_str(), real) != nullptr) {
-                    const std::string r(real);
-                    const std::string rr(rootReal);
-                    if (!IsUnder(r, rr)) {
-                        if (error) {
-                            *error = "路径经软链接解析后落在允许范围之外: " + input;
-                        }
-                        return false;
-                    }
-                    break;
-                }
-                probe = DirName(probe);
+        if (realpath(bound.c_str(), rootReal) == nullptr) {
+            // 边界本身消失或暂时不可解析时必须失败关闭。跳过检查会把
+            // symlink 防线变成 fail-open，并且让后续 fopen/rename 看到
+            // 一个与 Init 时不同的文件系统拓扑。
+            if (error) {
+                *error = "无法解析存储边界 " + bound + ": " + strerror(errno);
             }
+            return false;
+        }
+        std::string probe = full;
+        while (!probe.empty() && probe != "/") {
+            char real[PATH_MAX];
+            if (realpath(probe.c_str(), real) != nullptr) {
+                const std::string r(real);
+                const std::string rr(rootReal);
+                if (!IsUnder(r, rr)) {
+                    if (error) {
+                        *error = "路径经软链接解析后落在允许范围之外: " + input;
+                    }
+                    return false;
+                }
+                break;
+            }
+            probe = DirName(probe);
         }
     }
 
@@ -395,6 +402,14 @@ bool FileOps::Download(const std::string& url, const std::string& filename,
     // 目标目录
     std::string dirAbs = root_;
     if (!subdir.empty()) {
+        // Download 的 subdir 语义是下载目录下的子目录。ResolveInside
+        // 也接受共享存储根下的绝对路径，不能直接把它用于这里，
+        // 否则调用方可借此把任意外部 URL 写入 Download 之外的目录，
+        // 且返回的 savedRelPath 还会变成空字符串。
+        if (subdir[0] == '/') {
+            if (error) *error = "subdir 必须是下载目录下的相对路径";
+            return false;
+        }
         std::string subAbs;
         if (!ResolveInside(root_, storageRoot_, subdir, &subAbs, error)) return false;
         if (!MkdirP(subAbs, error)) return false;
@@ -442,7 +457,15 @@ bool FileOps::List(const std::string& relPath, std::vector<FileEntry>* out,
 
     DIR* d = opendir(abs.c_str());
     if (d == nullptr) {
-        if (error) *error = "打开目录失败: " + relPath + " (" + strerror(errno) + ")";
+        const int savedErrno = errno;
+        if (error) {
+            if (savedErrno == ENOENT || savedErrno == ENOTDIR) {
+                *error = "路径不存在: " + relPath;
+            } else {
+                *error = "无法访问路径: " + relPath + " (" +
+                         strerror(savedErrno) + ")";
+            }
+        }
         return false;
     }
     dirent* ent;
@@ -479,7 +502,15 @@ bool FileOps::Stat(const std::string& relPath, FileEntry* out, std::string* erro
 
     struct stat st{};
     if (lstat(abs.c_str(), &st) != 0) {
-        if (error) *error = "路径不存在: " + relPath;
+        const int savedErrno = errno;
+        if (error) {
+            if (savedErrno == ENOENT || savedErrno == ENOTDIR) {
+                *error = "路径不存在: " + relPath;
+            } else {
+                *error = "无法访问路径: " + relPath + " (" +
+                         strerror(savedErrno) + ")";
+            }
+        }
         return false;
     }
     out->isDir = S_ISDIR(st.st_mode);
@@ -514,9 +545,12 @@ bool FileOps::Delete(const std::string& relPath, bool recursive,
     std::string abs;
     if (!ResolveInside(root_, storageRoot_, NormalizeAlias(relPath), &abs, error)) return false;
 
-    // 不允许删下载目录本身 —— 那是把整个目录端掉，不会是调用方想要的
-    if (abs == root_) {
-        if (error) *error = "拒绝删除下载目录本身";
+    // 不允许删下载目录或共享存储根本身 —— 那会把整个存储树端掉，
+    // 不会是调用方想要的；绝对路径和 /sdcard 别名最终都会落到这里。
+    if (abs == root_ || (!storageRoot_.empty() && abs == storageRoot_)) {
+        if (error) *error = (abs == storageRoot_ && abs != root_)
+                                 ? "拒绝删除共享存储根本身"
+                                 : "拒绝删除下载目录本身";
         return false;
     }
 
@@ -544,8 +578,17 @@ bool FileOps::Rename(const std::string& fromRel, const std::string& toRel,
     std::string fromAbs, toAbs;
     if (!ResolveInside(root_, storageRoot_, NormalizeAlias(fromRel), &fromAbs, error)) return false;
     if (!ResolveInside(root_, storageRoot_, NormalizeAlias(toRel), &toAbs, error)) return false;
-    if (fromAbs == root_ || toAbs == root_) {
-        if (error) *error = "不能重命名下载目录本身";
+    if (fromAbs == root_ || toAbs == root_ ||
+        (!storageRoot_.empty() &&
+         (fromAbs == storageRoot_ || toAbs == storageRoot_))) {
+        if (error) {
+            if (!storageRoot_.empty() &&
+                (fromAbs == storageRoot_ || toAbs == storageRoot_)) {
+                *error = "不能重命名共享存储根本身";
+            } else {
+                *error = "不能重命名下载目录本身";
+            }
+        }
         return false;
     }
 

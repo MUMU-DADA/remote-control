@@ -143,7 +143,7 @@ sudo make run   # 编译并运行全部测试
 | `test_json` | JSON 解析 / 输出（用 AOSP 树内的 jsoncpp） | 34 |
 | `test_keyboard` | 按键注入（键名映射 → 键码） | 79 |
 | `test_websocket` | WS 握手与 Close 控制帧 | 24 |
-| `test_transport` | HTTP / Unix socket 生命周期 | 14 |
+| `test_transport` | HTTP / Unix socket 生命周期 | 21 |
 | `test_core_lifetime` | 动态库初始化与注入后端生命周期 | 7 |
 | `test_fileops` | 文件路径边界（越界 / `..` / 软链接逃逸） | 18 |
 | `test_sha256` | SHA-256（NIST 官方向量 + 分块一致性） | 9 |
@@ -162,7 +162,7 @@ sudo make run   # 编译并运行全部测试
                                                                   └─ /dev/uinput ──> 内核 ──> eventN 读回
 ```
 
-**实测结果：11 个套件、348 项检查全部通过**
+**实测结果：11 个套件、352 项检查全部通过**
 
 ```
 test_inject_uinput（38 项）

@@ -41,6 +41,13 @@ constexpr int    kBacklog          = 8;
 // 并发注入会互相破坏手势状态。连接可以并发，操作不行。
 constexpr int kDefaultIdleTimeoutSec = 30;
 
+// Stop() may be called by a request handler running in one of the detached
+// workers (Shutdown/Restart).  That worker must not wait for itself while the
+// other workers are being kicked.  Keep the current server/fd in TLS so Stop
+// can exclude exactly that connection from its wait.
+thread_local SocketServer* gActiveSocketServer = nullptr;
+thread_local int gActiveSocketFd = -1;
+
 // 允许用环境变量覆盖，方便测试（不然一个用例要等 30 秒）
 // 和运维调优。非法值忽略，回退到默认。
 int IdleTimeoutSec() {
@@ -193,10 +200,36 @@ bool SocketServer::Start(std::string* error) {
 
 void SocketServer::Stop() {
     stop_.store(true);
-    if (listenFd_ >= 0) {
-        // shutdown 让阻塞中的 accept 返回，避免依赖超时轮询
-        shutdown(listenFd_, SHUT_RDWR);
+    const int callerFd = gActiveSocketServer == this ? gActiveSocketFd : -1;
+
+    // 先关监听，再 shutdown 所有活跃连接。仅关监听只能让 accept 返回，
+    // detached worker 仍可能阻塞在 recvmsg；主线程若随后析构 Dispatcher，
+    // worker 就会继续使用悬空的 handler/stop_。
+    std::vector<int> peers;
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        if (listenFd_ >= 0) {
+            // shutdown 让阻塞中的 accept 返回，避免依赖超时轮询。
+            shutdown(listenFd_, SHUT_RDWR);
+            close(listenFd_);
+            listenFd_ = -1;
+        }
+        peers.reserve(connFds_.size());
+        for (int fd : connFds_) {
+            if (fd != callerFd) peers.push_back(fd);
+        }
     }
+    for (int fd : peers) shutdown(fd, SHUT_RDWR);
+
+    // 如果 Stop 是由某个 worker 的 handler 调用，跳过该 worker，避免
+    // 自己等待自己；它返回 handler 后会在 wrapper 中注销并关闭 fd。
+    std::unique_lock<std::mutex> lk(connMutex_);
+    connCv_.wait(lk, [this, callerFd] {
+        for (int fd : connFds_) {
+            if (fd != callerFd) return false;
+        }
+        return true;
+    });
 }
 
 void SocketServer::Run(const RequestHandler& handler) {
@@ -232,6 +265,22 @@ void SocketServer::Run(const RequestHandler& handler) {
         }
         consecutiveErrors = 0;
 
+        // 在 Stop() 和连接 worker 之间建立先后关系：Stop 取得锁后会等待
+        // connFds_ 为空，所以必须先登记再启动线程；否则 Stop 可能已经返回，
+        // 主线程随即析构服务对象，而这个刚接收的连接才开始访问 this。
+        bool accepted = false;
+        {
+            std::lock_guard<std::mutex> lk(connMutex_);
+            if (!stop_.load()) {
+                connFds_.insert(connFd);
+                accepted = true;
+            }
+        }
+        if (!accepted) {
+            close(connFd);
+            break;
+        }
+
         // 给连接设个空闲超时 —— 防止连上来就不说话的客户端永久占着线程。
         timeval tv{};
         tv.tv_sec  = IdleTimeoutSec();
@@ -253,13 +302,26 @@ void SocketServer::Run(const RequestHandler& handler) {
         // 线程起不来就退回串行，至少不丢连接。
         // SpawnDetached 用 pthread_create，失败返回 false 而不是抛异常 ——
         // AOSP 是 -fno-exceptions，std::thread 抛出来就是整个进程 terminate。
-        if (!SpawnDetached([this, connFd, &handler]() {
-                ServeConnection(connFd, handler);
-                close(connFd);
-            })) {
-            ALOGW("remote-control: 起线程失败，本连接串行处理");
+        auto serve = [this, connFd, &handler]() {
+            SocketServer* previousServer = gActiveSocketServer;
+            const int previousFd = gActiveSocketFd;
+            gActiveSocketServer = this;
+            gActiveSocketFd = connFd;
             ServeConnection(connFd, handler);
+            gActiveSocketServer = previousServer;
+            gActiveSocketFd = previousFd;
             close(connFd);
+            {
+                std::lock_guard<std::mutex> lk(connMutex_);
+                connFds_.erase(connFd);
+                connCv_.notify_all();
+            }
+        };
+        if (!SpawnDetached(std::move(serve))) {
+            ALOGW("remote-control: 起线程失败，本连接串行处理");
+            // 线程创建失败时仍然走同一个 wrapper，保证连接从集合中
+            // 注销并唤醒 Stop() 的等待者。
+            serve();
         }
     }
     ALOGI("remote-control: accept 循环退出");
