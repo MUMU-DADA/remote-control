@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <limits>
@@ -51,6 +52,22 @@ constexpr size_t kMinBodyRateBytesPerSec = 1u << 20;
 // 每一帧都能写出去一部分，攒不到 10 秒。
 constexpr int kSendTimeoutSec = 10;
 constexpr size_t kMaxHeaderBytes = 64 * 1024;
+
+std::string DefaultSpoolDir() {
+    // Product deployments keep request bodies beside the other service
+    // artifacts.  Public locations remain development fallbacks for the
+    // manual /data/local/tmp deployment.
+    const char* candidates[] = {"/data/misc/remote-control", "/data/local/tmp",
+                                "/data/tmp", "/tmp", nullptr};
+    for (const char* candidate : candidates) {
+        struct stat st{};
+        if (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode) &&
+            access(candidate, W_OK | X_OK) == 0) {
+            return candidate;
+        }
+    }
+    return "/data/local/tmp";
+}
 
 thread_local HttpServer* gActiveHttpServer = nullptr;
 thread_local int gActiveHttpFd = -1;
@@ -776,7 +793,7 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
     const bool shouldSpool = contentLength > spoolThreshold_;
     ScopedTempFile spool;
     if (shouldSpool) {
-        const std::string dir = spoolDir_.empty() ? "/data/local/tmp" : spoolDir_;
+        const std::string dir = spoolDir_.empty() ? DefaultSpoolDir() : spoolDir_;
         spool.path = dir + "/remote-control-body-" + std::to_string(getpid()) +
                      "-XXXXXX";
         std::vector<char> pathBuf(spool.path.begin(), spool.path.end());

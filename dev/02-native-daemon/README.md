@@ -83,7 +83,7 @@ HTTP 面，判据一律取**设备侧证据**（重启看 `uptime` 归零、按�
 │   ├── test_integration.cpp          端到端集成测试（39 项）
 │   ├── test_capture_screencap.cpp    screencap 后端测试（18 项）
 │   ├── test_appops.cpp               应用管理后端（57 项）
-│   ├── test_json.cpp                 JSON 解析/输出（34 项）
+│   ├── test_json.cpp                 JSON 解析/输出（49 项）
 │   ├── test_keyboard.cpp             按键注入（79 项）
 │   ├── test_websocket.cpp            WS 握手（18 项）
 │   ├── test_fileops.cpp              文件路径边界（18 项）
@@ -140,7 +140,7 @@ sudo make run   # 编译并运行全部测试
 | `test_integration` | **端到端**：socket → dispatch → 帧通道 / 注入 → 内核 | 47 |
 | `test_capture_screencap` | screencap 后端：fork/exec → 解析 → memfd | 18 |
 | `test_appops` | 应用管理后端（`pm`/`am`/`cmd` 子进程解析） | 57 |
-| `test_json` | JSON 解析 / 输出（用 AOSP 树内的 jsoncpp） | 34 |
+| `test_json` | JSON 解析 / 输出（用 AOSP 树内的 jsoncpp） | 49 |
 | `test_keyboard` | 按键注入（键名映射 → 键码） | 79 |
 | `test_websocket` | WS 握手与 Close 控制帧 | 24 |
 | `test_transport` | HTTP / Unix socket 生命周期 | 21 |
@@ -162,7 +162,7 @@ sudo make run   # 编译并运行全部测试
                                                                   └─ /dev/uinput ──> 内核 ──> eventN 读回
 ```
 
-**实测结果：11 个套件、352 项检查全部通过**
+**实测结果：11 个套件、367 项检查全部通过**
 
 ```
 test_inject_uinput（38 项）

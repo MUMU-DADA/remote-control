@@ -871,8 +871,9 @@ curl -X POST 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
 原因：不删的话每次安装都在 `/sdcard` 上留一个几十 MB 的 APK，
 用一阵子就是一堆，而且没人会想起来清。成功、失败、连打开失败都删。
 
-中间还有一层：`InstallApp` 自己会在 `/data/local/tmp/remote-control-install-*.apk`
-落一个临时文件，同样无论成败都清掉。
+中间还有一层：`InstallApp` 自己会在服务私有目录
+`/data/misc/remote-control/remote-control-install-*` 落一个临时文件，
+同样无论成败都清掉。开发期服务目录不可用时才回退到 `/data/local/tmp` 等临时目录。
 
 响应：`{"ok":true,"bytes":16805,"replace":true}`
 失败时 `error` 是 installer 的原话（签名冲突、版本降级、空间不足）。
