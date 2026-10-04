@@ -13,7 +13,7 @@
 #
 # 完整设计见 docs/09-deployment-and-update.md。
 
-service remote-control /system/bin/remote-control --socket /data/misc/remote-control/remote-control.sock --socket-mode 0666 --config /data/misc/remote-control/remote-control.conf --log /data/misc/remote-control/remote-control.log
+service remote-control /system/bin/remote-control --socket /data/misc/remote-control/remote-control.sock --socket-mode 0660 --config /data/misc/remote-control/remote-control.conf --log /data/misc/remote-control/remote-control.log
     class core
 
     # ── 运行身份：shell，不是 system ──────────────────────────────────────
@@ -56,16 +56,9 @@ service remote-control /system/bin/remote-control --socket /data/misc/remote-con
     #    取舍定了之后这里再换成 remote-control-launch。
     seclabel u:r:remote_control:s0
 
-    # init 创建 /dev/socket/remote-control，把 fd 通过
-    # ANDROID_SOCKET_remote-control 传给 remote-control。
-    #
-    # ⚠️ 权限必须是 **0666**：0660 + system:system 意味着只有 system UID/组能连，
-    #    而上位应用是 untrusted_app 自己的 UID —— 连不上。
-    #    真正的边界交给 SELinux 域（dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/remote_control_controller.te
-    #    里已经只为控制器应用放开了这一个 socket）。
-    #
-    #    注意：init 模式下 `--socket-mode` 是**无效**的（fd 由 init 建好传进来），
-    #    所以只能在这里定。
+    # 当前服务自己 bind /data/misc/remote-control 下的 socket，权限先收紧为 0660。
+    # SocketServer 还会通过 SO_PEERCRED 校验对端 UID；需要跨 UID 的客户端时，
+    # 必须显式增加 --socket-peer-uid，并同时配置对应的 SELinux 规则。
     # ⚠️ **不用 init 的 socket**（原来这里是
     #        socket remote-control seqpacket 0666 system system
     #    外加启动参数 --init-socket remote-control）。

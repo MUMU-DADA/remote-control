@@ -1,6 +1,7 @@
 // test_transport.cpp — HTTP / Unix socket transport lifecycle regressions
 
 #include "http_server.h"
+#include "config_file.h"
 #include "socket_server.h"
 #include "test_util.h"
 
@@ -449,6 +450,170 @@ void TestUnixShortPacketFdCleanup() {
     runner.join();
 }
 
+void TestUnixPeerUidAuthorization() {
+    printf("\n\033[1;34m[7] Unix socket SO_PEERCRED 鉴权\033[0m\n");
+    char pathTemplate[] = "/tmp/remote-control-transport-auth-XXXXXX";
+    const int tempFd = mkstemp(pathTemplate);
+    if (tempFd < 0) {
+        Check(false, "创建鉴权测试 socket 路径: %s", strerror(errno));
+        return;
+    }
+    close(tempFd);
+    unlink(pathTemplate);
+
+    SocketServer server = SocketServer::FromPath(pathTemplate);
+    // 选择一个与当前客户端 UID 不同的值，验证白名单不是只记录日志。
+    const uid_t peerUid = geteuid();
+    const uid_t deniedUid = peerUid == 0 ? 1 : 0;
+    server.SetAllowedPeerUid(deniedUid);
+    std::string error;
+    if (!server.Start(&error)) {
+        Check(false, "启动鉴权测试 Unix socket: %s", error.c_str());
+        unlink(pathTemplate);
+        return;
+    }
+
+    std::atomic<int> handled{0};
+    std::thread runner([&]() {
+        server.Run([&](const Request&, const std::string&, int, int) {
+            ++handled;
+            return ReplyPacket{};
+        });
+    });
+
+    const int peer = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, pathTemplate, strlen(pathTemplate) + 1);
+    const bool connected = peer >= 0 &&
+            connect(peer, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+    if (!connected) {
+        Check(false, "连接鉴权测试 Unix socket");
+        if (peer >= 0) close(peer);
+    } else {
+        timeval timeout{};
+        timeout.tv_sec = 3;
+        setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        Request request{};
+        const ssize_t sent = send(peer, &request, sizeof(request), MSG_NOSIGNAL);
+        char byte = 0;
+        const ssize_t readResult = read(peer, &byte, sizeof(byte));
+        Check(sent == static_cast<ssize_t>(sizeof(request)),
+              "未授权 UID 仍能发送请求到 socket");
+        Check(readResult <= 0, "SO_PEERCRED 拒绝未授权 UID，不返回协议应答");
+        Check(handled.load() == 0, "未授权请求不会进入 handler");
+        close(peer);
+    }
+
+    server.Stop();
+    runner.join();
+}
+
+void TestUnixPathTypeGuard() {
+    printf("\n\033[1;34m[8] Unix socket 路径类型保护\033[0m\n");
+    char pathTemplate[] = "/tmp/remote-control-transport-path-XXXXXX";
+    const int regularFd = mkstemp(pathTemplate);
+    if (regularFd < 0) {
+        Check(false, "创建普通文件路径: %s", strerror(errno));
+        return;
+    }
+    const char marker[] = "keep-me";
+    (void)write(regularFd, marker, sizeof(marker) - 1);
+    close(regularFd);
+
+    SocketServer server = SocketServer::FromPath(pathTemplate);
+    std::string error;
+    const bool started = server.Start(&error);
+    Check(!started, "普通文件路径不会被当作残留 socket 删除");
+
+    struct stat st{};
+    const bool remains = stat(pathTemplate, &st) == 0 &&
+                         S_ISREG(st.st_mode) && st.st_size ==
+                         static_cast<off_t>(sizeof(marker) - 1);
+    Check(remains, "普通文件仍保持原样");
+    unlink(pathTemplate);
+}
+
+void TestUnixActiveSocketGuard() {
+    printf("\n\033[1;34m[9] Unix socket 活跃实例保护\033[0m\n");
+    char pathTemplate[] = "/tmp/remote-control-transport-active-XXXXXX";
+    const int tempFd = mkstemp(pathTemplate);
+    if (tempFd < 0) {
+        Check(false, "创建活跃 socket 路径: %s", strerror(errno));
+        return;
+    }
+    close(tempFd);
+    unlink(pathTemplate);
+
+    SocketServer owner = SocketServer::FromPath(pathTemplate);
+    std::string error;
+    if (!owner.Start(&error)) {
+        Check(false, "启动首个 Unix socket server: %s", error.c_str());
+        unlink(pathTemplate);
+        return;
+    }
+
+    SocketServer contender = SocketServer::FromPath(pathTemplate);
+    error.clear();
+    const bool started = contender.Start(&error);
+    Check(!started && error.find("活动实例") != std::string::npos,
+          "已有监听实例时拒绝删除并接管 socket");
+    struct stat st{};
+    Check(lstat(pathTemplate, &st) == 0 && S_ISSOCK(st.st_mode),
+          "拒绝接管后原 socket 路径仍存在");
+    owner.Stop();
+    unlink(pathTemplate);
+}
+
+void TestConfigSaveTempFileSafety() {
+    printf("\n\033[1;34m[10] 配置文件临时文件安全写入\033[0m\n");
+    char dirTemplate[] = "/tmp/remote-control-config-XXXXXX";
+    char* dirName = mkdtemp(dirTemplate);
+    if (!dirName) {
+        Check(false, "创建配置测试目录: %s", strerror(errno));
+        return;
+    }
+    const std::string dir(dirName);
+    const std::string path = dir + "/config";
+    const std::string victim = dir + "/victim";
+    const std::string predictable = path + ".tmp";
+
+    const int victimFd = open(victim.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    const char marker[] = "keep-me";
+    if (victimFd >= 0) {
+        (void)write(victimFd, marker, sizeof(marker) - 1);
+        close(victimFd);
+    }
+    const bool linkMade = symlink(victim.c_str(), predictable.c_str()) == 0;
+    PersistedConfig cfg;
+    cfg.auth = true;
+    cfg.token = "fresh-token";
+    std::string error;
+    const bool saved = ConfigFile::Save(path, cfg, &error);
+    Check(victimFd >= 0 && linkMade && saved,
+          "配置保存成功且不跟随固定 .tmp 符号链接");
+
+    std::string contents;
+    const int readFd = open(victim.c_str(), O_RDONLY);
+    char buf[32]{};
+    if (readFd >= 0) {
+        const ssize_t n = read(readFd, buf, sizeof(buf));
+        if (n > 0) contents.assign(buf, static_cast<size_t>(n));
+        close(readFd);
+    }
+    PersistedConfig loaded;
+    std::string loadError;
+    const bool loadedOk = ConfigFile::Load(path, &loaded, &loadError);
+    Check(contents == std::string(marker, sizeof(marker) - 1) && loadedOk &&
+                  loaded.token == cfg.token,
+          "原目标文件保持不变且新配置可读取");
+
+    unlink(predictable.c_str());
+    unlink(path.c_str());
+    unlink(victim.c_str());
+    rmdir(dir.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -459,5 +624,9 @@ int main() {
     TestHttpSpoolCleanup();
     TestHttpContentLengthValidation();
     TestUnixShortPacketFdCleanup();
+    TestUnixPeerUidAuthorization();
+    TestUnixPathTypeGuard();
+    TestUnixActiveSocketGuard();
+    TestConfigSaveTempFileSafety();
     return remote_control_test::Summary("传输层生命周期");
 }

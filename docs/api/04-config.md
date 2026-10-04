@@ -145,7 +145,8 @@ curl "http://host:8088/api/v1/config?token=$T"
 **网页本身**（`/`、`/index.html`、`/ui`）不校验。它只是静态页面、
 不含任何秘密，而用户得先打开它才有地方输入令牌。
 
-网页会把令牌存在 `localStorage`。
+跨 UID 的 Unix socket 客户端还需显式增加 `--socket-peer-uid <uid>`；仅把
+文件模式改成 `0666` 不会绕过 `SO_PEERCRED`。网页会把令牌存在 `localStorage`。
 收到 401 时它会弹出输入条，而不是让你对着一个点不动的页面猜。
 
 ### ⚠️ 无鉴权 + 对外绑定 = 设备控制权交给整个网络
@@ -166,7 +167,7 @@ curl "http://host:8088/api/v1/config?token=$T"
 remote-control [选项]
 
   --socket <路径>      手动 bind 一个 Unix socket（开发期用）
-  --init-socket <名字> 接管 init 创建的 socket（生产用，见 remote-control.rc）
+  --init-socket <名字> 接管 init 创建的 socket（历史兼容模式）
   --display <id>       指定显示 ID，0 表示自动选主显示
   --touch-range <WxH>  触控坐标范围，默认取显示分辨率
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
@@ -178,6 +179,7 @@ remote-control [选项]
   --http-port <端口>   HTTP 端口，默认 8088
   --http-token <令牌>  访问令牌。给了就等于开启鉴权
   --socket-mode <8进制> socket 文件权限，默认 0660
+  --socket-peer-uid <uid> 允许连接 Unix socket 的对端 UID；默认当前 daemon UID
   --foreground         前台运行，日志输出到 stderr
   --verbose            详细日志
   -h, --help           显示本帮助
@@ -189,14 +191,15 @@ remote-control [选项]
   # 常用：让配置文件决定监听地址/端口/鉴权
   remote-control --socket /data/local/tmp/remote-control.sock
 
-  # 生产：由 init 拉起，socket 由 init 创建并打好 SELinux 标签
+  # 历史兼容：接管 init 创建并打好 SELinux 标签的 socket
   remote-control --init-socket remote-control
 ```
 
 ### `--socket-mode` 的权衡
 
-默认 `0660`（root:root）。要让上位应用以**自己的 UID** 连入，
-得放宽到 `0666` —— 但那意味着同设备任何进程都能控制本服务。
+默认 `0660`（root:root）。放宽到 `0666` 只改变文件层访问权限，
+不足以让其它 UID 连接：服务还会用 `SO_PEERCRED` 校验对端 UID。
+需要跨 UID 客户端时，启动参数显式指定 `--socket-peer-uid <uid>`，并谨慎评估授权范围。
 
 生产环境应该走 SELinux（见 `dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/`），
 而不是靠放宽文件权限。
@@ -222,7 +225,7 @@ curl -X POST http://host:8088/api/v1/config \
 | `verbose` | **热改** | 详细日志 |
 | `log-level` | **热改** | `debug` / `info` / `warn` / `error` |
 | `display` | **热改** | 显示 ID |
-| `socket-mode` | **热改** | socket 文件权限（会重新 chmod） |
+| `socket-mode` | **热改** | socket 文件权限（对已打开的监听 fd 调整权限） |
 | `touch-range` | **热改** | `WxH`。会**重建注入设备** |
 | `touch-width` / `touch-height` | **热改** | 单独设某一维 |
 | `socket` | 需重启 | socket 一旦 bind 就定了 |
@@ -302,7 +305,7 @@ serving=1
 
 ```
 service remote-control /system/bin/remote-control \
-        --socket /data/misc/remote-control/remote-control.sock --socket-mode 0666 \
+        --socket /data/misc/remote-control/remote-control.sock --socket-mode 0660 \
         --config /data/misc/remote-control/remote-control.conf \
         --log    /data/misc/remote-control/remote-control.log
     class core

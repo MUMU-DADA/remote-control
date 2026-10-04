@@ -100,8 +100,8 @@ class ServiceState {
     ApplyResult Apply(const std::vector<std::pair<std::string, std::string>>& kv);
     std::string ApplyResultJson(const ApplyResult& r) const;
 
-    // 供 --socket-mode 热改时回调（chmod 现有 socket 文件）
-    void SetSocketChmodHook(void (*hook)(uint32_t mode));
+    // 供 --socket-mode 热改时回调（由监听方对已打开的 socket fd 调整权限）
+    void SetSocketChmodHook(std::function<void(uint32_t mode)> hook);
     uint32_t CurrentSocketMode() const;
 
     // ── 统计 ────────────────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ class ServiceState {
     Capture*  capture_  = nullptr;
     Injector* injector_ = nullptr;
 
-    void (*socketChmodHook_)(uint32_t) = nullptr;
+    std::function<void(uint32_t)> socketChmodHook_;
     uint32_t socketMode_ = 0660;
 
     int64_t  startTimeMs_ = 0;

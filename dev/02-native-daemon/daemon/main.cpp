@@ -13,6 +13,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
@@ -57,7 +58,7 @@ void PrintUsage(const char* argv0) {
 
 选项:
   --socket <路径>      手动 bind 一个 Unix socket（开发期用）
-  --init-socket <名字> 接管 init 创建的 socket（生产用，见 remote-control.rc）
+  --init-socket <名字> 接管 init 创建的 socket（历史兼容模式）
   --display <id>       指定显示 ID，0 表示自动选主显示
   --touch-range <WxH>  触控坐标范围，默认取显示分辨率
   --uid <uid>          所有初始化完成后降到该 UID（需要 root）
@@ -71,8 +72,8 @@ void PrintUsage(const char* argv0) {
   --http-token <令牌>   访问令牌。给了就等于开启鉴权；
                         不给则由配置文件的 auth=/token= 决定
   --socket-mode <8进制>  socket 文件权限，默认 0660
-                        放宽到 0666 可让上位应用以自己的 UID 连入；
-                        但那意味着同设备任何进程都能控制本服务，请自行权衡
+                        文件权限之外还会按 SO_PEERCRED 校验 UID
+  --socket-peer-uid <uid> 允许连接 Unix socket 的对端 UID；默认当前 daemon UID
   --log <路径>         日志落盘路径，默认与配置文件同目录
   --ready-file <路径>   就绪后把**自身二进制的 sha256** 写进这个文件。
                         启动壳（remote-control-launch）靠它判断载荷起没起来，
@@ -89,7 +90,7 @@ void PrintUsage(const char* argv0) {
   # 常用：让配置文件决定监听地址/端口/鉴权（上位应用就是这么管的）
   remote-control --socket /data/local/tmp/remote-control.sock
 
-  # 生产：由 init 拉起，socket 由 init 创建并打好 SELinux 标签
+  # 历史兼容：接管 init 创建并打好 SELinux 标签的 socket
   remote-control --init-socket remote-control
 )",
             argv0);
@@ -138,6 +139,8 @@ int main(int argc, char** argv) {
     bool        dropPrivileges = false;
     bool        selfTest       = false;
     mode_t      socketMode     = 0660;
+    uid_t       socketPeerUid  = 0;
+    bool        socketPeerUidSet = false;
     std::string httpBind;                 // 空 = 不启用 HTTP API
     uint16_t    httpPort       = 8088;
     std::string httpToken;
@@ -170,6 +173,7 @@ int main(int argc, char** argv) {
         kOptGid,
         kOptSelfTest,
         kOptSocketMode,
+        kOptSocketPeerUid,
         kOptConfig,
         kOptHttpBind,
         kOptHttpPort,
@@ -187,6 +191,7 @@ int main(int argc, char** argv) {
         {"touch-range", required_argument, nullptr, kOptTouchRange},
         {"selftest",    no_argument,       nullptr, kOptSelfTest},
         {"socket-mode", required_argument, nullptr, kOptSocketMode},
+        {"socket-peer-uid", required_argument, nullptr, kOptSocketPeerUid},
         {"config",      required_argument, nullptr, kOptConfig},
         {"http-bind",   required_argument, nullptr, kOptHttpBind},
         {"http-port",   required_argument, nullptr, kOptHttpPort},
@@ -266,6 +271,20 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 socketMode = static_cast<mode_t>(v);
+                break;
+            }
+
+            case kOptSocketPeerUid: {
+                errno = 0;
+                char* end = nullptr;
+                const unsigned long long v = strtoull(optarg, &end, 10);
+                if (errno != 0 || end == optarg || *end != '\0' ||
+                    v > static_cast<unsigned long long>(UINT_MAX)) {
+                    fprintf(stderr, "错误: --socket-peer-uid 需为有效 UID\n");
+                    return 1;
+                }
+                socketPeerUid = static_cast<uid_t>(v);
+                socketPeerUidSet = true;
                 break;
             }
 
@@ -386,16 +405,11 @@ int main(int argc, char** argv) {
         server.SetSocketMode(socketMode);
 
         // 让 SetConfig("socket-mode", ...) 能真正作用到已监听的 socket 上。
-        // 不做这一步的话，"改成功了"只是改了个数字，用户下次连接还是老权限 ——
-        // 这种"报告成功但实际没变"是最难排查的一类问题。
+        // 回调由 SocketServer 对已打开的监听 fd 调用 fchmod，避免重新解析
+        // 可被替换的路径。
         ServiceState::Instance().SetSocketChmodHook(
-            [](uint32_t mode) {
-                const std::string& p = ServiceState::Instance()
-                                            .GetConfig().socketPath;
-                if (!p.empty() && chmod(p.c_str(), mode) != 0) {
-                    ALOGW("socket-mode 热改失败: chmod(%s, %04o): %s", p.c_str(),
-                          mode, strerror(errno));
-                }
+            [&server](uint32_t mode) {
+                server.SetSocketMode(static_cast<mode_t>(mode));
             });
     }
 
@@ -591,6 +605,9 @@ int main(int argc, char** argv) {
             ALOGW("起配置监视线程失败，配置文件改动不会实时生效");
         }
     }
+    if (socketPeerUidSet) {
+        server.SetAllowedPeerUid(socketPeerUid);
+    }
 
     if (!httpBind.empty()) {
         HttpServer::Options opts;
@@ -696,6 +713,9 @@ int main(int argc, char** argv) {
     // 仍可能正在执行最后一条请求。先显式等待它们退出，再销毁
     // Dispatcher/Capture 等被 handler 引用的对象。
     server.Stop();
+    // 配置监视线程是 detached 的，清除捕获 server 的热改回调；Apply()
+    // 在同一把 ServiceState 锁下调用回调，因此这里返回后不会再有旧回调。
+    ServiceState::Instance().SetSocketChmodHook({});
     gServer = nullptr;
     httpServer.Stop();
     if (httpThreadStarted) pthread_join(httpThread, nullptr);
