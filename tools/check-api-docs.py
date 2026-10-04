@@ -109,7 +109,7 @@ print("\n[6] /params 的抓帧节奏（01-http.md）")
 pm = api("/params")
 cap = pm.get("capture", {})
 t = open(os.path.join(DOCS, "01-http.md"), encoding="utf-8").read()
-for f in ("activeFps", "subscribers", "frames", "lastCaptureMs",
+for f in ("activeFps", "nextIntervalMs", "adaptive", "subscribers", "frames", "lastCaptureMs",
           "captureWidth", "served", "misses", "running", "subscriberList",
           "changeGen", "unchanged"):
     chk(f in cap, f"capture.{f} 存在", f"实际字段 {sorted(cap)}")
@@ -308,7 +308,7 @@ chk(deny.get("ok") is not True, "越界路径被拒", str(deny)[:60])
 alias = api("/files?path=/sdcard")
 chk(alias.get("ok") is True, "/sdcard 别名可用", str(alias.get("error"))[:60])
 t01 = open(os.path.join(DOCS, "01-http.md"), encoding="utf-8").read()
-for f in ("storage", "op=roots", "4 GB", "realpath"):
+for f in ("storage", "op=roots", "4 GiB", "realpath"):
     chk(f in t01, f"01-http.md 里写了 {f}")
 chk("install" in t01 and "落盘" in t01, "01-http.md 说明了上传落盘")
 

@@ -18,12 +18,14 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <limits>
 #include <unistd.h>
 
 #include "thread_util.h"
+#include "stale_temp_cleanup.h"
 
 #include "remote_control_log.h"
 #include "json_writer.h"
@@ -37,6 +39,7 @@ constexpr int kReadTimeoutSec = 30;
 // a declared request body instead of applying the small-request timeout to
 // the entire upload.
 constexpr size_t kMinBodyRateBytesPerSec = 1u << 20;
+constexpr uint64_t kUploadSpaceReserveBytes = 64ull << 20;
 
 // 流式响应的**发送**超时。
 //
@@ -67,6 +70,23 @@ std::string DefaultSpoolDir() {
         }
     }
     return "/data/local/tmp";
+}
+
+bool IsFileUploadRoute(const std::string& path) {
+    const char* expected[] = {"api", "v1", "files", "upload"};
+    size_t segment = 0;
+    size_t pos = 0;
+    while (pos < path.size()) {
+        while (pos < path.size() && path[pos] == '/') ++pos;
+        if (pos == path.size()) break;
+        if (segment == sizeof(expected) / sizeof(expected[0])) return false;
+        size_t end = path.find('/', pos);
+        if (end == std::string::npos) end = path.size();
+        if (path.compare(pos, end - pos, expected[segment]) != 0) return false;
+        ++segment;
+        pos = end;
+    }
+    return segment == sizeof(expected) / sizeof(expected[0]);
 }
 
 thread_local HttpServer* gActiveHttpServer = nullptr;
@@ -176,12 +196,23 @@ const char* StatusText(int code) {
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
+        case 409: return "Conflict";
         case 413: return "Payload Too Large";
+        case 429: return "Too Many Requests";
         case 500: return "Internal Server Error";
+        case 507: return "Insufficient Storage";
         case 503: return "Service Unavailable";
         default:  return "OK";
     }
 }
+
+struct ScopeExit {
+    std::function<void()> fn;
+    ~ScopeExit() { if (fn) fn(); }
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    explicit ScopeExit(std::function<void()> f) : fn(std::move(f)) {}
+};
 
 }  // namespace
 
@@ -324,7 +355,15 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     maxBody_  = opts.maxBodyBytes;
     spoolThreshold_ = opts.spoolThresholdBytes;
     maxConns_ = opts.maxConns > 0 ? opts.maxConns : 128;
-    spoolDir_ = opts.spoolDir;
+    spoolDir_ = opts.spoolDir.empty() ? DefaultSpoolDir() : opts.spoolDir;
+    const size_t staleSpools = RemoveStaleTempFiles(
+            spoolDir_.c_str(), "remote-control-body-");
+    if (staleSpools > 0) {
+        ALOGI("HTTP 启动时清理了 %zu 个中断上传暂存文件", staleSpools);
+    }
+    maxFileUploadBytes_ = std::min(opts.maxFileUploadBytes, maxBody_);
+    maxInFlightFileUploadDiskBytes_ = opts.maxInFlightFileUploadDiskBytes;
+    uploadDiskBytesInFlight_ = 0;
 
     const bool loopbackOnly = (opts.bindAddr == "127.0.0.1" ||
                                opts.bindAddr == "::1" ||
@@ -615,6 +654,12 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
     // occupy a worker indefinitely.
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::seconds(kReadTimeoutSec);
+    uint64_t reservedUploadDiskBytes = 0;
+    ScopeExit uploadReservationGuard([this, &reservedUploadDiskBytes]() {
+        if (reservedUploadDiskBytes != 0) {
+            ReleaseFileUploadDisk(reservedUploadDiskBytes);
+        }
+    });
     auto readChunk = [&](char* dst, size_t size) -> ssize_t {
         for (;;) {
             const auto now = std::chrono::steady_clock::now();
@@ -780,6 +825,8 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
         }
     }
 
+    out->bodySize = contentLength;
+
     // Headers still have the fixed 30-second deadline above. Once the
     // declared body size is known, allow a bounded transfer budget of
     // 30 seconds plus one second per MiB. This keeps a peer from extending
@@ -797,6 +844,14 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
     // 头读完了，正文**还没读** —— 给调用方一个提前拒绝的机会
     // （鉴权就走这里，见 ServeConnection）。
     if (onHeaders && !onHeaders(*out)) return false;
+
+    if (out->method == "POST" && IsFileUploadRoute(out->path) &&
+        contentLength > 0) {
+        if (!ReserveFileUploadDisk(contentLength, &reservedUploadDiskBytes,
+                                   errReply)) {
+            return false;
+        }
+    }
 
     // ── 大请求体落盘 ──
     //
@@ -883,6 +938,8 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
         body.resize(contentLength);
         out->body = std::move(body);
     }
+    out->bodyAdmissionDiskBytes = reservedUploadDiskBytes;
+    reservedUploadDiskBytes = 0;
 
     // 鉴权**不在这里**做。
     //
@@ -894,16 +951,73 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
     return true;
 }
 
-namespace {
-// 作用域退出时跑一次回调。给"响应写完之后再执行待办"用。
-struct ScopeExit {
-    std::function<void()> fn;
-    ~ScopeExit() { if (fn) fn(); }
-    ScopeExit(const ScopeExit&) = delete;
-    ScopeExit& operator=(const ScopeExit&) = delete;
-    explicit ScopeExit(std::function<void()> f) : fn(std::move(f)) {}
-};
-}  // namespace
+bool HttpServer::ReserveFileUploadDisk(size_t bytes, uint64_t* reservedBytes,
+                                       HttpResponse* error) {
+    if (bytes > maxFileUploadBytes_) {
+        *error = HttpResponse::Error(
+                413, "文件上传超过单文件上限 " +
+                             std::to_string(maxFileUploadBytes_) + " 字节");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(uploadBudgetMutex_);
+    const uint64_t bytes64 = static_cast<uint64_t>(bytes);
+    const uint64_t duplicateBytes = bytes > spoolThreshold_ ? bytes64 : 0;
+    if (duplicateBytes > std::numeric_limits<uint64_t>::max() - bytes64) {
+        *error = HttpResponse::Error(413, "上传正文尺寸超出当前架构可处理范围");
+        return false;
+    }
+    const uint64_t projectedBytes = bytes64 + duplicateBytes;
+    const uint64_t currentlyReserved = std::min(uploadDiskBytesInFlight_,
+                                                 maxInFlightFileUploadDiskBytes_);
+    if (projectedBytes > maxInFlightFileUploadDiskBytes_ - currentlyReserved) {
+        *error = HttpResponse::Error(
+                429, "上传空间正被其他请求占用，请稍后重试");
+        return false;
+    }
+
+    const std::string dir = spoolDir_.empty() ? DefaultSpoolDir() : spoolDir_;
+    struct statvfs space{};
+    if (statvfs(dir.c_str(), &space) != 0) {
+        *error = HttpResponse::Error(
+                507, "无法检查上传临时空间: " + std::string(strerror(errno)));
+        return false;
+    }
+    const uint64_t blocks = static_cast<uint64_t>(space.f_bavail);
+    const uint64_t blockSize = static_cast<uint64_t>(
+            space.f_frsize != 0 ? space.f_frsize : space.f_bsize);
+    const uint64_t available = blockSize != 0 &&
+                                       blocks > std::numeric_limits<uint64_t>::max() / blockSize
+                               ? std::numeric_limits<uint64_t>::max()
+                               : blocks * blockSize;
+    const uint64_t currentReserved = uploadDiskBytesInFlight_;
+    if (currentReserved > std::numeric_limits<uint64_t>::max() -
+                                  static_cast<uint64_t>(projectedBytes) ||
+        currentReserved + static_cast<uint64_t>(projectedBytes) >
+                std::numeric_limits<uint64_t>::max() -
+                        kUploadSpaceReserveBytes) {
+        *error = HttpResponse::Error(507, "上传空间预留值超出可表示范围");
+        return false;
+    }
+    const uint64_t reserved = currentReserved + projectedBytes;
+    const uint64_t needed = reserved + kUploadSpaceReserveBytes;
+    if (available < needed) {
+        *error = HttpResponse::Error(
+                507, "上传需要 spool 与目标文件的双份空间，当前可用空间不足");
+        return false;
+    }
+
+    uploadDiskBytesInFlight_ += projectedBytes;
+    *reservedBytes = projectedBytes;
+    return true;
+}
+
+void HttpServer::ReleaseFileUploadDisk(uint64_t bytes) {
+    std::lock_guard<std::mutex> lock(uploadBudgetMutex_);
+    uploadDiskBytesInFlight_ = bytes <= uploadDiskBytesInFlight_
+                                   ? uploadDiskBytesInFlight_ - bytes
+                                   : 0;
+}
 
 void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
     struct ActiveConnectionGuard {
@@ -1005,6 +1119,12 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
         (void)SendAllNoSignal(connFd, head.data(), head.size());
         return;
     }
+
+    ScopeExit uploadBudgetGuard([this, &req]() {
+        if (req.bodyAdmissionDiskBytes != 0) {
+            ReleaseFileUploadDisk(req.bodyAdmissionDiskBytes);
+        }
+    });
 
     struct BodyFileGuard {
         const std::string& path;

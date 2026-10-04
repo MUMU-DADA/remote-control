@@ -17,7 +17,7 @@
 //     客户端A ──读最新帧── 降采样/编码（各自并行）
 //     客户端B ──读最新帧──
 //
-// ## 抓帧节奏：按「所有订阅者的最高需求」，而不是按请求触发
+// ## 抓帧节奏：按订阅需求持续抓，静帧时可共享退避
 //
 // 第一版是按需触发（消费者请求时才抓）。那样**省 CPU，但延迟很差**：
 //
@@ -29,9 +29,10 @@
 //
 // 现在改成**按时抓帧**：
 //
-//   - 抓帧线程按 `max(所有订阅者的目标帧率)` 持续抓
+//   - 抓帧线程按 `max(所有订阅者的目标帧率)` 抓取
 //   - 消费者来了**直接拿最新帧**，延迟接近 0
 //   - 客户端改帧率 → 重算节奏（跟着最高需求走）
+//   - 全部订阅者都允许停检时，静帧探测逐步降到 10fps；更低的目标帧率照旧
 //   - 没有订阅者 → 停线程，一次都不抓
 //
 // 既满足"消费端只要 10 帧就别抓 30 帧"，又没有按需触发的延迟。
@@ -116,6 +117,12 @@ class FrameHub {
         // 客户端改了帧率就调它（服务端会重算抓帧节奏）。
         void SetFps(int fps);
 
+        // 所有订阅者都启用停检时，允许静止画面降低共享探测频率。
+        void SetSkipUnchanged(bool enabled);
+
+        // 页面恢复可见等场景要求尽快刷新时，立即安排一次抓帧。
+        void RequestFrame();
+
         // 客户端改了降采样宽度就调它。
         //
         // 抓帧按**所有订阅者里最大的 maxWidth** 来 ——
@@ -160,7 +167,11 @@ class FrameHub {
     // 返回 nullptr 表示抓帧不可用（没有 Dispatcher / 启动失败）。
     // error 里是原因。fps 是这个订阅者的目标帧率。
     std::unique_ptr<Sub> Subscribe(int fps, uint32_t maxWidth,
-                                   std::string* error);
+                                   bool skipUnchanged, std::string* error);
+
+    // 连续静帧逐步退避到 100ms 间隔；低于 10fps 的目标仍遵循目标周期。
+    static int CaptureIntervalMs(int fps, uint32_t unchangedCaptures,
+                                 bool adaptiveEnabled);
 
     // ── 取帧 ──
 
@@ -170,13 +181,15 @@ class FrameHub {
     struct Stats {
         bool     running       = false;   // 抓帧线程在跑吗
         int      subscribers   = 0;
-        int      maxFps        = 0;       // 当前按多少 fps 在抓（0 = 没需求）
+        int      maxFps        = 0;       // 最高目标 fps（0 = 没需求）
+        int      captureIntervalMs = 0;   // 当前探测间隔（含静止画面退避）
+        bool     adaptiveCapture = false; // 所有订阅者都允许停检
         uint32_t captureWidth  = 0;       // 当前按多少宽抓（0 = 原始分辨率）
         uint64_t frames        = 0;       // 一共抓了多少帧
         uint64_t lastSeq       = 0;
         int64_t  lastCaptureMs = 0;       // 最近一次抓帧耗时
         uint64_t served        = 0;       // 取帧直接命中（没等）的次数
-        uint64_t misses        = 0;       // 没等到新帧（超时）的次数
+        uint64_t misses        = 0;       // 等待超时且没有新帧（静帧退避时可能正常）
         uint64_t changeGen     = 0;       // 当前是"第几代不同的画面"
         uint64_t unchanged     = 0;       // 内容与上一帧相同而省下的帧数
     };

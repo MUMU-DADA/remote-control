@@ -312,6 +312,8 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 
   "capture": {
     "activeFps": 30,
+    "nextIntervalMs": 33,
+    "adaptive": false,
     "subscribers": 1,
     "frames": 4419,
     "lastCaptureMs": 10,
@@ -350,21 +352,24 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 }
 ```
 
-#### `capture` —— 服务端**实际**在按什么节奏抓
+#### `capture` —— 服务端抓帧节奏
 
-抓帧线程按**所有订阅者的最高需求**跑，所以客户端只知道自己要了多少帧，
-不知道设备实际被拉到了多快 —— 那会让「我明明只要 5fps，为什么设备这么烫」
-变成一个查不出来的问题。这里如实报出来。
+`activeFps` 是所有订阅者的最高帧率上限。静止画面且所有订阅者都启用
+`skipUnchanged` 时，探测间隔会逐步增加到 100ms（10fps）；目标低于 10fps
+时仍按订阅者要求抓取。检测到变化后恢复帧率上限。
+关闭停检的订阅会阻止共享抓帧退避，以保留连续视频流的帧率。
 
 | 字段 | 说明 |
 |---|---|
-| `activeFps` | 当前抓帧节奏。**0 = 没有任何订阅者，一次都没在抓** |
+| `activeFps` | 所有订阅者的最高目标帧率。**0 = 没有订阅者，一次都没在抓** |
+| `nextIntervalMs` | 当前探测间隔；静止画面可增加到 100ms，较低目标帧率不变 |
+| `adaptive` | 所有订阅者是否都启用了停检，因此允许静帧退避 |
 | `subscribers` | 订阅者数量 |
 | `frames` | 累计抓帧次数（不管有没有人收） |
 | `lastCaptureMs` | 最近一次抓帧耗时 |
 | `captureWidth` | 当前按多少宽抓。0 = 原始分辨率 |
 | `served` | 取帧时「最新帧已备好」的次数 |
-| `misses` | 没等到新帧的次数。**这个高 = 抓帧跟不上需求，客户端在等** |
+| `misses` | 消费者等待超时且没等到新帧的次数。静帧退避时会上升，不表示画面变化帧丢失 |
 | `running` | 抓帧线程活着吗 |
 | `changeGen` | 当前是「第几代**不同**的画面」。内容变了才 +1 |
 | `unchanged` | 与上一帧完全相同而**省下**的帧数 |
@@ -387,14 +392,13 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 | `transport` | `ws` 或 `mjpeg` |
 | `isMaxFps` | **是不是它把抓帧节奏顶上来的** |
 
-> `isMaxFps` 是排查时唯一真正要看的那条。抓帧节奏由最高需求决定，
-> 所以只要有一个客户端挂着 60fps，整个进程就一直在满速抓 ——
-> 没有这个字段的话，你只能挨个关客户端去试。
+> `isMaxFps` 标出把最高帧率上限顶上来的订阅。若所有订阅都启用停检，
+> 静帧时共享抓帧会退避；任意订阅关闭停检则保持最高目标节奏。
 >
 > 控制台（`GET /`）的状态面板每 2 秒把这一段显示成一行：
 >
 > ```
-> 抓帧  服务端 60fps · 2 个订阅 · 10ms · 宽 720  ⚠ 高于本页 10fps
+> 抓帧  上限 60fps · 2 个订阅 · 10ms · 探测 16ms · 宽 720  ⚠ 高于本页 10fps
 > ```
 >
 > 服务端节奏高于本页需求时标黄 —— 那说明有别的客户端在拉。
@@ -901,7 +905,7 @@ curl -X POST 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
 ## 七、文件与下载
 
 
-**上传上限 4 GB**，且**超过 4 MB 的请求体会落盘**而不是读进内存 ——
+**上传上限 4 GiB**，且**超过 4 MB 的请求体会落盘**而不是读进内存 ——
 设备总共几 GB 内存，塞不下一个几百 MB 的 APK。
 
 早先这里写死 64 MB，稍大的 APK 直接 `413`，网页表现就是"传不上去"。
@@ -984,6 +988,37 @@ curl -X POST http://<设备IP>:8088/api/v1/files \
      -H 'Content-Type: application/json' \
      -d '{"op":"rename","path":"/sdcard/a.txt","to":"/sdcard/b.txt"}'
 ```
+
+### POST /files/upload
+
+上传一个普通文件到 `path` 指定的**现有目录**。请求体就是文件原始字节，
+不是 JSON 或 multipart；`path` 可省略（默认下载目录），`name` 必须提供：
+
+```bash
+curl -X POST --data-binary @./report.pdf \
+     -H 'Content-Type: application/octet-stream' \
+     'http://<设备IP>:8088/api/v1/files/upload?path=%2Fsdcard%2FDocuments&name=report.pdf'
+```
+
+文件名必须是单段 basename，长度为 1 到 200 字节，不能含 `/`、反斜杠或控制字符。
+目标必须位于共享存储边界内，目标目录必须已存在；目标文件已存在时返回 HTTP 409。
+服务端先在目标目录写入隐藏临时文件，完成并同步后再发布；支持 no-replace 的文件系统上，
+发布是原子的且不会覆盖已有文件。失败时清理临时文件。上传成功返回 HTTP 201：
+
+Android 共享存储的 FUSE 实现可能不支持内核的 no-replace rename 和硬链接。遇到这种情况时，
+服务会串行化自身上传并在发布前检查目标；绕过此服务、直接写共享目录的其他进程不参与这把锁。
+正常结束时临时文件立即删除；服务异常终止留下的 HTTP spool 会在下次启动时回收，
+目标目录里的临时文件会在该目录下一次上传前回收。
+
+```json
+{"ok":true,"name":"report.pdf","path":"/storage/emulated/0/Documents/report.pdf","bytes":12345}
+```
+
+单个文件最多 4 GiB，所有在途上传按 spool 与目标文件的预计占用共享 8 GiB 配额。
+空间不足时，服务端会在读取请求正文前返回 HTTP 507；配额暂时被其他上传占满时返回
+HTTP 429，稍后重试即可。大于 4 MiB 时 HTTP 层先 spool 到临时文件，文件管理处理器
+按块复制到目标目录，不会把整个文件读回内存。上传完成后会请求 Android 媒体扫描，
+扫描失败不影响已保存文件。APK 安装接口仍受 4 GiB 请求体上限约束。
 
 越界时会明确说清楚边界在哪：
 

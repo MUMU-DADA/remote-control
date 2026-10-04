@@ -158,9 +158,8 @@ const std::string& WebUiHtml() {
     <div class="card">
       <h2>状态</h2>
       <div id="status" class="dim">就绪</div>
-      <!-- 服务端**实际**在按什么节奏抓帧。
-           本页要 10fps 不代表设备只被拉 10fps —— 抓帧节奏取所有订阅者的
-           最高需求，另一个客户端挂着 60fps 就会把整机拉满。
+      <!-- 服务端帧率上限和当前探测间隔。
+           本页要 10fps 不代表帧率上限只有 10fps；其他订阅也会影响共享节奏。
            没有这一行的话，"我明明只要 10 帧为什么设备这么烫"只能靠 curl。 -->
       <div id="cadence" class="dim" style="font-size:11px;margin-top:4px"></div>
       <div id="dbg" class="dim" style="font-size:11px;margin-top:4px"></div>
@@ -296,6 +295,9 @@ const std::string& WebUiHtml() {
           <button onclick="fsGoto(fsUp())">上级</button>
           <button onclick="fsLoad()">刷新</button>
           <button onclick="fsMkdir()">新建目录</button>
+          <button onclick="$('fsfile').click()">上传文件</button>
+          <input type="file" id="fsfile" style="display:none"
+                 onchange="fsUpload(this)">
         </div>
         <!-- 当前路径。绝对路径 —— 加了存储根之后"相对谁"不再唯一。 -->
         <div id="fsPath" class="dim"
@@ -628,7 +630,7 @@ function dbg(t) {
 // 服务端抓帧节奏。
 //
 // 和顶栏那个 shownFps 是**两回事**：那个是本页实际收到多少帧，
-// 这个是设备被拉到了多快。两个数不一致本身就是要看的信息 ——
+// 这个是共享抓帧的帧率上限与当前探测间隔。两个数不一致本身就是要看的信息 ——
 // 服务端跑得比本页需求高，说明有别的客户端在拉，或者本页在丢帧。
 function renderCadence(c) {
   const el = $('cadence');
@@ -639,8 +641,11 @@ function renderCadence(c) {
     return;
   }
   const n = (c.subscriberList || []).length;
-  let t = '抓帧  服务端 ' + c.activeFps + 'fps · ' + n + ' 个订阅'
+  const baseInterval = Math.max(1, Math.floor(1000 / c.activeFps));
+  let t = '抓帧  上限 ' + c.activeFps + 'fps · ' + n + ' 个订阅'
         + ' · ' + c.lastCaptureMs + 'ms';
+  if (c.nextIntervalMs > 0) t += ' · 探测 ' + c.nextIntervalMs + 'ms';
+  if (c.adaptive && c.nextIntervalMs > baseInterval) t += '（静帧退避）';
   if (c.captureWidth > 0) t += ' · 宽 ' + c.captureWidth;
 
   // 服务端比本页需求高 → 有别人在拉，或者本页跟不上。
@@ -1716,7 +1721,7 @@ function uploadApk(input) {
   const msg = $('apkmsg');
   const mb = (f.size / 1048576).toFixed(1);
 
-  // 本地先拦一道：服务端上限是 4GB，但设备内存/磁盘都可能更小，
+  // 本地先拦一道：服务端上限是 4 GiB，但设备内存/磁盘都可能更小，
   // 与其传完才失败，不如立刻说清楚
   msg.className = 'dim';
   msg.textContent = '上传中… ' + f.name + '（' + mb + ' MB） 0%';
@@ -1871,6 +1876,40 @@ function fsMkdir() {
 function fsDel(path, isDir) {
   if (!confirm('删除 ' + path + (isDir ? '（含其中所有内容）' : '') + '？')) return;
   fsPost({op: 'delete', path: path, recursive: !!isDir}, '已删除');
+}
+
+function fsUpload(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const mb = (f.size / 1048576).toFixed(1);
+  const query = new URLSearchParams({path: fsCwd, name: f.name});
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', withToken('/api/v1/files/upload?' + query.toString()));
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+  fsMsg('上传中… ' + f.name + '（' + mb + ' MB） 0%', false);
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const pct = Math.floor(e.loaded / e.total * 100);
+    fsMsg('上传中… ' + f.name + '（' + mb + ' MB） ' + pct + '%  '
+          + (e.loaded / 1048576).toFixed(1) + ' / ' + mb + ' MB', false);
+  };
+  xhr.upload.onload = () => fsMsg('已发送 ' + mb + ' MB，正在保存…', false);
+  xhr.onload = () => {
+    let d = null;
+    try { d = JSON.parse(xhr.responseText); } catch (e) {}
+    if (xhr.status === 201 && d && d.ok) {
+      fsMsg('✓ 已上传 ' + f.name + '（' + fmtSize(d.bytes) + '）', false);
+      fsLoad();
+    } else {
+      const detail = (d && d.error) || ('HTTP ' + xhr.status);
+      fsMsg('✗ 上传失败：' + detail, true);
+    }
+  };
+  xhr.onerror = () => fsMsg('✗ 上传失败：连接错误', true);
+  xhr.onabort = () => fsMsg('上传已取消', true);
+  xhr.send(f);
+  input.value = '';
 }
 
 function fsPost(body, okText) {

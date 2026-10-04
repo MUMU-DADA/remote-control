@@ -38,6 +38,10 @@
 using namespace remote_control;
 using namespace remote_control_test;
 
+namespace remote_control {
+void SetStubCaptureFrameVariant(uint8_t variant);
+}
+
 namespace {
 
 constexpr const char* kSocketPath = "/tmp/remote-control-itest.sock";
@@ -284,7 +288,7 @@ void TestFrameHubStopRestart(Dispatcher& dispatcher, int readFd) {
     }
 
     std::string error;
-    auto oldSub = hub.Subscribe(60, 320, &error);
+    auto oldSub = hub.Subscribe(60, 320, true, &error);
     Check(oldSub != nullptr, "抓帧订阅建立%s%s", oldSub ? "" : ": ",
           oldSub ? "" : error.c_str());
     if (!oldSub) {
@@ -310,7 +314,7 @@ void TestFrameHubStopRestart(Dispatcher& dispatcher, int readFd) {
     Check(hub.GetStats().subscribers == 0, "最后一个订阅已从 FrameHub 移除");
 
     auto restarting = std::async(std::launch::async, [&hub, &error] {
-        return hub.Subscribe(60, 320, &error);
+        return hub.Subscribe(60, 320, true, &error);
     });
     const bool restarted = restarting.wait_for(std::chrono::seconds(3)) ==
                            std::future_status::ready;
@@ -341,9 +345,85 @@ void TestFrameHubStopRestart(Dispatcher& dispatcher, int readFd) {
         Check(frame != nullptr && frame->seq > 0,
               "重启后的抓帧线程产出新帧（seq=%llu）",
               static_cast<unsigned long long>(frame ? frame->seq : 0));
+
+        const auto throttleDeadline = std::chrono::steady_clock::now() +
+                                      std::chrono::seconds(3);
+        while (hub.GetStats().captureIntervalMs < 100 &&
+               std::chrono::steady_clock::now() < throttleDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        auto stats = hub.GetStats();
+        Check(stats.adaptiveCapture && stats.captureIntervalMs == 100,
+              "静帧连续探测退避到 100ms（实际 %dms）",
+              stats.captureIntervalMs);
+
+        const uint64_t staticGeneration = stats.changeGen;
+        SetStubCaptureFrameVariant(1);
+        const auto changeDeadline = std::chrono::steady_clock::now() +
+                                    std::chrono::seconds(2);
+        do {
+            stats = hub.GetStats();
+            if (stats.changeGen > staticGeneration &&
+                stats.captureIntervalMs == 16) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } while (std::chrono::steady_clock::now() < changeDeadline);
+        Check(stats.changeGen > staticGeneration &&
+                      stats.captureIntervalMs == 16,
+              "像素变化后从静帧退避恢复到目标探测周期");
+        SetStubCaptureFrameVariant(0);
+
+        newSub->SetSkipUnchanged(false);
+        stats = hub.GetStats();
+        Check(!stats.adaptiveCapture && stats.captureIntervalMs == 16,
+              "单个订阅关闭停检后恢复 60fps 探测");
+
+        auto mixedSub = hub.Subscribe(30, 320, true, &error);
+        Check(mixedSub != nullptr, "混合模式的第二个订阅建立");
+        if (mixedSub) {
+            stats = hub.GetStats();
+            Check(!stats.adaptiveCapture,
+                  "混合订阅中存在关闭停检者时禁止共享退避");
+
+            newSub->SetSkipUnchanged(true);
+            stats = hub.GetStats();
+            Check(stats.adaptiveCapture,
+                  "所有订阅都启用停检后恢复共享退避");
+
+            mixedSub->SetSkipUnchanged(false);
+            stats = hub.GetStats();
+            Check(!stats.adaptiveCapture,
+                  "动态关闭第二个订阅的停检后恢复满速");
+
+            mixedSub->SetSkipUnchanged(true);
+            newSub->SetSkipUnchanged(true);
+            newSub->RequestFrame();
+            stats = hub.GetStats();
+            Check(stats.adaptiveCapture && stats.captureIntervalMs == 16,
+                  "refresh 请求立即重置退避计时");
+            mixedSub.reset();
+        }
         newSub.reset();
     }
     Check(!hub.GetStats().running, "所有订阅退出后抓帧线程停止");
+}
+
+void TestFrameHubCaptureIntervals() {
+    printf("\n\033[1;34m[8a] FrameHub 静帧调度\033[0m  退避上限与帧率下限\n");
+    Check(FrameHub::CaptureIntervalMs(60, 0, true) == 16,
+          "画面变化后退避计数清零并恢复 60fps 探测");
+    Check(FrameHub::CaptureIntervalMs(60, 1, true) == 32,
+          "连续静帧后间隔加倍到 32ms");
+    Check(FrameHub::CaptureIntervalMs(60, 2, true) == 64,
+          "继续静止后间隔加倍到 64ms");
+    Check(FrameHub::CaptureIntervalMs(60, 3, true) == 100 &&
+                  FrameHub::CaptureIntervalMs(60, 20, true) == 100,
+          "静帧探测最多退避到 100ms");
+    Check(FrameHub::CaptureIntervalMs(60, 20, false) == 16,
+          "停检关闭时保持目标 60fps");
+    Check(FrameHub::CaptureIntervalMs(5, 20, true) == 200,
+          "退避不会超过较低目标帧率的间隔");
 }
 
 // 数当前进程打开的 fd 数量
@@ -549,6 +629,7 @@ int main() {
     TestInfo(cfd);
     TestCaptureFrame(cfd);
     TestFrameHubStopRestart(dispatcher, readFd);
+    TestFrameHubCaptureIntervals();
     TestTapRoundTrip(cfd, readFd);
     TestSwipeRoundTrip(cfd, readFd);
     TestProtocolRobustness(cfd);

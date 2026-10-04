@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <atomic>
 
 #include "remote_control_log.h"
 
@@ -26,8 +27,13 @@ namespace {
 constexpr uint32_t kStubWidth  = 1080;
 constexpr uint32_t kStubHeight = 1920;
 constexpr uint32_t kStubFormat = 1;   // PIXEL_FORMAT_RGBA_8888
+std::atomic<uint8_t> gFrameVariant{0};
 
 }  // namespace
+
+void SetStubCaptureFrameVariant(uint8_t variant) {
+    gFrameVariant.store(variant, std::memory_order_relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // Frame（与真实后端共用同一份实现语义）
@@ -138,12 +144,14 @@ bool Capture::Grab(Frame* out, std::string* error) {
     //   R 通道 = x 方向渐变，G 通道 = y 方向渐变，B 固定
     // 这样测试可以从像素值反推坐标，验证数据没被破坏。
     auto* px = static_cast<uint8_t*>(base);
+    const uint8_t blue = static_cast<uint8_t>(0x40 +
+            gFrameVariant.load(std::memory_order_relaxed));
     for (uint32_t y = 0; y < height; ++y) {
         for (uint32_t x = 0; x < width; ++x) {
             const uint64_t o = (static_cast<uint64_t>(y) * width + x) * 4;
             px[o + 0] = static_cast<uint8_t>(x * 255 / (width  - 1));
             px[o + 1] = static_cast<uint8_t>(y * 255 / (height - 1));
-            px[o + 2] = 0x40;
+            px[o + 2] = blue;
             px[o + 3] = 0xFF;
         }
     }
