@@ -52,6 +52,11 @@ probe_pkg() {
 
 log "等设备就绪"
 "$ADB" -s "$SERIAL" wait-for-device >/dev/null 2>&1 || die "设备不在（$SERIAL）"
+# `binfmt_misc` 通常只有 root adbd 才能读取。包内 verify 也必须在复用
+# 已启动设备时尝试提升权限，否则普通 adbd 会把已注册规则误报成缺失。
+# 生产版 adbd 不允许 root 时忽略失败，让实际检查按可见性报告结果。
+"$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
+"$ADB" -s "$SERIAL" wait-for-device >/dev/null 2>&1 || true
 
 log "验收 1/4：镜像身份与 ABI"
 chk "ro.build.version.sdk"   "$(prop ro.build.version.sdk)"   '^31$'
@@ -88,6 +93,7 @@ if [ -s "$APK" ]; then
     PKG="$(probe_pkg)"
     if [ -z "$PKG" ]; then
         bad "装上了但找不到探针包名（pm list packages -3 是空的）"
+        fails=$((fails + 1))
     else
         # ⚠️ 启动前先清 logcat，否则会匹配到上一轮残留的 PROBE_RESULT（假绿，踩过）
         "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true

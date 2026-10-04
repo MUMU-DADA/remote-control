@@ -245,8 +245,11 @@ void TestHttpSpoolCleanup() {
     const std::string request = std::string(
             "POST /upload HTTP/1.1\r\nHost: localhost\r\n") +
             "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
-    const bool requestSent = SendAll(fd, request.data(), request.size()) &&
-                             SendAll(fd, body.data(), body.size());
+    // 把 Content-Length 之外的字节也放在同一次写入里，覆盖头部 read
+    // 一并读到流水线数据时的落盘边界：多出来的字节不能进入 bodyFile。
+    const std::string extra = "EXTRA_PIPELINED_BYTES";
+    const std::string wire = request + body + extra;
+    const bool requestSent = SendAll(fd, wire.data(), wire.size());
     const std::string response = ReadToClose(fd);
     close(fd);
 
@@ -329,6 +332,33 @@ void TestUnixShortPacketFdCleanup() {
     Check(validSent == static_cast<ssize_t>(sizeof(validRequest)) &&
                   replyBytes == sizeof(validReply),
           "有效请求保持连接并返回应答");
+
+    // SOCK_SEQPACKET 对超出接收缓冲区的消息返回前缀并设置 MSG_TRUNC；
+    // 服务端必须拒绝整条消息，不能把截断 payload 交给 handler。
+    const int oversizedPeer = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    bool oversizedConnected = oversizedPeer >= 0 &&
+            connect(oversizedPeer, reinterpret_cast<sockaddr*>(&addr),
+                    sizeof(addr)) == 0;
+    if (!oversizedConnected) {
+        Check(false, "连接 Unix socket server（超长请求）");
+        if (oversizedPeer >= 0) close(oversizedPeer);
+    } else {
+        timeval oversizedTimeout{};
+        oversizedTimeout.tv_sec = 3;
+        setsockopt(oversizedPeer, SOL_SOCKET, SO_RCVTIMEO,
+                   &oversizedTimeout, sizeof(oversizedTimeout));
+        std::vector<char> oversized(sizeof(Request) + kMaxRequestPayload + 1);
+        memcpy(oversized.data(), &validRequest, sizeof(validRequest));
+        const ssize_t oversizedSent = send(oversizedPeer, oversized.data(),
+                                           oversized.size(), 0);
+        char byte = 0;
+        const ssize_t oversizedRead = read(oversizedPeer, &byte, 1);
+        Check(oversizedSent == static_cast<ssize_t>(oversized.size()),
+              "发送超长请求");
+        Check(oversizedRead == 0, "服务端拒绝带 MSG_TRUNC 的请求");
+        Check(handled.load() == 1, "超长请求不会进入请求处理器");
+        close(oversizedPeer);
+    }
 
     int pipeFds[2] = {-1, -1};
     if (pipe(pipeFds) != 0) {

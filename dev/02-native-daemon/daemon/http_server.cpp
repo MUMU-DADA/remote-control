@@ -7,6 +7,7 @@
 #include "protocol.h"   // kErr* 协议状态码（Error 要把它写进 status 字段）
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <ctype.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -712,14 +713,20 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
             *errReply = HttpResponse::Error(500, "设置落盘文件标志失败");
             return false;
         }
-        // 已经把头部 buf 里带过来的那截正文写进去
-        if (!body.empty() && !WriteAll(spool.fd, body.data(), body.size())) {
+        // 已经把头部 buf 里带过来的那截正文写进去。一次 read 可能把
+        // Content-Length 之后的流水线数据也带进来；连接按约定只处理一条
+        // 请求，这些字节必须丢弃，不能写进上传文件，否则 bodyFile 的
+        // 实际大小会超过 bodySize。
+        const size_t initialBodyBytes = std::min(body.size(), contentLength);
+        if (initialBodyBytes > 0 &&
+            !WriteAll(spool.fd, body.data(), initialBodyBytes)) {
             *errReply = HttpResponse::Error(500, "写落盘文件失败");
             return false;
         }
+        body.resize(initialBodyBytes);
     }
 
-    size_t written = body.size();
+    size_t written = std::min(body.size(), contentLength);
     while (written < contentLength) {
         const ssize_t n = read(connFd, tmp, sizeof(tmp));
         if (n < 0) {
@@ -731,15 +738,20 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
             *errReply = HttpResponse::Error(400, "请求体不完整");
             return false;
         }
+        // 一次 read 也可能跨过 Content-Length 边界，把后续流水线数据
+        // 一并带回来。只消费本请求剩余的字节；多出来的部分随连接关闭
+        // 丢弃，不能写进落盘文件或继续计入 written。
+        const size_t remaining = contentLength - written;
+        const size_t chunk = std::min(static_cast<size_t>(n), remaining);
         if (spool.fd >= 0) {
-            if (!WriteAll(spool.fd, tmp, static_cast<size_t>(n))) {
+            if (!WriteAll(spool.fd, tmp, chunk)) {
                 *errReply = HttpResponse::Error(500, "写落盘文件失败");
                 return false;
             }
         } else {
-            body.append(tmp, static_cast<size_t>(n));
+            body.append(tmp, chunk);
         }
-        written += static_cast<size_t>(n);
+        written += chunk;
     }
 
     out->bodySize = contentLength;

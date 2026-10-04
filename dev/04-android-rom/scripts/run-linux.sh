@@ -262,6 +262,12 @@ fi
 
 # ---------------------------------------------------------------------------
 # 验收
+# `binfmt_misc` 目录通常只有 root adbd 才能读取。启动路径在等待开机时
+# 已经尝试过 `adb root`，但 `--verify` 直接跳到这里，复用一台由普通
+# adbd 提供服务的设备会把已注册的规则误报成缺失。再次尝试提升权限；
+# 生产版 adbd 不允许 root 时忽略失败，让后面的实际检查决定结果。
+"$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
+"$ADB" -s "$SERIAL" wait-for-device >/dev/null 2>&1 || true
 fails=0
 chk() {  # chk <描述> <实际值> <期望匹配>
     if printf '%s' "$2" | grep -qE "$3"; then printf '  [✓] %-34s %s\n' "$1" "$2"
@@ -306,11 +312,11 @@ fi
 
 log "验收 4/4：arm64 应用（APK）"
 PROBE_APK="$X64_DIR/artifacts/arm64-probe.apk"
-PKG=""
+PKG=""; IS_PROBE=0
 if [ -z "$APK" ]; then
     if [ -s "$PROBE_APK" ]; then
         # 首选项目自建的探针 APK：只含 arm64-v8a 一个 ABI，能装能跑就是翻译层在工作
-        APK="$PROBE_APK"; PKG=org.remotecontrol.arm64probe
+        APK="$PROBE_APK"; IS_PROBE=1
         log "  用自建探针 APK（tools/build-probe-apk.sh 产出，纯 arm64-v8a）"
     else
         APK="$RUN_DIR/com.oF2pks.kalturadeviceinfos_24.apk"; PKG=com.oF2pks.kalturadeviceinfos
@@ -320,28 +326,85 @@ if [ -z "$APK" ]; then
         fi
     fi
 fi
-if [ -s "$APK" ] && [ -n "$PKG" ]; then
+if [ -s "$APK" ]; then
     got=$(sha256sum "$APK" | cut -d' ' -f1)
     if [ "$PKG" = com.oF2pks.kalturadeviceinfos ] && [ "$got" != "$DEFAULT_APK_SHA256" ]; then
         warn "APK sha256 与内置值不同（$got）——若是自己指定的包可忽略"
     fi
-    "$ADB" -s "$SERIAL" shell "pm uninstall $PKG" >/dev/null 2>&1 || true
+    # 探针包名曾从 org.remotecontrol.arm64probe 改成 org.autosnap.arm64probe，
+    # 而交付目录里的 APK 可能由不同一轮构建生成。先删掉两个历史包名，
+    # 安装后从设备实际清单发现包名，避免 monkey 找错包并被 set -e 带走。
+    if [ -z "$PKG" ]; then
+        for old_pkg in org.remotecontrol.arm64probe org.autosnap.arm64probe; do
+            "$ADB" -s "$SERIAL" shell "pm uninstall $old_pkg" >/dev/null 2>&1 || true
+        done
+    else
+        "$ADB" -s "$SERIAL" shell "pm uninstall $PKG" >/dev/null 2>&1 || true
+    fi
+    # 记录安装前的第三方包，给没有 aapt 的环境提供包名发现的兜底。
+    # 已知探针包在上面先卸载，所以重新安装后也能从差集里找到。
+    before_pkgs="$("$ADB" -s "$SERIAL" shell \
+        'pm list packages -3 2>/dev/null | sed "s/^package://"' \
+        | tr -d '\r' || true)"
     "$ADB" -s "$SERIAL" push "$APK" /data/local/tmp/probe.apk >/dev/null
     chk "pm install --abi arm64-v8a" "$("$ADB" -s "$SERIAL" shell 'pm install --abi arm64-v8a -r /data/local/tmp/probe.apk' 2>&1 | tr -d '\r' | tail -1)" 'Success'
-    # 先清 logcat，否则会匹配到上一轮残留的 PROBE_RESULT（彩排时踩过）
-    "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
-    "$ADB" -s "$SERIAL" shell "monkey -p $PKG -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1 || true
-    sleep 6
-    pid=$("$ADB" -s "$SERIAL" shell pidof "$PKG" | tr -d '\r')
-    chk "进程存活"              "${pid:-DEAD}" '^[0-9]+$'
-    if [ -n "$pid" ]; then
-        chk "映射的 arm64 库条数" "$("$ADB" -s "$SERIAL" shell "grep -c '/system/lib64/arm64/' /proc/$pid/maps" | tr -d '\r')" '^[1-9][0-9]*$'
+    if [ -z "$PKG" ]; then
+        # 优先从 APK manifest 读取真实包名，支持 --apk 指定任意包名。
+        # aapt 不属于交付包，以下路径按源码树、常用工具目录、PATH 依次尝试。
+        for aapt_bin in "${AAPT:-}" \
+                        "$AOSP_DIR/out/host/linux-x86/bin/aapt" \
+                        "$AOSP_DIR/out/host/linux-x86/bin/aapt2" \
+                        "/opt/android/btools/android-13/aapt" \
+                        "/opt/android/btools/android-13/aapt2"; do
+            [ -x "$aapt_bin" ] || continue
+            PKG="$("$aapt_bin" dump badging "$APK" 2>/dev/null \
+                | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | sed -n '1p' || true)"
+            [ -n "$PKG" ] && break
+        done
+        if [ -z "$PKG" ] && command -v aapt >/dev/null 2>&1; then
+            PKG="$(aapt dump badging "$APK" 2>/dev/null \
+                | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | sed -n '1p' || true)"
+        fi
     fi
-    chk "primaryCpuAbi"         "$("$ADB" -s "$SERIAL" shell "pm dump $PKG 2>/dev/null | grep -m1 primaryCpuAbi" | tr -d '\r')" 'arm64-v8a'
-    # 自建探针：再从 logcat 里确认原生方法真的返回了结果
-    if [ "$PKG" = org.remotecontrol.arm64probe ]; then
-        sleep 2
-        chk "探针原生返回值"    "$("$ADB" -s "$SERIAL" logcat -d -s ARM64PROBE 2>/dev/null | grep -m1 PROBE_RESULT | tr -d '\r')" 'arm64-v8a native ok'
+    if [ -z "$PKG" ]; then
+        # aapt 不可用时，从安装前后的第三方包差集取新包。
+        after_pkgs="$("$ADB" -s "$SERIAL" shell \
+            'pm list packages -3 2>/dev/null | sed "s/^package://"' \
+            | tr -d '\r' || true)"
+        while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            if ! printf '%s\n' "$before_pkgs" | grep -Fxq "$candidate"; then
+                PKG="$candidate"
+                break
+            fi
+        done <<< "$after_pkgs"
+    fi
+    if [ -z "$PKG" ]; then
+        # 最后兼容历史探针包名；仅在前两种发现方式不可用时使用。
+        PKG="$("$ADB" -s "$SERIAL" shell \
+            'pm list packages -3 2>/dev/null | sed "s/^package://" | grep -i "arm64probe$" | sed -n "1p"' \
+            | tr -d '\r' || true)"
+    fi
+    if [ -z "$PKG" ]; then
+        chk "探针包名可从设备发现" "" '.+'
+    else
+        # 先清 logcat，否则会匹配到上一轮残留的 PROBE_RESULT（彩排时踩过）
+        "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
+        "$ADB" -s "$SERIAL" shell "monkey -p $PKG -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1 || true
+        sleep 6
+        # `pidof` 在应用尚未完成启动（或 adbd 刚重启）时会返回非零；让
+        # 验收项报告 DEAD，而不是被 set -e 静默中止整份验收。
+        pid=$("$ADB" -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)
+        chk "进程存活"              "${pid:-DEAD}" '^[0-9]+$'
+        if [ -n "$pid" ]; then
+            chk "映射的 arm64 库条数" "$("$ADB" -s "$SERIAL" shell "grep -c '/system/lib64/arm64/' /proc/$pid/maps" | tr -d '\r')" '^[1-9][0-9]*$'
+        fi
+        chk "primaryCpuAbi"         "$("$ADB" -s "$SERIAL" shell "pm dump $PKG 2>/dev/null | grep -m1 primaryCpuAbi" | tr -d '\r' || true)" 'arm64-v8a'
+        # 自建探针：再从 logcat 里确认原生方法真的返回了结果
+        if [ "$IS_PROBE" = 1 ]; then
+            sleep 2
+            chk "探针原生返回值"    "$("$ADB" -s "$SERIAL" logcat -d -s ARM64PROBE 2>/dev/null | grep -m1 PROBE_RESULT | tr -d '\r')" 'arm64-v8a native ok'
+        fi
     fi
 else
     warn "没有可用的 APK，跳过第 4 项"

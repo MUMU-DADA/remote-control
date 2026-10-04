@@ -309,8 +309,8 @@ int SocketServer::RecvRequest(int connFd, Request* out, std::string* payload,
     *outFd = -1;
 
     // 一次读「头 + payload」。SEQPACKET 有消息边界，多读的部分就是 payload，
-    // 不需要长度前缀。缓冲区按上限一次备好，超长消息会被内核截断（MSG_TRUNC
-    // 不设时剩余部分直接丢弃），下面用 n > 上限 来识别并报错。
+    // 不需要长度前缀。缓冲区按上限一次备好，超长消息会被内核截断并设置
+    // MSG_TRUNC；下面在发现该标志时拒绝整条消息。
     std::vector<char> buf(sizeof(Request) + kMaxRequestPayload);
     iovec iov{};
     iov.iov_base = buf.data();
@@ -368,7 +368,11 @@ int SocketServer::RecvRequest(int connFd, Request* out, std::string* payload,
     }
 
     if (n < 0) return errno;
-    if (msg.msg_flags & MSG_CTRUNC) return EMSGSIZE;
+    // SOCK_SEQPACKET 在消息大于接收缓冲区时会保留消息边界，但只把前缀
+    // 拷进 buf，并通过 MSG_TRUNC 标记丢弃了剩余内容。不能把这个前缀当成
+    // 合法请求交给 handler，否则超长 payload 会被静默截断，既可能绕过
+    // 参数校验，也会让客户端误以为整条请求已处理。
+    if (msg.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) return EMSGSIZE;
     if (static_cast<size_t>(n) < sizeof(Request)) return EMSGSIZE;
 
     memcpy(out, buf.data(), sizeof(Request));
