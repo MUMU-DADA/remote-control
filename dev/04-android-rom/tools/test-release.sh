@@ -216,10 +216,17 @@ chk_out "linux status.sh 能跑" "这个包里的 ROM" \
     env AUTOSNAP_RUN_DIR="$SANDBOX/run-linux" "$SANDBOX/x/$LROOT/bin/status.sh"
 chk_out "linux status.sh 报出模板参数" "hw.ramSize" \
     env AUTOSNAP_RUN_DIR="$SANDBOX/run-linux" "$SANDBOX/x/$LROOT/bin/status.sh"
+chk "Linux 生产 release 模板默认开启鉴权" \
+    grep -qxF 'service.auth=1' "$SANDBOX/x/$LROOT/templates/config.ini"
+chk "Windows 生产 release 模板默认开启鉴权" \
+    grep -qxF 'service.auth=1' "$SANDBOX/xw/$WROOT/templates/config.ini"
+chk "生产 release 模板保留空 token（首次启动生成）" \
+    grep -qxF 'service.token=' "$SANDBOX/x/$LROOT/templates/config.ini"
 chk_out "linux start-headless.sh --help" "无头启动" \
     "$SANDBOX/x/$LROOT/bin/start-headless.sh" --help
+SMOKE_PORT="${TEST_RELEASE_SMOKE_PORT:-5698}"
 chk_out "linux start-headless.sh 走到启动这一步（假模拟器起不来是预期的）" "启动：" \
-    env AUTOSNAP_RUN_DIR="$SANDBOX/run-linux" "$SANDBOX/x/$LROOT/bin/start-headless.sh" --port 5590 --no-wait
+    env AUTOSNAP_RUN_DIR="$SANDBOX/run-linux" "$SANDBOX/x/$LROOT/bin/start-headless.sh" --port "$SMOKE_PORT" --no-wait
 
 if [ -x "$PWSH" ]; then
     chk_out "windows status.ps1 能跑" "这个包里的 ROM" \
@@ -246,6 +253,25 @@ PS1
 else
     echo "  \033[1;33m[!]\033[0m 没有 pwsh，跳过 Windows 侧自述检查"
 fi
+
+echo
+echo "── [3] test-release 模板默认关闭鉴权"
+TEST_RELEASE_OUT="$SANDBOX/release-test"
+TEST_RELEASE_STAGE="$SANDBOX/stage-test"
+TEST_RELEASE_CACHE="$SANDBOX/cache-test"
+RELEASE_STAGE_DIR="$TEST_RELEASE_STAGE" RELEASE_CACHE_DIR="$TEST_RELEASE_CACHE" \
+    "$X64_DIR/scripts/release.sh" --platform linux --version test-auth \
+    --test-release --images "$FAKE_ROM" --out "$TEST_RELEASE_OUT" --no-download \
+    --linux-emulator-zip "$SANDBOX/emu-linux.zip" \
+    --linux-platform-tools-zip "$SANDBOX/pt-linux.zip" \
+    > "$SANDBOX/test-release.log" 2>&1
+TEST_RELEASE_ZIP="$TEST_RELEASE_OUT/autosnap-test-auth-linux-x86_64.zip"
+mkdir -p "$SANDBOX/xt"; ( cd "$SANDBOX/xt" && unzip -q "$TEST_RELEASE_ZIP" )
+TROOT="autosnap-test-auth-linux-x86_64"
+chk "test-release 模板默认关闭鉴权" \
+    grep -qxF 'service.auth=0' "$SANDBOX/xt/$TROOT/templates/config.ini"
+chk "test-release 模板不预置 token" \
+    grep -qxF 'service.token=' "$SANDBOX/xt/$TROOT/templates/config.ini"
 
 echo
 if [ "$fail" = 0 ]; then

@@ -126,7 +126,8 @@ curl http://<设备IP>:8088/api/v1/params
 
 ## 鉴权
 
-**默认无鉴权**（首启就是这个状态）。开启后，`/api/` 下的一切都要带令牌：
+**正式实例默认开启鉴权**，首次实例化随机生成 token；测试实例可显式关闭。
+开启后，`/api/` 下的一切都要带令牌：
 
 ```bash
 curl -H "Authorization: Bearer <令牌>" http://host:8088/api/v1/config

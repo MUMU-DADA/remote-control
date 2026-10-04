@@ -19,14 +19,12 @@ done
 
 hr() { printf '\033[1;36m── %s\033[0m\n' "$1"; }
 
-adb_state() {   # adb_state <端口>
-    [ -x "$ADB" ] || { printf '无 adb'; return 0; }
-    "$ADB" -s "$(serial_for_port "$1")" get-state 2>/dev/null | tr -d '\r' | sed -n '1p'
+boot_state() {
+    service_http_state "$1" 2>/dev/null || true
 }
-boot_state() {  # boot_state <端口>
-    local v
-    v="$("$ADB" -s "$(serial_for_port "$1")" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | sed -n '1p')"
-    if [ "$v" = 1 ]; then printf '已开机'; else printf '未就绪'; fi
+
+console_state() {
+    if console_ready "$1"; then printf '已连接'; else printf '不可用'; fi
 }
 
 if [ -n "$PORT" ] || instance_exists "$NAME"; then
@@ -37,11 +35,14 @@ if [ -n "$PORT" ] || instance_exists "$NAME"; then
     hr "实例 $NAME（端口 $PORT，序列号 $(serial_for_port "$PORT")）"
     if [ -n "$PID" ]; then
         printf '  %-16s %s\n' "进程" "在跑（PID $PID，已运行 $(ps -o etime= -p "$PID" 2>/dev/null | tr -d ' ' || echo '?'))"
-        printf '  %-16s %s\n' "adb / 开机" "$(adb_state "$PORT") / $(boot_state "$PORT")"
+        printf '  %-16s %s\n' "console / 服务" "$(console_state "$PORT") / $(boot_state "$PORT")"
         printf '  %-16s %s\n' "工作目录占用" "$(du -sh "$SYSDIR" 2>/dev/null | cut -f1 || echo '?')"
     else
         printf '  %-16s %s\n' "进程" "没在跑"
     fi
+    show_userdata_storage "$SYSDIR" "$(datadir_for_port "$PORT")"
+    service_read_instance "$PORT"
+    printf '  %-16s %s\n' "服务地址" "http://127.0.0.1:$SERVICE_HTTP_PORT → guest:$SERVICE_GUEST_PORT"
     printf '  %-16s %s\n' "工作目录" "${SYSDIR#"$ROOT"/}"
     printf '  %-16s %s\n' "日志" "${LOGF:-$(logfile_for_port "$PORT")}"
     if [ -s "$SYSDIR/hardware-qemu.ini" ]; then

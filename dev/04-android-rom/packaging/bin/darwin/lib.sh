@@ -71,6 +71,33 @@ config_get() {   # config_get <键> [默认值]
     if [ -n "$v" ]; then printf '%s' "$v"; else printf '%s' "$def"; fi
 }
 
+build_service_property_args() {   # build_service_property_args [test-instance]
+    local test_instance="${1:-0}" enabled bind port auth token adb_enabled
+    enabled="${SERVICE_ENABLED:-$(config_get service.enabled 1)}"
+    bind="${SERVICE_BIND:-$(config_get service.bind 0.0.0.0)}"
+    port="${SERVICE_GUEST_PORT:-$(config_get service.port 8088)}"
+    auth="${SERVICE_AUTH:-$(config_get service.auth 1)}"
+    token="${SERVICE_TOKEN-$(config_get service.token '')}"
+    adb_enabled="${SERVICE_ADB:-$(config_get service.adb_enabled 1)}"
+    case "$enabled:$auth:$adb_enabled" in
+        0:0:0|0:0:1|0:1:0|0:1:1|1:0:0|1:0:1|1:1:0|1:1:1) ;;
+        *) die "service.enabled/auth/adb_enabled 只能是 0 或 1" ;;
+    esac
+    case "$port" in ''|*[!0-9]*) die "service.port 必须是 1-65535 的整数" ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "service.port 必须是 1-65535 的整数"
+    [[ "$bind" =~ ^[A-Za-z0-9.:_-]+$ ]] || die "service.bind 格式不受支持：$bind"
+    [[ "$token" =~ ^[A-Za-z0-9_-]{0,80}$ ]] || die "service.token 仅支持 80 字节内的字母、数字、下划线和连字符"
+    if [ "$test_instance" = 1 ]; then auth=0; token=""; fi
+    SERVICE_PROPERTY_ARGS=(
+        -prop "qemu.rc.enabled=$enabled"
+        -prop "qemu.rc.bind=$bind"
+        -prop "qemu.rc.port=$port"
+        -prop "qemu.rc.auth=$auth"
+        -prop "qemu.rc.adb=$adb_enabled"
+    )
+    [ -z "$token" ] || SERVICE_PROPERTY_ARGS+=(-prop "qemu.rc.token=$token")
+}
+
 # ---------------------------------------------------------------------------
 # GPU：探测 + 自适应（macOS：system_profiler）
 #
@@ -107,7 +134,7 @@ gpu_reason() {
 
 # ---------------------------------------------------------------------------
 # 实例：名字 ↔ 端口。登记文件在 .run/instances/<名字>.env
-# 端口从 5580 起偶数分配（模拟器要求偶数：console 口 = port+1）。
+# 端口从 5580 起偶数分配（模拟器要求偶数：console 口 = port，ADB 口 = port+1）。
 # ---------------------------------------------------------------------------
 instance_file() { printf '%s/%s.env' "$INSTANCES_DIR" "$1"; }
 instance_exists() { [ -s "$(instance_file "$1")" ]; }
@@ -241,6 +268,9 @@ build_sysdir() {   # build_sysdir <端口> fresh|keep
     local port="$1" mode="${2:-fresh}" sysdir; sysdir="$(sysdir_for_port "$port")"
     if [ "$mode" = fresh ]; then rm -rf "$sysdir"; fi
     mkdir -p "$sysdir"
+    if declare -F optimize_image_storage >/dev/null; then
+        optimize_image_storage "$IMAGES" "$RUNTIME/emulator/qemu-img"
+    fi
     local item name
     for item in "$IMAGES"/* "$IMAGES"/.[!.]*; do
         [ -e "$item" ] || continue
@@ -294,3 +324,9 @@ human_mb() {   # human_mb <MB>
     local mb="$1"
     if [ "$mb" -ge 1024 ]; then printf '%d.%d GiB' $((mb / 1024)) $(( (mb % 1024) * 10 / 1024 )); else printf '%d MiB' "$mb"; fi
 }
+
+# Host management uses the emulator console and HTTP; ADB remains for verify.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/console.sh"
+if [ -f "$(dirname "${BASH_SOURCE[0]}")/storage.sh" ]; then
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/storage.sh"
+fi

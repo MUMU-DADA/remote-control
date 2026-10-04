@@ -11,6 +11,7 @@
 #   ./scripts/release.sh --zip-only          # 复用已有 staging，只压缩
 #   ./scripts/release.sh --zip-only --reuse-zip   # 连压缩也跳过：拿已有 zip 补跑冒烟
 #   ./scripts/release.sh --smoke             # 打完再解压 linux 那份真启动验收
+#   ./scripts/release.sh --test-release      # 测试包模板默认关闭服务鉴权
 #
 # ⚠️ **一次调用可能要用两份 ROM**，因为 mac 两档的 guest 架构不同：
 #     darwin-aarch64（Apple Silicon）要 **arm64 原生 ROM**；
@@ -67,6 +68,7 @@ CHANNEL="Stable"
 ZIP_LEVEL=1
 LIST_ONLY=0; STAGE_ONLY=0; ZIP_ONLY=0; NO_DOWNLOAD=0; SLIM=0; SMOKE=0; REUSE_ZIP=0
 KEEP_STAGE=0; CLEAN_SMOKE=0; VERIFY_IMAGES=1
+TEST_RELEASE=0
 SMOKE_PORT="${SMOKE_PORT:-5588}"
 SMOKE_ADB="${SMOKE_ADB:-/usr/bin/adb}"
 declare -A EMU_ZIP_OVERRIDE=() PT_ZIP_OVERRIDE=()
@@ -105,6 +107,7 @@ while [ $# -gt 0 ]; do
         --no-download) NO_DOWNLOAD=1 ;;
         --slim)       SLIM=1 ;;
         --smoke)      SMOKE=1 ;;
+        --test-release) TEST_RELEASE=1 ;;
         --keep-stage) KEEP_STAGE=1 ;;
         --clean-smoke) CLEAN_SMOKE=1 ;;
         --no-verify-images) VERIFY_IMAGES=0 ;;
@@ -598,6 +601,9 @@ stage_release() {   # stage_release <目标> <ROM 目录>
     chmod +x "$root"/bin/* 2>/dev/null || true
     cp -a "$PACKAGING_DIR/templates/." "$root/templates/"
     cp -f "$EMULATOR_CONFIG" "$root/templates/config.ini"     # 硬件唯一真源
+    if [ "$TEST_RELEASE" = 1 ]; then
+        sed -i 's/^service.auth=.*/service.auth=0/' "$root/templates/config.ini"
+    fi
     cat > "$root/templates/instance.env" <<'EOF'
 # 实例登记模板（名字 ↔ 端口）。启动脚本按这个格式写到 .run/instances/<名字>.env。
 PORT=5580

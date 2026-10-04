@@ -45,7 +45,7 @@ HTTP 服务默认最多保留 128 条并发连接。连接从 `accept` 后立即
 
 ### 鉴权
 
-默认无鉴权。开启后 `/api/` 下的一切都要带令牌：
+正式实例默认开启鉴权；测试 release/新实例可显式关闭。开启后 `/api/` 下的一切都要带令牌：
 
 ```bash
 curl -H "Authorization: Bearer <令牌>" ...
@@ -78,6 +78,23 @@ curl "http://host:8088/api/v1/config?token=<令牌>"      # 给 <img>/WebSocket 
 ---
 
 ## 一、服务信息与自省
+
+### GET /adb · POST /adb
+
+查询或切换 Android 的 ADB 能力。此接口本身不依赖 ADB，遵循 HTTP 鉴权，
+服务软关闭时仍可调用；网页顶部提供同样的开关。非 Android 构建返回 501。
+
+```bash
+curl -H "Authorization: Bearer $T" http://host:8088/api/v1/adb
+curl -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' http://host:8088/api/v1/adb
+```
+
+GET 返回 `enabled`（持久化开关）、`running`（adbd 是否实际运行）和 `state`。
+POST 必须提供布尔值 `enabled`，返回 `pending:true` 表示 init 正在执行切换。
+切换会跨 guest 重启保留。关闭 ADB 后，截图、串流、触控、上传和 HTTP 管理继续可用。
+
+软关闭服务时保留网页、服务开关、ADB 开关、服务身份和电源接口，均遵循原有鉴权规则。
 
 ### GET /describe
 
@@ -909,7 +926,7 @@ curl -X POST 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
 设备总共几 GB 内存，塞不下一个几百 MB 的 APK。
 
 早先这里写死 64 MB，稍大的 APK 直接 `413`，网页表现就是"传不上去"。
-现在上限只受磁盘约束；真的超了会明确回 413 并带上上限值。
+现在单次请求最多 4 GiB；超过上限时会明确回 413 并带上上限值，磁盘空间不足会提前拒绝。
 
 HTTP 接收用的 spool 临时文件会在请求处理结束后删除，包括处理成功和失败；
 处理器只在请求期间使用这个路径。安装流程另有一个暂存 APK：默认安装结束后删除，
@@ -1029,8 +1046,8 @@ HTTP 429，稍后重试即可。大于 4 MiB 时 HTTP 层先 spool 到临时文�
 
 > ⚠️ **这是整个共享存储的读写权限**，不只是下载目录。
 > 服务本身已经能点屏幕、装应用、重启设备，所以这不是新的信任边界 ——
-> 但**默认不鉴权且绑 `0.0.0.0`** 的组合下，同网络任何人都能删你的文件。
-> 对外暴露前请先看 [`04-config.md`](04-config.md) 的鉴权一节。
+> 正式实例默认开启鉴权；测试实例关闭鉴权且绑定 `0.0.0.0` 时，同网络任何人都能删文件。
+> 对外访问的令牌配置见 [`04-config.md`](04-config.md) 的鉴权一节。
 
 ## 八、电源
 

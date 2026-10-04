@@ -50,7 +50,7 @@
 
 ## 3. 硬件参数（屏幕 / 内存 / 核数 / GPU）
 
-改 [`templates/config.ini`](templates/config.ini) —— 它是**唯一真源**，
+改 [`templates/config.ini`](templates/config.ini) —— 它是硬件与 guest 首次服务配置的真源，
 启动脚本每次都会读它。命令行只在**显式传参**时覆盖（命令行优先于它）。
 
 | 键 | 默认 | 说明 |
@@ -59,9 +59,13 @@
 | `hw.ramSize` | 6144 | MB |
 | `hw.cpu.ncore` | 4 | 核数 |
 | `hw.gpu.mode` | auto | 有可用 GPU 就用 `host`，否则软件渲染；**起不来会自动退软件渲染** |
-| `disk.dataPartition.size` | 32G | 上限不是预分配；改它要 reset 才生效 |
+| `disk.dataPartition.size` | 16G | 数据卷容量上限；实际占用随数据增长，改容量须重建数据卷 |
 
 详见 [`templates/README.md`](templates/README.md)。
+
+文件属性里的“大小”是虚拟磁盘的逻辑容量，“占用空间”才是宿主实际分配。
+启动脚本会回收解压后 raw 镜像里的零块；镜像字节、校验和与 guest 分区容量保持不变。
+Linux/macOS 的只读镜像通过链接共享，Windows 同卷使用硬链接，避免每台实例复制整份系统。
 
 ---
 
@@ -73,16 +77,15 @@
 @MULTI_EXAMPLE@
 ```
 
-端口从 5580 起偶数分配（模拟器拿 `port+1` 当 console 口）。
+端口从 5580 起偶数分配（console 口为 `port`，可选 ADB 口为 `port+1`）。
 **同时只让一台上物理 LAN** —— guest 的 MAC 是 QEMU 默认值，所有实例相同。
 
 ---
 
 ## 5. ⚠️ 三条别踩
 
-1. **停机器必须先 `sync`。** `adb emu kill` 是硬断电不是关机：实测"写完不 sync
-   直接停"会让最近写的数据**整个消失**（等 15 秒再停也一样）。包里的 stop 脚本
-   已经先 `adb shell sync` 了，别绕过它去 `kill -9`。
+1. **用包内 stop 脚本正常关机。** 脚本经 HTTP 请求 Android 关机并确认模拟器退出，
+   无需 ADB。`--force` / `-Force`、console kill 或 `kill -9` 属于硬停止，可能丢失未落盘数据。
 2. **`initrd` 与 `config.ini` 不在工作目录里做链接。** 模拟器会**透过符号链接**
    重写 `initrd`，链过去就会改到 `images/` 里那份，`SHA256SUMS` 当场对不上。
    各平台的工作目录构建逻辑都写死了这条例外。
