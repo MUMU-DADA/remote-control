@@ -9,9 +9,9 @@
 
 | 目录 | 是什么 | 文档 |
 |---|---|---|
-| [`02-native-daemon/`](02-native-daemon/README.md) | **主线代码**：Android 原生守护进程（`remote-control`，截图 / 触控注入 / 设备管理，HTTP + WebSocket + Unix socket）与命令行客户端 `rcctl` | [README](02-native-daemon/README.md)（456 行） |
+| [`02-native-daemon/`](02-native-daemon/README.md) | **主线代码**：Android 原生守护进程（`remote-control`，截图 / 触控注入 / 设备管理，HTTP + WebSocket + Unix socket）与命令行客户端 `rcctl` | [README](02-native-daemon/README.md) |
 | [`04-android-rom/`](04-android-rom/README.md) | **验证与交付轨道**：自编 Android 12 ROM + 三套宿主脚本（Linux / Windows / macOS）+ release 打包 | [README](04-android-rom/README.md) ＋ **16 篇专题**见 [`04-android-rom/docs/`](04-android-rom/docs/00-bridge-eval.md) |
-| [`05-controller-app/`](05-controller-app/README.md) | 上位应用：设备本地的服务管理器（需「所有文件访问」权限） | [README](05-controller-app/README.md)（127 行） |
+| [`05-controller-app/`](05-controller-app/README.md) | 上位应用：设备本地的服务管理器（需「所有文件访问」权限） | [README](05-controller-app/README.md) |
 
 **先看哪个**：想懂服务本身 → `02`；想跑起来 / 打 ROM / 出交付包 → `04`；想在设备上管理这个服务 → `05`。
 
