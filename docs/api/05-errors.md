@@ -52,14 +52,22 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
 | HTTP | 协议状态 | 什么时候 |
 |---|---|---|
 | 200 | `kOk` | 成功 |
+| 201 | —（HTTP 层） | 文件上传成功 |
 | 400 | `kErrBadCmd` `kErrBadArg` `kErrPayload` | 参数错、未知资源、未知格式 |
 | 401 | —（HTTP 层） | 需要令牌 / 令牌不对 |
 | 403 | `kErrPermission` | 权限不足 |
 | 404 | `kErrNotFound` | 包/路径/资源不存在 |
+| 405 | —（HTTP 层） | 部分资源不接受该 HTTP 方法 |
+| 409 | —（HTTP 层） | 上传目标已存在 |
+| 413 | —（HTTP 层） | 请求体或文件超过限制 |
+| 429 | —（HTTP 层） | 上传临时空间配额正被其他请求占用 |
 | 500 | 其他 | 内部错误 |
 | 501 | `kErrUnsupported` | 不支持 |
-| 503 | —（HTTP 层） | **服务被软开关关掉了** |
+| 503 | —（HTTP 层） | **服务被软开关关闭**，或并发连接已达上限 |
 | 504 | `kErrTimeout` | 超时 |
+| 507 | —（HTTP 层） | 上传临时空间不足或无法检查 |
+
+`HttpResponse::Error` 生成的 JSON 会把 HTTP 状态写入 `status`；未映射为协议码的状态（如 405、409、413、429、507）会原样保留。
 
 ### 两个 HTTP 层专属的状态
 
@@ -75,6 +83,8 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
  用 POST /api/v1/service {\"on\":true} 重新开启"}
 ```
 
+并发连接达到上限时，HTTP 服务器在读取请求前直接返回 503，并带有 `Retry-After: 1`；响应 JSON 只有 `ok` 和 `error`，没有 `status`。软关闭产生的 503 由路由处理器返回 JSON `status: 503`，恢复入口仍可用。
+
 ---
 
 ## `error` 字段是服务端的原话
@@ -84,7 +94,7 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
 ### 好的错误信息
 
 ```json
-{"ok":false,"status":4108,"error":"需要 key（键名或键码）"}
+{"ok":false,"status":4099,"error":"需要 key（键名或键码）"}
 {"ok":false,"status":4099,"error":"不认识的键: nonsense。可用: home back
  menu appswitch search power volumeup volumedown mute enter delete
  backspace space tab escape up down left right center playpause nextsong

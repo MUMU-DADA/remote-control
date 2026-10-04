@@ -104,8 +104,9 @@ dev/04-android-rom/
 │   └── status.sh                   ← 一眼看清 载荷/注入/构建/产物/设备
 ├── packaging/                      ← release 包的**骨架**（进 zip 的那一层，源码）
 │   ├── START-HERE.md               ← 包内首读（占位符由 release.sh 填）
-│   ├── bin/linux/                  ← 包内入口：start-headless / stop / status / verify（bash）
-│   └── bin/windows/                ← 同名同语义的 PowerShell 版
+│   ├── bin/linux/                  ← 包内入口与管理脚本（bash）
+│   ├── bin/windows/                ← PowerShell 入口与管理脚本（含 reset）
+│   └── bin/darwin/                 ← macOS 包内入口与管理脚本（bash）
 ├── release/                        ← **release 产物**（zip，已 gitignore）
 ├── tools/
 │   ├── build-probe-apk.sh          ← 自建 arm64 探针 APK（纯 arm64-v8a，16 KB）

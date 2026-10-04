@@ -37,7 +37,7 @@
     └──────────────────┘   └──────────────────────┘
 ```
 
-**三条传输、一套实现**：HTTP 和 Unix socket 都走同一个 `Dispatcher`，能力完全一致；WebSocket 是 HTTP 之上的流式外壳（画面流 / 触控流 / 日志流）。三者只是不同的"外壳"，不存在"某个功能只有一种传输支持"。
+**共享命令层，HTTP 另有扩展**：HTTP/JSON 与 Unix socket 的常见设备操作和查询共用 `Dispatcher`。HTTP 还提供 ADB 管理、网页、文件上传及 WebSocket/MJPEG 流等路由；这些扩展没有对应的 socket 命令。WebSocket 是 HTTP Upgrade 上的实时流接口（画面流 / 触控流 / 日志流）。
 
 ---
 
@@ -49,7 +49,7 @@
 | `socket_server.{h,cpp}` | Unix socket 监听、收发、`SCM_RIGHTS` 传 fd、`SO_PEERCRED` 取对端身份 | ❌ 无 |
 | `http_server.{h,cpp}` | HTTP/1.1 服务端 + WebSocket 升级（自研，只实现协议子集） | ❌ 无 |
 | `rest_api.{h,cpp}` | `/api/v1/*` 路由、JSON 编解码 | ❌ 无 |
-| `dispatch.{h,cpp}` | 请求分发 + **操作串行化**（两条传输的唯一入口） | ❌ 无 |
+| `dispatch.{h,cpp}` | 共享设备命令分发；有状态操作经 `opMutex_` 串行化，`Info` / `Capture` 走抓帧后端自身的锁 | ❌ 无 |
 | `capture.h` + `capture_surfaceflinger.cpp` / `capture_screencap.cpp` | 抓帧并拷进 memfd。前者直连 SF，后者 exec `/system/bin/screencap` | ✅ `libgui` / ❌（只 fork/exec） |
 | `inject.{h,cpp}` + `inject_uinput.cpp` / `inject_vtp.cpp` / `inject_binder.cpp` | 手势与按键逻辑（平台无关）+ 可替换的注入后端 | ✅ 视后端而定 |
 | `keyboard.cpp` / `clipops.cpp` / `appops.cpp` / `fileops.cpp` | 按键、剪贴板、应用管理、文件管理 | ⚠️ 走 `pm`/`am`/`cmd`/`dumpsys` 子进程 |
@@ -143,7 +143,7 @@ HTTP / WebSocket：
 | `SOCK_SEQPACKET` | 保留消息边界，不用自己处理粘包/拆包 |
 | `SCM_RIGHTS` | 传 fd 的唯一方式（截图帧、APK 安装） |
 
-**为什么另外还要 HTTP/WebSocket**：`SCM_RIGHTS` 和 `SOCK_SEQPACKET` 都过不了 `adb forward`（TCP 通道），所以 Unix socket 只有设备上的进程能用。跨机器访问走 HTTP/JSON 与 WebSocket——代价是丢掉了 fd 传递，大块数据（截图）改成 HTTP 响应体直接承载。两条路都进同一个 `Dispatcher`，能力一致。
+**为什么另外还要 HTTP/WebSocket**：`SCM_RIGHTS` 和 `SOCK_SEQPACKET` 都过不了 `adb forward`（TCP 通道），所以 Unix socket 只有设备上的进程能用。跨机器访问走 HTTP/JSON 与 WebSocket；HTTP 路由在共享设备命令之外还提供管理、网页和上传能力。两种接口的数据传输也不同：Unix socket 可用 fd 传截图或 APK，HTTP 则通过请求体上传文件、通过响应体返回截图。
 
 ### 4.2 定长结构体
 
@@ -293,10 +293,10 @@ main()
   ├─ HttpServer::Start()                  → 独立 pthread 跑 HTTP + WebSocket
   └─ SocketServer::Run(handler)           ← 主线程阻塞在 accept
         │
-        └─ 每个连接：ServeConnection() → Dispatcher::Handle()
+        └─ 设备命令：ServeConnection() → Dispatcher::Handle()
 ```
 
-**并发模型**：两条传输各跑各的（HTTP 在独立线程，避免互相排队），但**操作是串行的**——锁在 `Dispatcher::Handle()` 里。这是刻意的：`Injector` 是有状态的（按下/抬起、槽位映射、手势 downTime），并发注入会互相破坏手势。代价是一次抓帧（~8–12ms）会让同时在跑的触控事件排队最多十几毫秒。
+**并发模型**：HTTP 与 Unix socket 各自在自己的连接线程中处理请求；共享设备命令都经 `Dispatcher::Handle()`。触控和文件、应用等有状态操作由 `opMutex_` 串行化，避免并发修改注入状态或设备操作互相干扰。只读的 `Info` 和 `Capture` 绕过该锁，使用抓帧后端自身的锁，因此抓帧不会因为一个长手势而排在其后，也不会仅因抓帧而让触控排队；抓帧后端内部的访问仍逐个执行。
 
 **退出与重启**：`Shutdown` 让两条传输的 accept 立刻返回并正常退出（退出码 0）；`Restart` 以**退出码 1** 退出，由 init 按 `restart_period`（默认 5 秒）重新拉起。⚠️ `.rc` 里**不能写 `oneshot`** —— 它的语义恰恰是"退出后不再拉起"，和保活相反（详见 [`09-deployment-and-update.md`](09-deployment-and-update.md) §3）。
 

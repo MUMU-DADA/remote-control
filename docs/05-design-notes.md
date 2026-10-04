@@ -11,26 +11,26 @@
 
 ## 一、三条传输
 
-同一个 `Dispatcher` 处理所有请求，三种传输只是不同的"外壳"：
+HTTP/JSON 与 Unix socket 的常见设备操作和查询共用 `Dispatcher`；HTTP 另有网页、管理、文件上传和 WebSocket/MJPEG 流等扩展。两种 API 并非能力完全相同：
 
 | 传输 | 适合 | 不适合 |
 |---|---|---|
 | **HTTP/JSON** | 任何语言、任何工具（curl、浏览器、脚本） | 高频事件（每次都要 TCP 往返 + HTTP 解析） |
 | **WebSocket** | 实时双向：画面流、触控流、日志流 | 一次性调用 |
-| **Unix socket**（SEQPACKET） | 本机、零拷贝传大块数据（截图/APK） | 跨机器 |
+| **Unix socket**（SEQPACKET） | 本机；用 `SCM_RIGHTS` 传递截图和 APK fd | 跨机器 |
 
-**能力完全一致** —— 不会出现"某个功能只有一种传输支持"，也不会出现
-两边行为不一致。适配层只做格式转换（截图 → PNG、memfd → 响应体）。
+设备操作命令有共同的底层实现，但 HTTP 专属路由没有对应的 socket 命令。
+具体路由、请求体和响应格式见 [API 权威文档](api/README.md)。
 
 ### 协议约定的由来
 
 | 方向 | 格式 | 为什么 |
 |---|---|---|
-| 请求 payload | **NUL 分隔的 UTF-8 字符串** | 参数少而固定。字符串本身不含 NUL，零依赖、无歧义，比 JSON 少一个解析器 |
+| Unix socket 请求 payload | **NUL 分隔的 UTF-8 字符串** | 参数少而固定。字符串本身不含 NUL，零依赖、无歧义，比 JSON 少一个解析器 |
 | 应答 payload | **JSON** | 结构化、字段会增长。服务端只需要"写"不需要"读"，所以不必引解析库 |
-| 大块数据 | **memfd + `SCM_RIGHTS`** | 复用截图已经在用的通道。**没有大小上限**（SEQPACKET 单条消息约 208KB 上限，APK 动辄几十 MB） |
+| Unix socket 大块数据 | **memfd + `SCM_RIGHTS`** | 不受 SEQPACKET 单条消息大小限制；实际容量仍受内存、文件系统等资源约束 |
 
-这三条同样适用于 HTTP 层：截图 → 直接当响应体、memfd → 读出来当响应体。
+这些线格式约定针对 Unix socket。HTTP/JSON 使用 JSON 请求与响应，二进制上传和截图通过 HTTP 正文传输；细节见 API 文档。
 
 ### 不引入 HTTP 库
 
@@ -147,11 +147,11 @@ server.Run([&](const HttpRequest& req) {
 响应后才调 `streamer`）。也就是说 WebSocket 里流的每个触控点都是
 **无锁注入**的 —— 和并发的 HTTP 请求会互相破坏手势状态。
 
-锁移进 `Dispatcher::Handle` 之后，无论谁调、从哪条传输调都自动串行。
-
-代价：一次抓帧（8–12ms）会让同时在跑的触控事件排队十几毫秒。
-这个开销是必要的 —— `Injector` 是有状态的（按下/抬起、槽位映射、
-手势 downTime）。
+锁移进 `Dispatcher::Handle` 之后，两条传输调用的有状态操作共用同一把锁，
+避免注入状态（按下/抬起、槽位映射、手势 downTime）被并发请求破坏。
+只读的 `Info` 和 `Capture` 会在分发前绕过 `opMutex_`，改由 `Capture`
+后端自身的锁保护，因此抓帧不必等长手势结束，触控也不会因一次抓帧而排队；
+同一抓帧后端仍会串行处理自己的请求。
 
 ### ⚠️ 关闭时的资源清理
 

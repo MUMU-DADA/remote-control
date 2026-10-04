@@ -13,18 +13,31 @@
 packaging/
 ├── START-HERE.md               ← 包内首读。含 @VER@ / @PLATFORM@ 等占位符，打包时替换
 ├── bin/
-│   ├── linux/                  ← 进 linux 包：生命周期脚本及 console/storage helpers
+│   ├── linux/                  ← 进 Linux 包：生命周期脚本及 console/storage helpers
 │   │   ├── lib.sh              公共函数（路径、config.ini、实例登记、adb/模拟器定位）
 │   │   ├── start-headless.sh   无头启动（默认 -no-window，后台 + 等开机）
 │   │   ├── stop.sh             优雅停（**先 sync 再 kill**，见下）
 │   │   ├── status.sh           实例/进程/开机状态 + ROM 指纹
+│   │   ├── console.sh          打开模拟器命令行
+│   │   ├── storage.sh          管理模拟器存储
 │   │   └── verify.sh           4 组验收（ABI / 翻译层 / arm64 机器码 / arm64 应用）
-│   └── windows/                ← 进 windows 包：同名同语义的 PowerShell 版及存储 helper
-│       ├── common.ps1
-│       ├── start-headless.ps1
-│       ├── stop.ps1
-│       ├── status.ps1
-│       └── verify.ps1
+│   ├── windows/                ← 进 Windows 包：PowerShell 入口及管理脚本
+│   │   ├── common.ps1
+│   │   ├── start-headless.ps1
+│   │   ├── stop.ps1
+│   │   ├── status.ps1
+│   │   ├── console.ps1
+│   │   ├── storage.ps1
+│   │   ├── reset.ps1            清空实例数据与快照
+│   │   └── verify.ps1
+│   └── darwin/                 ← 进 macOS 包：bash 生命周期脚本及 console/storage helpers
+│       ├── lib.sh
+│       ├── start-headless.sh
+│       ├── stop.sh
+│       ├── status.sh
+│       ├── console.sh
+│       ├── storage.sh
+│       └── verify.sh
 └── templates/
     └── README.md               ← 模板说明（config.ini / instance.env 的解释）
 ```
