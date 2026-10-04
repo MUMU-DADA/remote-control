@@ -21,7 +21,7 @@
 | 画面流 | ✅ WebSocket + MJPEG，jpeg/webp/png/h264，可中途改帧率/画质/分辨率 |
 | 屏幕方向 | ✅ `0/90/180/270`（设备转不动时退到换显示尺寸，如实回报） |
 | 鉴权 / 服务开关 | ✅ 令牌鉴权、软开关（不真停进程） |
-| 验证 | 单元/集成 **383 项检查**、文档一致性 **94 项**、真浏览器端到端 6 组 |
+| 验证 | 单元/集成 **459 项检查**（13 个套件）、文档一致性 **94 项**、真浏览器端到端 6 组 |
 
 **全功能体检**：`python3 tools/functional-sweep.py [host:port]`
 
@@ -40,15 +40,26 @@
 > ⚠️ **性能结论要连着分辨率一起看。** 上面是 720p 的口径。
 > 完整实测、测量方法与测量纪律见 [`docs/06-capture-performance.md`](docs/06-capture-performance.md)。
 
+截图与视频流已加入专项优化：抓帧不再等待长手势的全局操作锁，
+JPEG/PNG/WebP 流共享同内容、同参数的编码结果；PNG 滤波减少重复扫描，
+H.264 优先使用系统 libyuv 转换像素。传输写入有 1 秒期限，控制台解码与绘制
+优先呈现最新帧。720p 模拟器的 4 路 PNG 对照中，静态投递约 30→61fps，
+设置页滚动约 32–34→59fps；保持流连接时静态 PNG 截图 p50 为 167→116ms。
+环境、原始记录及统计限制见[证据索引](docs/evidence/stream-opt-2026-10-04/README.md)，
+这些结果不能直接用于估计动态游戏或真机硬件编码收益。
+
 ---
 
 ## 三分钟跑起来
 
-不需要 AOSP 源码树也能编（NDK 版走 `screencap` 后端）：
+不需要完整 AOSP 源码树也能编（NDK 版走 `screencap` 后端），
+但需要 NDK 和 **jsoncpp 1.9.4 源码**。没有仓库内的
+`aosp/external/jsoncpp` 时，先用 `JSONCPP_DIR` 指定该依赖：
 
 ```bash
-bash tools/build-ndk.sh                      # 出 out/ndk/remote-control
-adb push out/ndk/remote-control /data/local/tmp/
+JSONCPP_DIR=/path/to/jsoncpp bash tools/build-ndk.sh
+                                            # 默认 arm64-v8a / API 31
+adb push dev/02-native-daemon/out/ndk/arm64-v8a/remote-control /data/local/tmp/
 adb shell chmod 755 /data/local/tmp/remote-control
 adb shell "setsid /data/local/tmp/remote-control --socket /data/local/tmp/remote-control.sock \
            --http-bind 0.0.0.0 --foreground >/dev/null 2>&1 &"
@@ -145,8 +156,10 @@ Java-only AIDL。`remote-control` 用 `/dev/uinput` 绕开 —— 代价是会�
 
 - 平台私有 API 跨版本不稳定，升级 Android 必须对着源码重新确认
   （核对清单见 [`docs/03-reference.md`](docs/03-reference.md)）
-- 截图与触控**操作串行**（锁在 `Dispatcher::Handle()`）——
-  `Injector` 是有状态的，并发注入会互相破坏手势
+- 触控与其它有状态操作仍由 `Dispatcher` 串行化；截图与显示查询使用
+  `Capture` 自身的锁，可与长手势、文件操作并行。单个截图后端的抓帧仍串行
+- H.264 每个订阅者拥有独立 MediaCodec 编码器，受设备编码器并发能力限制；
+  JPEG/PNG/WebP 的共享编码缓存不适用于有状态的 H.264 帧间编码
 - 要传 fd 的客户端（截图帧、APK 安装）**必须在设备上运行** ——
   `SEQPACKET` 和 `SCM_RIGHTS` 过不了 `adb forward`
 - 默认**不鉴权**且只绑 `127.0.0.1`；改成 `0.0.0.0` 前请先看
@@ -169,6 +182,8 @@ Java-only AIDL。`remote-control` 用 `/dev/uinput` 绕开 —— 代价是会�
 
 内置的第三方代码只有 libwebp（BSD 3-Clause）和 libjpeg-turbo 的头文件
 （BSD-style），都是宽松许可，**没有任何 copyleft**，所以 MIT 成立。
+H.264 可选地运行时加载系统 `libyuv.so`（BSD 3-Clause）；缺库或缺符号时
+使用内置标量转换，不新增必须安装的设备库。
 逐项清单和判定依据在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 > ⚠️ 两样东西**不在**本仓库里，别以为 MIT 覆盖了它们：

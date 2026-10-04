@@ -113,6 +113,7 @@ void Frame::Reset() {
 // ---------------------------------------------------------------------------
 
 bool Capture::Init(std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // 提前确认 screencap 可执行，避免第一次请求才发现
     const char* path = ScreencapPath();
     if (access(path, X_OK) != 0) {
@@ -144,11 +145,18 @@ bool Capture::Init(std::string* error) {
     return true;
 }
 
-void Capture::SetDisplayId(uint64_t id) { requestedDisplayId_ = id; }
+void Capture::SetDisplayId(uint64_t id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    requestedDisplayId_ = id;
+}
 
-void Capture::Shutdown() { resolved_ = false; }
+void Capture::Shutdown() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    resolved_ = false;
+}
 
 bool Capture::ResolveDisplay(std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // screencap 后端拿不到显示列表，只能给一个占位值。
     // 真实分辨率在第一次 Grab() 时才知道。
     activeDisplayId_ = requestedDisplayId_ ? requestedDisplayId_ : 1;
@@ -159,6 +167,7 @@ bool Capture::ResolveDisplay(std::string* error) {
 
 bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
                            std::string* error) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // screencap 不提供显示枚举，用 Init() 里探针抓帧缓存下来的尺寸。
     // 探针失败时是 0，调用方会回退到默认触控范围并给出提示。
     out->clear();
@@ -175,6 +184,7 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
 }
 
 bool Capture::Grab(Frame* out, std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const char* path = ScreencapPath();
 
     int pipeFd[2];
@@ -345,6 +355,15 @@ bool Capture::Grab(Frame* out, std::string* error) {
 
     *out = std::move(frame);
     ok = true;
+    return ok;
+}
+
+bool Capture::Grab(Frame* out, std::string* error, uint32_t targetWidth) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const uint32_t previous = targetWidth_;
+    targetWidth_ = targetWidth;
+    const bool ok = Grab(out, error);
+    targetWidth_ = previous;
     return ok;
 }
 

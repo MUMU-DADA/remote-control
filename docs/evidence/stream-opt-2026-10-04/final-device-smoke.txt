@@ -1,0 +1,2 @@
+PASS final binary lists /sdcard under enforcing SELinux
+PASS final binary sends H264 static first frame (4282 bytes) with odd-width alignment

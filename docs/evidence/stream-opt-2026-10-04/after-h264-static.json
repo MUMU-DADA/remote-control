@@ -1,0 +1,41 @@
+{
+  "backend": "surfaceflinger",
+  "format": "h264",
+  "width": 0,
+  "requestedFps": 60,
+  "clients": 1,
+  "skipUnchanged": false,
+  "elapsedSeconds": 5.00519762,
+  "streams": [
+    {
+      "frames": 298,
+      "bytes": 5630176,
+      "firstFrameMs": 74.575997,
+      "closed": false,
+      "errors": [],
+      "fps": 59.5
+    }
+  ],
+  "pingMs": {
+    "samples": 49,
+    "p50": 4.89,
+    "p95": 44.72,
+    "max": 48.2
+  },
+  "screenshotMs": {
+    "samples": 8,
+    "p50": 27.99,
+    "p95": 37.84
+  },
+  "capture": {
+    "frames": 305,
+    "lastCaptureMs": 8,
+    "changedFrames": 1,
+    "unchangedFrames": 304
+  },
+  "encoding": {
+    "encodes": 0,
+    "cacheHits": 0,
+    "waitTimeouts": 0
+  }
+}

@@ -63,9 +63,25 @@ BSD 3-Clause 要求分发时保留版权声明和许可原文，因此：
 | `libz.so` | 设备 `/system/lib64/` | PNG 编码（dlopen） |
 | `libcurl.so` | 设备 `/system/lib64/`（VNDK） | 下载（dlopen） |
 | `libjnigraphics.so` | 设备 `/system/lib64/` | `AndroidBitmap_compress`（dlopen，API 30+） |
+| `libyuv.so` | 设备系统库（可选） | H.264 RGBA→NV12 SIMD 转换（dlopen，BSD 3-Clause） |
 | `liblog.so` | NDK | 日志 |
 
 运行时 `dlopen`，**没有静态链接，也没有随本项目分发**。
+
+### libyuv（可选运行时依赖）
+
+上游：[libyuv](https://chromium.googlesource.com/libyuv/libyuv/)，许可为
+[BSD 3-Clause](https://chromium.googlesource.com/libyuv/libyuv/+/refs/heads/main/LICENSE)，
+Copyright 2011 The LibYuv Project Authors. All rights reserved.
+
+本项目只查询系统 `libyuv.so` 的 `ABGRToNV12` 符号，没有复制第三方头文件、
+源码或二进制。系统没有可用库时使用项目内的标量 RGBA→NV12 转换。
+实际设备库的版本与版权声明以设备系统的 NOTICE 为准；若未来改成随产品分发
+libyuv，需要一并保留对应版本的完整许可与版权声明。
+
+jsoncpp 1.9.4（MIT）由外部源码目录提供：AOSP 使用树内依赖，主机和 NDK
+构建编入 `JSONCPP_DIR` 指定的实现。它不作为 vendored 源码保存在本仓库中，
+分发这些构建产物时仍需保留所用 jsoncpp 的许可声明。
 
 ---
 
@@ -80,8 +96,8 @@ BSD 3-Clause 要求分发时保留版权声明和许可原文，因此：
 | libwebp | BSD 3-Clause | 否 |
 | libjpeg-turbo（仅头文件 ×2 份） | BSD-style（IJG + BSD-3 + zlib） | 否 |
 
-其余依赖是运行时 `dlopen` 设备上的系统库（libjpeg / libz / libcurl /
-libjnigraphics），**不随本项目分发**。AOSP 源码树与 Google 的翻译层载荷
+其余设备图像依赖是运行时 `dlopen` 系统库（libjpeg / libz / libcurl /
+libjnigraphics / 可选 libyuv），**不随本项目分发**。AOSP 源码树与 Google 的翻译层载荷
 都在 `.gitignore` 里，不在本仓库中。
 
 BSD 系是宽松许可，可以并入 MIT 作品 —— 代价是要**保留它们的版权声明**，

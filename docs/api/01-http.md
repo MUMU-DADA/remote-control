@@ -326,6 +326,12 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
     ]
   },
 
+  "encoding": {
+    "encodes": 12,
+    "cacheHits": 180,
+    "waitTimeouts": 0
+  },
+
   "quality": {
     "jpeg": {"min":1, "max":100, "default":75},
     "webp": {"min":1, "max":100, "default":80},
@@ -398,6 +404,18 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 各格式量纲完全不同，**界面上的拖动条必须按当前格式取这个范围**，
 不能写死。写死了就会出现「拖到 75，但 PNG 只认 1-9」。
 
+#### `encoding` —— 图像流的共享编码统计
+
+| 字段 | 说明 |
+|---|---|
+| `encodes` | JPEG/PNG/WebP 流成功产生编码结果的累计次数；不含单次截图和 H.264 |
+| `cacheHits` | 命中同内容、同格式/质量/输出尺寸的共享结果次数，包含等待在途编码后命中 |
+| `waitTimeouts` | 等待其它请求在途编码超过 20ms 的累计次数；该轮不送图，后续继续尝试 |
+
+这些是进程累计值，性能测量应取窗口前后差值。相同像素跨抓帧沿用缓存，
+每代保留至多 8 个参数变体；`skipUnchanged=0` 会继续传帧但也能命中缓存。
+静态画面的高命中率不代表动态内容也能获得相同收益。
+
 #### `codecs` —— 这台设备到底能编什么
 
 | 字段 | 说明 |
@@ -405,7 +423,7 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 | `png/jpeg/webp/raw` | 各格式可用吗 |
 | `h264` / `h264Max` / `h264Used` | H.264 可用性、并发上限、当前占用 |
 | `backend` | 按格式列出当前实际后端，例如 `jpeg=AndroidBitmap_compress + webp=libwebp（内置） + png=zlib PNG`；JPEG/WebP 是否可用取决于系统 API 与编码库 |
-| `forced` | 是否被 `REMOTE_CONTROL_IMAGE_BACKEND` 强制指定 |
+| `forced` | 是否被 `REMOTE_CONTROL_FORCE_FALLBACK=1` 强制跳过原生编码器 |
 
 `nativeCodecs` 只表示 Android `AndroidBitmap_compress` 原生路径是否可用，不代表格式能力。格式支持以 `codecs.jpeg/webp/png` 为准：WebP 可由内置 libwebp 提供，PNG 可由 zlib 提供；没有原生路径或 JPEG 库时，JPEG 仍可能不可用。
 
