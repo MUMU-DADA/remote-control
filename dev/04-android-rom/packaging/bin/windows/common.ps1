@@ -191,6 +191,9 @@ function Build-SysDir {
         Die "镜像目录不完整：$($script:Images)（缺 system-qemu.img）"
     }
     $sysdir = Get-SysDir $P
+    if (Get-Command Optimize-ImageStorage -ErrorAction SilentlyContinue) {
+        Optimize-ImageStorage $script:Images
+    }
     if (-not $Keep) { Remove-Item $sysdir -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Force -Path $sysdir | Out-Null
 
@@ -213,6 +216,9 @@ function Build-SysDir {
         if (-not (Test-Path (Join-Path $sysdir $item.Name))) { $missing += $item.Name }
     }
     if ($missing.Count -gt 0) { Die "工作目录缺文件：$($missing -join ', ')（镜像链接没建成）" }
+    if (Get-Command Optimize-ImageStorage -ErrorAction SilentlyContinue) {
+        Optimize-ImageStorage $sysdir
+    }
     $how = if ($kinds.Count -gt 0) { ($kinds.Keys | Sort-Object) -join "/" } else { "（无）" }
     Write-Log "镜像已就位（$how）"
 }
@@ -265,4 +271,14 @@ function Wait-Boot {
 function Get-Prop {
     param([string]$Serial, [string]$Name)
     return ((& $script:Adb -s $Serial shell getprop $Name 2>$null) -join "").Trim()
+}
+
+. (Join-Path $PSScriptRoot "console.ps1")
+
+# storage.ps1 is kept as a small Windows-only provider.  Loading it here makes
+# Build-SysDir safe for every entry point while the provider itself avoids
+# kernel32 calls on non-Windows PowerShell used by CI.
+$storageProvider = Join-Path $PSScriptRoot "storage.ps1"
+if ((Test-Path -LiteralPath $storageProvider) -and -not (Get-Command Optimize-ImageStorage -ErrorAction SilentlyContinue)) {
+    . $storageProvider
 }

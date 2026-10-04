@@ -98,10 +98,33 @@ on post-fs-data
     mkdir /data/misc/remote-control 0770 shell shell
     mkdir /data/misc/remote-control/releases 0755 shell shell
 
+# Apply the template once persisted properties have loaded. The empty value
+# matches only a new data volume; API changes on an existing guest win.
+on property:ro.persistent_properties.ready=true && property:vendor.qemu.rc.adb=0 && property:persist.sys.rc.adb=
+    setprop persist.sys.rc.adb 0
+
+on property:ro.persistent_properties.ready=true && property:vendor.qemu.rc.adb=1 && property:persist.sys.rc.adb=
+    setprop persist.sys.rc.adb 1
+
 # 开机完成后再起 —— remote-control 要调 SurfaceFlinger 和 system_server，
 # 起太早会失败。
 on property:sys.boot_completed=1
     start remote-control
+
+# ADB is an optional guest capability. The management API updates this persistent
+# property; init owns the actual adbd lifecycle so the daemon needs no shell/adb.
+on property:persist.sys.rc.adb=0
+    stop adbd
+
+on property:persist.sys.rc.adb=1
+    start adbd
+
+# Keep a disabled bridge stopped even if framework USB setup starts it again.
+on property:init.svc.adbd=running && property:persist.sys.rc.adb=0
+    stop adbd
+
+on property:sys.rc.config_ready=1
+    setprop vendor.qemu.rc.token ""
 
 # -----------------------------------------------------------------------------
 # 调试用：跳过 seclabel 和 socket，以 root 身份前台跑

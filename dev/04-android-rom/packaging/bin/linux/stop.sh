@@ -5,12 +5,7 @@
 #   ./bin/stop.sh --port 5584
 #   ./bin/stop.sh --force         # 60 秒还没退就 SIGKILL
 #
-# ⚠️ 为什么不能只 kill 进程：`adb emu kill` 是**硬断电**，不是关机。
-#    实测（上游项目 tools/verify-kill-is-hard-poweroff.sh，同一台实例三组对照）：
-#      写入后 sync 再关 → 数据在
-#      写入后不 sync 直接关 → **数据没了**
-#      写入后等 15 秒再关 → **还是没了**
-#    所以这里一定先 `adb shell sync`。这条别"优化"掉。
+# 常规停机通过 HTTP 请求 Android 正常关机；--force 才允许硬停止。
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
@@ -32,7 +27,6 @@ if [ -z "$PORT" ]; then
     [ -n "$PORT" ] || die "实例 '$NAME' 没登记过端口（./bin/status.sh 看有哪些）"
 fi
 SERIAL="$(serial_for_port "$PORT")"
-require_adb
 
 PID="$(emu_pid_for_port "$PORT")"
 if [ -z "$PID" ]; then
@@ -40,23 +34,27 @@ if [ -z "$PID" ]; then
     exit 0
 fi
 
-log "让 guest 把脏页落盘（adb shell sync）"
-"$ADB" -s "$SERIAL" shell sync >/dev/null 2>&1 || warn "sync 没成功（设备可能已经挂了）"
-sleep 1
+log "通过 HTTP 请求 Android 正常关机（不需要 ADB）"
+service_read_instance "$PORT"
+if ! service_create_redirect "$PORT" || ! service_request_poweroff "$PORT" "$TIMEOUT"; then
+    if [ "$FORCE" != 1 ]; then
+        die "无法请求正常关机：HTTP 服务或保存的令牌不可用。修复服务后重试，或使用 --force 硬停止"
+    fi
+    warn "HTTP 正常关机不可用，--force 将直接终止模拟器；未落盘数据可能丢失"
+    console_kill "$PORT" || true
+fi
 
-log "请 guest 自己关机（adb emu kill）"
-"$ADB" -s "$SERIAL" emu kill >/dev/null 2>&1 || warn "emu kill 没送到（进程可能已经退出）"
-
-# ⚠️ 等的是**进程真的退出**，不是"命令返回了"：emu kill 只是递个关机请求，
-#    guest 还要走完流程（卸载 /data、收 qcow2）。这中间就重启会撞上
+# 等进程真的退出，Android 正常关机需要卸载文件系统并保存覆盖层。
+# 在进程退出前重启会撞上
 #    multiinstance.lock，第二台报 another emulator instance is currently running。
 for _ in $(seq 1 $((TIMEOUT / 2))); do
     [ -z "$(emu_pid_for_port "$PORT")" ] && { ok "已停止：$SERIAL"; exit 0; }
     sleep 2
 done
 
-warn "等了 ${TIMEOUT} 秒还没退出（PID $PID）—— 数据已经 sync 过，可以强杀"
+warn "等了 ${TIMEOUT} 秒还没退出（PID $PID）—— 尚未确认正常关机完成"
 if [ "$FORCE" = 1 ]; then
+    console_kill "$PORT" || true
     kill -9 "$PID" 2>/dev/null || true
     sleep 2
     [ -z "$(emu_pid_for_port "$PORT")" ] && { ok "已强杀：$SERIAL"; exit 0; }

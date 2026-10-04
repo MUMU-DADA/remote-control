@@ -32,6 +32,7 @@
 # =============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+require_console_helper
 
 DEFAULT_NAME="default"
 
@@ -160,6 +161,7 @@ do_launch() {   # do_launch <实例名> <emulator 路径> <gpu>
         -sysdir "$sysdir" -datadir "$datadir" -port "$port" \
         "${win_args[@]}" -gpu "$gpu" -no-boot-anim -no-audio -no-snapshot \
         -accel on -memory "$MEM_MB" -cores "$CORES" \
+        "${SERVICE_PROPERTY_ARGS[@]}" \
         "${tap_args[@]}" \
         >> "$log" 2>&1 < /dev/null &
     EMU_PID=$!
@@ -176,23 +178,19 @@ pick_emulator() {
     die "找不到模拟器（export EMULATOR_BIN=...）"
 }
 
-wait_adb() {   # 最多 40 秒；进程提前退出即失败
-    local serial="$1"
+console_appears() {   # 最多 40 秒；进程提前退出即失败
+    local port="$1"
     for _ in $(seq 1 8); do
-        "$ADB" -s "$serial" get-state >/dev/null 2>&1 && return 0
+        console_ready "$port" && return 0
         kill -0 "$EMU_PID" 2>/dev/null || return 1
         sleep 5
     done
     return 1
 }
 
-wait_boot() {
-    local serial="$1" i
-    for i in $(seq 1 60); do
-        [ "$("$ADB" -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && return 0
-        sleep 3
-    done
-    return 1
+wait_service() {
+    local port="$1"
+    service_wait_ready "$port" 300
 }
 
 # ---------------------------------------------------------------------------
@@ -216,7 +214,7 @@ cmd_create() {
            "$(config_get hw.lcd.density 320)" \
            "$([ "$(config_get hw.lcd.width 1280)" -gt "$(config_get hw.lcd.height 720)" ] && echo 横屏 || echo 竖屏)"
     printf '    内存/核  %s MB / %s 核\n' "$(config_get hw.ramSize 4096)" "$(config_get hw.cpu.ncore 4)"
-    printf '    数据分区 %s（实际占用看 qcow2 长到多大）\n' "$(config_get disk.dataPartition.size 32G)"
+    printf '    数据分区 %s（实际占用看 qcow2 长到多大）\n' "$(config_get disk.dataPartition.size 16G)"
     printf '    下一步   ./scripts/emulator.sh start %s\n' "$name"
 }
 
@@ -241,7 +239,15 @@ cmd_start() {
 
     resolve_hw
     local emu; emu="$(pick_emulator)"
-    local serial; serial="$(inst_serial "$name")"
+    local port; port="$(instance_port "$name")"
+
+    # The guest service is configured through qemu.rc.* properties and is
+    # reachable through the emulator console's NAT redirect.  Persisted
+    # instance values win on subsequent starts so template edits do not mutate
+    # an existing guest unexpectedly.
+    service_prepare_token "$name" 0 1
+    service_register "$name" "$port" 0 1
+    build_service_property_args 0
 
     if [ -n "$OPT_GPU" ]; then
         log "硬件参数： -memory $MEM_MB  -cores $CORES  -gpu $GPU_MODE（命令行指定）"
@@ -260,30 +266,30 @@ cmd_start() {
     for g in "${gpus[@]}"; do
         [ "$g" = "$GPU_MODE" ] || warn "上一档（$GPU_MODE）没起来，退到 $g"
         do_launch "$name" "$emu" "$g"
-        if wait_adb "$serial"; then started=1; break; fi
+        if console_appears "$port"; then started=1; break; fi
         warn "没起来（$(tail -2 "$(inst_log "$name")" | tr '\n' ' ')）"
         kill "$EMU_PID" 2>/dev/null || true
-        "$ADB" -s "$serial" emu kill >/dev/null 2>&1 || true
+        console_kill "$port" || true
         sleep 3
     done
     [ "$started" = 1 ] || die "起不来；看 $(inst_log "$name")"
 
     log "已启动 '$name'（-gpu $g -memory $MEM_MB -cores $CORES，端口 $(instance_port "$name")）"
+    service_create_redirect "$port" || die "无法建立 HTTP 转发 127.0.0.1:$SERVICE_HTTP_PORT → guest:$SERVICE_GUEST_PORT"
+    log "服务地址：http://127.0.0.1:$SERVICE_HTTP_PORT"
+    [ "$SERVICE_AUTH" != 1 ] || log "访问令牌保存在 $(service_token_file "$name")"
     if [ "$OPT_NOWAIT" = 1 ]; then
-        printf '后续： adb -s %s shell getprop sys.boot_completed\n' "$serial"
+        printf '后续： ./scripts/emulator.sh status %s\n' "$name"
         return 0
     fi
 
-    log "等开机完成"
-    if wait_boot "$serial"; then
-        "$ADB" -s "$serial" root >/dev/null 2>&1 || true
-        "$ADB" -s "$serial" wait-for-device
+    log "等服务就绪"
+    if wait_service "$port"; then
         local bt
         bt="$(grep -oE '(boot time|Boot completed in) [0-9]+ ms' "$(inst_log "$name")" 2>/dev/null | tail -1 || true)"
-        log "开机完成 ${bt:+（$bt）}"
-        "$ADB" -s "$serial" shell getprop ro.build.version.sdk >/dev/null 2>&1 || true
+        log "服务就绪：http://127.0.0.1:$SERVICE_HTTP_PORT ${bt:+（$bt）}"
     else
-        warn "等开机超时（300s）—— 可能还在起，也可能卡住了；看 $(inst_log "$name")"
+        warn "等服务超时（300s）—— 可能还在起，也可能卡住了；看 $(inst_log "$name")"
         return 1
     fi
 }
@@ -293,33 +299,20 @@ cmd_start() {
 # ---------------------------------------------------------------------------
 cmd_stop() {
     local name="${1:?实例名}"; need_instance "$name"
-    local port serial; port="$(instance_port "$name")"; serial="$(inst_serial "$name")"
+    local port; port="$(instance_port "$name")"
     local pids; pids="$(emu_pid_for_port "$port")"
     [ -n "$pids" ] || { warn "实例 '$name' 没在跑"; return 0; }
 
-    # ⚠️⚠️ 关机前**必须让 guest 把脏页落盘**。
-    #
-    #    `adb emu kill` **不是优雅关机，是硬断电** —— 它给 QEMU 发信号让它
-    #    立刻终止，guest 根本没机会卸载文件系统或提交日志。
-    #    实测（tools/verify-kill-is-hard-poweroff.sh，同一台实例三组对照）：
-    #
-    #      写入后 sync 再关      → 重启后文件**在**
-    #      写入后不 sync 直接关  → 重启后文件**没了**
-    #      写入后等 15 秒再关    → **还是没了**（guest 的回写比想象中懒）
-    #
-    #    后果不是"丢最后一点"，而是**最近写的东西整个没**，而且毫无征兆 ——
-    #    项目早期那条"模拟器 /data 不持久（根因未查明）"就是它。
-    log "让 guest 把脏页落盘（sync）"
-    "$ADB" -s "$serial" shell sync >/dev/null 2>&1 || true
-    sleep 1
+    # Let Android sync and unmount its filesystems through its normal power
+    # service. Emulator console kill is only used by the explicit kill command.
+    log "通过 HTTP 请求 Android 正常关机（不需要 ADB）"
+    service_read_instance "$port"
+    if ! service_create_redirect "$port" || ! service_request_poweroff "$port" "${AUTOSNAP_STOP_TIMEOUT:-60}"; then
+        warn "HTTP 服务或保存的令牌不可用；用 kill 命令可强制关闭"
+        return 1
+    fi
 
-    log "请 guest 自己关机（adb emu kill）"
-    "$ADB" -s "$serial" emu kill >/dev/null 2>&1 || true
-
-    # ⚠️ 等的是**进程真的退出**，不是"命令返回了"。emu kill 只是递个请求，
-    #    guest 还要走完关机流程（卸载 /data、收 qcow2）；这时候就重启会
-    #    撞上 multiinstance.lock —— 第二台会报 "another emulator instance
-    #    is currently running"。
+    # Wait for the process to exit before reusing its image locks.
     local i
     for i in $(seq 1 30); do
         [ -z "$(emu_pid_for_port "$port")" ] && { log "已停止 '$name'"; return 0; }
@@ -337,11 +330,7 @@ cmd_kill() {
 
     log "强制关闭 '$name'（SIGKILL）"
     local p
-    # ⚠️ 强杀之前先把脏页落盘。`adb emu kill` 本身就已经是硬断电了
-    #    （见 stop 里那段实测，三组对照），SIGKILL 只会更狠 ——
-    #    不做这一步，最近写入的数据会静默消失。多花一秒换数据安全，值。
-    "$ADB" -s "$(inst_serial "$name")" shell sync >/dev/null 2>&1 || true
-    "$ADB" -s "$(inst_serial "$name")" emu kill >/dev/null 2>&1 || true
+    console_kill "$port" || true
     sleep 2
     for p in $(emu_pid_for_port "$port"); do kill -9 "$p" 2>/dev/null || true; done
 
@@ -396,6 +385,12 @@ cmd_reset() {
     rm -rf "$sysdir"/build.avd "$sysdir"/snapshots "$sysdir"/tmpAdbCmds
     mkdir -p "$(inst_datadir "$name")"
 
+    # Reset creates a fresh guest, so service.* from the current template and
+    # a new token must be applied on its next start.
+    local port; port="$(instance_port "$name")"
+    instance_register "$name" "$port"
+    rm -f "$(service_token_file "$name")"
+
     log "已重置 '$name'（下次启动是全新机器；config.ini 的改动这次会全生效）"
 }
 
@@ -418,6 +413,7 @@ cmd_delete() {
     # ⚠️ 工作目录里镜像都是**符号链接**，rm -rf 只删链接不删目标 ——
     #    交付目录 artifacts/rom-* 不会被误删（这是要确认的第一件事）。
     rm -rf "$sysdir" "$datadir" "$log"
+    rm -f "$(service_token_file "$name")"
     instance_unregister "$name"
     log "已删除实例 '$name'"
 }
@@ -450,6 +446,7 @@ cmd_clone() {
     local s_sys s_dat d_sys d_dat
     s_sys="$(inst_sysdir "$src")"; s_dat="$(inst_datadir "$src")"
     instance_register "$dst" "$port"
+    copy_instance_service_metadata "$src" "$dst"
     d_sys="$(inst_sysdir "$dst")"; d_dat="$(inst_datadir "$dst")"
 
     log "复制工作目录（含已装应用）： $(du -sh "$s_sys" 2>/dev/null | cut -f1)"
@@ -486,6 +483,7 @@ cmd_clone() {
 #     INSTANCE-MANIFEST.json   元数据：名字、导出时间、ROM 指纹、跳过了哪些文件
 #     sysdir/…                 实例状态（**不含**指向 ROM 镜像的符号链接）
 #     datadir/…
+#     host-service.env / host-service.token   服务配置与访问令牌（0600）
 #
 # ⚠️ 两个关键设计，都是被实测逼出来的：
 #
@@ -560,6 +558,19 @@ cmd_export() {
     rm -rf "$stage"
     mkdir -p "$stage/sysdir" "$stage/datadir"
 
+    # Guest /data already contains the persisted service credentials.  Carry
+    # their host counterpart so importing does not create a different token.
+    local key value
+    : > "$stage/host-service.env"
+    for key in SERVICE_PORT SERVICE_ENABLED SERVICE_AUTH SERVICE_BIND SERVICE_ADB; do
+        value="$(instance_service_value "$name" "$key")"
+        [ -z "$value" ] || printf '%s=%s\n' "$key" "$value" >> "$stage/host-service.env"
+    done
+    if [ -s "$(service_token_file "$name")" ]; then
+        (umask 077; cp "$(service_token_file "$name")" "$stage/host-service.token")
+        chmod 600 "$stage/host-service.token"
+    fi
+
     local n_state=0 f b
     for f in "$sysdir"/*; do
         [ -e "$f" ] || continue
@@ -616,6 +627,8 @@ cmd_export() {
         rm -rf "$stage"
         die "tar 失败"
     fi
+    # The archive includes the service token as well as guest /data.
+    chmod 600 "$out"
     rm -rf "$stage"
 
     # 导完**读回确认** —— tar 说成功不等于归档能用
@@ -699,11 +712,22 @@ cmd_import() {
     [ "$free_mb" -gt $((need_mb + 512)) ] ||         die "空间不够：需要约 ${need_mb}MB，只剩 ${free_mb}MB"
 
     instance_register "$name" "$port"
+    local service_metadata service_token
+    service_metadata="$(tar -xOf "$f" ./host-service.env 2>/dev/null || true)"
+    if [ -n "$service_metadata" ]; then
+        printf '%s\n' "$service_metadata" | sed -n '/^SERVICE_\(PORT\|ENABLED\|AUTH\|BIND\|ADB\)=/p' >> "$(instance_file "$name")"
+    fi
+    service_token="$(tar -xOf "$f" ./host-service.token 2>/dev/null || true)"
+    if [ -n "$service_token" ]; then
+        (umask 077; printf '%s\n' "$service_token" > "$(service_token_file "$name")")
+        chmod 600 "$(service_token_file "$name")"
+    fi
     local sysdir; sysdir="$(inst_sysdir "$name")"
     mkdir -p "$sysdir" "$(inst_datadir "$name")"
 
     log "解包 → .run/sysdir-$port（约 $((need_mb/1024))G）"
     tar --sparse --numeric-owner -xf "$f" -C "$RUN_DIR" --strip-components=0 \
+        --exclude=./host-service.env --exclude=./host-service.token \
         --transform 's,^\./sysdir,sysdir-'"$port"',; s,^\./datadir,datadir-'"$port"',' \
         2>/dev/null || {
         # --transform 不可用（非 GNU tar）时退回两步走
@@ -743,8 +767,12 @@ cmd_import() {
 inst_state() {   # 打印 运行中/已停止
     local name="$1" port; port="$(instance_port "$name")"
     if [ -n "$(emu_pid_for_port "$port")" ]; then
-        local b; b="$("$ADB" -s "emulator-$port" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-        [ "$b" = 1 ] && printf '运行中(已开机)' || printf '运行中(启动中)'
+        service_read_instance "$port"
+        if service_http_state "$port" >/dev/null 2>&1; then
+            printf '运行中(服务就绪)'
+        else
+            printf '运行中(启动中)'
+        fi
     else
         printf '已停止'
     fi
@@ -776,7 +804,10 @@ cmd_status() {
     printf '实例       %s\n' "$name"
     printf '端口       %s\n' "$port"
     printf '状态       %s\n' "$(inst_state "$name")"
-    printf '串口       adb -s emulator-%s\n' "$port"
+    service_read_instance "$port"
+    printf 'console    127.0.0.1:%s\n' "$port"
+    printf '服务       http://127.0.0.1:%s（guest:%s）\n' "$SERVICE_HTTP_PORT" "$SERVICE_GUEST_PORT"
+    printf 'ADB        显式诊断时使用：adb -s emulator-%s\n' "$port"
     printf '工作目录   %s\n' "$(inst_sysdir "$name")"
     if [ ! -d "$(inst_sysdir "$name")" ]; then
         printf '           ⚠️  工作目录不存在（sysdir 已被删除）；实例若仍在跑，靠的是已删除的 inode\n'

@@ -239,7 +239,8 @@ if [ -n "$DZIP" ]; then
 
     # bin/ 必须是 mac 那五个（不是 linux 的、也不是空的）
     NB="$(ls "$DROOT/bin" 2>/dev/null | wc -l)"
-    chk "包内 bin/ 文件数" "$NB" "5"
+    # console/storage helpers are shipped alongside the five lifecycle scripts.
+    chk "包内 bin/ 文件数" "$NB" "7"
     for s in lib.sh start-headless.sh stop.sh status.sh verify.sh; do
         if [ -f "$DROOT/bin/$s" ]; then okc "包内有 bin/$s"; else badc "包内缺 bin/$s"; fi
     done

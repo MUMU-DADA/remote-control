@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Linux/x86_64 侧：启动自编 ROM（KVM 加速）并做 arm64 应用验收。
+# Linux/x86_64 侧：启动自编 ROM（KVM 加速）；显式 --verify 做 ADB 验收。
 #
-#   ./run-linux.sh                 # 启动 + 等开机 + 验收（默认：全新冷启动）
+#   ./run-linux.sh                 # 启动 + 等 HTTP 管理服务（默认：全新冷启动）
 #   ./run-linux.sh --no-wait       # 起了就返回
-#   ./run-linux.sh --verify        # 对已在跑的实例只做验收
-#   ./run-linux.sh --stop          # 停掉
-#   ./run-linux.sh --apk <path>    # 用指定的 arm64 APK 做验收（默认用固定的 F-Droid 包）
+#   ./run-linux.sh --verify        # 对已在跑的实例做验收（此路径需要 ADB）
+#   ./run-linux.sh --stop          # HTTP 正常关机；--force 允许 console 硬停止
+#   ./run-linux.sh --verify --apk <path> # 用指定的 arm64 APK 做验收
 #
 # 多开一台机器 / 保留状态 / 从快照秒起：
 #   ./run-linux.sh --port 5584                 # 再开一台（独立 sysdir / datadir / tap，互不干扰）
@@ -24,9 +24,11 @@
 #
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+require_console_helper
 
-WAIT=1; VERIFY_ONLY=0; APK=""; FORCE_PRODUCT_OUT=0; SHOW_KERNEL=0
+WAIT=1; VERIFY_ONLY=0; STOP=0; FORCE=0; APK=""; FORCE_PRODUCT_OUT=0; SHOW_KERNEL=0
 REUSE=0; SNAPSHOT=""
+NAME="${AUTOSNAP_NAME:-}"
 # 空 = 从 config.ini 读（见下面 resolve 那段）
 GPU_MODE=""; MEM_MB=""; CORES=""
 DEFAULT_APK_URL="https://mirrors.tuna.tsinghua.edu.cn/fdroid/repo/com.oF2pks.kalturadeviceinfos_24.apk"
@@ -36,10 +38,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-wait)     WAIT=0 ;;
         --verify)      VERIFY_ONLY=1 ;;
-        # ⚠️ emu kill 是**硬断电**（不是优雅关机），不先 sync 会丢掉
-        #    最近写入的数据 —— 实测见 tools/verify-kill-is-hard-poweroff.sh
-        --stop)        "$ADB" -s "emulator-$EMULATOR_PORT" shell sync >/dev/null 2>&1 || true
-                       "$ADB" -s "emulator-$EMULATOR_PORT" emu kill >/dev/null 2>&1 && log "已停" || warn "没在跑"; exit 0 ;;
+        # Parse all arguments before stopping so --stop --port N targets N.
+        --stop)        STOP=1 ;;
+        --force)       FORCE=1 ;;
+        --name)        NAME="${2:?}"; shift ;;
         --apk)         APK="${2:?}"; shift ;;
         --from-product-out) FORCE_PRODUCT_OUT=1 ;;
         --show-kernel) SHOW_KERNEL=1 ;;
@@ -58,6 +60,19 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+case "$EMULATOR_PORT" in ''|*[!0-9]*) die "端口必须是数字：$EMULATOR_PORT" ;; esac
+[ "$EMULATOR_PORT" -ge 1 ] && [ "$EMULATOR_PORT" -le 65534 ] && [ $((EMULATOR_PORT % 2)) -eq 0 ] || die "console 端口必须是 1-65534 内的偶数"
+OWNED_NAMES="$(instance_names_for_port "$EMULATOR_PORT")"
+if [ -z "$NAME" ]; then
+    if [ -n "$OWNED_NAMES" ]; then
+        NAME="$OWNED_NAMES"
+    elif [ "$EMULATOR_PORT" = "$EMULATOR_PORT_BASE" ]; then
+        NAME=default
+    else
+        NAME="port-$EMULATOR_PORT"
+    fi
+fi
+
 # 按**最终**端口派生（--port 在上面才生效，所以不能放到 common.sh 里算）：
 #   NET_TAP_IF        每实例一个 tap，否则多实例抢同一个 tap0
 #   EMULATOR_DATADIR  每实例一个 datadir；共用时 AOSP 自带模拟器会因为目录不存在
@@ -67,6 +82,49 @@ EMULATOR_DATADIR="${EMULATOR_DATADIR:-$RUN_DIR/datadir-$EMULATOR_PORT}"
 
 SERIAL="emulator-$EMULATOR_PORT"
 mkdir -p "$RUN_DIR" "$EMULATOR_DATADIR"
+
+# Normal lifecycle uses the emulator console and the guest HTTP service.  ADB
+# remains reserved for the explicit --verify diagnostics below.
+stop_without_adb() {
+    local pid
+    pid="$(emu_pid_for_port "$EMULATOR_PORT")"
+    [ -n "$pid" ] || { warn "端口 $EMULATOR_PORT 上没有模拟器在跑"; return 0; }
+    service_read_instance "$EMULATOR_PORT"
+    if ! service_create_redirect "$EMULATOR_PORT" || ! service_request_poweroff "$EMULATOR_PORT" "${AUTOSNAP_STOP_TIMEOUT:-60}"; then
+        [ "$FORCE" = 1 ] || die "HTTP 服务或令牌不可用。重试或使用 --stop --force 强制关闭"
+        warn "HTTP 正常关机请求失败；--force 使用 console kill（最近未写入数据可能丢失）"
+        console_kill "$EMULATOR_PORT" || true
+    fi
+    for _ in $(seq 1 30); do
+        [ -z "$(emu_pid_for_port "$EMULATOR_PORT")" ] && { log "已停：$SERIAL"; return 0; }
+        sleep 2
+    done
+    [ "$FORCE" = 1 ] || die "60 秒后进程仍在运行（PID $pid）。重试或使用 --stop --force"
+    warn "模拟器进程仍在运行（PID $pid），--force 使用 console kill"
+    console_kill "$EMULATOR_PORT" || true
+    for _ in 1 2 3 4 5; do
+        [ -z "$(emu_pid_for_port "$EMULATOR_PORT")" ] && { log "已停：$SERIAL"; return 0; }
+        sleep 1
+    done
+    die "没停掉：$SERIAL"
+}
+
+if [ "$STOP" = 1 ]; then
+    stop_without_adb
+    exit 0
+fi
+
+# Register service metadata before launch so HTTP redirection and tokens are
+# stable across --reuse and can be inspected without ADB.
+if [ "$VERIFY_ONLY" = 0 ]; then
+    [ -z "$OWNED_NAMES" ] || [ "$OWNED_NAMES" = "$NAME" ] || die "端口 $EMULATOR_PORT 已登记给实例 '$OWNED_NAMES'"
+    REGISTERED_PORT="$(instance_port "$NAME")"
+    [ -z "$REGISTERED_PORT" ] || [ "$REGISTERED_PORT" = "$EMULATOR_PORT" ] || die "实例 '$NAME' 已登记端口 $REGISTERED_PORT，不能覆盖它"
+    port_listening "$EMULATOR_PORT" && die "端口 $EMULATOR_PORT 上已有模拟器在运行"
+    service_prepare_token "$NAME" 0 "$REUSE"
+    service_register "$NAME" "$EMULATOR_PORT" 0 "$REUSE"
+    build_service_property_args 0
+fi
 
 # ---------------------------------------------------------------------------
 # 硬件参数：默认全部来自 emulator/config.ini
@@ -205,14 +263,15 @@ if [ "$VERIFY_ONLY" = 0 ]; then
             -no-window -gpu "$2" -no-boot-anim -no-audio \
             "${snap_args[@]}" \
             -accel on -memory "$MEM_MB" -cores "$CORES" \
+            "${SERVICE_PROPERTY_ARGS[@]}" \
             "${tap_args[@]}" \
             $([ "$SHOW_KERNEL" = 1 ] && printf '%s' "-show-kernel") \
             >> "$RUN_DIR/emulator-$EMULATOR_PORT.log" 2>&1 < /dev/null &
         EMU_PID=$!
     }
-    adb_appears() {   # 最多等 40 秒；进程提前退出即判定失败
+    console_appears() {   # 最多等 40 秒；进程提前退出即判定失败
         for _ in $(seq 1 8); do
-            "$ADB" -s "$SERIAL" get-state >/dev/null 2>&1 && return 0
+            console_ready "$EMULATOR_PORT" && return 0
             kill -0 "$EMU_PID" 2>/dev/null || return 1
             sleep 5
         done
@@ -235,37 +294,38 @@ if [ "$VERIFY_ONLY" = 0 ]; then
             log "启动自编 ROM（KVM）：$c  -gpu $g  -memory $MEM_MB -cores $CORES"
             [ "$g" = "$GPU_MODE" ] || warn "上一档（$GPU_MODE）没起来，退到 $g"
             launch "$c" "$g"
-            if adb_appears; then started=1; EMULATOR_BIN="$c"; GPU_MODE="$g"; break 2; fi
+            if console_appears; then started=1; EMULATOR_BIN="$c"; GPU_MODE="$g"; break 2; fi
             warn "这个组合没起来（$(tail -2 "$RUN_DIR/emulator-$EMULATOR_PORT.log" | tr '\n' ' ')）"
             kill "$EMU_PID" 2>/dev/null || true
-            "$ADB" -s "$SERIAL" emu kill >/dev/null 2>&1 || true
+            console_kill "$EMULATOR_PORT" || true
             sleep 3
         done
     done
     [ "$started" = 1 ] || die "所有模拟器/GPU 组合都没能启动设备；看 $RUN_DIR/emulator-$EMULATOR_PORT.log"
     log "实际使用：-gpu $GPU_MODE -memory $MEM_MB -cores $CORES"
 
+    if ! service_create_redirect "$EMULATOR_PORT"; then
+        die "无法建立 HTTP 转发 127.0.0.1:$SERVICE_HTTP_PORT → guest:$SERVICE_GUEST_PORT"
+    fi
+    log "服务地址：http://127.0.0.1:$SERVICE_HTTP_PORT"
     if [ "$WAIT" = 1 ]; then
-        log "等开机完成"
-        for i in $(seq 1 40); do
-            [ "$("$ADB" -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break
-            sleep 5
-        done
-        "$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
-        "$ADB" -s "$SERIAL" wait-for-device
-        log "开机完成： $(grep -oE '(boot time|Boot completed in) [0-9]+ ms' "$RUN_DIR/emulator-$EMULATOR_PORT.log" 2>/dev/null | tail -1 || true)"
-    else
-        printf '\n后续： ./run-linux.sh --verify\n'
+        log "等服务就绪"
+        service_wait_ready "$EMULATOR_PORT" 300 || die "服务就绪超时；看 $RUN_DIR/emulator-$EMULATOR_PORT.log"
+        log "服务就绪"
+    fi
+    if [ "$VERIFY_ONLY" = 0 ]; then
+        [ "$WAIT" = 1 ] || printf '\n后续： ./run-linux.sh --verify --port %s\n' "$EMULATOR_PORT"
         exit 0
     fi
 fi
 
 # ---------------------------------------------------------------------------
 # 验收
-# `binfmt_misc` 目录通常只有 root adbd 才能读取。启动路径在等待开机时
-# 已经尝试过 `adb root`，但 `--verify` 直接跳到这里，复用一台由普通
-# adbd 提供服务的设备会把已注册的规则误报成缺失。再次尝试提升权限；
+# `binfmt_misc` 目录通常只有 root adbd 才能读取。显式 --verify 诊断
+# 尝试 adb root，以免普通 adbd 把已注册的规则误报成缺失；
 # 生产版 adbd 不允许 root 时忽略失败，让后面的实际检查决定结果。
+require_adb
+log "--verify 已显式请求 ADB 诊断（普通启动不需要 ADB）"
 "$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
 "$ADB" -s "$SERIAL" wait-for-device >/dev/null 2>&1 || true
 fails=0

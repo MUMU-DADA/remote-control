@@ -10,6 +10,7 @@
 #
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/storage.sh"
 
 DEST="$ARTIFACTS_DIR/rom-$PRODUCT_NAME"
 
@@ -172,7 +173,7 @@ log "清空并重建 $DEST"
 rm -rf "$DEST"; mkdir -p "$DEST/system"
 
 for f in $REQUIRED $OPTIONAL; do
-    [ -s "$PRODUCT_OUT/$f" ] && cp -f "$PRODUCT_OUT/$f" "$DEST/$f"
+    [ -s "$PRODUCT_OUT/$f" ] && copy_sparse_file "$PRODUCT_OUT/$f" "$DEST/$f"
 done
 
 # 屏幕尺寸/密度：交付目录里那份 config.ini 用本项目 emulator/config.ini 覆盖。

@@ -27,6 +27,7 @@ param(
     [switch]$Gui,
     [switch]$NoWait,
     [switch]$WipeData,
+    [switch]$TestInstance,
     [switch]$NoAccel
 )
 
@@ -36,14 +37,13 @@ if ([string]::IsNullOrWhiteSpace($Name)) { $Name = $script:DefaultName }
 
 Assert-Emulator
 Assert-Images
-Assert-Adb
 
 # ---------------------------------------------------------------------------
-# 端口：显式 > 该实例已登记的 > 自动分配（偶数，console 口 = port+1）
+# 端口：显式 > 该实例已登记的 > 自动分配（偶数为 console 口，ADB 口 = port+1）
 # ---------------------------------------------------------------------------
 if ($Port -le 0) { $Port = Get-InstancePort $Name }
 if ($Port -le 0) { $Port = New-FreePort }
-if ($Port % 2 -ne 0) { Die "端口必须是偶数：$Port（模拟器拿 port+1 当 console 口）" }
+if ($Port % 2 -ne 0) { Die "端口必须是偶数：$Port（console 口为偶数，ADB 口为 port+1）" }
 $owners = @(Get-InstanceNamesForPort $Port)
 if ($owners.Count -gt 0 -and ($owners.Count -ne 1 -or $owners[0] -ne $Name)) {
     $ownerText = $owners -join ", "
@@ -59,7 +59,60 @@ $registeredPort = Get-InstancePort $Name
 if ($registeredPort -ne $Port -and ((Test-Path $sysdir) -or (Test-Path $datadir))) {
     Die "端口 $Port 的工作目录已存在但不属于实例 '$Name'：$sysdir / $datadir；拒绝覆盖未登记数据"
 }
+# HTTP 元数据必须在覆盖实例登记前读回；复用 guest 的配置已持久化。
+$effectiveReuse = $Reuse -and -not $WipeData -and (Test-Path $sysdir)
+$oldHttpPort = Get-InstanceValue $Name "HTTP_PORT"
+$oldServicePort = Get-InstanceValue $Name "SERVICE_PORT"
+$oldServiceAuth = Get-InstanceValue $Name "SERVICE_AUTH"
+$oldServiceEnabled = Get-InstanceValue $Name "SERVICE_ENABLED"
+$oldServiceBind = Get-InstanceValue $Name "SERVICE_BIND"
+$oldServiceAdb = Get-InstanceValue $Name "SERVICE_ADB"
+$serviceEnabled = Get-ConfigValue "service.enabled" "1"
+$serviceBind = Get-ConfigValue "service.bind" "0.0.0.0"
+$servicePort = Get-ConfigValue "service.port" "8088"
+$serviceAuth = if ($TestInstance) { "0" } else { Get-ConfigValue "service.auth" "1" }
+$serviceAdb = Get-ConfigValue "service.adb_enabled" "1"
+$serviceToken = if ($effectiveReuse) { Get-ServiceToken $Name } else { New-ServiceToken $Name -TestInstance:$TestInstance }
+$serviceGuestPort = [int](Get-ConfigValue "service.port" "8088")
+if ($serviceEnabled -notmatch '^[01]$' -or $serviceAuth -notmatch '^[01]$' -or $serviceAdb -notmatch '^[01]$') {
+    Die "service.enabled/auth/adb_enabled 只能是 0 或 1"
+}
+if ($servicePort -notmatch '^[0-9]+$' -or [int]$servicePort -lt 1 -or [int]$servicePort -gt 65535) {
+    Die "service.port 必须是 1-65535 的整数"
+}
+if ($serviceBind -notmatch '^[A-Za-z0-9.:_-]+$' -or $serviceToken -notmatch '^[A-Za-z0-9_-]{0,80}$') {
+    Die "service.bind/token 格式不受支持"
+}
+
+if ($effectiveReuse) {
+    if ($oldServicePort -match '^[0-9]+$') { $servicePort = $oldServicePort; $serviceGuestPort = [int]$oldServicePort }
+    if ($oldServiceAuth -match '^[01]$') { $serviceAuth = $oldServiceAuth }
+    if ($oldServiceEnabled -match '^[01]$') { $serviceEnabled = $oldServiceEnabled }
+    if ($oldServiceBind) { $serviceBind = $oldServiceBind }
+    if ($oldServiceAdb -match '^[01]$') { $serviceAdb = $oldServiceAdb }
+    if ($serviceAuth -eq "1") {
+        $serviceToken = Get-ServiceToken $Name
+        if (-not $serviceToken) { Die "复用实例缺少服务令牌文件；恢复 .run\instances\$Name.token 后重试" }
+    } else { $serviceToken = "" }
+}
+$serviceHttpPort = 18088 + [int](($Port - $script:PortBase) / 2)
+if ($oldHttpPort -match '^[0-9]+$') { $serviceHttpPort = [int]$oldHttpPort }
+if ($env:AUTOSNAP_HTTP_PORT) {
+    if ($env:AUTOSNAP_HTTP_PORT -notmatch '^[0-9]+$') { Die "HTTP 端口必须是 1-65535 的整数" }
+    $serviceHttpPort = [int]$env:AUTOSNAP_HTTP_PORT
+}
+if ($serviceHttpPort -lt 1 -or $serviceHttpPort -gt 65535) { Die "HTTP 端口必须是 1-65535 的整数" }
+$serviceProps = @(
+    "-prop", "qemu.rc.enabled=$serviceEnabled",
+    "-prop", "qemu.rc.bind=$serviceBind",
+    "-prop", "qemu.rc.port=$servicePort",
+    "-prop", "qemu.rc.auth=$serviceAuth",
+    "-prop", "qemu.rc.adb=$serviceAdb"
+)
+if ($serviceToken) { $serviceProps += @("-prop", "qemu.rc.token=$serviceToken") }
+
 Register-Instance $Name $Port
+Set-InstanceService $Name $serviceHttpPort $serviceGuestPort $serviceEnabled $serviceAuth $serviceBind $serviceAdb
 
 # ---------------------------------------------------------------------------
 # 前置自检
@@ -76,8 +129,8 @@ else {
     } catch { Write-Warn "查不到虚拟化状态（非 Windows 或权限不足），跳过这项自检" }
 }
 
-$drive = (Get-Item $script:RunDir -ErrorAction SilentlyContinue)
-if (-not $drive) { New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null; $drive = Get-Item $script:RunDir }
+$drive = (Get-Item $script:RunDir -Force -ErrorAction SilentlyContinue)
+if (-not $drive) { New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null; $drive = Get-Item $script:RunDir -Force }
 $freeGB = (Get-PSDrive $drive.PSDrive.Name).Free / 1GB
 if ($freeGB -lt 8) { Write-Warn ("工作目录所在盘只剩 {0:N1} GB —— 数据分区是 qcow2 覆盖层、会随用量增长" -f $freeGB) }
 
@@ -120,6 +173,7 @@ function Start-EmuOnce {
            "-gpu", $GpuMode, "-accel", $accel,
            "-memory", "$memMB", "-cores", "$coreN",
            "-no-boot-anim", "-no-audio", "-no-snapshot")
+    $a += $serviceProps
     if (-not $Gui)      { $a += "-no-window" }
     if ($WipeData)      { $a += "-wipe-data" }
 
@@ -135,7 +189,7 @@ foreach ($g in $gpuCands) {
     if ($g -ne $gpuMode) { Write-Warn "上一档（$gpuMode）没起来，退到 $g" }
     Write-Log "启动：-gpu $g -memory $memMB -cores $coreN -accel $accel 端口 $Port"
     Start-EmuOnce $g
-    if (Wait-Adb $serial 60) { $started = $true; $usedGpu = $g; break }
+    if (Wait-ConsoleReady $Port 60) { $started = $true; $usedGpu = $g; break }
     $tail = (Get-Content $errf -Tail 2 -ErrorAction SilentlyContinue) -join " "
     Write-Warn "没起来（$tail）"
     Stop-Process -Id $script:EmuProc.Id -Force -ErrorAction SilentlyContinue
@@ -144,6 +198,9 @@ foreach ($g in $gpuCands) {
 if (-not $started) { Die "起不来。日志：$logf / $errf" }
 
 Write-Ok "已启动：$serial（-gpu $usedGpu -memory $memMB -cores $coreN）"
+if (-not (Add-ConsoleRedirect $Port $serviceHttpPort $serviceGuestPort)) {
+    Die "无法建立服务端口转发：宿主 $serviceHttpPort → guest $serviceGuestPort"
+}
 if ($gpuAuto) { Write-Log "GPU 自适应依据：$(Get-GpuReason)" }
 
 if ($NoWait) {
@@ -152,10 +209,8 @@ if ($NoWait) {
     exit 0
 }
 
-Write-Log "等开机完成（WHPX 下通常几十秒）"
-if (-not (Wait-Boot $serial $TimeoutSec)) { Die "等开机超时（${TimeoutSec}s）—— 看 $logf / $errf" }
-& $script:Adb -s $serial root 2>$null | Out-Null
-& $script:Adb -s $serial wait-for-device 2>$null | Out-Null
+Write-Log "等服务就绪（WHPX 下通常几十秒）"
+if (-not (Wait-ServiceReady $Port $TimeoutSec)) { Die "等 remote-control 服务超时（${TimeoutSec}s）—— 看 $logf / $errf" }
 
 $bt = (Select-String -Path $logf -Pattern '(boot time|Boot completed in) \d+ ms' -ErrorAction SilentlyContinue |
        Select-Object -Last 1).Line

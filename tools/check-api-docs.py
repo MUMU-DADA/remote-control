@@ -21,6 +21,10 @@ BASE = (sys.argv[1] if len(sys.argv) > 1
         else os.environ.get("REMOTE_CONTROL_BASE", "http://127.0.0.1:8088"))
 B = BASE.rstrip("/") + "/api/v1"
 DOCS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "api")
+opener = urllib.request.build_opener()
+if os.environ.get("REMOTE_CONTROL_TOKEN"):
+    opener.addheaders.append(("Authorization", "Bearer " + os.environ["REMOTE_CONTROL_TOKEN"]))
+urllib.request.install_opener(opener)
 def api(p):
     try:
         with urllib.request.urlopen(B+p, timeout=20) as r: return json.load(r)

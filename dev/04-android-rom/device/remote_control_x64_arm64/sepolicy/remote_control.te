@@ -126,6 +126,8 @@ binder_use(remote_control)
 #        allow {netdomain -ephemeral_app} port_type:tcp_socket name_bind;
 #    进了 netdomain 属性就能绑任意端口，同时拿到标准的网络权限。
 net_domain(remote_control)
+get_prop(remote_control, vendor_remote_control_boot_prop)
+set_prop(remote_control, remote_control_settings_prop)
 
 # -----------------------------------------------------------------------------
 # 截图：调 SurfaceFlinger
@@ -453,10 +455,14 @@ allow remote_control mnt_user_file:lnk_file r_file_perms;
 #    /sdcard 仍然列不出东西，denial 换成了
 #        avc: denied { search } ... dev="fuse" tcontext=u:object_r:fuse:s0
 #    /sdcard 是 FUSE 提供的，挂载点本身是 fuse 类型，得单独给。
-allow remote_control fuse:dir { search getattr open read };
-allow remote_control fuse:file { read open getattr };
-allow remote_control media_rw_data_file:dir { open read search getattr };
-allow remote_control media_rw_data_file:file { open read getattr };
+allow remote_control fuse:dir { search getattr open read write add_name remove_name };
+allow remote_control fuse:file { read open getattr write create setattr unlink rename };
+allow remote_control media_rw_data_file:dir {
+    open read search getattr write add_name remove_name
+};
+allow remote_control media_rw_data_file:file {
+    open read getattr write create setattr unlink rename
+};
 
 # svc / pm / am 是 shell 脚本，脚本里调的是 `app_process64`（Java 层），
 # 所以还要能 exec zygote_exec。AOSP 给 shell 的就是这一条

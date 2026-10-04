@@ -25,12 +25,12 @@
 //   这个文件的读者是人，可读性也重要。
 //
 // 格式：
-//   enabled=1        服务是否应当运行（上位应用写，supervisor 读）
-//   bind=127.0.0.1   监听地址。改 0.0.0.0 才是真正"对外"
+//   enabled=1        服务对外软开关（管理入口始终保留）
+//   bind=0.0.0.0     监听地址。127.0.0.1 为仅 guest 本机
 //   port=8088        HTTP 监听端口。**这就是对外端口本身**，
 //                    不再依赖额外的端口转发 —— 转发器和这个值对不上
 //                    的话，"改端口"就会变成一个改完就失联的操作
-//   auth=0           是否要求访问令牌
+//   auth=1           是否要求访问令牌
 //   token=...        auth=1 且为空时，守护进程启动时随机生成并写回
 
 #pragma once
@@ -41,9 +41,9 @@ namespace remote_control {
 
 struct PersistedConfig {
     bool        enabled = true;
-    std::string bind    = "127.0.0.1";   // 监听地址；0.0.0.0 = 对外
+    std::string bind    = "0.0.0.0";     // 监听地址；鉴权默认开启
     int         port    = 8088;
-    bool        auth    = false;
+    bool        auth    = true;
     std::string token;
 
     // 上一次读到的 token 是否为空、由本次启动生成
@@ -56,7 +56,7 @@ class ConfigFile {
     static std::string DefaultPath();
 
     // 读取。**文件不存在不算错误** —— 返回全默认值。
-    // 首启就是这个状态：无鉴权、8088、启用。
+    // 首启默认开启服务和鉴权，8088；release 模板可覆盖这些默认值。
     static bool Load(const std::string& path, PersistedConfig* out,
                      std::string* error);
 

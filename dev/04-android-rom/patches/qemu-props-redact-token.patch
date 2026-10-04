@@ -1,0 +1,26 @@
+diff --git a/device/generic/goldfish/qemu-props/qemu-props.cpp b/device/generic/goldfish/qemu-props/qemu-props.cpp
+--- a/device/generic/goldfish/qemu-props/qemu-props.cpp
++++ b/device/generic/goldfish/qemu-props/qemu-props.cpp
+@@ -137,7 +137,7 @@ int main(void)
+ 
+         temp[len] = '\0';  /* zero-terminate string */
+ 
+-        DD("received: %.*s", len, temp);
++        DD("received boot property");
+ 
+         /* separate propery name from value */
+         prop_value = strchr(temp, '=');
+@@ -167,9 +167,11 @@ int main(void)
+             final_prop_name = temp;
+         }
+ 
++        const char* logged_value = !strcmp(final_prop_name, "vendor.qemu.rc.token")
++                ? "[redacted]" : prop_value;
+         if (property_set(final_prop_name, prop_value) < 0) {
+-            ALOGW("could not set property '%s' to '%s'", final_prop_name, prop_value);
++            ALOGW("could not set property '%s' to '%s'", final_prop_name, logged_value);
+         } else {
+-            ALOGI("successfully set property '%s' to '%s'", final_prop_name, prop_value);
++            ALOGI("successfully set property '%s' to '%s'", final_prop_name, logged_value);
+             count += 1;
+         }

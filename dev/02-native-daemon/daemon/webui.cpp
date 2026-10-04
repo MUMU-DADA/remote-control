@@ -128,6 +128,11 @@ const std::string& WebUiHtml() {
     <input type="checkbox" id="svcsw" onchange="toggleService(this.checked)">
     <span id="svctext">服务对外可用</span>
   </label>
+  <label id="adbwrap" style="display:flex; align-items:center; gap:6px;
+         font-size:12px; color:#9ac">
+    <input type="checkbox" id="adbsw" onchange="toggleAdb(this.checked)">
+    <span id="adbtext">ADB 开启</span>
+  </label>
   <!-- 面板开关。横屏设备最缺宽度，收起面板就能让画面占满整屏。 -->
   <button id="panelsw" onclick="togglePanel()" title="收起/展开右侧控制面板"
           style="font-size:12px; padding:3px 8px">面板</button>
@@ -1603,12 +1608,34 @@ function refreshService() {
     serving = d.serving;
     updateServiceUi('');
   }).catch(() => {});
+  refreshAdb();
 }
 
 function updateServiceUi(note) {
   $('svcsw').checked = serving;
   $('svctext').textContent = serving ? '服务对外可用' : '服务已关闭';
   $('svcwrap').style.color = serving ? '#4a9' : '#c55';
+  if (note) setStatus(note);
+}
+
+function toggleAdb(on) {
+  api('/adb', { method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({enabled:on}) })
+    .then(d => updateAdbUi(d.enabled, d.note || ''))
+    .catch(e => {
+      updateAdbUi(!on, '');
+      setStatus('切换 ADB 失败：' + e, true);
+    });
+}
+
+function refreshAdb() {
+  api('/adb').then(d => updateAdbUi(d.enabled, '')).catch(() => {});
+}
+
+function updateAdbUi(on, note) {
+  $('adbsw').checked = !!on;
+  $('adbtext').textContent = on ? 'ADB 开启' : 'ADB 关闭';
+  $('adbwrap').style.color = on ? '#9ac' : '#c88';
   if (note) setStatus(note);
 }
 

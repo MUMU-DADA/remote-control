@@ -128,7 +128,9 @@ for platform in linux darwin; do
     mkdir -p "$PKG/bin/$platform" "$PKG/runtime/emulator/qemu" "$PKG/runtime/platform-tools" \
              "$PKG/templates" "$PKG/images" "$PKG/run/instances"
     cp "$X64_DIR/packaging/bin/$platform/start-headless.sh" "$PKG/bin/$platform/start-headless.sh"
-    cp "$X64_DIR/packaging/bin/$platform/lib.sh" "$PKG/bin/$platform/lib.sh"
+    cp "$X64_DIR/packaging/bin/$platform/lib.sh" \
+       "$X64_DIR/packaging/bin/$platform/console.sh" \
+       "$X64_DIR/packaging/bin/$platform/storage.sh" "$PKG/bin/$platform/"
     chmod +x "$PKG/bin/$platform/start-headless.sh" "$PKG/bin/$platform/lib.sh"
     if [ "$platform" = linux ]; then backend=linux-x86_64/qemu-system-x86_64-headless
     else backend=darwin-aarch64/qemu-system-aarch64-headless; fi
@@ -192,7 +194,10 @@ if [ -n "$PWSH" ]; then
     PKG="$TEST_TMP/windows"
     mkdir -p "$PKG/bin/windows" "$PKG/runtime/emulator/qemu/windows-x86_64" \
              "$PKG/runtime/platform-tools" "$PKG/templates" "$PKG/images/system" "$PKG/run/instances"
-    cp "$X64_DIR/packaging/bin/windows/common.ps1" "$X64_DIR/packaging/bin/windows/start-headless.ps1" "$PKG/bin/windows/"
+    cp "$X64_DIR/packaging/bin/windows/common.ps1" \
+       "$X64_DIR/packaging/bin/windows/start-headless.ps1" \
+       "$X64_DIR/packaging/bin/windows/console.ps1" \
+       "$X64_DIR/packaging/bin/windows/storage.ps1" "$PKG/bin/windows/"
     printf x > "$PKG/runtime/emulator/emulator.exe"
     printf x > "$PKG/runtime/emulator/qemu/windows-x86_64/qemu-system-x86_64.exe"
     printf x > "$PKG/runtime/platform-tools/adb.exe"
@@ -224,7 +229,8 @@ TEST_TREE="$TEST_TMP/checkout"
 mkdir -p "$TEST_TREE/aosp" "$TEST_TREE/dev/04-android-rom/scripts" \
          "$TEST_TREE/dev/04-android-rom/emulator" "$TEST_TREE/product-out/system"
 PKGROOT="$TEST_TREE/dev/04-android-rom"
-cp "$X64_DIR/scripts/package-rom.sh" "$X64_DIR/scripts/common.sh" "$PKGROOT/scripts/"
+cp "$X64_DIR/scripts/package-rom.sh" "$X64_DIR/scripts/common.sh" \
+   "$X64_DIR/scripts/storage.sh" "$PKGROOT/scripts/"
 cp "$X64_DIR/emulator/config.ini" "$PKGROOT/emulator/config.ini"
 PRODUCT_OUT_TEST="$TEST_TREE/product-out"
 make_images "$PRODUCT_OUT_TEST"
@@ -238,6 +244,29 @@ start_emulator_holder() {
         safety-holder "$1" &
     HOLDER_PID=$!
 }
+
+echo "-- sparse image copy preserves bytes and logical size"
+SPARSE_SRC="$TEST_TREE/sparse-source.img"
+SPARSE_DST="$TEST_TREE/sparse-dest.img"
+python3 - "$SPARSE_SRC" <<'PY'
+import os, sys
+p = sys.argv[1]
+with open(p, 'wb') as f:
+    f.write(b'header')
+    for _ in range(64):
+        f.write(b'\0' * (1024 * 1024))
+    f.write(b'trailer')
+PY
+SPARSE_SRC="$SPARSE_SRC" SPARSE_DST="$SPARSE_DST" \
+    bash -c '. "$0/scripts/storage.sh"; copy_sparse_file "$SPARSE_SRC" "$SPARSE_DST"' \
+    "$PKGROOT"
+if cmp -s "$SPARSE_SRC" "$SPARSE_DST" && \
+   [ "$(stat -c %s "$SPARSE_SRC")" = "$(stat -c %s "$SPARSE_DST")" ] && \
+   [ "$(stat -c %b "$SPARSE_DST")" -lt "$(stat -c %b "$SPARSE_SRC")" ]; then
+    okc "sparse image copy keeps bytes/size and reduces allocated blocks"
+else
+    badc "sparse image copy changed bytes/size or did not preserve holes"
+fi
 
 printf active-data > "$PRODUCT_OUT_TEST/userdata-qemu.img"
 start_emulator_holder "$PRODUCT_OUT_TEST"

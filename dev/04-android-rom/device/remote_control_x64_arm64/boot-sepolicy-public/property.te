@@ -1,0 +1,4 @@
+# Export only the property type so vendor qemu-props can populate boot options.
+# Read access is explicit; unlike vendor_qemu_prop this type is not readable by
+# every Android domain. The token is cleared by init after the handoff.
+vendor_public_prop(vendor_remote_control_boot_prop)

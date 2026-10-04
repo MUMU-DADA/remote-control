@@ -9,8 +9,8 @@
 # 为什么要同步而不是直接改 AOSP 树：
 #   1. 本项目目录才是唯一真源，AOSP 树是可重来的构建依赖（85 GB，不纳入版本管理）；
 #   2. 容器只挂了 aosp/，本项目目录不在容器里；
-#   3. 全程**不改 AOSP 上游任何文件**——落点只有新增的 device/remote_control/ 一个目录，
-#      lunch 能发现它是因为 Soong 会递归扫描 device/*/*/AndroidProducts.mk。
+#   3. 设备树落在 device/remote_control/；另有可逆的 qemu-props 日志补丁，
+#      防止首启传入的 token 被上游写入 logcat。
 #
 # ⚠️ 两个产品**一起同步**，不是只同步当前 PRODUCT：
 #    AndroidProducts.mk 里两个产品并列，AOSP 树里缺任何一个，对应产品的
@@ -63,6 +63,10 @@ fi
 
 # ---------------------------------------------------------------------------
 if [ "$MODE" = revert ]; then
+    token_patch="$X64_DIR/patches/qemu-props-redact-token.patch"
+    if patch -d "$AOSP_DIR" -p1 -R --dry-run -f < "$token_patch" >/dev/null 2>&1; then
+        patch -d "$AOSP_DIR" -p1 -R -f < "$token_patch"
+    fi
     [ -d "$DEVICE_DST" ] || { log "AOSP 里本来就没有 $DEVICE_DST"; exit 0; }
     rm -rf "$DEVICE_DST"
     log "已移除 $DEVICE_DST（AOSP 树回到未注入状态）"
@@ -104,6 +108,13 @@ fi
     PRODUCT=$PRODUCT → 期望 device/$PRODUCT_NAME/"
 
 [ "$MODE" = check ] && exit 0
+
+token_patch="$X64_DIR/patches/qemu-props-redact-token.patch"
+if patch -d "$AOSP_DIR" -p1 --dry-run -f < "$token_patch" >/dev/null 2>&1; then
+    patch -d "$AOSP_DIR" -p1 -f < "$token_patch"
+elif ! patch -d "$AOSP_DIR" -p1 -R --dry-run -f < "$token_patch" >/dev/null 2>&1; then
+    die "qemu-props 日志补丁与当前源码不匹配：$token_patch"
+fi
 
 # ---------------------------------------------------------------------------
 # 2) 同步设备树（保留权限位：bin/ 下的可执行文件必须是 0755）

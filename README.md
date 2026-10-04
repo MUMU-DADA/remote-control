@@ -162,7 +162,8 @@ Java-only AIDL。`remote-control` 用 `/dev/uinput` 绕开 —— 代价是会�
   JPEG/PNG/WebP 的共享编码缓存不适用于有状态的 H.264 帧间编码
 - 要传 fd 的客户端（截图帧、APK 安装）**必须在设备上运行** ——
   `SEQPACKET` 和 `SCM_RIGHTS` 过不了 `adb forward`
-- 默认**不鉴权**且只绑 `127.0.0.1`；改成 `0.0.0.0` 前请先看
+- 正式实例默认绑定 `0.0.0.0` 并开启鉴权，首次实例化生成随机令牌；可在
+  release 的 `templates/config.ini` 预设服务配置。参见
   [`docs/api/04-config.md`](docs/api/04-config.md)
 
 ---

@@ -1,0 +1,2 @@
+persist.sys.rc.adb u:object_r:remote_control_settings_prop:s0 exact bool
+sys.rc.config_ready u:object_r:remote_control_settings_prop:s0 exact bool

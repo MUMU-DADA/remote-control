@@ -114,7 +114,7 @@ class HttpServer {
     struct Options {
         std::string bindAddr = "127.0.0.1";
         uint16_t    port     = 8088;
-        // 访问令牌。**空 = 无鉴权**，这是默认状态（首启即是）。
+        // 访问令牌。空 = 无鉴权；main 为正式首启生成/读取随机令牌。
         // 非空时 /api/ 下的所有请求都要带令牌；
         // 网页本身（/ 和 /ui）不校验 —— 它只是个静态页面，
         // 不含任何秘密，而用户得先打开它才能输入令牌。
@@ -151,8 +151,7 @@ class HttpServer {
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;
 
-    // token 非空但绑定地址不是回环时返回 false —— 拒绝"对外且不鉴权"的配置。
-    // 与其在文档里写"请不要这样"，不如让它在启动时就失败。
+    // 显式配置为对外且无鉴权时告警；正式默认由 main 开启鉴权。
     bool Start(const Options& opts, std::string* error);
 
     // Run 在调用线程阻塞；销毁对象前，调用方必须在 Stop 后 join 该线程。

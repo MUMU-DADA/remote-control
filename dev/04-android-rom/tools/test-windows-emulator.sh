@@ -55,6 +55,8 @@ rm -rf "$SANDBOX"; mkdir -p "$SANDBOX/win" "$SANDBOX/emulator"
 
 cp "$X64_DIR/emulator/config.ini" "$SANDBOX/emulator/config.ini"
 cp "$X64_DIR/windows/emulator.ps1" "$SANDBOX/win/emulator.ps1"
+mkdir -p "$SANDBOX/packaging/bin/windows"
+cp "$X64_DIR/packaging/bin/windows/console.ps1" "$X64_DIR/packaging/bin/windows/storage.ps1" "$SANDBOX/packaging/bin/windows/"
 
 config_value() {
     awk -F= -v key="$1" '$1 == key { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' \
@@ -62,8 +64,9 @@ config_value() {
 }
 CONFIG_MEMORY_MB="$(config_value hw.ramSize)"
 CONFIG_CORES="$(config_value hw.cpu.ncore)"
-[ -n "$CONFIG_MEMORY_MB" ] && [ -n "$CONFIG_CORES" ] || {
-    echo "[x] config.ini 缺少 hw.ramSize 或 hw.cpu.ncore"
+CONFIG_DATA_SIZE="$(config_value disk.dataPartition.size)"
+[ -n "$CONFIG_MEMORY_MB" ] && [ -n "$CONFIG_CORES" ] && [ -n "$CONFIG_DATA_SIZE" ] || {
+    echo "[x] config.ini 缺少 hw.ramSize、hw.cpu.ncore 或 disk.dataPartition.size"
     exit 1
 }
 
@@ -102,9 +105,9 @@ printf '%s' "$CREATE_OUT" | grep -q "1280x720 @320dpi  横屏" \
 printf '%s' "$CREATE_OUT" | grep -q "${CONFIG_MEMORY_MB} MB / ${CONFIG_CORES} 核" \
     && { printf '  \033[1;32m✓\033[0m %s\n' "create 打印内存/核数（都来自 config.ini）"; pass=$((pass+1)); } \
     || { printf '  \033[1;31m✗\033[0m %s\n' "create 打印内存/核数（都来自 config.ini）"; fail=$((fail+1)); }
-printf '%s' "$CREATE_OUT" | grep -q "32G" \
-    && { printf '  \033[1;32m✓\033[0m %s\n' "create 打印数据分区 32G"; pass=$((pass+1)); } \
-    || { printf '  \033[1;31m✗\033[0m %s\n' "create 打印数据分区 32G"; fail=$((fail+1)); }
+printf '%s' "$CREATE_OUT" | grep -qF "$CONFIG_DATA_SIZE" \
+    && { printf '  \033[1;32m✓\033[0m %s\n' "create 打印数据分区 $CONFIG_DATA_SIZE"; pass=$((pass+1)); } \
+    || { printf '  \033[1;31m✗\033[0m %s\n' "create 打印数据分区 $CONFIG_DATA_SIZE"; fail=$((fail+1)); }
 chk "default 的端口是 5580" test "$(port_of default)" = "5580"
 chk_out "create dev2" "已创建" ps create dev2
 chk_out "status dev2 读到真源的 ${CONFIG_MEMORY_MB}" "$CONFIG_MEMORY_MB" ps status dev2
@@ -128,7 +131,7 @@ echo "── [2] list / status"
 chk_out "list 里有 dev2 和端口" "dev2" ps list
 chk_out "list 显示已停止" "已停止" ps list
 chk_out "status 读到真源的 ${CONFIG_MEMORY_MB}" "$CONFIG_MEMORY_MB" ps status dev2
-chk_out "status 读到真源的 32G" "32G" ps status dev2
+chk_out "status 读到真源的 $CONFIG_DATA_SIZE" "$CONFIG_DATA_SIZE" ps status dev2
 chk_out "status 读到真源的 ${CONFIG_CORES} 核" "hw.cpu.ncore             ${CONFIG_CORES}" ps status dev2
 
 echo

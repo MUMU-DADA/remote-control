@@ -96,3 +96,5 @@ WIFI_DRIVER_FW_PATH_AP      := "/dev/null"
 #    区别只在"注释怎么写"。见 docs/13-macos-port.md §7.0.10。
 #
 SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/sepolicy
+SYSTEM_EXT_PUBLIC_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/boot-sepolicy-public
+BOARD_VENDOR_SEPOLICY_DIRS += device/remote_control/remote_control_x64_arm64/boot-sepolicy-vendor

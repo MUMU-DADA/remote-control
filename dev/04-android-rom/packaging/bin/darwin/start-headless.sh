@@ -21,7 +21,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 NAME="$DEFAULT_NAME"; PORT=""; GPU=""; MEM=""; CORES=""
-REUSE=0; GUI=0; WAIT=1; WIPE=0; ACCEL="auto"; TIMEOUT=300
+REUSE=0; GUI=0; WAIT=1; WIPE=0; ACCEL="auto"; TIMEOUT=300; TEST_INSTANCE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -36,6 +36,7 @@ while [ $# -gt 0 ]; do
         --gui)     GUI=1 ;;
         --no-wait) WAIT=0 ;;
         --wipe-data) WIPE=1 ;;
+        --test-instance) TEST_INSTANCE=1 ;;
         --bridge)
             die "--bridge 在 macOS 上不可用：macOS 没有 -net-tap 的等价物。
     这不是待修的缺陷 —— windows 包同样没有桥接（见 docs/13-macos-port.md §3.5）。
@@ -49,7 +50,7 @@ done
 
 require_runtime
 require_images
-require_adb
+command -v curl >/dev/null 2>&1 || die "找不到 curl（服务就绪检测需要 HTTP 客户端）"
 
 # ---------------------------------------------------------------------------
 # 端口：显式 > 该实例已登记的 > 自动分配
@@ -62,7 +63,7 @@ case "$PORT" in
     ''|*[!0-9]*) die "端口必须是数字：$PORT" ;;
 esac
 if [ $((PORT % 2)) -ne 0 ]; then
-    die "端口必须是偶数：$PORT（模拟器拿 port+1 当 console 口）"
+    die "端口必须是偶数：$PORT（此端口为 console，port+1 为 ADB）"
 fi
 OWNED_PORTS="$(instance_names_for_port "$PORT")"
 if [ -n "$OWNED_PORTS" ] && [ "$OWNED_PORTS" != "$NAME" ]; then
@@ -79,7 +80,6 @@ REGISTERED_PORT="$(instance_port "$NAME")"
 if [ "$REGISTERED_PORT" != "$PORT" ] && { [ -e "$SYSDIR" ] || [ -L "$SYSDIR" ] || [ -e "$DATADIR" ] || [ -L "$DATADIR" ]; }; then
     die "端口 $PORT 的工作目录已存在但不属于实例 '$NAME'：$SYSDIR / $DATADIR；拒绝覆盖未登记数据"
 fi
-instance_register "$NAME" "$PORT"
 
 # ---------------------------------------------------------------------------
 # 前置自检
@@ -117,6 +117,10 @@ else
 fi
 mkdir -p "$DATADIR"
 
+service_prepare_token "$NAME" "$TEST_INSTANCE" "$REUSE"
+service_register "$NAME" "$PORT" "$TEST_INSTANCE" "$REUSE"
+build_service_property_args "$TEST_INSTANCE"
+
 # ---------------------------------------------------------------------------
 # 硬件参数
 # ---------------------------------------------------------------------------
@@ -132,7 +136,7 @@ case "$CORES" in ''|*[!0-9]*) die "核数必须是数字：$CORES" ;; esac
 
 # GPU 候选：自适应选的那档起不来就退软件渲染。
 # 「探测到 GPU ≠ 驱动能用」（虚拟机里的 macOS 就是有设备无 Metal），
-# 所以判据是"adb 真的看得见设备"，不是"探测到了"。
+# 所以判据是"console 已完成认证"，不是"探测到了"。
 GPU_CANDIDATES=("$GPU_MODE")
 [ "$GPU_AUTO" = 1 ] && [ "$GPU_MODE" = host ] && GPU_CANDIDATES+=("swiftshader_indirect")
 
@@ -148,6 +152,7 @@ launch() {   # launch <gpu>
         nohup "$EMULATOR" \
             -sysdir "$SYSDIR" -datadir "$DATADIR" -port "$PORT" \
             -gpu "$1" -accel "$ACCEL" -memory "$MEM" -cores "$CORES" \
+            "${SERVICE_PROPERTY_ARGS[@]}" \
             -no-boot-anim -no-audio -no-snapshot \
             $([ "$GUI" = 1 ] || printf '%s' "-no-window") \
             $([ "$WIPE" = 1 ] && printf '%s' "-wipe-data") \
@@ -156,10 +161,10 @@ launch() {   # launch <gpu>
     disown 2>/dev/null || true
 }
 
-adb_appears() {   # 最多 40 秒；进程提前退出即判定失败
+console_appears() {   # 最多 40 秒；进程提前退出即判定失败
     local i
     for i in 1 2 3 4 5 6 7 8; do
-        "$ADB" -s "$SERIAL" get-state >/dev/null 2>&1 && return 0
+        console_ready "$PORT" && return 0
         kill -0 "$EMU_PID" 2>/dev/null || return 1
         sleep 5
     done
@@ -171,28 +176,31 @@ for g in "${GPU_CANDIDATES[@]}"; do
     [ "$g" = "$GPU_MODE" ] || warn "上一档（$GPU_MODE）没起来，退到 $g"
     log "启动：$EMULATOR -gpu $g -memory $MEM -cores $CORES -accel $ACCEL 端口 $PORT"
     launch "$g"
-    if adb_appears; then started=1; USED_GPU="$g"; break; fi
+    if console_appears; then started=1; USED_GPU="$g"; break; fi
     warn "没起来：$(tail -2 "$LOGF" 2>/dev/null | tr '\n' ' ')"
     kill "$EMU_PID" 2>/dev/null || true
-    "$ADB" -s "$SERIAL" emu kill >/dev/null 2>&1 || true
+    console_kill "$PORT" || true
     sleep 3
 done
 [ "$started" = 1 ] || die "起不来。日志：$LOGF"
 ok "已启动：$SERIAL（-gpu $USED_GPU -memory $MEM -cores $CORES）"
 if [ "$GPU_AUTO" = 1 ]; then log "GPU 自适应依据：$(gpu_reason)"; fi
 
+if ! service_create_redirect "$PORT"; then
+    die "无法建立 HTTP 转发 127.0.0.1:$SERVICE_HTTP_PORT → guest:$SERVICE_GUEST_PORT（端口可能已占用）"
+fi
+log "服务地址：http://127.0.0.1:$SERVICE_HTTP_PORT"
+[ "$SERVICE_AUTH" != 1 ] || log "访问令牌保存在 $(service_token_file "$NAME")（不在日志中显示）"
+
 if [ "$WAIT" = 0 ]; then
     printf '\n后续： ./bin/status.sh --port %s     ./bin/verify.sh --port %s     ./bin/stop.sh --port %s\n' "$PORT" "$PORT" "$PORT"
     exit 0
 fi
 
-log "等开机完成（硬件加速下通常 20~60 秒；TCG 下是分钟级）"
-if ! wait_for_boot "$PORT" "$TIMEOUT"; then
-    warn "等开机超时（${TIMEOUT}s）—— 看 $LOGF"
-    die "设备没能进入 sys.boot_completed=1"
+log "等 HTTP 服务就绪（不需要 ADB）"
+if ! service_wait_ready "$PORT" "$TIMEOUT"; then
+    die "HTTP 服务未就绪（${TIMEOUT}s）—— 看 $LOGF；复用实例若修改过服务端口/令牌，请更新实例登记或重新创建"
 fi
-"$ADB" -s "$SERIAL" root >/dev/null 2>&1 || true
-"$ADB" -s "$SERIAL" wait-for-device >/dev/null 2>&1 || true
 
 # 开机耗时那一行是模拟器在 guest 报完之后才写的，可能比 adb 看到 boot_completed 晚一瞬 ——
 # 给它三次机会，免得永远打印成空（实测踩过）
@@ -202,7 +210,7 @@ for _ in 1 2 3; do
     [ -n "$BOOTTIME" ] && break
     sleep 1
 done
-ok "开机完成 ${BOOTTIME:+（$BOOTTIME）}"
+ok "服务检测完成 ${BOOTTIME:+（$BOOTTIME）}"
 log "设备序列号：$SERIAL"
 log "工作目录：  $SYSDIR（镜像在 $IMAGES，只读；状态全在这里）"
 log "日志：      $LOGF"

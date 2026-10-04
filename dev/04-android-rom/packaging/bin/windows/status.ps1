@@ -20,11 +20,8 @@ function Show-Row  { param([string]$K, [string]$V) Write-Host ("  {0,-16} {1}" -
 
 function Get-BootState {
     param([int]$P)
-    try {
-        $v = (& $script:Adb -s (Get-Serial $P) shell getprop sys.boot_completed 2>$null) -join ""
-        if ($v.Trim() -eq "1") { return "已开机" }
-    } catch { }
-    return "未就绪"
+    if (Test-ServiceReady $P) { return "服务已就绪" }
+    return "服务未就绪"
 }
 
 if ($Port -gt 0 -or (Test-Instance $Name)) {
@@ -37,8 +34,8 @@ if ($Port -gt 0 -or (Test-Instance $Name)) {
         $procs = @(Get-EmuProcess $Port)
         Show-Row "进程" ("在跑（PID " + (($procs | ForEach-Object { $_.ProcessId }) -join ",") + "）")
         # 先取变量再拼字符串：双引号里再套 $() 与引号是 PowerShell 的经典坑
-        $adbState = (& $script:Adb -s (Get-Serial $Port) get-state 2>$null) -join ""
-        Show-Row "adb / 开机" ($adbState.Trim() + " / " + (Get-BootState $Port))
+        Show-Row "服务状态" (Get-BootState $Port)
+        Show-Row "管理地址" ("http://127.0.0.1:" + (Get-ServiceHttpPort $Port))
     } else {
         Show-Row "进程" "没在跑"
     }

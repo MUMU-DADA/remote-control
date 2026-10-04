@@ -18,6 +18,8 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include "android_properties.h"
+
 #include <algorithm>
 #include <atomic>
 #include <iterator>
@@ -2057,19 +2059,18 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
 HttpResponse RestApi::Handle(const HttpRequest& req) {
     // ── 服务对外开关 ──
     //
-    // 关掉之后一切请求都回 503，**只有服务开关本身除外**。
-    // 不放行它的话，关掉服务就等于把自己锁在门外 —— 而这正是
-    // 软开关想避免的情况。上位应用还能通过改配置文件开回来，
-    // 但网页和 API 客户端没有文件访问权。
+    // 关闭业务能力后仍保留认证管理入口，供用户重新开启、控制 ADB
+    // 或正常关机；网页和 API 客户端不需要设备配置文件访问权。
+    std::string path = req.path;
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
     if (!ServiceState::Instance().Serving()) {
-        const std::string p = req.path;
-        // 放行两类：
-        //   1. 网页本身 —— 不放行的话用户连开关都够不着（浏览器里
-        //      只会看到一个 503 的 JSON），只能靠上位应用或改配置文件
-        //   2. 开关接口 —— API 客户端重新开启的入口
+        const std::string& p = path;
+        // 网页、恢复开关和宿主管理接口始终可达，HTTP 层仍验证令牌。
         const bool isPage = (p == "/" || p == "/index.html" || p == "/ui");
-        const bool isSwitch = (p == "/api/v1/service");
-        if (!isPage && !isSwitch) {
+        const bool isManagement = (p == "/api/v1/service" ||
+                p == "/api/v1/adb" || p == "/api/v1/power" ||
+                p == "/api/v1" || p == "/api");
+        if (!isPage && !isManagement) {
             return HttpResponse::Error(
                     503, "服务已关闭对外能力。用 POST /api/v1/service "
                          "{\"on\":true} 重新开启");
@@ -2079,8 +2080,6 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
     // 归一化尾斜杠：/api/v1/ 与 /api/v1 应当等价。
     // 不做这一步的话，浏览器里多打一个斜杠就 404 —— 而 Segments() 是
     // 容忍尾斜杠的，两边判断不一致。（实测就是这么暴露的。）
-    std::string path = req.path;
-    while (path.size() > 1 && path.back() == '/') path.pop_back();
 
     const std::vector<std::string> seg = Segments(path);
 
@@ -2173,6 +2172,44 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         return Call(Cmd::Restart, "", 0, -1);
     }
 
+    if (res == "adb" && seg.size() == 3) {
+#if defined(__ANDROID__)
+        if (method == "GET") {
+            const bool enabled = AndroidProperty("persist.sys.rc.adb", "1") != "0";
+            const std::string state = AndroidProperty("init.svc.adbd", "unknown");
+            json::Writer w;
+            w.Obj().Field("enabled", enabled)
+                  .Field("running", state == "running")
+                  .Field("state", state)
+                  .Field("note", enabled ? "ADB 已开启" : "ADB 已关闭")
+             .EndObj();
+            return HttpResponse::Json(200, w.str());
+        }
+        if (method == "POST") {
+            json::Value body;
+            HttpResponse err;
+            if (!ParseJsonBody(req, &body, &err)) return err;
+            if (!body.has("enabled") || !body["enabled"].isBool()) {
+                return HttpResponse::Error(400, "需要布尔值 enabled");
+            }
+            const bool enabled = body.flag("enabled");
+            if (!SetAndroidProperty("persist.sys.rc.adb", enabled ? "1" : "0")) {
+                return HttpResponse::Error(500, "设置 ADB 状态失败");
+            }
+            json::Writer w;
+            w.Obj().Field("enabled", enabled)
+                  .Field("running", AndroidProperty("init.svc.adbd") == "running")
+                  .Field("pending", true)
+                  .Field("note", enabled ? "已请求开启 ADB" : "已请求关闭 ADB")
+             .EndObj();
+            return HttpResponse::Json(200, w.str());
+        }
+        return HttpResponse::Error(405, "adb 只支持 GET / POST");
+#else
+        return HttpResponse::Error(501, "当前平台不支持控制 Android ADB");
+#endif
+    }
+
     // ── 截图 / 流 / 触控 ──
     if (res == "capture" && (method == "GET" || method == "POST")) {
         return HandleCapture(req);
@@ -2243,7 +2280,7 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         json::Value b; HttpResponse err;
         if (!ParseJsonBody(req, &b, &err)) return err;
         const std::string what = b.str("action", "reboot");
-        return Call(Cmd::Power, PackArgs({what}), 0, -1);
+        return Call(Cmd::Power, PackArgs({what}), kFlagForce, -1);
     }
     // 屏幕方向。同样用 POST：有副作用。
     if (res == "rotate" && method == "POST") {
