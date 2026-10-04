@@ -7,14 +7,17 @@
 // 它不碰设备：用真实临时目录 + 真实的软链接来测，
 // 所以主机上就能跑，也不依赖 /sdcard。
 //
-// ⚠️ 只测 ResolveInside 这个静态函数，不测 List/Mkdir 那些 ——
-//    那些要真文件系统，而这台构建机上没有 /sdcard。
+// ResolveInside 和上传原子落盘使用显式临时根目录测试；不依赖设备上的 /sdcard。
 
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <string>
+#include <thread>
 
 #include "fileops.h"
 #include "test_util.h"
@@ -97,6 +100,13 @@ void TestResolve() {
     Check(!r.ok, "相对 .. 被拒 → %s", r.error.c_str());
     r = Resolve(std::string(kRoot) + "/../outside");
     Check(!r.ok, "绝对 .../storage/../outside 被拒 → %s", r.error.c_str());
+    std::string nulEscape = std::string(kRoot) + "/Download/..";
+    nulEscape.push_back('\0');
+    nulEscape += "a/..";
+    nulEscape.push_back('\0');
+    nulEscape += "b";
+    r = Resolve(nulEscape);
+    Check(!r.ok, "含 NUL 的路径不能借系统调用截断绕过边界");
     // 但"退到存储根又回来"是合法的
     r = Resolve("sub/../a.txt");
     Check(r.ok && r.path == std::string(kDl) + "/a.txt",
@@ -122,6 +132,140 @@ void TestSymlink() {
     }
 }
 
+bool Upload(const std::string& name, const std::string& data,
+            std::string* path, std::string* error,
+            const std::string& directory = kDl) {
+    return FileOps::UploadToStorage(kDl, kRoot, directory, name, -1,
+                                    data.data(), data.size(), path, error);
+}
+
+std::string ReadFile(const std::string& path) {
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return {};
+    std::string data;
+    char buf[256];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        data.append(buf, static_cast<size_t>(n));
+    }
+    close(fd);
+    return data;
+}
+
+void TestUpload() {
+    printf("\n[7] 文件上传与原子落盘\n");
+    std::string path, error;
+    const std::string staleTemp =
+            std::string(kDl) + "/.remote-control-upload-2147483647-0";
+    const int staleFd = open(staleTemp.c_str(), O_WRONLY | O_CREAT | O_EXCL,
+                             0600);
+    if (staleFd >= 0) close(staleFd);
+    const std::string payload("hello\0world", 11);
+    const bool uploaded = Upload("hello.bin", payload, &path, &error);
+    Check(uploaded && path == std::string(kDl) + "/hello.bin" &&
+              ReadFile(path) == payload,
+          "二进制内容按原字节写入并返回绝对路径: %s", error.c_str());
+    Check(staleFd >= 0 && access(staleTemp.c_str(), F_OK) != 0,
+          "上传前回收已退出进程遗留的目标临时文件");
+
+    error.clear();
+    const bool duplicate = Upload("hello.bin", "replacement", &path, &error);
+    Check(!duplicate && error.rfind("目标已存在:", 0) == 0 &&
+              ReadFile(std::string(kDl) + "/hello.bin") == payload,
+          "同名上传拒绝覆盖且保留旧内容");
+
+    error.clear();
+    const bool empty = Upload("empty.dat", "", &path, &error);
+    struct stat emptyStat{};
+    const bool emptyFile = stat((std::string(kDl) + "/empty.dat").c_str(),
+                                &emptyStat) == 0 && emptyStat.st_size == 0;
+    Check(empty && emptyFile, "零字节文件可正常上传");
+
+    for (const std::string& invalid : {std::string(""), std::string("."),
+                                        std::string(".."), std::string("a/b"),
+                                        std::string("a\\b"),
+                                        std::string("bad\nname")}) {
+        error.clear();
+        const bool ok = Upload(invalid, "x", &path, &error);
+        Check(!ok && error.rfind("文件名", 0) == 0,
+              "拒绝非 basename 或控制字符文件名");
+    }
+
+    error.clear();
+    const bool outside = Upload("escape.bin", "x", &path, &error,
+                                "/tmp/remote-control-fileops-test/outside");
+    Check(!outside, "目标目录超出共享存储根时拒绝");
+
+    std::string nulEscape = std::string(kRoot) + "/Download/..";
+    nulEscape.push_back('\0');
+    nulEscape += "a/..";
+    nulEscape.push_back('\0');
+    nulEscape += "b";
+    const std::string escapedFile = "/tmp/remote-control-fileops-test/escape.bin";
+    unlink(escapedFile.c_str());
+    error.clear();
+    const bool escaped = Upload("escape.bin", "x", &path, &error, nulEscape);
+    Check(!escaped && access(escapedFile.c_str(), F_OK) != 0,
+          "含 NUL 的多层 .. 上传路径不能越出共享存储");
+
+    const std::string link = std::string(kRoot) + "/upload-link";
+    unlink(link.c_str());
+    if (symlink(kDl, link.c_str()) == 0) {
+        error.clear();
+        const bool throughLink = Upload("linked.bin", "x", &path, &error,
+                                        link);
+        Check(!throughLink, "上传目标目录含软链接时拒绝");
+    }
+
+    char spoolPath[] = "/tmp/remote-control-upload-spool-XXXXXX";
+    const int spoolFd = mkstemp(spoolPath);
+    bool spoolReady = false;
+    if (spoolFd >= 0) {
+        const std::string spoolData(180000, 's');
+        size_t offset = 0;
+        while (offset < spoolData.size()) {
+            const ssize_t n = write(spoolFd, spoolData.data() + offset,
+                                    spoolData.size() - offset);
+            if (n <= 0) break;
+            offset += static_cast<size_t>(n);
+        }
+        spoolReady = offset == spoolData.size();
+        error.clear();
+        const bool copied = spoolReady &&
+            FileOps::UploadToStorage(kDl, kRoot, kDl, "spooled.bin", spoolFd,
+                                     nullptr, spoolData.size(), &path, &error);
+        Check(copied && ReadFile(path) == spoolData,
+              "大正文从 spool fd 流式复制到目标目录: %s", error.c_str());
+        error.clear();
+        const bool shortSource = spoolReady &&
+            FileOps::UploadToStorage(kDl, kRoot, kDl, "short.bin", spoolFd,
+                                     nullptr, 1, &path, &error);
+        Check(!shortSource, "spool 正文长度不符时拒绝发布");
+        close(spoolFd);
+        unlink(spoolPath);
+    } else {
+        Check(false, "创建 spool 测试文件: %s", strerror(errno));
+    }
+
+    bool first = false, second = false;
+    std::string firstPath, secondPath;
+    std::string firstError, secondError;
+    const std::string firstData(65536, 'a');
+    const std::string secondData(65536, 'b');
+    std::thread a([&] {
+        first = Upload("raced.bin", firstData, &firstPath, &firstError);
+    });
+    std::thread b([&] {
+        second = Upload("raced.bin", secondData, &secondPath, &secondError);
+    });
+    a.join();
+    b.join();
+    const std::string racedData = ReadFile(std::string(kDl) + "/raced.bin");
+    Check(first != second &&
+              (racedData == firstData || racedData == secondData),
+          "并发同名上传只发布一个完整文件");
+}
+
 }  // namespace
 
 int main() {
@@ -134,6 +278,7 @@ int main() {
 
     TestResolve();
     TestSymlink();
+    TestUpload();
 
     RmTree("/tmp/remote-control-fileops-test");
 

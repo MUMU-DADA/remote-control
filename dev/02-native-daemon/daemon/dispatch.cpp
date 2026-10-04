@@ -641,7 +641,7 @@ ReplyPacket Dispatcher::HandleInstallApp(const Request& req, int reqFd) {
     std::string tmp;
 
     // 上限和 HTTP 层共用同一个常量 —— 见 protocol.h 里的说明。
-    // 以前这里是写死的 2GB，而 HTTP 层放行 4GB：用户传完 3GB 的 APK
+    // 以前这里是写死的 2 GiB，而 HTTP 层放行 4 GiB：用户传完 3 GiB 的 APK
     // 才在这里被拒，报错还像是传输出了问题。
     constexpr int64_t kMaxApk = static_cast<int64_t>(kMaxUploadBytes);
 
@@ -1111,13 +1111,15 @@ ReplyPacket Dispatcher::HandleStats(const Request& req) {
              .Field("frames", h.frames)
              .Field("lastSeq", h.lastSeq)
              .Field("lastCaptureMs", h.lastCaptureMs)
-             // maxFps: 当前按多少 fps 在抓（所有订阅者里的最高需求）
+             // maxFps: 所有订阅者中的最高目标帧率；静帧时可按更长间隔探测
              .Field("maxFps", static_cast<int64_t>(h.maxFps))
+             .Field("captureIntervalMs",
+                    static_cast<int64_t>(h.captureIntervalMs))
+             .Field("adaptiveCapture", h.adaptiveCapture)
              // served: 取帧直接命中（抓帧线程已经备好）的次数
-             // misses: 没等到新帧（超时）的次数
+             // misses: 等待超时且没有新帧；静帧退避时这属于预期
              //
-             // 这个比值就是"卡不卡"的机器可读版本：
-             // 按需触发的那版每次都要等一个抓帧周期，misses 会很高。
+             // 静帧退避期间 misses 会正常增加，不应单独作为卡顿指标。
              .Field("served", h.served)
              .Field("misses", h.misses)
          .EndObj();

@@ -55,6 +55,7 @@ int64_t NowMs() {
 // 客户端理论上能要到 60fps，但抓帧本身可能只有 15fps（1440x2960 +
 // 软件渲染）。把它钳住是为了让 cv 的等待时间不至于小到变成空转。
 constexpr int kMaxFps = 60;
+constexpr int kMaxStaticProbeIntervalMs = 100;
 
 }  // namespace
 
@@ -80,6 +81,7 @@ struct FrameHub::Impl {
     // 用 map 而不是计数，因为要取最大值。
     std::map<uint64_t, int>      subFps;
     std::map<uint64_t, uint32_t> subMaxWidth;
+    std::map<uint64_t, bool>     subSkipUnchanged;
 
     // 订阅者的自述信息（谁/什么格式/挂了多久）。
     struct SubMeta {
@@ -93,6 +95,10 @@ struct FrameHub::Impl {
     uint64_t nextSubId = 1;
     int      maxFps    = 0;      // 0 = 没有任何需求
     uint32_t captureWidth = 0;   // 0 = 原始分辨率
+    bool     adaptiveCapture = false;
+    uint32_t unchangedCaptures = 0;
+    int      captureIntervalMs = 0;
+    uint64_t scheduleGeneration = 0;
 
     bool threadRunning = false;
     bool threadStopping = false;
@@ -122,14 +128,41 @@ struct FrameHub::Impl {
             if (kv.second > w) w = kv.second;
         }
 
-        if (m != maxFps || w != captureWidth) {
+        bool adaptive = !subSkipUnchanged.empty();
+        for (const auto& kv : subSkipUnchanged) {
+            if (!kv.second) {
+                adaptive = false;
+                break;
+            }
+        }
+
+        if (m != maxFps || w != captureWidth ||
+            adaptive != adaptiveCapture) {
             maxFps = m;
             captureWidth = w;
+            adaptiveCapture = adaptive;
+            unchangedCaptures = 0;
+            captureIntervalMs = FrameHub::CaptureIntervalMs(
+                    maxFps, unchangedCaptures, adaptiveCapture);
+            ++scheduleGeneration;
             // 节奏/尺寸变了，让抓帧线程立刻重新评估
             nextCaptureAt = NowMs();
         }
     }
 };
+
+int FrameHub::CaptureIntervalMs(int fps, uint32_t unchangedCaptures,
+                                bool adaptiveEnabled) {
+    if (fps < 1) return 0;
+    int interval = std::max(1, 1000 / std::min(fps, kMaxFps));
+    if (!adaptiveEnabled) return interval;
+
+    const int limit = std::max(interval, kMaxStaticProbeIntervalMs);
+    for (uint32_t i = 0; i < unchangedCaptures && interval < limit; ++i) {
+        interval = std::min(limit, interval * 2);
+    }
+    return interval;
+}
 
 FrameHub& FrameHub::Instance() {
     static FrameHub hub;
@@ -172,6 +205,7 @@ FrameHub::Sub::~Sub() {
         std::lock_guard<std::mutex> lk(im->mu);
         im->subFps.erase(id_);
         im->subMaxWidth.erase(id_);
+        im->subSkipUnchanged.erase(id_);
         auto meta = im->subMeta.find(id_);
         if (meta != im->subMeta.end()) {
             peer = meta->second.peer;
@@ -249,6 +283,34 @@ void FrameHub::Sub::SetFps(int fps) {
     im->cv.notify_all();
 }
 
+void FrameHub::Sub::SetSkipUnchanged(bool enabled) {
+    Impl* im = Instance().impl_;
+    if (im == nullptr) return;
+    std::lock_guard<std::mutex> lk(im->mu);
+    auto it = im->subSkipUnchanged.find(id_);
+    if (!active_ || it == im->subSkipUnchanged.end() || it->second == enabled) {
+        return;
+    }
+    it->second = enabled;
+    im->RecomputeMaxFps();
+    im->stats.adaptiveCapture = im->adaptiveCapture;
+    im->stats.captureIntervalMs = im->captureIntervalMs;
+    im->cv.notify_all();
+}
+
+void FrameHub::Sub::RequestFrame() {
+    Impl* im = Instance().impl_;
+    if (im == nullptr) return;
+    std::lock_guard<std::mutex> lk(im->mu);
+    if (!active_ || im->subFps.find(id_) == im->subFps.end()) return;
+    im->unchangedCaptures = 0;
+    im->captureIntervalMs = FrameHub::CaptureIntervalMs(
+            im->maxFps, im->unchangedCaptures, im->adaptiveCapture);
+    ++im->scheduleGeneration;
+    im->nextCaptureAt = NowMs();
+    im->cv.notify_all();
+}
+
 void FrameHub::Sub::Describe(std::string peer, std::string format,
                              std::string transport) {
     Impl* im = Instance().impl_;
@@ -321,6 +383,7 @@ FramePtr FrameHub::Sub::WaitNext(uint64_t afterSeq, int timeoutMs,
 }
 
 std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, uint32_t maxWidth,
+                                                   bool skipUnchanged,
                                                    std::string* error) {
     if (impl_ == nullptr) impl_ = new Impl();
     Impl* im = impl_;
@@ -345,11 +408,17 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, uint32_t maxWidth,
 
     im->subFps[sub->id_]      = fps;
     im->subMaxWidth[sub->id_] = maxWidth;
+    im->subSkipUnchanged[sub->id_] = skipUnchanged;
     im->subMeta[sub->id_].startedAtMs = NowMs();
     im->RecomputeMaxFps();
     im->stats.subscribers  = static_cast<int>(im->subFps.size());
     im->stats.maxFps       = im->maxFps;
     im->stats.captureWidth = im->captureWidth;
+    im->stats.adaptiveCapture = im->adaptiveCapture;
+    im->stats.captureIntervalMs = im->captureIntervalMs;
+    im->unchangedCaptures = 0;
+    ++im->scheduleGeneration;
+    im->nextCaptureAt = NowMs();
 
     if (!im->threadRunning) {
         im->stop = false;
@@ -385,7 +454,12 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, uint32_t maxWidth,
                 // 放在后面会把整个节奏往后推一个抓帧周期，
                 // 实际帧率永远达不到目标。
                 const int fps = im->maxFps;
-                im->nextCaptureAt = NowMs() + 1000 / (fps > 0 ? fps : 1);
+                const int intervalMs = FrameHub::CaptureIntervalMs(
+                        fps, im->unchangedCaptures, im->adaptiveCapture);
+                const int64_t captureStartedAt = NowMs();
+                im->captureIntervalMs = intervalMs;
+                im->nextCaptureAt = captureStartedAt + intervalMs;
+                const uint64_t scheduleGeneration = im->scheduleGeneration;
 
                 // 序号在持锁时取，保证发布顺序和序号一致
                 const uint64_t seq = im->nextSeq++;
@@ -401,6 +475,8 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, uint32_t maxWidth,
 
                 lk2.lock();
                 if (f != nullptr) {
+                    const bool changed = !im->prev ||
+                            f->changeGen != im->prev->changeGen;
                     im->latest = f;
                     im->prev = f;          // 下一帧拿它比对
                     im->changeGen = f->changeGen;
@@ -408,8 +484,19 @@ std::unique_ptr<FrameHub::Sub> FrameHub::Subscribe(int fps, uint32_t maxWidth,
                     im->stats.frames++;
                     im->stats.lastSeq = f->seq;
                     im->stats.lastCaptureMs = dt;
+                    if (changed) im->unchangedCaptures = 0;
+                    else ++im->unchangedCaptures;
                 } else {
                     ALOGW("共享抓帧失败");
+                    im->unchangedCaptures = 0;
+                }
+                if (scheduleGeneration == im->scheduleGeneration &&
+                    !im->stop && im->maxFps > 0) {
+                    im->captureIntervalMs = FrameHub::CaptureIntervalMs(
+                            im->maxFps, im->unchangedCaptures,
+                            im->adaptiveCapture);
+                    im->nextCaptureAt = std::max(
+                            captureStartedAt + im->captureIntervalMs, NowMs());
                 }
                 im->cv.notify_all();
             }
@@ -521,6 +608,8 @@ FrameHub::Stats FrameHub::GetStats() const {
     s.running     = impl_->threadRunning;
     s.subscribers = static_cast<int>(impl_->subFps.size());
     s.maxFps      = impl_->maxFps;
+    s.captureIntervalMs = impl_->captureIntervalMs;
+    s.adaptiveCapture = impl_->adaptiveCapture;
     s.captureWidth = impl_->captureWidth;
     s.lastSeq     = impl_->latest != nullptr ? impl_->latest->seq : 0;
     s.changeGen   = impl_->changeGen;

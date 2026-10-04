@@ -14,9 +14,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include "fileops.h"
 #include "frame_hub.h"
 #include "h264_encoder.h"
 #include "http_server.h"
@@ -107,6 +109,9 @@ class RestApi {
     // 安装：请求体就是 APK 字节，落成临时文件后用 fd 送过去
     HttpResponse HandleInstall(const HttpRequest& req);
 
+    // 文件上传：请求体就是文件字节；大请求直接从 HTTP spool 文件复制。
+    HttpResponse HandleFileUpload(const HttpRequest& req);
+
     // 画面流。同一个端点两种传输：
     //   有 Upgrade 头 → WebSocket（二进制帧，控制台用这条）
     //   没有          → MJPEG（<img src> 就能看，零 JS）
@@ -144,6 +149,9 @@ class RestApi {
     bool HandleTouchEvent(const std::string& text, std::string* reply);
 
     Dispatcher* dispatcher_;
+    FileOps uploadFileOps_;
+    std::mutex uploadFileOpsMutex_;
+    bool uploadFileOpsInitialized_ = false;
     // 可能为空（没启用 HTTP 时）
     HttpServer* httpServer_ = nullptr;
 };

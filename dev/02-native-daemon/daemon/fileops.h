@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -65,6 +66,21 @@ class FileOps {
     // 原子重命名；目标已存在时拒绝，不会静默覆盖。
     bool Rename(const std::string& fromRel, const std::string& toRel,
                 std::string* error);
+
+    // 把正文写入共享存储中的现有目录。同名文件一律拒绝，不覆盖已有内容。
+    // sourceFd >= 0 时从 fd 精确读取 size 字节；否则使用 memory。
+    bool Upload(const std::string& directory, const std::string& filename,
+                int sourceFd, const char* memory, size_t size,
+                std::string* savedPath, std::string* error);
+
+    // 显式根目录版本供主机测试使用；生产调用应使用上面的实例方法，
+    // 以便规范化 /sdcard 等已验证的存储别名并触发媒体扫描。
+    static bool UploadToStorage(const std::string& root,
+                                const std::string& storageRoot,
+                                const std::string& directory,
+                                const std::string& filename,
+                                int sourceFd, const char* memory, size_t size,
+                                std::string* savedPath, std::string* error);
 
     // ── 路径约束（公开出来是为了能单独测）──────────────────────────────────
     //

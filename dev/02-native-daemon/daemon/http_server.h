@@ -52,6 +52,8 @@ struct HttpRequest {
 
     // 正文长度（不管在内存还是文件里）
     size_t bodySize = 0;
+    // HTTP 层为文件上传正文预留的总磁盘预算，在 handler 完成后释放。
+    uint64_t bodyAdmissionDiskBytes = 0;
 
     // 取正文内容。bodyFile 非空时把文件读进来（调用方自己别对
     // 大文件用它 —— 那就白落盘了）。
@@ -122,12 +124,16 @@ class HttpServer {
         // ⚠️ 但非落盘的那条路仍然全量进内存，所以这个值不能当成
         //    "随便多大都行"：超过 spoolThresholdBytes 的会自动走落盘。
         // 和安装路径共用同一个常量，见 protocol.h —— 两处分开写会漂移。
-        size_t      maxBodyBytes = kMaxUploadBytes;
+        size_t      maxBodyBytes = kMaxHttpUploadBytes;
 
         // 超过这个大小就落盘，不留在内存里。
         // 4MB 是个折中：小于它的请求（JSON、剪贴板文本）走内存更快，
         // 大于它的（APK、文件上传）走磁盘不会被 OOM 干掉。
         size_t      spoolThresholdBytes = 4u << 20;   // 4MB
+
+        // 上传正文 spool 与目标临时文件同时存在，故为两者预留空间。
+        size_t      maxFileUploadBytes = kMaxHttpUploadBytes;
+        uint64_t    maxInFlightFileUploadDiskBytes = 2 * kMaxUploadBytes;
 
         // 落盘目录。空 = 优先 /data/misc/remote-control，不可用时回退到
         // /data/local/tmp 等开发环境目录。
@@ -219,10 +225,13 @@ class HttpServer {
     // 返回 false 表示"到此为止"，errReply 里是要回给客户端的应答。
     //
     // 为什么要有这个钩子：鉴权必须能在**读正文之前**做。
-    // 否则未授权的客户端可以让服务端先收完（并落盘）最多 4GB 的请求体
+    // 否则未授权的客户端可以让服务端先收完（并落盘）最多 4 GiB 的请求体
     // 再被拒 —— 一个不需要任何凭据的磁盘打满 + 线程占用手段。
     bool ReadRequest(int connFd, HttpRequest* out, HttpResponse* errReply,
                      const std::function<bool(const HttpRequest&)>& onHeaders);
+    bool ReserveFileUploadDisk(size_t bytes, uint64_t* reservedBytes,
+                               HttpResponse* error);
+    void ReleaseFileUploadDisk(uint64_t bytes);
 
     int         listenFd_ = -1;
     uint16_t    port_ = 0;
@@ -237,6 +246,10 @@ class HttpServer {
     size_t      maxConns_ = 128;
     size_t      spoolThreshold_ = 4u << 20;   // 超过就落盘
     std::string spoolDir_;                     // 空 = 选择服务目录或开发回退目录
+    size_t      maxFileUploadBytes_ = kMaxHttpUploadBytes;
+    uint64_t    maxInFlightFileUploadDiskBytes_ = 2 * kMaxUploadBytes;
+    std::mutex  uploadBudgetMutex_;
+    uint64_t    uploadDiskBytesInFlight_ = 0;
     std::atomic<bool> stop_{false};
 };
 

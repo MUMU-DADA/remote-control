@@ -209,6 +209,10 @@ void TestHttpSpoolCleanup() {
         return;
     }
     const std::string spoolDir(dirName);
+    const std::string staleSpool =
+            spoolDir + "/remote-control-body-2147483647-stale";
+    int staleFd = open(staleSpool.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (staleFd >= 0) close(staleFd);
 
     HttpServer server;
     HttpServer::Options options;
@@ -222,6 +226,8 @@ void TestHttpSpoolCleanup() {
         RemoveDirectoryContents(spoolDir);
         return;
     }
+    Check(staleFd >= 0 && access(staleSpool.c_str(), F_OK) != 0,
+          "启动时回收已退出进程遗留的 spool 文件");
 
     HttpHandler handler = [](const HttpRequest& req) {
         struct stat st{};
@@ -320,8 +326,158 @@ void TestHttpContentLengthValidation() {
     runner.join();
 }
 
+void TestHttpFileUploadBudget() {
+    printf("\n\033[1;34m[6] HTTP 文件上传空间配额\033[0m\n");
+    char dirTemplate[] = "/tmp/remote-control-upload-budget-XXXXXX";
+    char* dirName = mkdtemp(dirTemplate);
+    if (!dirName) {
+        Check(false, "创建上传 quota 临时目录: %s", strerror(errno));
+        return;
+    }
+    const std::string spoolDir(dirName);
+
+    HttpServer server;
+    HttpServer::Options options;
+    options.port = 0;
+    options.maxBodyBytes = 1024;
+    options.spoolThresholdBytes = 16;
+    options.spoolDir = spoolDir;
+    options.maxFileUploadBytes = 128;
+    options.maxInFlightFileUploadDiskBytes = 256;
+    std::string error;
+    if (!server.Start(options, &error)) {
+        Check(false, "启动 HTTP server: %s", error.c_str());
+        RemoveDirectoryContents(spoolDir);
+        return;
+    }
+
+    std::atomic<int> handled{0};
+    HttpHandler handler = [&](const HttpRequest& req) {
+        std::string body, readError;
+        const bool read = req.ReadBody(&body, &readError);
+        const bool admitted = read && body.size() == req.bodySize &&
+                              req.bodyAdmissionDiskBytes == 160;
+        ++handled;
+        return HttpResponse::Text(admitted ? 200 : 500,
+                                  admitted ? "admitted" : "bad admission");
+    };
+    std::thread runner([&]() { server.Run(handler); });
+
+    const std::string path = "/api/v1/files/upload?name=x";
+    const std::string aliasPath = "/api/v1/files//upload/?name=x";
+    const std::string oversized = "POST " + aliasPath +
+            " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 129\r\n\r\n";
+    int fd = ConnectHttp(server.port());
+    const bool oversizedSent = fd >= 0 &&
+            SendAll(fd, oversized.data(), oversized.size());
+    const std::string oversizedResponse = fd >= 0 ? ReadToClose(fd) : "";
+    if (fd >= 0) close(fd);
+    Check(oversizedSent &&
+                  oversizedResponse.find("413 Payload Too Large") != std::string::npos,
+          "单文件超过上限时在读取正文前拒绝");
+
+    const std::string head = "POST " + path +
+            " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 80\r\n\r\n";
+    const int first = ConnectHttp(server.port());
+    const bool firstSent = first >= 0 && SendAll(first, head.data(), head.size());
+    usleep(50 * 1000);
+
+    const std::string aliasHead = "POST " + aliasPath +
+            " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 80\r\n\r\n";
+    fd = ConnectHttp(server.port());
+    const bool secondSent = fd >= 0 && SendAll(fd, aliasHead.data(), aliasHead.size());
+    const std::string secondResponse = fd >= 0 ? ReadToClose(fd) : "";
+    if (fd >= 0) close(fd);
+    Check(firstSent && secondSent &&
+                  secondResponse.find("429 Too Many Requests") != std::string::npos,
+          "尾斜杠与重复斜杠上传路由也预留在途空间");
+
+    if (first >= 0) {
+        shutdown(first, SHUT_RDWR);
+        close(first);
+    }
+    usleep(50 * 1000);
+
+    const std::string payload(80, 'u');
+    fd = ConnectHttp(server.port());
+    const bool thirdSent = fd >= 0 && SendAll(fd, head.data(), head.size()) &&
+                           SendAll(fd, payload.data(), payload.size());
+    const std::string thirdResponse = fd >= 0 ? ReadToClose(fd) : "";
+    if (fd >= 0) close(fd);
+    Check(thirdSent && thirdResponse.find("200 OK") != std::string::npos &&
+                  thirdResponse.find("admitted") != std::string::npos &&
+                  handled.load() == 1,
+          "正文中断后释放 quota，后续上传可成功");
+
+    server.Stop();
+    runner.join();
+    DIR* dir = opendir(spoolDir.c_str());
+    size_t entries = 0;
+    if (dir) {
+        while (dirent* entry = readdir(dir)) {
+            if (strcmp(entry->d_name, ".") != 0 &&
+                strcmp(entry->d_name, "..") != 0) {
+                ++entries;
+            }
+        }
+        closedir(dir);
+    }
+    Check(dir != nullptr && entries == 0, "上传结束后清除所有 spool 文件");
+    RemoveDirectoryContents(spoolDir);
+}
+
+void TestHttpFourGiBFileUploadLimit() {
+    printf("\n\033[1;34m[7] HTTP 文件上传 4 GiB 上限\033[0m\n");
+    HttpServer server;
+    HttpServer::Options options;
+    options.port = 0;
+    options.maxBodyBytes = kMaxHttpUploadBytes;
+    options.maxFileUploadBytes = kMaxHttpUploadBytes;
+    options.maxInFlightFileUploadDiskBytes = 256;
+    std::string error;
+    if (!server.Start(options, &error)) {
+        Check(false, "启动 4 GiB 上传限制 server: %s", error.c_str());
+        return;
+    }
+
+    std::atomic<int> handled{0};
+    std::thread runner([&]() {
+        server.Run([&](const HttpRequest&) {
+            ++handled;
+            return HttpResponse::Text(200, "unexpected");
+        });
+    });
+    auto statusForLength = [&](uint64_t length) {
+        const std::string request =
+                "POST /api/v1/files/upload?name=x HTTP/1.1\r\n"
+                "Host: localhost\r\nContent-Length: " +
+                std::to_string(length) + "\r\n\r\n";
+        const int fd = ConnectHttp(server.port());
+        if (fd < 0) return std::string();
+        const bool sent = SendAll(fd, request.data(), request.size());
+        const std::string response = sent ? ReadToClose(fd) : std::string();
+        close(fd);
+        return response;
+    };
+
+    const std::string exact = statusForLength(kMaxHttpUploadBytes);
+    Check(exact.find("429 Too Many Requests") != std::string::npos,
+          "4 GiB 正好位于单文件上限内，之后由在途磁盘配额限制");
+    const std::string over = statusForLength(
+            static_cast<uint64_t>(kMaxHttpUploadBytes) + 1);
+    const char* overStatus = sizeof(size_t) >= sizeof(uint64_t)
+                                     ? "413 Payload Too Large"
+                                     : "400 Bad Request";
+    Check(over.find(overStatus) != std::string::npos &&
+                  handled.load() == 0,
+          "超过 4 GiB 的请求在读取正文前拒绝");
+
+    server.Stop();
+    runner.join();
+}
+
 void TestUnixShortPacketFdCleanup() {
-    printf("\n\033[1;34m[6] Unix socket 短包 fd 清理\033[0m\n");
+    printf("\n\033[1;34m[7] Unix socket 短包 fd 清理\033[0m\n");
     char pathTemplate[] = "/tmp/remote-control-transport-sock-XXXXXX";
     const int tempFd = mkstemp(pathTemplate);
     if (tempFd < 0) {
@@ -623,6 +779,8 @@ int main() {
     TestHttpStopFromHandler();
     TestHttpSpoolCleanup();
     TestHttpContentLengthValidation();
+    TestHttpFileUploadBudget();
+    TestHttpFourGiBFileUploadLimit();
     TestUnixShortPacketFdCleanup();
     TestUnixPeerUidAuthorization();
     TestUnixPathTypeGuard();

@@ -79,14 +79,17 @@ HTTP 面，判据一律取**设备侧证据**（重启看 `uptime` 归零、按�
 ├── tests/                            主机侧测试（g++ 直接编译，不需要 AOSP）
 │   ├── Makefile                       `make run` = 跑全部 + 核对 README 里的检查数
 │   ├── test_util.h                   公共工具（断言、计数上报、设备节点发现）
-│   ├── test_inject_uinput.cpp        注入后端单元测试（35 项）
-│   ├── test_integration.cpp          端到端集成测试（39 项）
-│   ├── test_capture_screencap.cpp    screencap 后端测试（18 项）
+│   ├── test_inject_uinput.cpp        注入后端单元测试（38 项）
+│   ├── test_integration.cpp          端到端集成测试（62 项）
+│   ├── test_capture_screencap.cpp    screencap 后端测试（21 项）
 │   ├── test_appops.cpp               应用管理后端（57 项）
 │   ├── test_json.cpp                 JSON 解析/输出（49 项）
 │   ├── test_keyboard.cpp             按键注入（79 项）
-│   ├── test_websocket.cpp            WS 握手（18 项）
-│   ├── test_fileops.cpp              文件路径边界（18 项）
+│   ├── test_websocket.cpp            WS 握手（47 项）
+│   ├── test_transport.cpp            HTTP / Unix socket 生命周期（37 项）
+│   ├── test_encoded_frame_cache.cpp  共享编码缓存（13 项）
+│   ├── test_h264_encoder.cpp         H.264 编码器（43 项）
+│   ├── test_fileops.cpp              文件路径与上传（35 项）
 │   ├── test_sha256.cpp               SHA-256（9 项）
 │   └── fake_screencap.c              冒充 /system/bin/screencap 的替身
 │
@@ -137,18 +140,20 @@ sudo make run   # 编译并运行全部测试
 | 测试 | 覆盖范围 | 检查项 |
 |---|---|---|
 | `test_inject_uinput` | 注入后端本身 | 38 |
-| `test_integration` | **端到端**：socket → dispatch → 帧通道 / 注入 → 内核 | 47 |
-| `test_capture_screencap` | screencap 后端：fork/exec → 解析 → memfd | 18 |
+| `test_integration` | **端到端**：socket → dispatch → 帧通道 / 注入 → 内核 | 62 |
+| `test_capture_screencap` | screencap 后端：fork/exec → 解析 → memfd | 21 |
 | `test_appops` | 应用管理后端（`pm`/`am`/`cmd` 子进程解析） | 57 |
 | `test_json` | JSON 解析 / 输出（用 AOSP 树内的 jsoncpp） | 49 |
 | `test_keyboard` | 按键注入（键名映射 → 键码） | 79 |
-| `test_websocket` | WS 握手与 Close 控制帧 | 24 |
-| `test_transport` | HTTP / Unix socket 生命周期 | 21 |
+| `test_websocket` | WebSocket 帧 / Close 控制帧 | 47 |
+| `test_transport` | HTTP / Unix socket 生命周期 | 37 |
 | `test_core_lifetime` | 动态库初始化与注入后端生命周期 | 7 |
-| `test_fileops` | 文件路径边界（越界 / `..` / 软链接逃逸） | 18 |
+| `test_encoded_frame_cache` | 共享编码缓存 | 13 |
+| `test_h264_encoder` | H.264 编码器边界 | 43 |
+| `test_fileops` | 文件路径与上传原子落盘 | 35 |
 | `test_sha256` | SHA-256（NIST 官方向量 + 分块一致性） | 9 |
 
-> `make run` 除了跑这 11 个套件，还会把各套件自报的检查数求和并与根
+> `make run` 除了跑这 13 个套件，还会把各套件自报的检查数求和并与根
 > [`README.md`](../../README.md) 里写的「单元/集成 N 项检查」比对 ——
 > 数字对不上就直接失败。加测试忘了改 README 会被当场拦住。
 
@@ -162,7 +167,7 @@ sudo make run   # 编译并运行全部测试
                                                                   └─ /dev/uinput ──> 内核 ──> eventN 读回
 ```
 
-**实测结果：11 个套件、383 项检查全部通过**
+**实测结果：13 个套件、497 项检查全部通过**
 
 ```
 test_inject_uinput（38 项）
@@ -174,7 +179,7 @@ test_inject_uinput（38 项）
   [5] 异常路径   孤立的 TouchUp 安全返回
   [6] 设备能力位 内核记录的 PROP/ABS/KEY 位图逐个解码验证
 
-test_integration（47 项）
+test_integration（62 项）
   [1] Info 请求      协议往返正确
   [2] Capture 帧通道 fd 通过 SCM_RIGHTS 到达，可 mmap，
                      8,294,400 字节，渐变像素值逐个校验通过
