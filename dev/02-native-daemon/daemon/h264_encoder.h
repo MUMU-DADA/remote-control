@@ -75,6 +75,12 @@ class H264Encoder {
     bool EncodeRgba(const uint8_t* rgba, uint32_t width, uint32_t height,
                     std::vector<uint8_t>* out, std::string* error);
 
+    // 每次至多取一个完整访问单元。静止画面停止送帧后仍需轮询，
+    // 否则异步完成的最后一帧会一直滞留在编码器里。
+    // timeoutMs 是总等待预算（最多 20ms）；0 为非阻塞。
+    bool PollOutput(std::vector<uint8_t>* out, std::string* error,
+                    int timeoutMs = 0);
+
     // 要求下一个输出帧是关键帧。
     //
     // 新客户端接入时必须调 —— 否则它要等到下一个 I 帧（默认 2 秒）
@@ -85,12 +91,18 @@ class H264Encoder {
         uint64_t framesIn  = 0;
         uint64_t framesOut = 0;
         uint64_t bytesOut  = 0;
+        uint64_t framesDropped = 0;
         int64_t  lastEncodeMs = 0;
+        int64_t  lastConvertUs = 0;
+        int64_t  lastOutputPtsUs = 0;
+        int64_t  lastOutputLatencyUs = 0;
+        bool     libyuv = false;
     };
     Stats GetStats() const;
 
   private:
-    bool DrainOutput(std::vector<uint8_t>* out, bool block, std::string* error);
+    bool DrainOutput(std::vector<uint8_t>* out, int64_t timeoutUs,
+                     std::string* error);
 
     void*  codec_ = nullptr;          // AMediaCodec*
     Config cfg_;
@@ -101,10 +113,13 @@ class H264Encoder {
     // SPS/PPS。MediaCodec 会把它作为**单独一个** CODEC_CONFIG buffer
     // 吐出来，但那不是一个完整的访问单元 —— WebCodecs 的
     // VideoDecoder 要的是"一个 chunk = 一个访问单元"。
-    // 所以先存住，等下一个真正的帧来了再拼到前面。
+    // 所以先存住，给每个 IDR 补上参数集，支持客户端重建解码器。
     std::vector<uint8_t> codecConfig_;
+    std::vector<uint8_t> partialOutput_;
+    uint32_t inputStride_ = 0;
+    uint32_t inputSliceHeight_ = 0;
+    int64_t lastInputPtsUs_ = 0;
     Stats  stats_;
-    std::vector<uint8_t> yuv_;        // RGBA→YUV 的转换缓冲，复用避免每帧分配
 };
 
 }  // namespace remote_control

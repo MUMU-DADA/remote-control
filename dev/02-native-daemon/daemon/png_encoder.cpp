@@ -7,8 +7,8 @@
 
 #include <cstdint>
 #include <atomic>
+#include <memory>
 #include <mutex>
-#include <vector>
 
 #include "remote_control_log.h"
 
@@ -66,39 +66,34 @@ void PutChunk(std::string* out, const char type[4], const std::string& data) {
 // 只试 0(None)/1(Sub)/2(Up) 三种：Paeth 收益有限而计算更贵，
 // 而截图这类内容 Sub/Up 已经能拿到绝大部分收益。
 uint8_t ChooseFilter(const uint8_t* cur, const uint8_t* prev, size_t rowBytes,
-                     std::vector<uint8_t>* out) {
-    out->resize(rowBytes);
+                     uint8_t* out) {
+    // Score all three filters in one pass. The old implementation traversed
+    // each row three times and then traversed it a fourth time to emit the
+    // winner, which is a noticeable fraction of PNG level-1 cost at 720p.
+    uint64_t scores[3] = {0, 0, 0};
+    for (size_t i = 0; i < rowBytes; ++i) {
+        const uint8_t curByte = cur[i];
+        const uint8_t left = (i >= 4) ? cur[i - 4] : 0;
+        const uint8_t up = prev ? prev[i] : 0;
+        const uint8_t none = curByte;
+        const uint8_t sub = static_cast<uint8_t>(curByte - left);
+        const uint8_t above = static_cast<uint8_t>(curByte - up);
+        scores[0] += (none < 128) ? none : (256 - none);
+        scores[1] += (sub < 128) ? sub : (256 - sub);
+        scores[2] += (above < 128) ? above : (256 - above);
+    }
 
     uint8_t bestFilter = 0;
-    uint64_t bestScore = UINT64_MAX;
-
-    for (uint8_t f = 0; f <= 2; ++f) {
-        uint64_t score = 0;
-        for (size_t i = 0; i < rowBytes; ++i) {
-            const uint8_t a = (i >= 4) ? cur[i - 4] : 0;         // 左
-            const uint8_t b = prev ? prev[i] : 0;                 // 上
-            uint8_t v;
-            switch (f) {
-                case 1:  v = static_cast<uint8_t>(cur[i] - a); break;
-                case 2:  v = static_cast<uint8_t>(cur[i] - b); break;
-                default: v = cur[i]; break;
-            }
-            // 绝对值和：把有符号字节映射成无符号距离
-            score += (v < 128) ? v : (256 - v);
-        }
-        if (score < bestScore) {
-            bestScore = score;
-            bestFilter = f;
-        }
-    }
+    if (scores[1] < scores[bestFilter]) bestFilter = 1;
+    if (scores[2] < scores[bestFilter]) bestFilter = 2;
 
     for (size_t i = 0; i < rowBytes; ++i) {
         const uint8_t a = (i >= 4) ? cur[i - 4] : 0;
         const uint8_t b = prev ? prev[i] : 0;
         switch (bestFilter) {
-            case 1:  (*out)[i] = static_cast<uint8_t>(cur[i] - a); break;
-            case 2:  (*out)[i] = static_cast<uint8_t>(cur[i] - b); break;
-            default: (*out)[i] = cur[i]; break;
+            case 1:  out[i] = static_cast<uint8_t>(cur[i] - a); break;
+            case 2:  out[i] = static_cast<uint8_t>(cur[i] - b); break;
+            default: out[i] = cur[i]; break;
         }
     }
     return bestFilter;
@@ -184,27 +179,29 @@ std::string PngEncoder::EncodeRgba(const uint8_t* pixels, uint32_t width,
     }
 
     // ── 1. 逐行滤波，拼成 deflate 的输入 ──
-    std::string raw;
-    raw.reserve(static_cast<size_t>(rawSize));
-    std::vector<uint8_t> filtered;
+    // zlib only reads this buffer after every byte has been filled. Allocate
+    // uninitialized storage to avoid clearing the whole 720p frame before the
+    // filter pass writes it.
+    std::unique_ptr<uint8_t[]> raw(new uint8_t[static_cast<size_t>(rawSize)]);
     for (uint32_t y = 0; y < height; ++y) {
         const uint8_t* cur = pixels + static_cast<size_t>(y) * rowBytes;
         const uint8_t* prev = (y > 0) ? (pixels + static_cast<size_t>(y - 1) * rowBytes)
                                       : nullptr;
-        const uint8_t f = ChooseFilter(cur, prev, rowBytes, &filtered);
-        raw.push_back(static_cast<char>(f));
-        raw.append(reinterpret_cast<const char*>(filtered.data()), rowBytes);
+        uint8_t* row = raw.get() + static_cast<size_t>(y) * (rowBytes + 1);
+        const uint8_t f = ChooseFilter(cur, prev, rowBytes,
+                                       row + 1);
+        row[0] = f;
     }
 
     // ── 2. deflate ──
-    uLongf bound = g_z.compressBound(static_cast<uLong>(raw.size()));
+    uLongf bound = g_z.compressBound(static_cast<uLong>(rawSize));
     std::string compressed;
     compressed.resize(bound);
     uLongf destLen = bound;
     const int rc = g_z.compress2(
             reinterpret_cast<Bytef*>(&compressed[0]), &destLen,
-            reinterpret_cast<const Bytef*>(raw.data()),
-            static_cast<uLong>(raw.size()),
+            reinterpret_cast<const Bytef*>(raw.get()),
+            static_cast<uLong>(rawSize),
             compressionLevel == 0 ? kZDefaultCompression : compressionLevel);
     if (rc != Z_OK) {
         if (error) *error = "zlib 压缩失败，返回码 " + std::to_string(rc);

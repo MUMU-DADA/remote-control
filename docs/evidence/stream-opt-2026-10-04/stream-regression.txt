@@ -1,0 +1,4 @@
+PASS invalid/raw/HTTP-H264 stream requests rejected
+PASS 2 concurrent encoders produce frames; third gets explicit error
+PASS disconnect releases encoder slots and stops capture
+PASS screenshot during 1200ms longpress completes in 19.6ms

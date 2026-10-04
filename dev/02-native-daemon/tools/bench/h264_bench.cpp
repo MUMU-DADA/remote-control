@@ -83,8 +83,9 @@ int main(int argc, char** argv) {
     cfg.fps = 30;
     cfg.iFrameIntervalSec = 2;
 
+    H264Encoder encoder;
     std::string err;
-    if (!H264Encoder::Instance().Start(cfg, &err)) {
+    if (!encoder.Start(cfg, &err)) {
         printf("  x Start 失败: %s\n", err.c_str());
         return 1;
     }
@@ -102,14 +103,15 @@ int main(int argc, char** argv) {
 
         std::vector<uint8_t> out;
         const int64_t t0 = NowMs();
-        const bool ok = H264Encoder::Instance().EncodeRgba(
+        bool ok = encoder.EncodeRgba(
                 rgba.data(), w, h, &out, &err);
+        if (ok && out.empty()) ok = encoder.PollOutput(&out, &err, 5);
         const int64_t dt = NowMs() - t0;
         totalMs += dt;
 
         if (!ok) {
             printf("  x 第 %d 帧失败: %s\n", i, err.c_str());
-            H264Encoder::Instance().Stop();
+            encoder.Stop();
             return 1;
         }
         totalBytes += out.size();
@@ -123,7 +125,22 @@ int main(int argc, char** argv) {
         }
     }
 
-    const auto st = H264Encoder::Instance().GetStats();
+    // 结束送入后继续取出异步完成的尾部帧，避免把内部缓冲当成丢帧。
+    const int64_t drainUntil = NowMs() + 1000;
+    while (encoder.GetStats().framesOut < encoder.GetStats().framesIn &&
+           NowMs() < drainUntil) {
+        std::vector<uint8_t> out;
+        if (!encoder.PollOutput(&out, &err, 20)) {
+            printf("  x 尾部输出失败: %s\n", err.c_str());
+            return 1;
+        }
+        if (!out.empty()) {
+            totalBytes += out.size();
+            if (firstChunk.empty()) firstChunk = out;
+        }
+    }
+
+    const auto st = encoder.GetStats();
     printf("\n  ── 汇总 ──\n");
     printf("  送帧 %llu，出帧 %llu，有数据的轮次 %d/%d\n",
            (unsigned long long)st.framesIn, (unsigned long long)st.framesOut,
@@ -131,10 +148,14 @@ int main(int argc, char** argv) {
     printf("  总输出 %zu 字节，平均 %.0f 字节/轮\n",
            totalBytes, static_cast<double>(totalBytes) / rounds);
     printf("  平均耗时 %.2f ms/轮\n", static_cast<double>(totalMs) / rounds);
+    printf("  丢帧 %llu，最后转换 %lld us，输出延迟 %lld us，转换器: %s\n",
+           (unsigned long long)st.framesDropped,
+           (long long)st.lastConvertUs, (long long)st.lastOutputLatencyUs,
+           st.libyuv ? "libyuv" : "scalar");
     printf("  codec 串: %s\n",
-           H264Encoder::Instance().CodecString().empty()
+           encoder.CodecString().empty()
                    ? "（还没解析出 SPS）"
-                   : H264Encoder::Instance().CodecString().c_str());
+                   : encoder.CodecString().c_str());
     if (!firstChunk.empty()) {
         printf("  首块 NAL: %s\n", NalSummary(firstChunk).c_str());
     }
@@ -147,11 +168,19 @@ int main(int argc, char** argv) {
         FILE* o = fopen(argv[5], "wb");
         if (o != nullptr) {
             // 再跑一遍，把所有输出拼起来
-            H264Encoder::Instance().Stop();
-            H264Encoder::Instance().Start(cfg, &err);
+            encoder.Stop();
+            encoder.Start(cfg, &err);
             for (int i = 0; i < rounds; ++i) {
                 std::vector<uint8_t> out;
-                H264Encoder::Instance().EncodeRgba(rgba.data(), w, h, &out, &err);
+                encoder.EncodeRgba(rgba.data(), w, h, &out, &err);
+                if (out.empty()) encoder.PollOutput(&out, &err, 5);
+                if (!out.empty()) fwrite(out.data(), 1, out.size(), o);
+            }
+            const int64_t finishBy = NowMs() + 1000;
+            while (encoder.GetStats().framesOut < encoder.GetStats().framesIn &&
+                   NowMs() < finishBy) {
+                std::vector<uint8_t> out;
+                if (!encoder.PollOutput(&out, &err, 20)) break;
                 if (!out.empty()) fwrite(out.data(), 1, out.size(), o);
             }
             fclose(o);
@@ -159,6 +188,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    H264Encoder::Instance().Stop();
+    encoder.Stop();
     return 0;
 }

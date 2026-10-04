@@ -19,6 +19,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
+#include <initializer_list>
 #include <string>
 
 namespace remote_control {
@@ -53,11 +55,26 @@ bool WsComputeAccept(const std::string& key, std::string* acceptOut);
 //   true  → 读到一帧，*out 有效
 //   false → 连接结束或出错，*error 说明原因（对端正常关闭时 error 为空）
 //
-// 会自动回应 ping（发 pong）。
+// 会自动回应 ping（发 pong），并返回该控制帧，让事件循环继续发送视频。
 bool WsReadFrame(int fd, WsFrame* out, std::string* error);
 
 // 写一帧。服务端发出的帧**不打掩码**（RFC 6455 规定）。
 bool WsWriteFrame(int fd, uint8_t opcode, const std::string& payload);
+
+// A deadline applies to the entire frame, including all short writes. After a
+// failure the connection must close, since part of the frame may already exist.
+bool WsWriteFrameWithTimeout(int fd, uint8_t opcode, const std::string& payload,
+                            int timeoutMs);
+
+struct SocketBuffer {
+    const void* data;
+    size_t size;
+};
+
+// Scatter/gather send for up to eight buffers, without copying their contents.
+// timeoutMs > 0 is an absolute send deadline; 0 uses the socket's blocking mode.
+bool SendBuffersWithTimeout(int fd, std::initializer_list<SocketBuffer> buffers,
+                            int timeoutMs);
 
 // 便捷：写一个文本帧
 bool WsWriteText(int fd, const std::string& text);

@@ -65,18 +65,26 @@ void Frame::Reset() {
 // ---------------------------------------------------------------------------
 
 bool Capture::Init(std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     (void)error;
     ALOGW("使用桩截图后端 —— 生成合成图像，不是真实屏幕内容");
     resolved_ = true;
     return true;
 }
 
-void Capture::SetDisplayId(uint64_t id) { requestedDisplayId_ = id; }
+void Capture::SetDisplayId(uint64_t id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    requestedDisplayId_ = id;
+}
 
-void Capture::Shutdown() { resolved_ = false; }
+void Capture::Shutdown() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    resolved_ = false;
+}
 
 bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
                            std::string* error) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     (void)error;
     out->clear();
     DisplayInfo info;
@@ -89,6 +97,7 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
 }
 
 bool Capture::ResolveDisplay(std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     (void)error;
     activeDisplayId_ = requestedDisplayId_ ? requestedDisplayId_ : 1;
     resolved_ = true;
@@ -96,6 +105,7 @@ bool Capture::ResolveDisplay(std::string* error) {
 }
 
 bool Capture::Grab(Frame* out, std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!resolved_ && !ResolveDisplay(error)) return false;
 
     const uint32_t width  = kStubWidth;
@@ -147,6 +157,15 @@ bool Capture::Grab(Frame* out, std::string* error) {
 
     *out = std::move(frame);
     return true;
+}
+
+bool Capture::Grab(Frame* out, std::string* error, uint32_t targetWidth) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const uint32_t previous = targetWidth_;
+    targetWidth_ = targetWidth;
+    const bool ok = Grab(out, error);
+    targetWidth_ = previous;
+    return ok;
 }
 
 // ---------------------------------------------------------------------------

@@ -6,13 +6,13 @@
 #include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <array>
 #include <chrono>
 #include <climits>
 #include <utility>
-#include <vector>
 
 #include "remote_control_log.h"
 
@@ -147,20 +147,6 @@ bool ReadFullUntil(int fd, void* buf, size_t n,
     return true;
 }
 
-bool WriteFull(int fd, const void* buf, size_t n) {
-    const uint8_t* p = static_cast<const uint8_t*>(buf);
-    size_t sent = 0;
-    while (sent < n) {
-        const ssize_t w = send(fd, p + sent, n - sent, MSG_NOSIGNAL);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            return false;
-        }
-        sent += static_cast<size_t>(w);
-    }
-    return true;
-}
-
 }  // namespace
 
 // ── SHA-1 / base64 ──────────────────────────────────────────────────────────
@@ -274,7 +260,7 @@ bool WsComputeAccept(const std::string& key, std::string* acceptOut) {
 
 // ── 帧读写 ──────────────────────────────────────────────────────────────────
 bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
-    for (;;) {   // ping 会被自动回应，然后继续等真正的数据帧
+    {
         uint8_t hdr[2];
         if (!ReadFull(fd, hdr, 1)) {
             if (error) error->clear();     // 对端正常关闭，不算错误
@@ -375,14 +361,19 @@ bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
 
         // 控制帧就地处理
         if (out->opcode == kWsPing) {
-            WsWriteFrame(fd, kWsPong, out->payload);
-            continue;
+            // A peer that cannot receive its pong is already unusable. Keep
+            // ping handling bounded so it cannot pin the connection thread.
+            if (!WsWriteFrameWithTimeout(fd, kWsPong, out->payload, 1000)) {
+                if (error) *error = "回应 ping 超时";
+                return false;
+            }
+            return true;
         }
         if (out->opcode == kWsPong) {
-            continue;   // 我们不发 ping，忽略对端的 pong
+            return true;
         }
         if (out->opcode == kWsClose) {
-            if (!WsWriteFrame(fd, kWsClose, out->payload)) {
+            if (!WsWriteFrameWithTimeout(fd, kWsClose, out->payload, 1000)) {
                 if (error) *error = "回应 close 帧失败";
                 return false;
             }
@@ -393,27 +384,94 @@ bool WsReadFrame(int fd, WsFrame* out, std::string* error) {
     }
 }
 
-bool WsWriteFrame(int fd, uint8_t opcode, const std::string& payload) {
-    std::vector<uint8_t> buf;
-    buf.reserve(payload.size() + 10);
-    buf.push_back(static_cast<uint8_t>(0x80 | opcode));   // FIN + opcode
+bool SendBuffersWithTimeout(int fd, std::initializer_list<SocketBuffer> buffers,
+                            int timeoutMs) {
+    iovec vectors[8];
+    if (buffers.size() > sizeof(vectors) / sizeof(vectors[0]) || timeoutMs < 0) {
+        errno = EINVAL;
+        return false;
+    }
+    size_t count = 0;
+    for (const auto& buffer : buffers) {
+        if (buffer.size == 0) continue;
+        vectors[count++] = {const_cast<void*>(buffer.data), buffer.size};
+    }
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeoutMs);
+    size_t first = 0;
+    while (first < count) {
+        if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) {
+            errno = ETIMEDOUT;
+            return false;
+        }
+        msghdr message{};
+        message.msg_iov = vectors + first;
+        message.msg_iovlen = count - first;
+        const ssize_t written = sendmsg(fd, &message,
+                MSG_NOSIGNAL | (timeoutMs > 0 ? MSG_DONTWAIT : 0));
+        if (written <= 0) {
+            if (written < 0 && errno == EINTR) continue;
+            if (written < 0 && timeoutMs > 0 &&
+                (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                const auto remaining = std::chrono::duration_cast<
+                        std::chrono::milliseconds>(deadline -
+                        std::chrono::steady_clock::now()).count();
+                if (remaining <= 0) {
+                    errno = ETIMEDOUT;
+                    return false;
+                }
+                pollfd pfd{fd, POLLOUT | POLLHUP | POLLERR, 0};
+                const int waitMs = remaining >= INT_MAX ? INT_MAX :
+                                   static_cast<int>(remaining + 1);
+                const int ready = poll(&pfd, 1, waitMs);
+                if (ready > 0 || (ready < 0 && errno == EINTR)) continue;
+                if (ready == 0) errno = ETIMEDOUT;
+            }
+            return false;
+        }
+        size_t remaining = static_cast<size_t>(written);
+        while (first < count && remaining >= vectors[first].iov_len) {
+            remaining -= vectors[first].iov_len;
+            ++first;
+        }
+        if (first < count && remaining != 0) {
+            vectors[first].iov_base = static_cast<char*>(vectors[first].iov_base) +
+                                      remaining;
+            vectors[first].iov_len -= remaining;
+        }
+    }
+    return true;
+}
 
+bool WsWriteFrameWithTimeout(int fd, uint8_t opcode, const std::string& payload,
+                            int timeoutMs) {
+    uint8_t header[10];
+    size_t headerSize = 0;
+    header[headerSize++] = static_cast<uint8_t>(0x80 | opcode);
     const size_t n = payload.size();
     // 服务端发出的帧**不打掩码**（RFC 6455 5.1）
     if (n < 126) {
-        buf.push_back(static_cast<uint8_t>(n));
+        header[headerSize++] = static_cast<uint8_t>(n);
     } else if (n <= 0xFFFF) {
-        buf.push_back(126);
-        buf.push_back(static_cast<uint8_t>(n >> 8));
-        buf.push_back(static_cast<uint8_t>(n));
+        header[headerSize++] = 126;
+        header[headerSize++] = static_cast<uint8_t>(n >> 8);
+        header[headerSize++] = static_cast<uint8_t>(n);
     } else {
-        buf.push_back(127);
+        header[headerSize++] = 127;
         for (int i = 7; i >= 0; --i) {
-            buf.push_back(static_cast<uint8_t>(static_cast<uint64_t>(n) >> (i * 8)));
+            header[headerSize++] = static_cast<uint8_t>(
+                    static_cast<uint64_t>(n) >> (i * 8));
         }
     }
-    buf.insert(buf.end(), payload.begin(), payload.end());
-    return WriteFull(fd, buf.data(), buf.size());
+
+    // Send the small header and existing encoded buffer in one syscall.
+    // A short write can end inside either iovec, so advance both explicitly.
+    return SendBuffersWithTimeout(fd, {{header, headerSize},
+                                      {payload.data(), n}}, timeoutMs);
+}
+
+bool WsWriteFrame(int fd, uint8_t opcode, const std::string& payload) {
+    return WsWriteFrameWithTimeout(fd, opcode, payload, 0);
 }
 
 bool WsWriteText(int fd, const std::string& text) {

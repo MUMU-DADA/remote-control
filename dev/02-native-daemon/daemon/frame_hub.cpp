@@ -201,6 +201,8 @@ FrameHub::Sub::~Sub() {
         im->threadRunning = false;
         im->threadStopping = false;
         im->stats.running = false;
+        im->latest.reset();
+        im->prev.reset();
         im->cv.notify_all();
     }
 
@@ -490,8 +492,9 @@ FramePtr FrameHub::CaptureOnce(Dispatcher* dispatcher, uint64_t seq,
     //    所以客户端要的图比抓帧尺寸小时，理论上会有极少数"其实
     //    降采样后一样"的帧被多送一次。方向是安全的（宁可多送、
     //    不可漏送），而且省下的哈希是它的 45 倍。
-    f->changeGen     = (prev != nullptr && SamePixels(*prev, *f))
-                               ? prev->changeGen : genIfChanged;
+    const bool same = prev != nullptr && SamePixels(*prev, *f);
+    f->changeGen = same ? prev->changeGen : genIfChanged;
+    f->encodedImages = same ? prev->encodedImages : std::make_shared<EncodedFrameCache>();
 
     // 删除器负责 munmap + close —— 最后一个消费者放手时才释放。
     // 这样"共享"是真的共享：三个客户端拿到的是同一个映射，

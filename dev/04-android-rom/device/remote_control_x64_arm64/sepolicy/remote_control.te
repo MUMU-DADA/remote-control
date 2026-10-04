@@ -152,6 +152,24 @@ net_domain(remote_control)
 hal_client_domain(remote_control, hal_graphics_allocator)
 hal_client_domain(remote_control, hal_graphics_composer)
 
+# MediaCodec 编码：和 AOSP 的原生 media 客户端一致，声明 Codec2/OMX
+# 客户端可获得 hwservice 查找、双向 Binder/FD 及媒体变体属性读取。
+# 只补 media_variant_prop 无法让守护进程找到/调用编码 HAL。
+hal_client_domain(remote_control, hal_codec2)
+hal_client_domain(remote_control, hal_omx)
+
+# media.player 的 codec list 与 media.resource_manager 同属 mediaserver；
+# resource manager 会通过 Binder 回调客户端（例如 reclaimResource）。
+allow remote_control mediaserver_service:service_manager find;
+binder_call(remote_control, mediaserver)
+binder_call(mediaserver, remote_control)
+
+# MediaCodec 初始化/释放时会查询媒体配置并提交 media.metrics。
+# 缺少服务查找权限会令 getService 重试，给首帧增加数秒等待。
+get_prop(remote_control, media_config_prop)
+allow remote_control mediametrics_service:service_manager find;
+binder_call(remote_control, mediametrics)
+
 # ── 和 system_server 打交道（pm / am / cmd / settings / content 全靠这条）──
 #
 # ⚠️ `/system/bin/pm` 的真实内容是：
