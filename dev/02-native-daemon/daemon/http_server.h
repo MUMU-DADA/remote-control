@@ -149,7 +149,7 @@ class HttpServer {
     bool Start(const Options& opts, std::string* error);
 
     // Run 在调用线程阻塞；销毁对象前，调用方必须在 Stop 后 join 该线程。
-    void Run(const HttpHandler& handler);
+    void Run(HttpHandler handler);
     // 停止接收请求、关闭其他连接并等待 worker 退出。handler 可调用 Stop；
     // 此时 Stop 等待其他 worker，当前 handler 返回后连接自行收尾。
     void Stop();

@@ -59,10 +59,14 @@ class SocketServer {
     bool Start(std::string* error);
 
     // 阻塞式 accept 循环，直到 Stop() 被调用。
-    void Run(const RequestHandler& handler);
+    void Run(RequestHandler handler);
 
     // 让 Run() 从阻塞中退出。可从其它线程调用。
     void Stop();
+
+    // 供 SIGTERM/SIGINT 处理器调用。只写入自管道并设置原子标志，
+    // 不获取锁、不分配内存，符合异步信号处理约束。
+    void SignalStop() noexcept;
 
     const std::string& path() const { return path_; }
 
@@ -88,11 +92,15 @@ class SocketServer {
     // 发应答，可选带一个 fd。
     bool SendReply(int connFd, const ReplyPacket& packet);
 
+    bool CreateWakePipe(std::string* error);
+
     std::string path_;
     // 手动模式下的 socket 路径；init 模式下为空
     mode_t      socketMode_ = 0660;   // 可用 --socket-mode 放宽，见 main.cpp 的说明
     std::string initSocketName_;    // init 模式下的 socket 名
     int  listenFd_ = -1;
+    int  wakeReadFd_ = -1;
+    std::atomic<int> wakeWriteFd_{-1};
     std::atomic<bool> stop_{false};
     bool ownsPath_ = false;         // true 表示退出时要 unlink path_
 

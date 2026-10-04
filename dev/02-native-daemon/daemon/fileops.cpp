@@ -4,11 +4,13 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -17,11 +19,17 @@
 #include "remote_control_log.h"
 #include "subprocess.h"
 
+#if !defined(SYS_renameat2) && defined(__NR_renameat2)
+#define SYS_renameat2 __NR_renameat2
+#endif
+
 namespace remote_control {
 namespace {
 
 constexpr int64_t kDefaultMaxDownload = 512LL << 20;   // 512 MB
 constexpr int     kDefaultTimeoutSec  = 300;
+constexpr size_t  kMaxPathComponents  = 256;
+constexpr size_t  kMaxDeleteDepth     = 256;
 
 std::string JoinPath(const std::string& a, const std::string& b) {
     if (a.empty()) return b;
@@ -37,56 +45,13 @@ std::string DirName(const std::string& p) {
     return p.substr(0, s);
 }
 
-// 递归建目录（mkdir -p）
-bool MkdirP(const std::string& path, std::string* error) {
-    if (path.empty() || path == "/") return true;
-    struct stat st{};
-    if (stat(path.c_str(), &st) == 0) {
-        if (S_ISDIR(st.st_mode)) return true;
-        if (error) *error = path + " 已存在且不是目录";
-        return false;
-    }
-    if (!MkdirP(DirName(path), error)) return false;
-    if (mkdir(path.c_str(), 0775) != 0 && errno != EEXIST) {
-        if (error) *error = "mkdir " + path + " 失败: " + strerror(errno);
-        return false;
-    }
-    return true;
-}
-
-// 递归删除
-bool RemoveRecursive(const std::string& path, std::string* error) {
-    struct stat st{};
-    if (lstat(path.c_str(), &st) != 0) {
-        if (error) *error = "lstat " + path + " 失败: " + strerror(errno);
-        return false;
-    }
-    if (!S_ISDIR(st.st_mode)) {
-        if (unlink(path.c_str()) != 0) {
-            if (error) *error = "删除 " + path + " 失败: " + strerror(errno);
-            return false;
-        }
-        return true;
-    }
-    DIR* d = opendir(path.c_str());
-    if (d == nullptr) {
-        if (error) *error = "打开目录 " + path + " 失败: " + strerror(errno);
-        return false;
-    }
-    dirent* ent;
-    while ((ent = readdir(d)) != nullptr) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-        if (!RemoveRecursive(JoinPath(path, ent->d_name), error)) {
-            closedir(d);
-            return false;
-        }
-    }
-    closedir(d);
-    if (rmdir(path.c_str()) != 0) {
-        if (error) *error = "删除目录 " + path + " 失败: " + strerror(errno);
-        return false;
-    }
-    return true;
+// path 是不是 base（或 base 自己）。两边都要求无尾斜杠。
+bool IsUnder(const std::string& path, const std::string& base) {
+    if (base.empty()) return false;
+    if (path == base) return true;
+    return path.size() > base.size() &&
+           path.compare(0, base.size(), base) == 0 &&
+           path[base.size()] == '/';
 }
 
 // 相对 root 的路径表示；不在 root 内返回空
@@ -97,6 +62,208 @@ std::string RelativeTo(const std::string& root, const std::string& abs) {
         return abs.substr(root.size() + 1);
     }
     return {};
+}
+
+// The old implementation validated a path with realpath(), then used the
+// path string in fopen/rename/rmdir.  A different process could replace a
+// checked parent directory with a symlink in between those operations.  All
+// mutating operations below therefore walk from an already-open directory fd;
+// O_NOFOLLOW rejects symlink components and the final operation is *at(2).
+bool RelativeParts(const std::string& base, const std::string& abs,
+                   std::vector<std::string>* parts) {
+    parts->clear();
+    if (abs == base) return true;
+    if (!IsUnder(abs, base)) return false;
+    const std::string rel = abs.substr(base.size() + 1);
+    size_t i = 0;
+    while (i < rel.size()) {
+        size_t slash = rel.find('/', i);
+        if (slash == std::string::npos) slash = rel.size();
+        const std::string part = rel.substr(i, slash - i);
+        if (part.empty() || part == "." || part == "..") return false;
+        parts->push_back(part);
+        if (parts->size() > kMaxPathComponents) return false;
+        i = slash + 1;
+    }
+    return true;
+}
+
+int OpenDirNoFollow(const std::string& path) {
+    if (path.empty() || path[0] != '/') return -1;
+    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    size_t i = 1;
+    while (i < path.size()) {
+        size_t slash = path.find('/', i);
+        if (slash == std::string::npos) slash = path.size();
+        if (slash == i) {
+            i = slash + 1;
+            continue;
+        }
+        const std::string part = path.substr(i, slash - i);
+        const int next = openat(fd, part.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            close(fd);
+            return -1;
+        }
+        close(fd);
+        fd = next;
+        i = slash + 1;
+    }
+    return fd;
+}
+
+int OpenPathDirNoFollow(const std::string& base, const std::string& abs,
+                        std::string* error) {
+    std::vector<std::string> parts;
+    if (!RelativeParts(base, abs, &parts)) {
+        if (error) *error = "路径不在允许目录内: " + abs;
+        return -1;
+    }
+    int fd = OpenDirNoFollow(base);
+    if (fd < 0) {
+        if (error) *error = "打开目录失败: " + std::string(strerror(errno));
+        return -1;
+    }
+    for (const std::string& part : parts) {
+        const int next = openat(fd, part.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            const int savedErrno = errno;
+            close(fd);
+            if (error) *error = "打开目录 " + part + " 失败: " + strerror(savedErrno);
+            return -1;
+        }
+        close(fd);
+        fd = next;
+    }
+    return fd;
+}
+
+int OpenParentNoFollow(const std::string& base, const std::string& abs,
+                       std::string* leaf, std::string* error) {
+    std::vector<std::string> parts;
+    if (!RelativeParts(base, abs, &parts) || parts.empty()) {
+        if (error) *error = "目标必须是允许目录中的子项: " + abs;
+        return -1;
+    }
+    *leaf = parts.back();
+    parts.pop_back();
+    int fd = OpenDirNoFollow(base);
+    if (fd < 0) {
+        if (error) *error = "打开目录失败: " + std::string(strerror(errno));
+        return -1;
+    }
+    for (const std::string& part : parts) {
+        const int next = openat(fd, part.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            const int savedErrno = errno;
+            close(fd);
+            if (error) *error = "打开目录 " + part + " 失败: " + strerror(savedErrno);
+            return -1;
+        }
+        close(fd);
+        fd = next;
+    }
+    return fd;
+}
+
+bool MkdirPAt(const std::string& base, const std::string& abs,
+              std::string* error) {
+    std::vector<std::string> parts;
+    if (!RelativeParts(base, abs, &parts)) {
+        if (error) *error = "路径不在允许目录内: " + abs;
+        return false;
+    }
+    int fd = OpenDirNoFollow(base);
+    if (fd < 0) {
+        if (error) *error = "打开目录失败: " + std::string(strerror(errno));
+        return false;
+    }
+    for (const std::string& part : parts) {
+        if (mkdirat(fd, part.c_str(), 0775) != 0 && errno != EEXIST) {
+            const int savedErrno = errno;
+            close(fd);
+            if (error) *error = "mkdir " + part + " 失败: " + strerror(savedErrno);
+            return false;
+        }
+        struct stat st{};
+        if (fstatat(fd, part.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+            !S_ISDIR(st.st_mode)) {
+            const int savedErrno = errno;
+            close(fd);
+            if (error) *error = part + " 已存在且不是目录" +
+                                  (savedErrno ? (": " + std::string(strerror(savedErrno))) : "");
+            return false;
+        }
+        const int next = openat(fd, part.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) {
+            const int savedErrno = errno;
+            close(fd);
+            if (error) *error = "打开目录 " + part + " 失败: " + strerror(savedErrno);
+            return false;
+        }
+        close(fd);
+        fd = next;
+    }
+    close(fd);
+    return true;
+}
+
+bool RemoveTreeAt(int parentFd, const std::string& name, std::string* error,
+                  size_t depth = 0) {
+    if (depth > kMaxDeleteDepth) {
+        if (error) *error = "目录层级超过上限";
+        return false;
+    }
+    struct stat st{};
+    if (fstatat(parentFd, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (error) *error = "路径不存在: " + name;
+        return false;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        if (unlinkat(parentFd, name.c_str(), 0) != 0) {
+            if (error) *error = "删除 " + name + " 失败: " + strerror(errno);
+            return false;
+        }
+        return true;
+    }
+
+    const int childFd = openat(parentFd, name.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (childFd < 0) {
+        if (error) *error = "打开目录 " + name + " 失败: " + strerror(errno);
+        return false;
+    }
+    DIR* dir = fdopendir(childFd);
+    if (dir == nullptr) {
+        close(childFd);
+        if (error) *error = "打开目录 " + name + " 失败: " + strerror(errno);
+        return false;
+    }
+    bool ok = true;
+    errno = 0;
+    while (ok) {
+        dirent* ent = readdir(dir);
+        if (ent == nullptr) break;
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        ok = RemoveTreeAt(dirfd(dir), ent->d_name, error, depth + 1);
+    }
+    const int readErrno = errno;
+    closedir(dir);
+    if (!ok) return false;
+    if (readErrno != 0) {
+        if (error) *error = "读取目录 " + name + " 失败: " + strerror(readErrno);
+        return false;
+    }
+    if (unlinkat(parentFd, name.c_str(), AT_REMOVEDIR) != 0) {
+        if (error) *error = "删除目录 " + name + " 失败: " + strerror(errno);
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -111,15 +278,6 @@ std::string FileOps::NormalizeAlias(const std::string& input) const {
         }
     }
     return input;
-}
-
-// path 是不是 base（或 base 自己）。两边都要求无尾斜杠。
-static bool IsUnder(const std::string& path, const std::string& base) {
-    if (base.empty()) return false;
-    if (path == base) return true;
-    return path.size() > base.size() &&
-           path.compare(0, base.size(), base) == 0 &&
-           path[base.size()] == '/';
 }
 
 bool FileOps::ResolveInside(const std::string& root,
@@ -182,6 +340,10 @@ bool FileOps::ResolveInside(const std::string& root,
             parts.pop_back();
         } else {
             parts.push_back(seg);
+            if (parts.size() > kMaxPathComponents) {
+                if (error) *error = "路径层级超过上限: " + input;
+                return false;
+            }
         }
         i = slash + 1;
     }
@@ -307,8 +469,11 @@ bool FileOps::Init(std::string* error) {
     for (int i = 0; candidates[i] != nullptr; ++i) {
         struct stat st{};
         if (stat(candidates[i], &st) == 0 && S_ISDIR(st.st_mode)) {
-            root_ = candidates[i];
-            break;
+            char canonical[PATH_MAX];
+            if (realpath(candidates[i], canonical) != nullptr) {
+                root_ = canonical;
+                break;
+            }
         }
     }
     if (root_.empty()) {
@@ -333,8 +498,11 @@ bool FileOps::Init(std::string* error) {
     for (int i = 0; storageCandidates[i] != nullptr; ++i) {
         struct stat st{};
         if (stat(storageCandidates[i], &st) == 0 && S_ISDIR(st.st_mode)) {
-            storageRoot_ = storageCandidates[i];
-            break;
+            char canonical[PATH_MAX];
+            if (realpath(storageCandidates[i], canonical) != nullptr) {
+                storageRoot_ = canonical;
+                break;
+            }
         }
     }
     // 兜底：用下载目录的父目录。真探不到就退化成"只能操作下载目录"，
@@ -351,7 +519,8 @@ bool FileOps::Init(std::string* error) {
     if (!storageRoot_.empty()) {
         char canon[PATH_MAX];
         if (realpath(storageRoot_.c_str(), canon) != nullptr) {
-            const char* aliasCandidates[] = {"/sdcard", "/data/media/0", nullptr};
+            const char* aliasCandidates[] = {"/storage/emulated/0", "/sdcard",
+                                              "/data/media/0", nullptr};
             for (int i = 0; aliasCandidates[i] != nullptr; ++i) {
                 char a[PATH_MAX];
                 if (realpath(aliasCandidates[i], a) != nullptr &&
@@ -412,7 +581,9 @@ bool FileOps::Download(const std::string& url, const std::string& filename,
         }
         std::string subAbs;
         if (!ResolveInside(root_, storageRoot_, subdir, &subAbs, error)) return false;
-        if (!MkdirP(subAbs, error)) return false;
+        if (!MkdirPAt(storageRoot_.empty() ? root_ : storageRoot_, subAbs, error)) {
+            return false;
+        }
         dirAbs = subAbs;
     }
 
@@ -455,9 +626,13 @@ bool FileOps::List(const std::string& relPath, std::vector<FileEntry>* out,
     std::string abs;
     if (!ResolveInside(root_, storageRoot_, NormalizeAlias(relPath), &abs, error)) return false;
 
-    DIR* d = opendir(abs.c_str());
+    const std::string& bound = storageRoot_.empty() ? root_ : storageRoot_;
+    const int dirFd = OpenPathDirNoFollow(bound, abs, error);
+    if (dirFd < 0) return false;
+    DIR* d = fdopendir(dirFd);
     if (d == nullptr) {
         const int savedErrno = errno;
+        close(dirFd);
         if (error) {
             if (savedErrno == ENOENT || savedErrno == ENOTDIR) {
                 *error = "路径不存在: " + relPath;
@@ -471,9 +646,9 @@ bool FileOps::List(const std::string& relPath, std::vector<FileEntry>* out,
     dirent* ent;
     while ((ent = readdir(d)) != nullptr) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-        const std::string childAbs = JoinPath(abs, ent->d_name);
         struct stat st{};
-        if (lstat(childAbs.c_str(), &st) != 0) continue;
+        if (fstatat(dirfd(d), ent->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+        const std::string childAbs = JoinPath(abs, ent->d_name);
 
         FileEntry e;
         e.name  = ent->d_name;
@@ -501,17 +676,36 @@ bool FileOps::Stat(const std::string& relPath, FileEntry* out, std::string* erro
     if (!ResolveInside(root_, storageRoot_, NormalizeAlias(relPath), &abs, error)) return false;
 
     struct stat st{};
-    if (lstat(abs.c_str(), &st) != 0) {
+    const std::string& bound = storageRoot_.empty() ? root_ : storageRoot_;
+    if (abs == bound) {
+        const int fd = OpenPathDirNoFollow(bound, abs, error);
+        if (fd < 0) return false;
+        const bool ok = fstat(fd, &st) == 0;
         const int savedErrno = errno;
-        if (error) {
-            if (savedErrno == ENOENT || savedErrno == ENOTDIR) {
-                *error = "路径不存在: " + relPath;
-            } else {
-                *error = "无法访问路径: " + relPath + " (" +
-                         strerror(savedErrno) + ")";
-            }
+        close(fd);
+        if (!ok) {
+            if (error) *error = "无法访问路径: " + relPath + " (" +
+                                  strerror(savedErrno) + ")";
+            return false;
         }
-        return false;
+    } else {
+        std::string leaf;
+        const int parentFd = OpenParentNoFollow(bound, abs, &leaf, error);
+        if (parentFd < 0) return false;
+        const bool ok = fstatat(parentFd, leaf.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0;
+        const int savedErrno = errno;
+        close(parentFd);
+        if (!ok) {
+            if (error) {
+                if (savedErrno == ENOENT || savedErrno == ENOTDIR) {
+                    *error = "路径不存在: " + relPath;
+                } else {
+                    *error = "无法访问路径: " + relPath + " (" +
+                             strerror(savedErrno) + ")";
+                }
+            }
+            return false;
+        }
     }
     out->isDir = S_ISDIR(st.st_mode);
     out->size  = out->isDir ? 0 : static_cast<int64_t>(st.st_size);
@@ -526,18 +720,24 @@ bool FileOps::Mkdir(const std::string& relPath, bool parents, std::string* error
     if (!ResolveInside(root_, storageRoot_, NormalizeAlias(relPath), &abs, error)) return false;
     if (abs == root_) return true;   // 根目录已存在
 
-    struct stat st{};
-    if (stat(abs.c_str(), &st) == 0) {
-        if (S_ISDIR(st.st_mode)) return true;
-        if (error) *error = relPath + " 已存在且不是目录";
-        return false;
+    const std::string& bound = storageRoot_.empty() ? root_ : storageRoot_;
+    if (parents) return MkdirPAt(bound, abs, error);
+    std::string leaf;
+    const int parentFd = OpenParentNoFollow(bound, abs, &leaf, error);
+    if (parentFd < 0) return false;
+    const bool ok = mkdirat(parentFd, leaf.c_str(), 0775) == 0;
+    const int savedErrno = errno;
+    if (!ok && savedErrno == EEXIST) {
+        struct stat st{};
+        if (fstatat(parentFd, leaf.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+            S_ISDIR(st.st_mode)) {
+            close(parentFd);
+            return true;
+        }
     }
-    if (parents) return MkdirP(abs, error);
-    if (mkdir(abs.c_str(), 0775) != 0) {
-        if (error) *error = "mkdir 失败: " + std::string(strerror(errno));
-        return false;
-    }
-    return true;
+    close(parentFd);
+    if (!ok && error) *error = "mkdir 失败: " + std::string(strerror(savedErrno));
+    return ok;
 }
 
 bool FileOps::Delete(const std::string& relPath, bool recursive,
@@ -554,23 +754,31 @@ bool FileOps::Delete(const std::string& relPath, bool recursive,
         return false;
     }
 
+    const std::string& bound = storageRoot_.empty() ? root_ : storageRoot_;
+    std::string leaf;
+    const int parentFd = OpenParentNoFollow(bound, abs, &leaf, error);
+    if (parentFd < 0) return false;
     struct stat st{};
-    if (lstat(abs.c_str(), &st) != 0) {
-        if (error) *error = "路径不存在: " + relPath;
+    if (fstatat(parentFd, leaf.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        const int savedErrno = errno;
+        close(parentFd);
+        if (error) *error = "路径不存在: " + relPath + " (" + strerror(savedErrno) + ")";
         return false;
     }
     if (S_ISDIR(st.st_mode) && !recursive) {
         // 非递归只删空目录，避免误删一整棵树
-        if (rmdir(abs.c_str()) != 0) {
-            if (error) {
-                *error = std::string("目录非空或无法删除（需要 recursive）: ") +
-                         strerror(errno);
-            }
-            return false;
+        const bool ok = unlinkat(parentFd, leaf.c_str(), AT_REMOVEDIR) == 0;
+        const int savedErrno = errno;
+        close(parentFd);
+        if (!ok && error) {
+            *error = std::string("目录非空或无法删除（需要 recursive）: ") +
+                     strerror(savedErrno);
         }
-        return true;
+        return ok;
     }
-    return RemoveRecursive(abs, error);
+    const bool ok = RemoveTreeAt(parentFd, leaf, error);
+    close(parentFd);
+    return ok;
 }
 
 bool FileOps::Rename(const std::string& fromRel, const std::string& toRel,
@@ -591,22 +799,63 @@ bool FileOps::Rename(const std::string& fromRel, const std::string& toRel,
         }
         return false;
     }
+    const bool samePath = fromAbs == toAbs;
 
+    const std::string& bound = storageRoot_.empty() ? root_ : storageRoot_;
+    std::string fromLeaf, toLeaf;
+    const int fromParent = OpenParentNoFollow(bound, fromAbs, &fromLeaf, error);
+    if (fromParent < 0) return false;
+    const int toParent = OpenParentNoFollow(bound, toAbs, &toLeaf, error);
+    if (toParent < 0) {
+        close(fromParent);
+        if (error && error->empty()) *error = "目标目录不存在: " + DirName(toRel);
+        return false;
+    }
     struct stat st{};
-    if (stat(fromAbs.c_str(), &st) != 0) {
-        if (error) *error = "源路径不存在: " + fromRel;
+    if (fstatat(fromParent, fromLeaf.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        const int savedErrno = errno;
+        close(fromParent);
+        close(toParent);
+        if (error) *error = "源路径不存在: " + fromRel + " (" + strerror(savedErrno) + ")";
         return false;
     }
-    // 目标父目录必须存在
-    if (stat(DirName(toAbs).c_str(), &st) != 0) {
-        if (error) *error = "目标目录不存在: " + DirName(toRel);
+    if (samePath) {
+        close(fromParent);
+        close(toParent);
+        return true;
+    }
+    // Do not silently replace an existing file or directory.  Callers can
+    // delete it explicitly, which avoids accidental data loss and also makes
+    // the operation atomic with respect to the opened parent directories.
+    if (fstatat(toParent, toLeaf.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0) {
+        close(fromParent);
+        close(toParent);
+        if (error) *error = "目标已存在: " + toRel;
         return false;
     }
-    if (rename(fromAbs.c_str(), toAbs.c_str()) != 0) {
-        if (error) *error = "重命名失败: " + std::string(strerror(errno));
+    const int targetErrno = errno;
+    if (targetErrno != ENOENT) {
+        close(fromParent);
+        close(toParent);
+        if (error) *error = "无法检查目标: " + std::string(strerror(targetErrno));
         return false;
     }
-    return true;
+    // renameat() replaces an existing destination.  Use renameat2 with
+    // RENAME_NOREPLACE so the existence check above remains race safe.
+    constexpr unsigned int kRenameNoReplace = 1u;
+#if defined(SYS_renameat2)
+    const long renameResult = syscall(SYS_renameat2, fromParent, fromLeaf.c_str(),
+                                      toParent, toLeaf.c_str(), kRenameNoReplace);
+#else
+    const long renameResult = -1;
+    errno = ENOTSUP;
+#endif
+    const bool ok = renameResult == 0;
+    const int savedErrno = errno;
+    close(fromParent);
+    close(toParent);
+    if (!ok && error) *error = "重命名失败: " + std::string(strerror(savedErrno));
+    return ok;
 }
 
 }  // namespace remote_control

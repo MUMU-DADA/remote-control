@@ -16,6 +16,8 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <poll.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "remote_control_log.h"
@@ -81,10 +83,14 @@ SocketServer::SocketServer(SocketServer&& other) noexcept
       : path_(std::move(other.path_)),
         initSocketName_(std::move(other.initSocketName_)),
         listenFd_(other.listenFd_),
+        wakeReadFd_(other.wakeReadFd_),
+        wakeWriteFd_(other.wakeWriteFd_.load()),
         stop_(other.stop_.load()),
         ownsPath_(other.ownsPath_) {
     // 转移所有权，避免 other 析构时关掉我们正在用的 fd / unlink 路径
     other.listenFd_ = -1;
+    other.wakeReadFd_ = -1;
+    other.wakeWriteFd_.store(-1);
     other.ownsPath_ = false;
 }
 
@@ -92,15 +98,22 @@ SocketServer& SocketServer::operator=(SocketServer&& other) noexcept {
     if (this != &other) {
         Stop();
         if (listenFd_ >= 0) close(listenFd_);
+        if (wakeReadFd_ >= 0) close(wakeReadFd_);
+        const int oldWakeWrite = wakeWriteFd_.exchange(-1);
+        if (oldWakeWrite >= 0) close(oldWakeWrite);
         if (ownsPath_ && !path_.empty()) unlink(path_.c_str());
 
         path_           = std::move(other.path_);
         initSocketName_ = std::move(other.initSocketName_);
         listenFd_       = other.listenFd_;
+        wakeReadFd_     = other.wakeReadFd_;
+        wakeWriteFd_.store(other.wakeWriteFd_.load());
         stop_.store(other.stop_.load());
         ownsPath_       = other.ownsPath_;
 
         other.listenFd_ = -1;
+        other.wakeReadFd_ = -1;
+        other.wakeWriteFd_.store(-1);
         other.ownsPath_ = false;
     }
     return *this;
@@ -112,6 +125,12 @@ SocketServer::~SocketServer() {
         close(listenFd_);
         listenFd_ = -1;
     }
+    if (wakeReadFd_ >= 0) {
+        close(wakeReadFd_);
+        wakeReadFd_ = -1;
+    }
+    const int wakeWrite = wakeWriteFd_.exchange(-1);
+    if (wakeWrite >= 0) close(wakeWrite);
     if (ownsPath_ && !path_.empty()) {
         unlink(path_.c_str());
     }
@@ -134,6 +153,11 @@ bool SocketServer::Start(std::string* error) {
         // init 已经 listen 过了，这里不要再 listen
         path_ = std::string("/dev/socket/") + initSocketName_;
         ALOGI("remote-control: 接管 init socket fd=%d (%s)", listenFd_, path_.c_str());
+        if (!CreateWakePipe(error)) {
+            close(listenFd_);
+            listenFd_ = -1;
+            return false;
+        }
         return true;
 #else
         // init socket activation 是 Android 专有机制（libcutils）。
@@ -195,11 +219,40 @@ bool SocketServer::Start(std::string* error) {
 
     ownsPath_ = true;
     ALOGI("remote-control: 监听 %s (fd=%d)", path_.c_str(), listenFd_);
+    if (!CreateWakePipe(error)) {
+        close(listenFd_);
+        listenFd_ = -1;
+        unlink(path_.c_str());
+        ownsPath_ = false;
+        return false;
+    }
     return true;
 }
 
+bool SocketServer::CreateWakePipe(std::string* error) {
+    int fds[2] = {-1, -1};
+    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) {
+        if (error) *error = std::string("创建停止唤醒管道失败: ") + strerror(errno);
+        return false;
+    }
+    wakeReadFd_ = fds[0];
+    wakeWriteFd_.store(fds[1]);
+    return true;
+}
+
+void SocketServer::SignalStop() noexcept {
+    stop_.store(true, std::memory_order_relaxed);
+    const int fd = wakeWriteFd_.load(std::memory_order_relaxed);
+    if (fd >= 0) {
+        const char byte = 1;
+        // write() is async-signal-safe; a full non-blocking pipe already
+        // contains a wakeup, so EAGAIN can be ignored.
+        (void)write(fd, &byte, sizeof(byte));
+    }
+}
+
 void SocketServer::Stop() {
-    stop_.store(true);
+    SignalStop();
     const int callerFd = gActiveSocketServer == this ? gActiveSocketFd : -1;
 
     // 先关监听，再 shutdown 所有活跃连接。仅关监听只能让 accept 返回，
@@ -221,18 +274,18 @@ void SocketServer::Stop() {
     }
     for (int fd : peers) shutdown(fd, SHUT_RDWR);
 
-    // 如果 Stop 是由某个 worker 的 handler 调用，跳过该 worker，避免
-    // 自己等待自己；它返回 handler 后会在 wrapper 中注销并关闭 fd。
+    // 如果 Stop 是由某个 worker 的 handler 调用，不能在这里等待其它
+    // worker：两个并发的 Shutdown 请求会各自等待对方而死锁。调用方
+    // 返回 handler 后由主线程再次 Stop()，统一等待所有连接退出。
+    if (callerFd >= 0) return;
+
+    // 非 worker 调用方（通常是 Run() 返回后的主线程）等待所有 worker
+    // 注销连接，确保随后销毁 handler/Dispatcher 时没有悬空访问。
     std::unique_lock<std::mutex> lk(connMutex_);
-    connCv_.wait(lk, [this, callerFd] {
-        for (int fd : connFds_) {
-            if (fd != callerFd) return false;
-        }
-        return true;
-    });
+    connCv_.wait(lk, [this] { return connFds_.empty(); });
 }
 
-void SocketServer::Run(const RequestHandler& handler) {
+void SocketServer::Run(RequestHandler handler) {
     if (listenFd_ < 0) {
         ALOGE("remote-control: Run() 在 Start() 之前被调用");
         return;
@@ -247,6 +300,26 @@ void SocketServer::Run(const RequestHandler& handler) {
     // 让失败**显式**而不是变成饥饿。
     int consecutiveErrors = 0;
     while (!stop_.load()) {
+        pollfd fds[2]{};
+        fds[0].fd = listenFd_;
+        fds[0].events = POLLIN;
+        fds[1].fd = wakeReadFd_;
+        fds[1].events = POLLIN;
+        int pollRc;
+        do {
+            pollRc = poll(fds, 2, -1);
+        } while (pollRc < 0 && errno == EINTR);
+        if (pollRc < 0 || stop_.load()) break;
+        if (fds[1].revents & POLLIN) {
+            char drain[64];
+            while (read(wakeReadFd_, drain, sizeof(drain)) > 0) {}
+            break;
+        }
+        if (!(fds[0].revents & POLLIN)) {
+            if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+            continue;
+        }
+
         int connFd = accept4(listenFd_, nullptr, nullptr, SOCK_CLOEXEC);
         if (connFd < 0) {
             if (errno == EINTR) continue;
@@ -302,7 +375,7 @@ void SocketServer::Run(const RequestHandler& handler) {
         // 线程起不来就退回串行，至少不丢连接。
         // SpawnDetached 用 pthread_create，失败返回 false 而不是抛异常 ——
         // AOSP 是 -fno-exceptions，std::thread 抛出来就是整个进程 terminate。
-        auto serve = [this, connFd, &handler]() {
+        auto serve = [this, connFd, handler]() mutable {
             SocketServer* previousServer = gActiveSocketServer;
             const int previousFd = gActiveSocketFd;
             gActiveSocketServer = this;
@@ -317,7 +390,9 @@ void SocketServer::Run(const RequestHandler& handler) {
                 connCv_.notify_all();
             }
         };
-        if (!SpawnDetached(std::move(serve))) {
+        // Keep the local callable intact so the serial fallback below still
+        // has a valid handler when thread creation fails.
+        if (!SpawnDetached(serve)) {
             ALOGW("remote-control: 起线程失败，本连接串行处理");
             // 线程创建失败时仍然走同一个 wrapper，保证连接从集合中
             // 注销并唤醒 Stop() 的等待者。

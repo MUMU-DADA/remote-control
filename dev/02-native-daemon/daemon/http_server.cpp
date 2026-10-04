@@ -8,6 +8,8 @@
 
 #include <arpa/inet.h>
 #include <algorithm>
+#include <chrono>
+#include <climits>
 #include <ctype.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -15,6 +17,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <limits>
 #include <unistd.h>
@@ -28,6 +31,11 @@ namespace remote_control {
 namespace {
 
 constexpr int kReadTimeoutSec = 30;
+// A large APK may legitimately take several minutes on a slow device or
+// USB link. Keep the anti-slowloris deadline, but budget at least 1 MiB/s for
+// a declared request body instead of applying the small-request timeout to
+// the entire upload.
+constexpr size_t kMinBodyRateBytesPerSec = 1u << 20;
 
 // 流式响应的**发送**超时。
 //
@@ -474,17 +482,17 @@ void HttpServer::Stop() {
 
     KickAllConnections("服务关闭", 600, callerFd);
 
-    // Shutdown 中断读写，但不能取消已经进入 handler 的调用。等连接
-    // worker 全部退出，调用方才可以安全析构它们可能引用的服务对象。
-    // 若 Stop 从当前连接的 handler 调用，当前 worker 必须先从 handler 返回，
-    // 因此此处只等待其他连接，避免等待自己退出。
+    // Shutdown 中断读写，但不能取消已经进入 handler 的调用。若 Stop
+    // 从当前连接的 handler 调用，不能等待其它 worker：两个并发的
+    // Shutdown 请求会互相等待。主线程稍后再次 Stop() 时统一等待全部
+    // worker，再析构它们引用的服务对象。
+    if (callerFd >= 0) return;
+
     std::unique_lock<std::mutex> lk(connMutex_);
-    connCv_.wait(lk, [this, callerFd] {
-        return !HasConnectionsExcept(connFds_, callerFd);
-    });
+    connCv_.wait(lk, [this] { return connFds_.empty(); });
 }
 
-void HttpServer::Run(const HttpHandler& handler) {
+void HttpServer::Run(HttpHandler handler) {
     while (!stop_.load()) {
         sockaddr_in peer{};
         socklen_t peerLen = sizeof(peer);
@@ -554,13 +562,13 @@ void HttpServer::Run(const HttpHandler& handler) {
         // 线程起不来就退回串行处理 —— 至少不丢这次连接。
         // 用 SpawnDetached 而不是 std::thread：后者创建失败会抛异常，
         // 而 AOSP 是 -fno-exceptions，抛出去就是整个进程 terminate。
-        if (!SpawnDetached([this, connFd, &handler]() {
+        auto serve = [this, connFd, handler]() mutable {
                 ServeConnection(connFd, handler);
                 close(connFd);
-            })) {
+            };
+        if (!SpawnDetached(serve)) {
             ALOGW("HTTP: 起线程失败，本连接串行处理");
-            ServeConnection(connFd, handler);
-            close(connFd);
+            serve();
         }
     }
     ALOGI("HTTP accept 循环退出");
@@ -570,6 +578,39 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
                             HttpResponse* errReply,
                             const std::function<bool(const HttpRequest&)>&
                                     onHeaders) {
+    // SO_RCVTIMEO limits one read, but a peer can keep a connection alive
+    // forever by sending one byte just before each timeout. Use one fixed
+    // deadline for the complete header/body read so slowloris clients cannot
+    // occupy a worker indefinitely.
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(kReadTimeoutSec);
+    auto readChunk = [&](char* dst, size_t size) -> ssize_t {
+        for (;;) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            const auto remaining = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(deadline - now).count();
+            pollfd pfd{connFd, POLLIN | POLLHUP | POLLERR, 0};
+            const int waitMs = remaining > INT_MAX ? INT_MAX
+                                                    : static_cast<int>(remaining);
+            int pr;
+            do {
+                pr = poll(&pfd, 1, waitMs);
+            } while (pr < 0 && errno == EINTR);
+            if (pr == 0) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            if (pr < 0) return -1;
+            const ssize_t n = read(connFd, dst, size);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            return n;
+        }
+    };
     std::string buf;
     buf.reserve(4096);
 
@@ -577,7 +618,7 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
     size_t headerEnd = std::string::npos;
     char tmp[4096];
     while (headerEnd == std::string::npos) {
-        const ssize_t n = read(connFd, tmp, sizeof(tmp));
+        const ssize_t n = readChunk(tmp, sizeof(tmp));
         if (n < 0) {
             if (errno == EINTR) continue;
             *errReply = HttpResponse::Error(400, std::string("读请求失败: ") +
@@ -703,6 +744,20 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
         }
     }
 
+    // Headers still have the fixed 30-second deadline above. Once the
+    // declared body size is known, allow a bounded transfer budget of
+    // 30 seconds plus one second per MiB. This keeps a peer from extending
+    // a request forever one byte at a time while allowing the documented
+    // multi-hundred-MB/GB APK uploads to finish on slower links.
+    const size_t bodySeconds =
+            contentLength / kMinBodyRateBytesPerSec +
+            (contentLength % kMinBodyRateBytesPerSec != 0 ? 1u : 0u);
+    const size_t maxIntSeconds = static_cast<size_t>(INT_MAX);
+    const size_t extraSeconds =
+            std::min(bodySeconds, maxIntSeconds - kReadTimeoutSec);
+    deadline = std::chrono::steady_clock::now() +
+               std::chrono::seconds(kReadTimeoutSec + extraSeconds);
+
     // 头读完了，正文**还没读** —— 给调用方一个提前拒绝的机会
     // （鉴权就走这里，见 ServeConnection）。
     if (onHeaders && !onHeaders(*out)) return false;
@@ -754,7 +809,7 @@ bool HttpServer::ReadRequest(int connFd, HttpRequest* out,
 
     size_t written = std::min(body.size(), contentLength);
     while (written < contentLength) {
-        const ssize_t n = read(connFd, tmp, sizeof(tmp));
+        const ssize_t n = readChunk(tmp, sizeof(tmp));
         if (n < 0) {
             if (errno == EINTR) continue;
             *errReply = HttpResponse::Error(400, "读请求体失败");

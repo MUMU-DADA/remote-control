@@ -281,6 +281,9 @@ constexpr size_t kMaxReplyPayload = 4u << 20;   // 4 MB
 // 默认手势参数
 constexpr uint32_t kDefaultTapMs   = 50;
 constexpr uint32_t kDefaultSwipeMs = 300;
+// 外部请求允许的最长单次手势时长。过大的值会让 worker 长时间睡眠，
+// 即使 HTTP 连接数有限也足以造成拒绝服务。
+constexpr uint32_t kMaxGestureMs   = 30 * 1000;
 constexpr float    kDefaultPressure = 1.0f;
 constexpr float    kDefaultSize     = 0.02f;  // 相对屏幕短边
 
