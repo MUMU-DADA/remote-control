@@ -1,0 +1,31 @@
+Complete NDK minimum-API build — 2026-10-04 (Asia/Shanghai)
+
+Command (script-supported environment parameters, from repository root):
+  API=26 ABI=arm64-v8a bash tools/build-ndk.sh
+
+Result: exit 0, remote-control and rcctl both compiled and linked successfully.
+NDK: /opt/android/android-ndk-r26d; compiler aarch64-linux-android26-clang++.
+Includes current capture, FrameHub, H264, HTTP/REST, WebSocket and Web UI source,
+plus the final FileOps O_PATH ancestor traversal fix.
+The 98 libwebp C objects were rebuilt from scratch under API 26 after moving
+the prior shared object cache to /tmp/rc-stream-opt-webpobj-before-api26.
+Only four existing jsoncpp deprecated-volatile warnings; no compiler errors.
+
+Final log: /tmp/rc-stream-opt-ndk-api26-final.log.
+The final run exited 0 after the FileOps fix and reused only the API 26 WebP
+objects from the previous clean build.
+Previous clean-build log: /tmp/rc-stream-opt-ndk-api26-clean.log.
+Initial successful run (before isolating the WebP cache):
+  /tmp/rc-stream-opt-ndk-api26.log.
+
+Artifacts under dev/02-native-daemon/out/ndk/arm64-v8a:
+  remote-control: 2660264 bytes, ARM aarch64 ELF 64-bit PIE.
+  SHA-256: 68642eff15ad58b2becc933d1623169123efd8156343e595103478f0212e7670
+  rcctl: 519592 bytes, ARM aarch64 ELF 64-bit PIE.
+  SHA-256: aee43d46d75ec3e38e4cea255555822e9734f4db985c4cfa1a69115f44762f25
+
+llvm-readelf --notes remote-control confirmed .note.android.ident contains
+API 26 (little-endian 1a 00 00 00) and NDK r26d.
+API 26 is the documented Android 8 compilation minimum. This is build
+compatibility verification; no Android 8 device run was performed here.
+No source changes or device operations were needed for this build.

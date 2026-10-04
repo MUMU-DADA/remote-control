@@ -97,6 +97,7 @@ void Frame::Reset() {
 // ---------------------------------------------------------------------------
 
 bool Capture::Init(std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!ResolveDisplay(error)) return false;
     ALOGI("使用显示 id=0x%llx",
           static_cast<unsigned long long>(activeDisplayId_));
@@ -104,13 +105,18 @@ bool Capture::Init(std::string* error) {
 }
 
 void Capture::SetDisplayId(uint64_t id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     requestedDisplayId_ = id;
     resolved_ = false;
 }
 
-void Capture::Shutdown() { resolved_ = false; }
+void Capture::Shutdown() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    resolved_ = false;
+}
 
 bool Capture::ResolveDisplay(std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // screencap 里的明确警告：多显示时顺序不保证稳定，所以必须显式选一个。
     const std::vector<PhysicalDisplayId> ids =
             SurfaceComposerClient::getPhysicalDisplayIds();
@@ -146,6 +152,7 @@ bool Capture::ResolveDisplay(std::string* error) {
 
 bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
                            std::string* error) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     out->clear();
 
     const std::vector<PhysicalDisplayId> ids =
@@ -196,6 +203,7 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
 }
 
 bool Capture::Grab(Frame* out, std::string* error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!resolved_ && !ResolveDisplay(error)) return false;
 
     const PhysicalDisplayId displayId{activeDisplayId_};
@@ -342,6 +350,15 @@ bool Capture::Grab(Frame* out, std::string* error) {
 
     *out = std::move(frame);
     return true;
+}
+
+bool Capture::Grab(Frame* out, std::string* error, uint32_t targetWidth) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const uint32_t previous = targetWidth_;
+    targetWidth_ = targetWidth;
+    const bool ok = Grab(out, error);
+    targetWidth_ = previous;
+    return ok;
 }
 
 // ---------------------------------------------------------------------------

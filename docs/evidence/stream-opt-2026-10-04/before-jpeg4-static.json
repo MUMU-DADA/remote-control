@@ -1,0 +1,58 @@
+{
+  "backend": "surfaceflinger",
+  "format": "jpeg",
+  "width": 0,
+  "requestedFps": 60,
+  "clients": 4,
+  "skipUnchanged": false,
+  "elapsedSeconds": 5.020249810999999,
+  "streams": [
+    {
+      "frames": 305,
+      "bytes": 10507561,
+      "firstFrameMs": 20.26231399999999,
+      "closed": false,
+      "errors": [],
+      "fps": 60.8
+    },
+    {
+      "frames": 306,
+      "bytes": 10542012,
+      "firstFrameMs": 19.264306999999988,
+      "closed": false,
+      "errors": [],
+      "fps": 61
+    },
+    {
+      "frames": 306,
+      "bytes": 10542012,
+      "firstFrameMs": 23.578491,
+      "closed": false,
+      "errors": [],
+      "fps": 61
+    },
+    {
+      "frames": 306,
+      "bytes": 10542012,
+      "firstFrameMs": 22.655666999999994,
+      "closed": false,
+      "errors": [],
+      "fps": 61
+    }
+  ],
+  "pingMs": {
+    "samples": 49,
+    "p50": 9.95,
+    "p95": 39.26,
+    "max": 43.85
+  },
+  "screenshotMs": {
+    "samples": 8,
+    "p50": 30.84,
+    "p95": 34.25
+  },
+  "capture": {
+    "frames": 306,
+    "lastCaptureMs": 10
+  }
+}

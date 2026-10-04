@@ -1,8 +1,10 @@
 # remote-control 的验证测试
 #
-# 所有测试都在开发机上**真实运行**，走完整的系统路径，不是 mock：
+# 所有测试都在开发机上运行；注入、socket 与进程测试走真实系统路径：
 #   - 触控：真的创建虚拟触摸屏、注入事件、从 /dev/input/eventN 读回
 #   - 截图：真的 fork/exec 一个进程、通过管道读像素
+# H.264 单元测试使用可控的 MediaCodec fake 验证缓冲和错误边界；
+# 真正的设备编码验证另见 tools/bench/h264_regression.cpp。
 #
 #   make              编译全部
 #   sudo make run     跑全部（需要 root：/dev/uinput 默认 0600）
@@ -95,7 +97,7 @@ SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
 APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
                  $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_transport test_core_lifetime test_fileops test_sha256
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_transport test_core_lifetime test_encoded_frame_cache test_h264_encoder test_fileops test_sha256
 
 all: $(BINS) fake_screencap
 
@@ -141,6 +143,17 @@ test_core_lifetime: $(CORE_LIFETIME_SRCS) test_util.h \
                     build/fakes/libcurl.so
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(CORE_LIFETIME_SRCS) -ldl
 
+test_encoded_frame_cache: test_encoded_frame_cache.cpp test_util.h \
+                          $(DAEMON)/encoded_frame_cache.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -fno-exceptions -pthread -o $@ $<
+
+H264_TEST_SRCS = test_h264_encoder.cpp $(DAEMON)/h264_encoder.cpp $(DAEMON)/log_buffer.cpp
+
+test_h264_encoder: $(H264_TEST_SRCS) test_util.h $(DAEMON)/h264_encoder.h \
+                   fakes/media/NdkMediaCodec.h fakes/media/NdkMediaFormat.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -Ifakes -DREMOTE_CONTROL_TEST_MEDIANDK=1 \
+	    -D__ANDROID_API__=31 -pthread -o $@ $(H264_TEST_SRCS) -ldl
+
 # fileops 要的是「路径边界」那部分逻辑，所以连 http_client 一起编进来
 FO_SRCS = test_fileops.cpp $(DAEMON)/fileops.cpp $(DAEMON)/http_client.cpp $(DAEMON)/log_buffer.cpp $(DAEMON)/subprocess.cpp
 
@@ -167,7 +180,7 @@ test_appops: $(APPOPS_SRCS) test_util.h $(DAEMON)/appops.h $(DAEMON)/subprocess.
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^
 
 test_capture_screencap: $(SCREENCAP_SRCS) test_util.h $(DAEMON)/capture.h
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(SCREENCAP_SRCS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(SCREENCAP_SRCS)
 
 fake_screencap: fake_screencap.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -192,6 +205,8 @@ _run: all
 	 ./test_websocket;                           w=$$?; echo; \
 	 ./test_transport;                           t=$$?; echo; \
 	 LD_LIBRARY_PATH="$$(pwd)/build/fakes$${LD_LIBRARY_PATH:+:$${LD_LIBRARY_PATH}}" ./test_core_lifetime; q=$$?; echo; \
+	 ./test_encoded_frame_cache;                 e=$$?; echo; \
+	 ./test_h264_encoder;                        h=$$?; echo; \
 	 ./test_fileops;                             f=$$?; echo; \
 	 ./test_sha256;                             s=$$?; echo; \
 	 echo "───────────────────────────────"; \
@@ -204,6 +219,8 @@ _run: all
 	 printf "  %-34s %s\n" "WebSocket 握手"       "$$([ $$w -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "传输层生命周期"       "$$([ $$t -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "daemon 资源生命周期" "$$([ $$q -eq 0 ] && echo 通过 || echo 失败)"; \
+	 printf "  %-34s %s\n" "共享编码缓存" "$$([ $$e -eq 0 ] && echo 通过 || echo 失败)"; \
+	 printf "  %-34s %s\n" "H.264 编码器" "$$([ $$h -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "文件路径边界"         "$$([ $$f -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "SHA-256"                 "$$([ $$s -eq 0 ] && echo 通过 || echo 失败)"; \
 	 echo "───────────────────────────────"; \
@@ -217,7 +234,7 @@ _run: all
 	     printf "  %-34s %s\n" "检查数与 README 一致" \
 	         "✗ 实际 $$total，README 写 $$want —— 改了测试就要同步改 README"; r=1; \
 	 fi; \
-	 exit $$(( u + i + c + a + j + k + w + t + q + f + s + r ))
+	 exit $$(( u + i + c + a + j + k + w + t + q + e + h + f + s + r ))
 
 clean:
 	rm -rf $(WEBP_OBJ)

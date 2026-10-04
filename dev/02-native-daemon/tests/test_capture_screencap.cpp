@@ -18,6 +18,9 @@
 #include <unistd.h>
 
 #include <string>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 #include "../daemon/capture.h"
 #include "test_util.h"
@@ -274,6 +277,61 @@ int main(int argc, char** argv) {
         Check(err.find("头部失败") != std::string::npos ||
                       err.find("不可执行") != std::string::npos,
               "错误信息可读: %s", err.c_str());
+    }
+
+    printf("\n[10] Per-request width restoration\n");
+    SetupEnv("FAKE_SCREENCAP_SIZE", "64x48");
+    {
+        Capture cap;
+        std::string error;
+        cap.SetTargetWidth(720);
+        Frame frame;
+        const bool ok = cap.Grab(&frame, &error, 480);
+        Check(ok && cap.TargetWidth() == 720,
+              "successful per-request capture restores the configured width");
+        setenv("REMOTE_CONTROL_SCREENCAP_PATH", "/nonexistent/screencap", 1);
+        const bool failed = !cap.Grab(&frame, &error, 320);
+        Check(failed && cap.TargetWidth() == 720,
+              "failed per-request capture also restores the configured width");
+    }
+
+    printf("\n[11] Concurrent capture and display configuration\n");
+    SetupEnv("FAKE_SCREENCAP_SIZE", "64x48");
+    {
+        Capture cap;
+        std::string error;
+        cap.Init(&error);
+        cap.SetTargetWidth(720);
+        std::atomic<int> failures{0};
+        std::vector<std::thread> workers;
+        for (int i = 0; i < 4; ++i) {
+            workers.emplace_back([&, i] {
+                for (int j = 0; j < 8; ++j) {
+                    std::string err;
+                    if (i < 3) {
+                        Frame frame;
+                        if (!cap.Grab(&frame, &err, 320 + 80 * i) ||
+                            frame.width != 64 || frame.height != 48 ||
+                            cap.TargetWidth() != 720) {
+                            ++failures;
+                        }
+                    } else {
+                        cap.SetDisplayId(j + 1);
+                        cap.Shutdown();
+                        if (!cap.ResolveDisplay(&err)) ++failures;
+                        std::vector<DisplayInfo> displays;
+                        if (!cap.ListDisplays(&displays, &err) ||
+                            displays.size() != 1 || displays[0].width != 64 ||
+                            displays[0].height != 48) {
+                            ++failures;
+                        }
+                    }
+                }
+            });
+        }
+        for (auto& worker : workers) worker.join();
+        Check(failures == 0 && cap.TargetWidth() == 720,
+              "capture and configuration entry points remain consistent concurrently");
     }
 
     return Summary("结果");

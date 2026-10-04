@@ -1018,6 +1018,7 @@ std::string SubscribersJson() {
 HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
     const StreamParams def;   // 内置默认
     const FrameHub::Stats h = FrameHub::Instance().GetStats();
+    const EncodedFrameCache::Stats encoding = EncodedFrameCache::GetStats();
     // quality 范围也从**同一个来源**取 —— 上报的和服务端实际钳的
     // 必须是同一个数，各写一份迟早漂移。
     const QualityRange qj = QualityRangeFor(ImageFormat::kJpeg);
@@ -1073,6 +1074,11 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
             //    Val(const std::string&)，把整个数组当成**字符串**再转义
             //    一遍，客户端拿到的是 "[{\"id\":1,...}]" 而不是数组。
             .Key("subscriberList").RawJson(SubscribersJson())
+        .EndObj()
+        .Key("encoding").Obj()
+            .Field("encodes", encoding.encodes)
+            .Field("cacheHits", encoding.hits)
+            .Field("waitTimeouts", encoding.waitTimeouts)
         .EndObj()
         // ── 每种格式的 quality 范围 ──
         //
@@ -1280,6 +1286,10 @@ bool ParseStreamParams(const HttpRequest& req, StreamParams* out,
         *error = "流不支持 format=raw";
         return false;
     }
+    if (!ImageEncoder::Instance().Supports(fmt)) {
+        *error = "设备不支持格式: " + fs;
+        return false;
+    }
     out->codec = static_cast<int>(fmt);
 
     // quality 的含义随格式变：PNG 1-9（zlib 级别），JPEG/WebP 1-100（质量）。
@@ -1366,9 +1376,9 @@ void DownscaleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
 
 // 取一帧、降采样、编码。
 //
-// 返回空字符串表示"这一帧不用发"，用 *unchanged 区分是"画面没变"还是"出错"。
-std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
-                                      bool* unchanged) {
+// 返回空指针表示"这一帧不用发"，用 *unchanged 区分是"画面没变"还是"出错"。
+EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
+                                          bool* unchanged) {
     *unchanged = false;
 
     // ── 订阅共享抓帧 ──
@@ -1392,10 +1402,9 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
     // 多个客户端会等到**同一帧** —— 这正是共享的意义：
     // 三个客户端看同一块屏幕，只需要抓一次。
     //
-    // 超时给两倍帧间隔（下限 100ms、上限 500ms）：既够等到下一次
-    // 抓帧完成（screencap 后端要 120ms+），又不会把控制消息
-    // （改帧率/画质）拖太久 —— 那些是在同一个循环里处理的。
-    const int waitMs = std::min(500, std::max(100, p.fps > 0 ? 2000 / p.fps : 200));
+    // Yield regularly to WebSocket control messages even on a slow capture
+    // backend. The producer keeps capturing independently while we retry.
+    const int waitMs = 20;
 
     uint64_t latestSeq = 0;
     FramePtr f = st->hubSub->WaitNext(st->hubSeq, waitMs, &latestSeq);
@@ -1409,16 +1418,11 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
     }
     st->hubSeq = f->seq;
 
-    // ⚠️ 下游的 DownscaleRgba 逐行按 width 跨步。stride != width 时
-    //    会画出斜的图 —— 与其静默出错，不如明确拒绝一次并说清楚。
-    //    （实测见过的后端都是 stride == width，所以这是道保险。）
-    if (f->stride != 0 && f->stride != f->width) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            ALOGE("抓帧 stride(%u) != width(%u)，画面流暂不支持 —— 请报告",
-                  f->stride, f->width);
-        }
+    const uint32_t stride = f->stride ? f->stride : f->width;
+    if (f->width == 0 || f->height == 0 || stride < f->width ||
+        static_cast<uint64_t>(stride) * f->height * 4 > f->size ||
+        (f->pixelFormat != 1 && f->pixelFormat != 2 && f->pixelFormat != 5)) {
+        ALOGW("抓帧几何或像素格式无效");
         return {};
     }
 
@@ -1436,38 +1440,51 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
         *unchanged = true;
         return {};
     }
-    st->lastChangeGen = f->changeGen;
-    st->haveChangeGen = true;
-
     const uint32_t w = f->width, h = f->height;
-    const size_t size = f->size;
-    const uint8_t* src = f->data;
-
-    // BGRA → RGBA。每个客户端各转一次（不同客户端可能用不同的
-    // 降采样），换算成本远低于一次抓帧。
-    std::vector<uint8_t> rgba;
-    if (f->needsBgraSwap()) {
-        rgba.resize(size);
-        for (size_t i = 0; i + 3 < size; i += 4) {
-            rgba[i]     = src[i + 2];
-            rgba[i + 1] = src[i + 1];
-            rgba[i + 2] = src[i];
-            rgba[i + 3] = src[i + 3];
-        }
-        src = rgba.data();
-    }
-
     uint32_t dw = w, dh = h;
-    const uint8_t* enc = src;
     if (p.maxWidth > 0 && w > static_cast<uint32_t>(p.maxWidth)) {
         dw = static_cast<uint32_t>(p.maxWidth);
         dh = static_cast<uint32_t>(static_cast<uint64_t>(h) * dw / w);
         if (dh == 0) dh = 1;
-        DownscaleRgba(src, w, h, dw, dh, &st->scaled);
-        enc = st->scaled.data();
+    }
+    // NV12 is 4:2:0: both dimensions must be even. Align after calculating
+    // the requested aspect ratio so odd maxWidth values cannot make the
+    // hardware encoder reject the stream.
+    if (static_cast<ImageFormat>(p.codec) == ImageFormat::kH264) {
+        dw = std::max<uint32_t>(2, dw & ~1u);
+        dh = std::max<uint32_t>(2, dh & ~1u);
     }
     st->outW = dw;
     st->outH = dh;
+
+    // Do pixel conversion and scaling only in the cache's producing thread.
+    // Cache hits return the same immutable payload without touching pixels.
+    auto preparePixels = [&](std::vector<uint8_t>* rgba) {
+        const uint8_t* src = f->data;
+        if (f->needsBgraSwap() || stride != w) {
+            rgba->resize(static_cast<size_t>(w) * h * 4);
+            for (uint32_t y = 0; y < h; ++y) {
+                const uint8_t* row = src + static_cast<size_t>(y) * stride * 4;
+                uint8_t* dst = rgba->data() + static_cast<size_t>(y) * w * 4;
+                if (!f->needsBgraSwap()) {
+                    memcpy(dst, row, static_cast<size_t>(w) * 4);
+                    continue;
+                }
+                for (uint32_t x = 0; x < w; ++x) {
+                    dst[x * 4] = row[x * 4 + 2];
+                    dst[x * 4 + 1] = row[x * 4 + 1];
+                    dst[x * 4 + 2] = row[x * 4];
+                    dst[x * 4 + 3] = row[x * 4 + 3];
+                }
+            }
+            src = rgba->data();
+        }
+        if (dw != w || dh != h) {
+            DownscaleRgba(src, w, h, dw, dh, &st->scaled);
+            src = st->scaled.data();
+        }
+        return src;
+    };
 
     // ── H.264：不走 ImageEncoder ──
     //
@@ -1481,27 +1498,24 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
             // 超了不是变慢，是创建失败 —— 所以先问名额，好在日志里
             // 说清楚"为什么这个流没画面"。
             if (!H264Encoder::SlotAvailable()) {
-                static bool warned = false;
-                if (!warned) {
-                    warned = true;
-                    ALOGW("H.264 编码器已达上限（%d 路在用），"
-                          "这个流改用 JPEG 或等一路释放",
-                          H264Encoder::MaxConcurrent());
-                }
+                st->streamError = "H.264 编码器已达并发上限";
                 return {};
             }
             st->h264 = std::make_unique<H264Encoder>();
         }
 
         // 尺寸变了必须重建：编码器一旦 configure 就不能改尺寸
-        if (st->h264W != dw || st->h264H != dh) {
+        const int requestedFps = p.fps > 0 ? p.fps : 30;
+        const int requestedQuality = (p.level > 0 && p.level <= 100) ? p.level : 75;
+        if (st->h264W != dw || st->h264H != dh ||
+            st->h264Fps != requestedFps || st->h264Quality != requestedQuality) {
             H264Encoder::Config cfg;
             cfg.width  = dw;
             cfg.height = dh;
-            cfg.fps    = static_cast<uint32_t>(p.fps > 0 ? p.fps : 30);
+            cfg.fps    = static_cast<uint32_t>(requestedFps);
             // 码率由 quality 推导。经验公式：每像素每帧约 0.1 bit
             // 是"看得过去"的量级，再按 quality/75 缩放。
-            const int q = (p.level > 0 && p.level <= 100) ? p.level : 75;
+            const int q = requestedQuality;
             uint64_t br = static_cast<uint64_t>(dw) * dh * cfg.fps / 10 * q / 75;
 
             // 下限**跟着分辨率走**，不是固定值。
@@ -1518,11 +1532,15 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
 
             if (!st->h264->Start(cfg, &herr)) {
                 ALOGW("H.264 启动失败，这个流没有画面: %s", herr.c_str());
+                st->streamError = herr;
                 st->h264.reset();
                 return {};
             }
             st->h264W = dw;
             st->h264H = dh;
+            st->h264Fps = requestedFps;
+            st->h264Quality = requestedQuality;
+            ++st->h264ConfigGeneration;
             // 新实例：必须让下一个输出是关键帧，否则客户端开头是黑的
             // （要等到下一个 I 帧，默认 2 秒）
             st->needKeyFrame = true;
@@ -1538,14 +1556,30 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
         // 编码并发限制。拿不到名额就跳过这一帧 ——
         // 堵在这里的话连客户端的 fps/画质控制消息都收不到
         // （它们在同一个循环里处理）。
-        EncodePool::Guard guard(200);
+        EncodePool::Guard guard(5);
         if (!guard.acquired()) return {};
 
+        std::vector<uint8_t> rgba;
+        const uint8_t* enc = preparePixels(&rgba);
         std::vector<uint8_t> nal;
+        const uint64_t framesIn = st->h264->GetStats().framesIn;
         if (!st->h264->EncodeRgba(enc, dw, dh, &nal, &herr)) {
             ALOGW("H.264 编码失败: %s", herr.c_str());
+            st->streamError = herr;
             st->h264.reset();
             st->h264W = st->h264H = 0;
+            return {};
+        }
+        if (st->h264->GetStats().framesIn > framesIn) {
+            st->lastChangeGen = f->changeGen;
+            st->haveChangeGen = true;
+        }
+        if (nal.empty() && !st->h264->PollOutput(&nal, &herr, 5)) {
+            ALOGW("H.264 输出轮询失败: %s", herr.c_str());
+            st->streamError = herr;
+            st->h264.reset();
+            st->h264W = st->h264H = 0;
+            st->h264Fps = st->h264Quality = 0;
             return {};
         }
         // 编码器有内部缓冲，不是每送一帧就出一帧 —— 空是正常的
@@ -1554,29 +1588,40 @@ std::string RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st,
             return {};
         }
         ++st->frameNo;
-        return std::string(reinterpret_cast<const char*>(nal.data()), nal.size());
+        auto image = std::make_shared<EncodedImage>();
+        image->bytes.assign(reinterpret_cast<const char*>(nal.data()), nal.size());
+        image->width = dw;
+        image->height = dh;
+        return image;
     }
 
-    // 编码并发限制。多个客户端共享同一帧，所以它们会**同时**开始编码 ——
-    // 10 个客户端在 4 核上就是 10 路并发抢 CPU，每个都变慢，
-    // 还挤占抓帧和触控注入。限制到核数之后，多的排队。
-    //
-    // 排队会让超额客户端的帧率下降，这是有意的取舍：与其 10 个都卡，
-    // 不如 4 个流畅 + 6 个慢一点。
-    EncodePool::Guard guard(200);
-    if (!guard.acquired()) {
-        *unchanged = true;   // 没编成 = 这一轮没新帧，调用方按"没变"处理
-        return {};
+    const ImageFormat format = static_cast<ImageFormat>(p.codec);
+    const auto cacheKey = std::make_tuple(static_cast<int>(format), p.level, dw, dh);
+    auto image = f->encodedImages->Get(cacheKey, 20, [&]() -> EncodedImagePtr {
+        EncodePool::Guard encodeGuard(5);
+        if (!encodeGuard.acquired()) return nullptr;
+
+        std::vector<uint8_t> rgba;
+        const uint8_t* enc = preparePixels(&rgba);
+        std::string perr;
+        std::string out = ImageEncoder::Instance().Encode(enc, dw, dh, format,
+                                                          p.level, &perr);
+        if (out.empty()) {
+            ALOGW("流编码失败: %s", perr.c_str());
+            return nullptr;
+        }
+        auto result = std::make_shared<EncodedImage>();
+        result->bytes = std::move(out);
+        result->width = dw;
+        result->height = dh;
+        return result;
+    });
+    if (image) {
+        ++st->frameNo;
+        st->lastChangeGen = f->changeGen;
+        st->haveChangeGen = true;
     }
-
-    std::string perr;
-    std::string out = ImageEncoder::Instance().Encode(enc, dw, dh,
-                                                      static_cast<ImageFormat>(p.codec),
-                                                      p.level, &perr);
-    if (out.empty()) ALOGW("流编码失败: %s", perr.c_str());
-
-    if (!out.empty()) ++st->frameNo;
-    return out;
+    return image;
 }
 
 HttpResponse RestApi::HandleStream(const HttpRequest& req) {
@@ -1623,7 +1668,7 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
             const int64_t t0 = NowMs();
 
             bool unchanged = false;
-            std::string img = NextEncodedFrame(p, &st, &unchanged);
+            EncodedImagePtr img = NextEncodedFrame(p, &st, &unchanged);
             // 第一次拿到订阅就自报家门 —— 抓帧节奏由最高需求决定，
             // /params 里必须能看出"是谁在拉、拉多快"，否则只能靠猜。
             if (st.hubSub && !st.described) {
@@ -1633,7 +1678,7 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
                         ImageEncoder::Name(static_cast<ImageFormat>(p.codec)),
                         "mjpeg");
             }
-            if (img.empty()) {
+            if (!img) {
                 // 画面没变就整帧跳过：MJPEG 客户端会继续显示上一帧，
                 // 这正是我们要的。出错也走这里，下一轮重试。
                 //
@@ -1645,32 +1690,19 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
                 continue;
             }
 
-            std::string part;
-            part.reserve(img.size() + 200);
-            part += "--" + boundary + "\r\n";
-            part += "Content-Type: ";
-            part += ImageEncoder::MimeType(static_cast<ImageFormat>(p.codec));
-            part += "\r\n";
-            part += "Content-Length: " + std::to_string(img.size()) + "\r\n";
-            part += "X-RemoteControl-Frame: " + std::to_string(st.frameNo) + "\r\n";
-            part += "X-RemoteControl-Width: " + std::to_string(st.outW) + "\r\n";
-            part += "X-RemoteControl-Height: " + std::to_string(st.outH) + "\r\n";
-            part += "\r\n";
-            part += img;
-            part += "\r\n";
-
-            size_t sent = 0;
-            bool broken = false;
-            while (sent < part.size()) {
-                const ssize_t n = write(fd, part.data() + sent, part.size() - sent);
-                if (n <= 0) {
-                    if (n < 0 && errno == EINTR) continue;
-                    broken = true;
-                    break;
-                }
-                sent += static_cast<size_t>(n);
+            const std::string header =
+                    "--" + boundary + "\r\nContent-Type: " +
+                    ImageEncoder::MimeType(static_cast<ImageFormat>(p.codec)) +
+                    "\r\nContent-Length: " + std::to_string(img->bytes.size()) +
+                    "\r\nX-RemoteControl-Frame: " + std::to_string(st.frameNo) +
+                    "\r\nX-RemoteControl-Width: " + std::to_string(st.outW) +
+                    "\r\nX-RemoteControl-Height: " + std::to_string(st.outH) +
+                    "\r\n\r\n";
+            if (!SendBuffersWithTimeout(fd,
+                    {{header.data(), header.size()},
+                     {img->bytes.data(), img->bytes.size()}, {"\r\n", 2}}, 1000)) {
+                break;
             }
-            if (broken) break;
 
             const int64_t rest = intervalMs - (NowMs() - t0);
             if (rest > 0) usleep(static_cast<useconds_t>(rest) * 1000);
@@ -1714,13 +1746,17 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                 .Field("skipUnchanged", p.skipUnchanged)
                 .Field("chrome", false)
              .EndObj();
-            if (!WsWriteText(fd, w.str())) return;
+            if (!WsWriteFrameWithTimeout(fd, kWsText, w.str(), 1000)) return;
         }
 
         int64_t  nextFrameAt = NowMs();
-        uint64_t sent = 0;
         uint32_t lastW = 0, lastH = 0;   // 上次告诉客户端的尺寸
         bool     codecSent = false;   // H.264 的 codec 串只发一次
+        uint64_t sentH264Generation = 0;
+
+        const auto sendText = [fd](const std::string& text) {
+            return WsWriteFrameWithTimeout(fd, kWsText, text, 1000);
+        };
 
         // 主循环用 poll 同时等两件事：客户端发来的控制消息、下一帧的时间点。
         //
@@ -1736,6 +1772,10 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
             if (nextFrameAt > now) {
                 waitMs = static_cast<int>(nextFrameAt - now);
                 if (waitMs > 1000) waitMs = 1000;   // 最多等 1 秒，便于察觉断连
+            }
+            if (st.h264 && st.h264->Running()) {
+                const auto stats = st.h264->GetStats();
+                if (stats.framesIn > stats.framesOut) waitMs = std::min(waitMs, 5);
             }
 
             pollfd pfd{};
@@ -1762,8 +1802,8 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                     if (json::Parse(f.payload, &v, &jerr)) {
                         const std::string t = v.str("t");
                         if (t == "ping") {
-                            WsWriteText(fd, "{\"t\":\"pong\",\"s\":" +
-                                                std::to_string(v.num("s", 0)) + "}");
+                            if (!sendText("{\"t\":\"pong\",\"s\":" +
+                                          std::to_string(v.num("s", 0)) + "}")) return;
                         } else if (t == "fps") {
                             const int nf = ClampInt(std::to_string(v.num("v", p.fps)),
                                                     1, 60, p.fps);
@@ -1772,16 +1812,17 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                             // 也告诉 FrameHub —— 抓帧节奏跟着最高需求走，
                             // 不报的话"客户端降到 5fps 但服务端还在 30fps 抓"
                             if (st.hubSub) st.hubSub->SetFps(nf);
-                            WsWriteText(fd, "{\"t\":\"ack\",\"fps\":" +
-                                                std::to_string(nf) + "}");
+                            st.haveChangeGen = false;
+                            if (!sendText("{\"t\":\"ack\",\"fps\":" +
+                                          std::to_string(nf) + "}")) return;
                         } else if (t == "quality") {
                             const QualityRange qr = QualityRangeFor(
                                     static_cast<ImageFormat>(p.codec));
                             p.level = ClampInt(std::to_string(v.num("v", p.level)),
                                                qr.min, qr.max, p.level);
                             st.haveChangeGen = false;
-                            WsWriteText(fd, "{\"t\":\"ack\",\"quality\":" +
-                                                std::to_string(p.level) + "}");
+                            if (!sendText("{\"t\":\"ack\",\"quality\":" +
+                                          std::to_string(p.level) + "}")) return;
                         } else if (t == "format") {
                             const std::string fs = v.str("v");
                             ImageFormat nf;
@@ -1790,20 +1831,33 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                                 if (nf == ImageFormat::kAuto) {
                                     nf = ImageEncoder::Instance().BestFormat();
                                 }
+                                if (!ImageEncoder::Instance().Supports(nf)) {
+                                    if (!sendText("{\"t\":\"error\",\"error\":\"unsupported format\"}")) return;
+                                    continue;
+                                }
+                                const ImageFormat old = static_cast<ImageFormat>(p.codec);
                                 p.codec = static_cast<int>(nf);
-                                p.level = (nf == ImageFormat::kJpeg) ? 75
-                                        : (nf == ImageFormat::kWebp) ? 80 : 1;
+                                if (old != nf) {
+                                    p.level = QualityRangeFor(nf).def;
+                                    if (nf == ImageFormat::kH264 || old == ImageFormat::kH264) {
+                                        st.h264.reset();
+                                        st.h264W = st.h264H = 0;
+                                        st.h264Fps = st.h264Quality = 0;
+                                        st.needKeyFrame = false;
+                                    }
+                                    codecSent = false;
+                                }
                                 st.haveChangeGen = false;   // 换了格式，缓存作废
-                                WsWriteText(fd,
+                                if (!sendText(
                                     std::string("{\"t\":\"ack\",\"format\":\"") +
-                                        ImageEncoder::Name(nf) + "\"}");
+                                        ImageEncoder::Name(nf) + "\"}")) return;
                             }
                         } else if (t == "skipUnchanged") {
                             p.skipUnchanged = (v.num("v", 1) != 0);
                             st.haveChangeGen = false;   // 重新开始判定
-                            WsWriteText(fd, std::string("{\"t\":\"ack\","
+                            if (!sendText(std::string("{\"t\":\"ack\","
                                     "\"skipUnchanged\":") +
-                                    (p.skipUnchanged ? "true" : "false") + "}");
+                                    (p.skipUnchanged ? "true" : "false") + "}")) return;
                         } else if (t == "maxWidth") {
                             // 中途换降采样宽度 —— 不用重连就能改分辨率。
                             // 0 = 不降采样（原始分辨率）。
@@ -1819,12 +1873,13 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                             // 客户端会一直停在旧尺寸上。
                             st.haveChangeGen = false;
                             nextFrameAt = NowMs();
-                            WsWriteText(fd, "{\"t\":\"ack\",\"maxWidth\":" +
-                                                std::to_string(nw) + "}");
+                            if (!sendText("{\"t\":\"ack\",\"maxWidth\":" +
+                                          std::to_string(nw) + "}")) return;
                         } else if (t == "refresh") {
                             // 客户端主动要求"下一帧无论变没变都发"，
                             // 用于页面重新可见时立刻刷新一次。
                             st.haveChangeGen = false;
+                            st.needKeyFrame = true;
                             nextFrameAt = NowMs();
                         }
                     }
@@ -1832,13 +1887,41 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                 continue;    // 处理完消息再看时间，避免刚好错过帧点
             }
 
-            // ── 到点就出一帧 ──
-            if (NowMs() < nextFrameAt) continue;
-            const int intervalMs = 1000 / p.fps;
-            nextFrameAt = NowMs() + intervalMs;
-
             bool unchanged = false;
-            std::string img = NextEncodedFrame(p, &st, &unchanged);
+            EncodedImagePtr img;
+            // MediaCodec completes asynchronously. Drain an accepted frame
+            // even when no new pixels arrive or skipUnchanged stops input.
+            if (st.h264 && st.h264->Running()) {
+                std::vector<uint8_t> nal;
+                std::string error;
+                if (!st.h264->PollOutput(&nal, &error)) {
+                    ALOGW("H.264 输出失败: %s", error.c_str());
+                    json::Writer w;
+                    w.Obj().Field("t", "error").Field("error", error).EndObj();
+                    sendText(w.str());
+                    return;
+                }
+                if (!nal.empty()) {
+                    auto result = std::make_shared<EncodedImage>();
+                    result->bytes.assign(reinterpret_cast<const char*>(nal.data()), nal.size());
+                    result->width = st.outW;
+                    result->height = st.outH;
+                    img = result;
+                    ++st.frameNo;
+                }
+            }
+            if (!img) {
+                if (NowMs() < nextFrameAt) continue;
+                const int intervalMs = 1000 / p.fps;
+                nextFrameAt = NowMs() + intervalMs;
+                img = NextEncodedFrame(p, &st, &unchanged);
+            }
+            if (!st.streamError.empty()) {
+                json::Writer w;
+                w.Obj().Field("t", "error").Field("error", st.streamError).EndObj();
+                sendText(w.str());
+                return;
+            }
             // 第一次拿到订阅就自报家门 —— 抓帧节奏由最高需求决定，
             // /params 里必须能看出"是谁在拉、拉多快"，否则只能靠猜。
             if (st.hubSub && !st.described) {
@@ -1848,7 +1931,7 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                         ImageEncoder::Name(static_cast<ImageFormat>(p.codec)),
                         "ws");
             }
-            if (img.empty()) continue;      // 没变或出错，下一轮再看
+            if (!img) continue;      // 没变或出错，下一轮再看
 
             // 二进制帧。尺寸信息单独发一条文本消息 ——
             // 不然客户端在"有图没尺寸"的窗口里没法画。
@@ -1864,7 +1947,7 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                     .Field("w", static_cast<int64_t>(st.outW))
                     .Field("h", static_cast<int64_t>(st.outH))
                  .EndObj();
-                if (!WsWriteText(fd, w.str())) return;
+                if (!sendText(w.str())) return;
                 lastW = st.outW;
                 lastH = st.outH;
             }
@@ -1875,18 +1958,18 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
             // 不同，客户端不能猜、服务端也不该写死 —— 它来自 SPS，
             // 所以要等**第一帧编出来之后**才拿得到，只能放在这里发。
             if (static_cast<ImageFormat>(p.codec) == ImageFormat::kH264 &&
-                !codecSent && st.h264) {
+                (!codecSent || sentH264Generation != st.h264ConfigGeneration) && st.h264) {
                 const std::string cs = st.h264->CodecString();
                 if (!cs.empty()) {
                     json::Writer w;
                     w.Obj().Field("t", "codec").Field("codec", cs).EndObj();
-                    if (!WsWriteText(fd, w.str())) return;
+                    if (!sendText(w.str())) return;
                     codecSent = true;
+                    sentH264Generation = st.h264ConfigGeneration;
                 }
             }
 
-            if (!WsWriteFrame(fd, kWsBinary, img)) return;
-            ++sent;
+            if (!WsWriteFrameWithTimeout(fd, kWsBinary, img->bytes, 1000)) return;
         }
     };
     return resp;

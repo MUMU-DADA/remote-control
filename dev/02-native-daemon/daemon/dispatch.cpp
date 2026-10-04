@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <unistd.h>
 #include <memory>
 
@@ -291,11 +292,10 @@ ReplyPacket Dispatcher::HandleCapture(const Request& req) {
     // 详见 capture.h 的 SetTargetWidth。
     //
     // 0 = 原始分辨率。screencap 后端会忽略它。
-    capture_->SetTargetWidth(req.x > 0 ? static_cast<uint32_t>(req.x) : 0);
-
     Frame frame;
     std::string error;
-    if (!capture_->Grab(&frame, &error)) {
+    if (!capture_->Grab(&frame, &error,
+                        req.x > 0 ? static_cast<uint32_t>(req.x) : 0)) {
         packet.reply.status = kErrCaptured;
         ALOGE("截图失败: %s", error.c_str());
         return packet;
@@ -314,9 +314,8 @@ ReplyPacket Dispatcher::HandleCapture(const Request& req) {
     // 这条原本是每帧一条 —— 单次截图时无害，但画面流每秒要抓 20~30 帧，
     // 于是日志被同一行刷屏：既看不清别的东西，10KB 的落盘历史几秒就被冲光。
     // 帧尺寸这类信息在 /api/v1/config 和自检里都有，不需要每帧重复。
-    static bool loggedOnce = false;
-    if (!loggedOnce) {
-        loggedOnce = true;
+    static std::atomic<bool> loggedOnce{false};
+    if (!loggedOnce.exchange(true)) {
         ALOGI("截图 %ux%u stride=%u format=0x%x size=%llu（后续帧不再重复记录）",
               frame.width, frame.height, frame.stride, frame.format,
               static_cast<unsigned long long>(frame.size));
@@ -383,23 +382,29 @@ ReplyPacket Dispatcher::HandleTouch(const Request& req) {
 
 ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
                                int reqFd, int peerUid) {
-    // 所有操作串行化。理由见 dispatch.h 里的 opMutex_ ——
+    if (req.magic != kMagic) {
+        ALOGE("magic 不匹配 (收到 0x%x), uid=%d", req.magic, peerUid);
+        return ReplyPacket{MakeReply(kErrBadMagic, req.cmd), -1};
+    }
+
+    // Capture/Info are read-only and their backends have their own lock. Keep
+    // them outside the operation mutex so a long gesture or file operation
+    // cannot add a full round-trip of latency to the video producer.
+    if (static_cast<Cmd>(req.cmd) == Cmd::Info) return HandleInfo(req);
+    if (static_cast<Cmd>(req.cmd) == Cmd::Capture) return HandleCapture(req);
+
+    // 所有操作串行化。理由见 dispatch.h opMutex_ ——
     // 关键是流式响应（WebSocket / MJPEG）的回调是在处理器**返回之后**
     // 才跑的，锁放调用方保护不到它们。
     std::lock_guard<std::mutex> opLock(opMutex_);
 
     const std::vector<std::string> args = SplitPayload(payload);
 
-    if (req.magic != kMagic) {
-        ALOGE("magic 不匹配 (收到 0x%x), uid=%d", req.magic, peerUid);
-        return ReplyPacket{MakeReply(kErrBadMagic, req.cmd), -1};
-    }
-
     switch (static_cast<Cmd>(req.cmd)) {
         case Cmd::Info:
-            return HandleInfo(req);
+            return HandleInfo(req);  // guarded fallback for future routing changes
         case Cmd::Capture:
-            return HandleCapture(req);
+            return HandleCapture(req);  // guarded fallback for future routing changes
         case Cmd::Tap:
         case Cmd::Swipe:
         case Cmd::TouchDown:

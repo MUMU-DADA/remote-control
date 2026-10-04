@@ -1,0 +1,153 @@
+MediaCodec SELinux regression — 2026-10-04 (Asia/Shanghai)
+
+Target: emulator-5580, Android 12 x86_64 + ARM64 bridge.
+Original init daemon: PID 1316, UID shell (2000), domain u:r:remote_control:s0.
+SELinux stayed Enforcing throughout; no setenforce 0 and no new permissive domain.
+The stock userdebug policy already marks su permissive; remote_control is enforcing.
+
+Observed failure:
+- AMediaCodec_createEncoderByType("video/avc") returned NULL after about 5 seconds.
+- The same H264 standalone regression binary worked from shell/su context.
+- Kernel audit:
+  [17226.084668] avc: denied { read } comm="remote-control"
+  scontext=u:r:remote_control:s0 tcontext=u:object_r:media_variant_prop:s0
+  tclass=file permissive=0
+  [17226.091358] second identical media_variant_prop denial.
+
+Verified policy/source cause:
+- Live policy remote_control had coredomain/domain/netdomain, but no Codec2/OMX
+  client grants: no media_variant_prop/codec2_config_prop reads, no codec
+  hwservice find, no bidirectional Binder/FD access to codec services.
+- shell belongs to appdomain. AOSP platform policy includes non-isolated
+  appdomain in hal_codec2_client and hal_omx_client, explaining the difference.
+- AOSP public/hal_codec2.te and public/hal_omx.te provide complete client grants.
+- AOSP MediaCodecList.cpp queries media.player; MediaCodec.cpp queries
+  media.resource_manager. Both service_contexts entries use mediaserver_service.
+- Resource manager invokes client Binder callbacks (reclaimResource).
+- MediaMetricsItem.cpp queries media.metrics; its getService retries if denied.
+
+Source fix:
+  hal_client_domain(remote_control, hal_codec2)
+  hal_client_domain(remote_control, hal_omx)
+  allow remote_control mediaserver_service:service_manager find;
+  binder_call(remote_control, mediaserver)
+  binder_call(mediaserver, remote_control)
+  get_prop(remote_control, media_config_prop)
+  allow remote_control mediametrics_service:service_manager find;
+  binder_call(remote_control, mediametrics)
+
+The policy uses AOSP macros and targets named media services; it does not make
+remote_control an appdomain or grant access to arbitrary services/properties.
+
+Temporary device verification:
+1. Backup runtime policy:
+   adb exec-out cat /sys/fs/selinux/policy > /tmp/rc-live-policy
+   adb push /tmp/rc-live-policy /data/local/tmp/rc-codec-original-policy
+   Original runtime-policy SHA-256:
+   1b8b703804ee0edfe31a86853cbbe60053c684d99365a24707e84de2aa324a53
+2. Compile existing AOSP platform/mapping/vendor/system_ext CIL plus the narrow
+   macro-equivalent media delta with secilc -m -M true -G -c 30 (neverallow enabled).
+   Result: /tmp/rc-codec-media-policy.
+3. Load only that enforcing binary policy:
+   adb push /tmp/rc-codec-media-policy /data/local/tmp/rc-codec-media-policy
+   adb shell load_policy /data/local/tmp/rc-codec-media-policy
+4. Runtime policy before/after was decompiled with checkpolicy -b -M -F and compared:
+   0 allow/dontaudit/permissive rules removed;
+   24 named media allow rules added;
+   0 typeattribute declarations changed.
+   sepolicy-analyze permissive reported only the pre-existing su domain.
+5. Restart only the init service, not Android:
+   adb shell setprop ctl.restart remote-control
+   The existing process cached the failed codec list in MediaCodecList static
+   state, so policy reload alone did not repair that process.
+
+Verification after restart:
+- PID 4338, UID shell, domain u:r:remote_control:s0, getenforce: Enforcing.
+- Original daemon WebSocket request:
+  ws://127.0.0.1:18088/api/v1/stream?format=h264&fps=30&skipUnchanged=0&maxWidth=1280
+- Received size 1280x720, codec avc1.42C029, first binary 15975 bytes after 81ms.
+- Received 10 H264 frames in 374ms; verification script exited 0.
+- No new remote_control AVC denial was present after the test.
+- maxWidth=720 on the old binary produces 720x405 and configure -22, a separate
+  odd-height NV12 bug fixed by the new stream dimension alignment.
+
+The device policy was intentionally left temporarily loaded during combined
+optimization validation. The parent task owned restoration.
+Restore original runtime policy without reboot:
+  adb shell load_policy /data/local/tmp/rc-codec-original-policy
+  adb shell setprop ctl.restart remote-control
+The original policy backup is also retained at /tmp/rc-live-policy on host.
+
+The parent temporarily bind-mounted the optimized daemon onto
+/system/bin/remote-control; that was independently restored with umount and
+service start, as recorded below.
+No original system binary or on-disk SELinux policy was replaced by this test.
+
+Canonical source build verification:
+- bash tools/integrate-sepolicy.sh exited 0 for
+  remote_control_x64_arm64-userdebug; 501 tasks completed in 1 minute 36 seconds.
+- The overlay copied the canonical device-tree policy into the AOSP build.
+  The platform system/sepolicy tree remains unmodified.
+- All policy compilation, macro expansion and neverallow checks passed.
+- sepolicy_tests, Treble sepolicy tests for versions 26.0 through 30.0, and
+  service/hwservice/property/file context validation passed.
+- Host build log: /tmp/rc-codec-sepolicy-build.log.
+- Explicit m -j8 sepolicy_freeze_test exited 0 in 4 seconds. Ninja reported
+  no work to do because the freeze-test stamp was already current; the policy
+  lives under system_ext private policy and does not alter frozen platform API.
+  Host log: /tmp/rc-codec-sepolicy-freeze.log.
+
+Restoration and read-only verification:
+- The parent stopped remote-control, unmounted the temporary file bind mount,
+  loaded /data/local/tmp/rc-codec-original-policy, and started remote-control.
+- The first restored service was PID 8379. A later FileOps regression was
+  investigated and fixed, then the parent repeated the complete restoration.
+- Latest restored service: PID 8597, UID shell, domain u:r:remote_control:s0;
+  Enforcing. /proc/mounts has no /system/bin/remote-control bind mount.
+- /system/bin/remote-control SHA-256 restored to:
+  c98cbb9e1db9e9a7c0d99bd3899ae43ef408211dad13f1a895d0abe8b8f19906
+- After the latest restoration, runtime policy was read again to
+  /tmp/rc-restored-runtime-policy and both it and
+  /tmp/rc-live-policy were decompiled with checkpolicy -b -M -F.
+- diff -u /tmp/rc-restore-original.conf /tmp/rc-restore-current.conf exited 0:
+  all decompiled policy text, including rules and typeattribute membership,
+  is byte-for-byte identical. Both contain 1820 types and 30470 rules.
+  Both decompiled files have SHA-256:
+  86ec47a6e955a0d0acf6c0f2806f81109c2d8bf8b5303357ebaee17091f24353
+- The binary policy hashes differ after kernel serialization:
+  original: 1b8b703804ee0edfe31a86853cbbe60053c684d99365a24707e84de2aa324a53
+  restored: 32307d93847d5b494001ec84cd7f604adc08e616fec8eb936a68e5129b663738
+  The identical decompilation confirms that this is a representation change,
+  not a policy-rule or attribute change.
+- sepolicy-analyze permissive still reports only the pre-existing su domain.
+- This verification used only read operations; no load_policy or service
+  restart was performed by the verification subtask.
+
+Additional temporary-policy audit during file-API regression investigation:
+- The policy actually loaded for MediaCodec tests was rc-codec-media-policy,
+  compiled from the original CIL inputs plus the media delta. The exploratory
+  rc-codec-exact-live-policy was never loaded.
+- The captured loaded runtime policy /tmp/rc-codec-loaded-policy decompiles to
+  /tmp/rc-codec-loaded.conf. Its complete diff against the original has exactly
+  24 added allow lines and 0 removed or changed lines. All attribute and
+  typeattribute membership lines are identical.
+- sepolicy-analyze attribute -r fuse reports fs_type, sdcard_type and
+  mlstrustedobject for both original and media test policies. Existing fuse,
+  media_rw_data_file and mnt_user_file access rules are preserved.
+- Comparison report: /tmp/rc-codec-policy-semantic-report.json.
+- The first optimized-binary API check passed 92/94; the two failures were
+  listing the storage root and the /sdcard alias. The original-binary check
+  passed 94/94. The denials were rootfs:dir read on name="/", not fuse.
+- The current source included a secure FileOps traversal that opened "/"
+  and each ancestor with O_RDONLY, requesting directory-read permission
+  outside the allowed storage. The media policy did not remove permissions;
+  the temporary policy was not the cause of this file API regression.
+- The parent changed ancestor traversal to O_PATH | O_DIRECTORY | O_NOFOLLOW
+  and reopened only the final anchored directory with openat(fd, ".",
+  O_RDONLY | O_DIRECTORY | O_CLOEXEC). Read-only review confirmed that every
+  named component still rejects symlinks and the final reopen uses the fixed
+  directory fd without re-resolving a replaced parent pathname.
+- After this source fix, the parent verified /sdcard listing and the API check
+  passed 94/94. The final H264 odd-width request 361 encoded at 360x202 and
+  delivered a first frame. The original binary and original runtime policy
+  were then restored again, verified as described above.

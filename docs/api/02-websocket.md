@@ -53,6 +53,7 @@ new WebSocket('ws://host:8088/api/v1/touch?token=' + encodeURIComponent(tok))
 
 ping 会被自动回 pong。收到客户端的 close 帧后，服务端会回送相同载荷的 close
 帧，再结束流；客户端应等待这个响应后关闭 TCP 连接。
+ping/close 响应的整帧写入期限为 1 秒，发送失败后结束连接。
 
 ### 通用心跳
 
@@ -79,8 +80,8 @@ ws://host:8088/api/v1/stream?fps=30&format=jpeg&quality=75&maxWidth=720&skipUnch
 | 参数 | 默认 | 范围 | 说明 |
 |---|---|---|---|
 | `fps` | 5 | 1-60 | 帧率 |
-| `format` | `auto` | `auto`\|`jpeg`\|`webp`\|`png` | 编码格式 |
-| `quality` | 按格式 | PNG 1-9 / JPEG·WebP 1-100 | 画质 |
+| `format` | `auto` | `auto`\|`jpeg`\|`webp`\|`png`\|`h264` | 编码格式，H.264 只支持 WebSocket |
+| `quality` | 按格式 | PNG 1-9 / JPEG·WebP·H.264 1-100 | PNG 是压缩级别，H.264 换算为码率 |
 | `maxWidth` | 720 | 0-8192（0 = 不缩放） | 降采样宽度 |
 | `skipUnchanged` | 1 | 0\|1 | 画面没变时跳过编码 |
 
@@ -89,11 +90,14 @@ ws://host:8088/api/v1/stream?fps=30&format=jpeg&quality=75&maxWidth=720&skipUnch
 
 `skipUnchanged=1` 时静止画面**整帧不编码**（实测 10 秒只发 1 帧）。
 暂停后重连、或想强制每帧都发，用 `skipUnchanged=0`。
+JPEG/PNG/WebP 的相同内容、格式、quality 和输出尺寸会共享编码结果；
+`skipUnchanged=0` 仍会传帧，但不强制重复编码相同像素。统计见 `/params.encoding`。
+初始查询指定的格式若当前服务不支持，升级前返回 HTTP 400。
 
 ### H.264（`format=h264`）
 
-帧比 JPEG **小两个数量级**（P 帧几十~几百字节 vs 11 KB），但它有两处
-前提：
+静态画面的 H.264 P 帧可只有几十至几百字节，动态内容取决于码率和复杂度，
+不能把这个体积比例推广到游戏。它有两处前提：
 
 1. **只能走 WebSocket** —— MJPEG 的 `multipart` 是"每段一张独立的图"，
    装不下带帧间依赖的流。带 `format=h264` 走 MJPEG 会返回 400。
@@ -116,8 +120,18 @@ ws://host:8088/api/v1/stream?fps=30&format=jpeg&quality=75&maxWidth=720&skipUnch
 
 **服务端保证**：第一个二进制帧一定是完整的访问单元（`SPS PPS IDR`）。
 MediaCodec 本来把 SPS/PPS 作为单独一个 CODEC_CONFIG buffer 吐出来，
-服务端会先存住、拼到下一个真正的帧前面再发 —— 单独发出去的话客户端
+服务端会先存住、给每个 IDR 补上参数集再发 —— 单独发出去的话客户端
 会拿到一个只有参数集、没有图像的 chunk。
+
+每个二进制消息只包含一个完整访问单元。已接受的输入会独立轮询输出，
+因此 `skipUnchanged=1` 停止新输入后仍可发出异步完成的最后一帧。
+改变 fps、quality 或输出尺寸会重新配置编码器；重建后重新发送 `codec`
+及关键帧，即使 codec 字符串与之前相同。H.264 输出宽高对齐到偶数，
+实际尺寸以 `size` 消息为准。
+
+启动、编码或输出错误时，服务端尝试发送 `{"t":"error","error":"…"}`，
+随后结束连接。客户端应显示错误并选择重新连接或另一格式，不能等待该连接
+无限自行重试。
 
 ⚠️ **并发有硬上限**：真机的硬件编码器通常只支持 1~2 路。超了不是
 变慢，是创建失败。当前默认 2，`GET /api/v1/params` 的
@@ -194,23 +208,44 @@ ws.send(JSON.stringify({t:'ping', s:1}));
 
 ### 客户端渲染示例
 
+下面的独立图片帧示例同一时间只解码一帧，并保留最新待解码帧；
+处理 H.264 时应另外维护参考帧和关键帧恢复，不能照此任意丢弃 delta chunk。
+
 ```js
 const ws = new WebSocket('ws://host:8088/api/v1/stream?fps=30&format=jpeg');
 ws.binaryType = 'blob';
-ws.onmessage = async (ev) => {
+let pending = null, decoding = false;
+async function decodeLatest() {
+  if (decoding || !pending) return;
+  decoding = true;
+  const data = pending;
+  pending = null;
+  try {
+    const bmp = await createImageBitmap(data);
+    try { ctx.drawImage(bmp, 0, 0); }
+    finally { bmp.close(); }
+  } catch (error) {
+    console.error('image decode failed', error);
+  } finally {
+    decoding = false;
+    decodeLatest();
+  }
+}
+ws.onmessage = (ev) => {
   if (typeof ev.data === 'string') {          // 控制消息
     const m = JSON.parse(ev.data);
     if (m.t === 'size') { cvs.width = m.w; cvs.height = m.h; }
     return;
   }
-  const bmp = await createImageBitmap(ev.data);
-  ctx.drawImage(bmp, 0, 0);
-  bmp.close();     // ⚠️ 不 close 会攒着不放，几分钟就吃满内存
+  pending = ev.data;
+  decodeLatest();
 };
 ```
 
 用 `createImageBitmap` 而不是 `<img>`：解码在 worker 线程上、绘制是同步的，
 而且能 `close()` **主动释放** —— `<img>` 的旧帧什么时候被回收是浏览器说了算。
+内置控制台还合并 `requestAnimationFrame` 绘制，并用连接/格式代数丢弃旧异步结果；
+H.264 解码队列拥塞时会重置解码器并请求新的关键帧。
 
 ### 主循环为什么用 poll
 
@@ -218,6 +253,12 @@ ws.onmessage = async (ev) => {
 早先是"select 查消息 + sleep 1ms"，有两个毛病：空转（每秒 1000 次唤醒），
 以及控制消息要等下一轮才被看到 —— 而中间可能正卡在一次抓帧里
 （screencap 后端要 120ms），ping 往返能到 100ms 以上。
+
+共享抓帧等候与在途图像编码等候每次最多 20ms，获取编码并发名额最多 5ms，
+随后返回消息处理循环；实际编码计算本身仍可能占用更长时间。
+画面流的控制消息、二进制帧和 MJPEG part 写入均有覆盖所有短写的 1 秒期限。
+超时或写入失败会关闭连接，避免半帧后继续发送导致协议失步；这个期限不是
+完整帧从设备到屏幕的延迟保证。
 
 ### MJPEG 那条
 

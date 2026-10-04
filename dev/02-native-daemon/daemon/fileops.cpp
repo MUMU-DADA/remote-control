@@ -90,7 +90,9 @@ bool RelativeParts(const std::string& base, const std::string& abs,
 
 int OpenDirNoFollow(const std::string& path) {
     if (path.empty() || path[0] != '/') return -1;
-    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    // Ancestors only anchor openat; O_PATH needs traversal permission without
+    // asking to list rootfs or other directories outside the allowed storage.
+    int fd = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -1;
     size_t i = 1;
     while (i < path.size()) {
@@ -102,7 +104,7 @@ int OpenDirNoFollow(const std::string& path) {
         }
         const std::string part = path.substr(i, slash - i);
         const int next = openat(fd, part.c_str(),
-                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                                O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (next < 0) {
             close(fd);
             return -1;
@@ -111,7 +113,12 @@ int OpenDirNoFollow(const std::string& path) {
         fd = next;
         i = slash + 1;
     }
-    return fd;
+    // fdopendir and the final storage operation need a readable directory.
+    const int readable = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const int savedErrno = errno;
+    close(fd);
+    errno = savedErrno;
+    return readable;
 }
 
 int OpenPathDirNoFollow(const std::string& base, const std::string& abs,

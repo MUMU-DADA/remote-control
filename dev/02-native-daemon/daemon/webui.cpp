@@ -54,6 +54,10 @@ const std::string& WebUiHtml() {
   /* 面板收起 —— 横屏设备默认收，把宽度全让给画面 */
   body.nopanel .panel { display:none; }
   body.nopanel .screen { flex:1 1 100%; }
+  @media (max-width:640px) {
+    main { flex-direction:column; }
+    .panel { flex:0 0 40%; width:100%; max-height:40%; }
+  }
 
   /* 铺满模式：画面**保持宽高比**放大到显示区里能完整放下的最大值 ——
      不裁切、不溢出、也不变形。用的就是 object-fit:contain。
@@ -453,14 +457,24 @@ const hasWebCodecs = (typeof VideoDecoder !== 'undefined' &&
 let h264Dec = null;        // VideoDecoder 实例
 let h264Ready = false;     // 配置成功、可以喂数据了
 let h264Ts = 0;            // 时间戳（WebCodecs 要求单调递增）
+let h264Epoch = 0;
+let h264Config = null;
+let h264NeedsKey = true;
+let h264Pending = [];
+let h264RefreshAt = 0;
 
 function stopH264() {
+  ++h264Epoch;
   if (h264Dec) {
     try { h264Dec.close(); } catch (e) {}
     h264Dec = null;
   }
   h264Ready = false;
   h264Ts = 0;
+  h264Config = null;
+  h264NeedsKey = true;
+  h264Pending = [];
+  h264RefreshAt = 0;
 }
 
 // 一段 Annex-B 里有没有 IDR（NAL 类型 5）？
@@ -487,8 +501,10 @@ function hasIdr(buf) {
 //   在 Linux 上可能是 unsupported。Chromium 同理（受编译开关影响）。
 //   不探就 configure 的话，报错信息是 "not supported"，而用户看到的
 //   只是黑屏。
-async function startH264(codecStr) {
+async function startH264(codecStr, socket) {
   stopH264();
+  resetPresentation();
+  const epoch = h264Epoch;
   if (!hasWebCodecs) return false;
 
   let cfg = { codec: codecStr, optimizeForLatency: true };
@@ -496,6 +512,7 @@ async function startH264(codecStr) {
 
   try {
     const sup = await VideoDecoder.isConfigSupported(cfg);
+    if (epoch !== h264Epoch || socket !== streamWs) return null;
     dbg('isConfigSupported(' + codecStr + ') = ' + JSON.stringify(sup.supported));
     if (!sup.supported) {
       setStatus('这个浏览器不支持 H.264 解码（' + codecStr +
@@ -503,6 +520,7 @@ async function startH264(codecStr) {
       return false;
     }
   } catch (e) {
+    if (epoch !== h264Epoch || socket !== streamWs) return null;
     dbg('isConfigSupported 抛异常: ' + e);
     return false;
   }
@@ -510,17 +528,11 @@ async function startH264(codecStr) {
   try {
     h264Dec = new VideoDecoder({
       output: (frame) => {
-        if (cvs.width !== frame.displayWidth || cvs.height !== frame.displayHeight) {
-          cvs.width = frame.displayWidth;
-          cvs.height = frame.displayHeight;
-          sw = cvs.width; sh = cvs.height;
-          updateMeta();
-        }
-        ctx.drawImage(frame, 0, 0);
-        frame.close();     // 不 close 会攒着不放，几秒就吃满内存
-        ++streamFrames;
+        if (epoch !== h264Epoch || socket !== streamWs) { frame.close(); return; }
+        presentFrame(frame, frame.displayWidth, frame.displayHeight, socket);
       },
       error: (e) => {
+        if (epoch !== h264Epoch || socket !== streamWs) return;
         dbg('VideoDecoder 错误: ' + e);
         h264Ready = false;
         setStatus('H.264 解码器出错，退回 JPEG', true);
@@ -529,14 +541,61 @@ async function startH264(codecStr) {
     });
     // optimizeForLatency：别为了重排攒缓冲。画面流要的是低延迟。
     h264Dec.configure(cfg);
+    h264Config = cfg;
     h264Ready = true;
+    const pending = h264Pending;
+    h264Pending = [];
+    for (const data of pending) decodeH264(data, socket);
     dbg('H.264 解码器已配置: ' + codecStr);
     return true;
   } catch (e) {
+    if (epoch !== h264Epoch || socket !== streamWs) return null;
     dbg('VideoDecoder configure 失败: ' + e);
     stopH264();
     return false;
   }
+}
+
+function decodeH264(data, socket) {
+  if (socket !== streamWs) return;
+  const key = hasIdr(data);
+  if (!h264Ready || !h264Dec) {
+    // Keep the first IDR and its dependencies while the async capability probe
+    // runs. Overflow discards the whole chain and waits for the next IDR.
+    if (key) h264Pending = [data];
+    else if (h264Pending.length > 0) {
+      if (h264Pending.length < 8) h264Pending.push(data);
+      else { h264Pending = []; requestH264Key(socket); }
+    }
+    return;
+  }
+  try {
+    if (h264Dec.decodeQueueSize >= 3) {
+      h264Dec.reset();
+      h264Dec.configure(h264Config);
+      h264NeedsKey = true;
+      if (!key) requestH264Key(socket);
+    }
+    if (h264NeedsKey && !key) return;
+    h264Dec.decode(new EncodedVideoChunk({
+      type: key ? 'key' : 'delta',
+      timestamp: (h264Ts += Math.round(1000000 / Math.max(1, fps))),
+      data: data
+    }));
+    h264NeedsKey = false;
+  } catch (e) {
+    h264NeedsKey = true;
+    requestH264Key(socket);
+    if (streamFrames === 0) dbg('H.264 decode 失败: ' + e);
+  }
+}
+
+function requestH264Key(socket) {
+  const now = performance.now();
+  if (socket !== streamWs || socket.readyState !== WebSocket.OPEN ||
+      (h264RefreshAt && now - h264RefreshAt < 250)) return;
+  h264RefreshAt = now;
+  socket.send(JSON.stringify({t:'refresh'}));
 }
 
 // 退回 JPEG 并重连。只在确认不支持时调，避免来回切。
@@ -705,7 +764,7 @@ function saveToken() {
   $('authbar').style.display = token ? 'none' : 'flex';
   setStatus(token ? '令牌已保存' : '令牌已清除');
   // 两条长连接要重连才会带上新令牌
-  if (streamWs) { try { streamWs.close(); } catch (e) {} streamWs = null; }
+  stopStream();
   if (ws) { try { ws.close(); } catch (e) {} ws = null; }
   refresh();
   startStream();
@@ -732,9 +791,63 @@ const ctx = cvs.getContext('2d', { alpha: false, desynchronized: true });
 
 let streamWs = null;
 let streamReady = false;
+let streamFormat = 'jpeg';
 let streamFrames = 0;
 let lastFpsAt = performance.now();
 let shownFps = 0;
+let imageDecodeRunning = false;
+let pendingImage = null;
+let pendingPresented = null;
+let presentationRequest = 0;
+let presentationEpoch = 0;
+
+function resetPresentation() {
+  ++presentationEpoch;
+  pendingImage = null;
+  if (pendingPresented) { pendingPresented.source.close(); pendingPresented = null; }
+  if (presentationRequest) cancelAnimationFrame(presentationRequest);
+  presentationRequest = 0;
+}
+
+function presentFrame(source, width, height, socket) {
+  if (socket !== streamWs) { source.close(); return; }
+  if (pendingPresented) pendingPresented.source.close();
+  pendingPresented = {source, width, height, socket};
+  if (presentationRequest) return;
+  presentationRequest = requestAnimationFrame(() => {
+    presentationRequest = 0;
+    const frame = pendingPresented;
+    pendingPresented = null;
+    if (!frame) return;
+    try {
+      if (frame.socket !== streamWs) return;
+      if (cvs.width !== frame.width || cvs.height !== frame.height) {
+        cvs.width = frame.width; cvs.height = frame.height;
+        sw = frame.width; sh = frame.height;
+        updateMeta();
+      }
+      ctx.drawImage(frame.source, 0, 0);
+      ++streamFrames;
+    } finally { frame.source.close(); }
+  });
+}
+
+async function decodeLatestImage() {
+  if (imageDecodeRunning || !pendingImage) return;
+  imageDecodeRunning = true;
+  const image = pendingImage;
+  pendingImage = null;
+  try {
+    const bmp = await createImageBitmap(new Blob([image.data]));
+    if (image.epoch !== presentationEpoch || image.socket !== streamWs) bmp.close();
+    else presentFrame(bmp, bmp.width, bmp.height, image.socket);
+  } catch (e) {
+    if (image.socket === streamWs && streamFrames === 0) dbg('decode failed: ' + e);
+  } finally {
+    imageDecodeRunning = false;
+    decodeLatestImage();
+  }
+}
 
 function streamUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -761,6 +874,8 @@ function startStream() {
   }
   try { streamWs = new WebSocket(url); }
   catch (e) { dbg('new WebSocket 失败: ' + e); setStatus('画面流建立失败：' + e, true); return; }
+  const socket = streamWs;
+  streamFormat = codec;
   // ⚠️ 必须是 arraybuffer，不能是 blob。
   //
   //    EncodedVideoChunk 的 data 要 **BufferSource**：
@@ -776,35 +891,48 @@ function startStream() {
   streamWs.binaryType = 'arraybuffer';
 
   streamWs.onopen = () => {
+    if (socket !== streamWs) return;
     streamReady = true;
     dbg('open');
     setStatus('画面流已连接');
     updateMeta();
   };
   streamWs.onclose = (e) => {
+    if (socket !== streamWs) return;
     streamReady = false;
     streamWs = null;
+    stopH264();
+    resetPresentation();
     // 把关闭码打进控制台。WebSocket 断了但页面上只会显示一句
     // "断开"，光看那个分不清是被服务端关的、握手失败、还是网络问题。
     dbg('close code=' + e.code + ' clean=' + e.wasClean + ' r=' + (e.reason || ''));
     updateMeta();
-    if (fps > 0) setTimeout(startStream, 1500);   // 自动重连
+    if (fps > 0) setTimeout(() => { if (!streamWs) startStream(); }, 1500);
   };
   streamWs.onerror = (e) => {
+    if (socket !== streamWs) return;
     streamReady = false;
     dbg('error ' + (e && e.message ? e.message : '(无消息)'));
   };
 
   streamWs.onmessage = async (ev) => {
+    if (socket !== streamWs) return;
     // 文本消息是控制信息，二进制才是图
     if (typeof ev.data === 'string') {
       dbg('text ' + ev.data.slice(0, 60));
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if ((m.t === 'hello' || m.t === 'ack') && m.format &&
+          m.format !== streamFormat) {
+        streamFormat = m.format;
+        stopH264();
+        resetPresentation();
+      }
       if (m.t === 'size') {
         // 服务端在尺寸**变化时**发这条 —— 第一帧之前、以及之后每次
         // 改 maxWidth / 设备转屏 / 改分辨率都会发。
         // 客户端据此建/改 canvas，否则得等图到了才知道多大。
         if (cvs.width !== m.w || cvs.height !== m.h) {
+          resetPresentation();
           cvs.width = m.w; cvs.height = m.h;
           sw = m.w; sh = m.h;
           updateMeta();
@@ -822,7 +950,9 @@ function startStream() {
       } else if (m.t === 'codec') {
         // 服务端在**第一帧之前**告诉 codec 串 —— WebCodecs 必须要它，
         // 而各设备的 profile/level 不同，不能写死。
-        if (!(await startH264(m.codec))) {
+        const ready = await startH264(m.codec, socket);
+        if (socket !== streamWs || ready === null) return;
+        if (!ready) {
           setStatus('这个浏览器不支持 H.264（需要 WebCodecs），已退回 JPEG', true);
           dbg('没有 WebCodecs，退回 JPEG');
           fallbackToJpeg();
@@ -831,59 +961,55 @@ function startStream() {
         }
       } else if (m.t === 'hello') {
         setStatus('画面流 ' + m.format + ' @' + m.fps + 'fps');
+      } else if (m.t === 'error') {
+        const message = m.error || '画面流出错';
+        if (message === 'unsupported format') {
+          codec = streamFormat;
+          syncQualitySlider();
+          setStatus('设备不支持所选编码，继续使用 ' + codec.toUpperCase(), true);
+        } else if (streamFormat === 'h264') {
+          codec = 'h264';
+          fallbackToJpeg();
+          syncQualitySlider();
+          setStatus('H.264 出错：' + message + '，改用 JPEG', true);
+        } else {
+          setStatus('画面流出错：' + message, true);
+        }
       }
       return;
     }
 
     // H.264：喂给 WebCodecs，不走 createImageBitmap
-    if (h264Ready && h264Dec) {
-      try {
-        h264Dec.decode(new EncodedVideoChunk({
-          type: hasIdr(ev.data) ? 'key' : 'delta',
-          timestamp: (h264Ts += 33333),   // 微秒；单调递增即可
-          data: ev.data                   // ArrayBuffer（见 binaryType 那处）
-        }));
-      } catch (e) {
-        if (streamFrames === 0) dbg('H.264 decode 失败: ' + e);
-      }
+    if (streamFormat === 'h264') {
+      decodeH264(ev.data, socket);
       return;
     }
-    // 选了 H.264 但解码器还没起来（codec 消息没到 / 配置失败）：
-    // 这些是裸 H.264 字节，当图片解只会报错 —— 直接丢。
-    if (codec === 'h264') return;
 
     // 二进制帧：解码到 canvas
     if (streamFrames === 0) {
       dbg('binary ' + (ev.data.size || ev.data.byteLength) + 'B cIB='
           + (typeof createImageBitmap));
     }
-    try {
-      const bmp = await createImageBitmap(new Blob([ev.data]));
-      if (cvs.width !== bmp.width || cvs.height !== bmp.height) {
-        cvs.width = bmp.width; cvs.height = bmp.height;
-        sw = bmp.width; sh = bmp.height;
-      }
-      ctx.drawImage(bmp, 0, 0);
-      bmp.close();                 // 不 close 会攒着不放，几分钟就吃满内存
-      ++streamFrames;
-    } catch (e) {
-      // 解码失败只丢这一帧。但如果是 API 不可用，会每帧都失败 ——
-      // 那时候页面就是一片黑，而没有任何提示。所以记一次。
-      if (streamFrames === 0) dbg('decode failed: ' + e);
-    }
+    pendingImage = {data: ev.data, socket, epoch: presentationEpoch};
+    decodeLatestImage();
   };
 }
 
 function pushStreamParams() {
   if (!streamReady) return;
+  streamWs.send(JSON.stringify({t: 'format', v: codec}));
   streamWs.send(JSON.stringify({t: 'fps', v: fps}));
   streamWs.send(JSON.stringify({t: 'quality', v: quality}));
-  streamWs.send(JSON.stringify({t: 'format', v: codec}));
 }
 
 function stopStream() {
   stopH264();
-  if (streamWs) { try { streamWs.close(); } catch (e) {} streamWs = null; }
+  resetPresentation();
+  if (streamWs) {
+    const socket = streamWs;
+    streamWs = null;
+    try { socket.close(); } catch (e) {}
+  }
   streamReady = false;
   setStatus('画面流已暂停');
   updateMeta();
@@ -1571,8 +1697,9 @@ function toggleFill() {
 function applyPanelForAspect() {
   if (readPanelPref() !== null) return;
   if (!sw || !sh) return;
-  setPanel(sh >= sw, false);      // 横屏（宽>高）→ 收起
+  setPanel(sh >= sw && window.innerWidth > 640, false);
 }
+window.addEventListener('resize', applyPanelForAspect);
 
 // ── 上传安装 APK ──
 //

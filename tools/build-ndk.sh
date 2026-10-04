@@ -63,6 +63,11 @@ ok "$ABI / API $API → ${TRIPLE}${API}-clang++"
 step "检查源码"
 # -----------------------------------------------------------------------------
 DAEMON="$SRC/daemon"
+JSONCPP_DIR=${JSONCPP_DIR:-"$PROJECT_DIR/aosp/external/jsoncpp"}
+if [ ! -f "$JSONCPP_DIR/include/json/json.h" ]; then
+    bad "找不到 jsoncpp；用 JSONCPP_DIR=<jsoncpp 1.9.4 源码目录> 指定依赖"
+    exit 1
+fi
 
 # 平台构建才需要的文件，NDK 构建**必须排除**：
 #   capture_surfaceflinger.cpp  依赖 libgui
@@ -140,6 +145,8 @@ COMMON_FLAGS=(
     -fPIE -pie
     -DREMOTE_CONTROL_NDK_BUILD=1
     -I"$DAEMON"
+    -I"$JSONCPP_DIR/include"
+    -DJSON_USE_EXCEPTION=0
 )
 
 "$CXX" "${COMMON_FLAGS[@]}" -I"$WEBP_DIR" \
@@ -173,6 +180,10 @@ COMMON_FLAGS=(
     "$WEBP_OBJ"/*.o \
     "$DAEMON/websocket.cpp" \
     "$DAEMON/config_file.cpp" \
+    "$DAEMON/sha256.cpp" \
+    "$JSONCPP_DIR/src/lib_json/json_reader.cpp" \
+    "$JSONCPP_DIR/src/lib_json/json_value.cpp" \
+    "$JSONCPP_DIR/src/lib_json/json_writer.cpp" \
     -llog -lmediandk -static-libstdc++ -lm -pthread
 
 ok "remote-control → $OUT/$ABI/remote-control"

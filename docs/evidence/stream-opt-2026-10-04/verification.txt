@@ -1,0 +1,38 @@
+Final verification, 2026-10-04, Asia/Shanghai
+
+make -C dev/02-native-daemon/tests -j8 run
+  PASS: 459 checks across 13 suites; README count agrees.
+  Log: /tmp/rc-opt-tests-final.log.
+
+TARGET=remote_control_x64_arm64-userdebug JOBS=8 bash tools/build-remote-control.sh
+  PASS: Android 12 x86_64 platform daemon and rcctl built.
+  Final daemon SHA-256:
+  c1df9f7fc6da124a242dd438dd09ab92b6ec57a312694bf5afee95b6b680ad5a
+  Log: /tmp/rc-opt-platform-build.log.
+
+python3 tools/check-api-docs.py http://127.0.0.1:18088
+  PASS: 94/94 on final platform daemon, enforcing remote_control domain.
+  Log: /tmp/rc-opt-api-docs-check-final.log.
+  An earlier optimized build failed two storage listing checks because existing
+  secure path traversal used O_RDONLY for ancestors, requiring rootfs read.
+  Ancestors now use O_PATH|O_DIRECTORY|O_NOFOLLOW, then the anchored final
+  directory is opened for reading. No extra rootfs read grant was added.
+
+python3 tools/check-docs.py --strict
+  PASS: all local Markdown links resolve.
+
+git diff --check
+  PASS.
+
+Browser, hardware-codec boundary tests, transport checks and ARM64 API26 builds
+are recorded separately in browser.txt, stream-regression.txt,
+mjpeg-regression.txt, final-device-smoke.txt, builds.txt and selinux.txt.
+
+The performance/browser binary preceded only the O_PATH compatibility fix;
+the final binary passed the complete API suite and H264 static-first-frame
+smoke test. No capture, encoder, transport or browser code changed afterward.
+
+Temporary host service and comparison worktree were removed. The emulator's
+original system binary and enforcing runtime policy were restored after tests.
+Optimized source and platform/NDK build artifacts remain in the workspace;
+no permanent ROM installation or Git commit was made by this task.

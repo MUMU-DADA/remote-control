@@ -43,6 +43,8 @@
 #include <string>
 #include <vector>
 
+#include "encoded_frame_cache.h"
+
 namespace remote_control {
 
 class Dispatcher;
@@ -73,6 +75,8 @@ struct SharedFrame {
     // 和降采样都不必做。
     uint64_t changeGen    = 0;
 
+    std::shared_ptr<EncodedFrameCache> encodedImages;
+
     // 显存格式归一化成 RGBA 需要转换吗（BGRA 要）
     bool needsBgraSwap() const { return pixelFormat == 5; }
 };
@@ -82,7 +86,7 @@ class FrameHub {
   public:
     static FrameHub& Instance();
 
-    // 注入 Dispatcher（抓帧要走它，以复用那把操作锁）。
+    // 注入 Dispatcher（抓帧经它走 Capture 自身的锁）。
     // 在 main() 里调一次。
     void Configure(Dispatcher* dispatcher);
 
@@ -199,7 +203,7 @@ class FrameHub {
     FrameHub(const FrameHub&) = delete;
     FrameHub& operator=(const FrameHub&) = delete;
 
-    // 抓一帧（会走 Dispatcher，即持那把操作锁）。
+    // 抓一帧（走 Dispatcher，与手势/文件操作并行）。
     // 静态成员是因为抓帧线程的 lambda 需要调它。
     // seq 由调用方分配后传进来 —— CaptureOnce 是静态的，拿不到 impl_。
     // prev 用来做源头变化检测（见 SharedFrame::changeGen）；没有上一帧

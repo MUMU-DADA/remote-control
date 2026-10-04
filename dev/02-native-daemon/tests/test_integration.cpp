@@ -291,7 +291,10 @@ void TestFrameHubStopRestart(Dispatcher& dispatcher, int readFd) {
         operation.join();
         return;
     }
-    usleep(50000);  // worker 已发起抓帧，并在 dispatcher 操作锁前等待
+    uint64_t firstSeq = 0;
+    const auto captureDuringGesture = oldSub->WaitNext(0, 200, &firstSeq);
+    Check(captureDuringGesture != nullptr,
+          "长按仍持有操作锁时抓帧可以完成");
 
     std::atomic<bool> oldSubDestroyed{false};
     std::thread destroyer([sub = std::move(oldSub), &oldSubDestroyed]() mutable {
@@ -309,10 +312,10 @@ void TestFrameHubStopRestart(Dispatcher& dispatcher, int readFd) {
     auto restarting = std::async(std::launch::async, [&hub, &error] {
         return hub.Subscribe(60, 320, &error);
     });
-    const bool waitedForJoin =
-            restarting.wait_for(std::chrono::milliseconds(100)) ==
-            std::future_status::timeout;
-    Check(waitedForJoin, "重订阅等待旧抓帧线程 join 完成");
+    const bool restarted = restarting.wait_for(std::chrono::seconds(3)) ==
+                           std::future_status::ready;
+    Check(restarted, "并发重订阅在旧线程 join 后完成且不死锁");
+    if (!restarted) _Exit(1);
 
     operation.join();
     const auto joinDeadline = std::chrono::steady_clock::now() +

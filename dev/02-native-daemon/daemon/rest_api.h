@@ -61,7 +61,10 @@ struct StreamState {
     // 尺寸变了要 Stop 再 Start —— 编码器一旦 configure 就不能改尺寸。
     std::unique_ptr<H264Encoder> h264;
     uint32_t h264W = 0, h264H = 0;   // 当前编码器的尺寸
+    int h264Fps = 0, h264Quality = 0;
+    uint64_t h264ConfigGeneration = 0;
     bool     needKeyFrame = false;   // 下一个输出要是关键帧
+    std::string streamError;
     uint64_t hubSeq = 0;          // 本连接已经消费到哪一帧
     uint64_t hubTimeouts = 0;     // 等新帧超时的次数（诊断用）
 
@@ -119,8 +122,8 @@ class RestApi {
     // 取一帧并编码。两条传输共用 —— 各写一遍的话，
     // "跳过未变化的帧"这类优化很容易只做在一条上。
     // 返回空表示这帧不用发，*unchanged 区分"画面没变"和"出错"。
-    std::string NextEncodedFrame(const StreamParams& p, StreamState* st,
-                                 bool* unchanged);
+    EncodedImagePtr NextEncodedFrame(const StreamParams& p, StreamState* st,
+                                     bool* unchanged);
 
     // 手势类：x,y 走请求头的字段（和 tap/swipe 一致）
     HttpResponse HandleGesture(const HttpRequest& req, Cmd cmd, bool needsEnd);

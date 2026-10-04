@@ -14,8 +14,9 @@
 | **HTTP 客户端** | **libcurl**（运行期 dlopen） | 设备系统库 | MIT/X | ✅ 会碰不可信输入（服务端返回的数据），且是事实标准 |
 | **WebP 编码** | libwebp（源码内置） | vendored | BSD-3 | 纯编码器，输入是我们自己的像素 |
 | **JPEG 编码** | libjpeg（运行期 dlopen） | 设备系统库 | IJG | 同上 |
-| **PNG 编码** | zlib（源码内置） | vendored | zlib | 同上 |
-| **H.264 编码** | AMediaCodec | 平台 API | — | 平台硬件编码器 |
+| **PNG 编码** | zlib（运行期 dlopen） | 设备系统库 | zlib | 使用系统 deflate/CRC，不内置 zlib 源码 |
+| **H.264 编码** | AMediaCodec | 平台 API | — | 使用设备 AVC 编码器；模拟器上可能是软件编码器 |
+| **H.264 RGBA→NV12** | libyuv（可选，运行期 dlopen） | 设备系统库 `libyuv.so` | BSD-3 | 使用已有 SIMD 转换；缺库或缺 `ABGRToNV12` 时回退标量实现 |
 | **JSON 输出** | 自己写的 `json_writer.h` | 本项目 | — | **只输出不解析**，不碰不可信输入 |
 | **HTTP 服务端** | 自己写的 `http_server.cpp` | 本项目 | — | 见第三节 |
 | **令牌校验** | 自己写的恒定时间比较 | 本项目 | — | 见第四节 |
@@ -49,6 +50,11 @@ AOSP 自己也在用。
 > ⚠️ AOSP 编 jsoncpp 时带 `-DJSON_USE_EXCEPTION=0`，此时它的内部断言是
 > `abort()` 而不是抛异常。所以只走 `parse()` 的返回值这条路，
 > 不碰任何可能触发断言的操作。
+
+**构建来源**：AOSP 构建链接树内的 jsoncpp；主机与 NDK 构建使用
+`JSONCPP_DIR` 中的头文件和 `src/lib_json` 三个源文件。
+默认目录是仓库的 `aosp/external/jsoncpp`。NDK 本身不提供 jsoncpp，
+因此“无需完整 AOSP 树”仍要求单独准备 jsoncpp 1.9.4 源码，不能把它视作可选依赖。
 
 **顺带拆掉的一个坑**：原来的测试断言错误信息里含「位置」二字，
 换引擎后格式变成 `Line 1, Column 6`。**这种把实现细节钉死的断言，
@@ -123,6 +129,21 @@ HTTP 401   上传 0 字节   落盘文件 0 个   磁盘消耗 0.0 MB
    本项目换 JSON 时**没动 `Value` 接口**，所以调用方一行没改。
 4. **换进来的是更安全的，还是只是更多的代码？**
    vendor 一万行第三方代码，如果没解决上面第 1、2 条，那是净增攻击面。
+
+## 六、视频像素转换复用 libyuv
+
+H.264 的 ByteBuffer 输入需要 NV12。现在优先运行时加载系统 libyuv 的
+`ABGRToNV12`；libyuv 的 ABGR 名称按 32 位整数表示，实际输入内存是 RGBA 字节序。
+编码器输入的行跨度与 slice height 仍按 MediaCodec 返回的布局处理。
+
+这个可选依赖只优化 CPU 像素转换，不替代 MediaCodec，也没有把 libyuv 源码
+或二进制加入仓库。`REMOTE_CONTROL_H264_LIBYUV=0` 可用于对照标量回退路径；
+部署时系统库不可见或缺符号会自动回退。许可归属见第三方声明。
+
+ROM 集成还需要 MediaCodec 使用的 Codec2/OMX HAL、mediaserver、
+media.resource_manager 和 media.metrics 服务权限，以及媒体配置属性读取权限。
+本项目的 `remote_control.te` 已补齐这些声明；仅允许读取媒体属性不足以启动编码器。
+这部分属于平台服务访问权限，与 libyuv 是否可用无关。
 
 ---
 

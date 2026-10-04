@@ -87,7 +87,7 @@ class Dispatcher {
     Injector* injector_;
     std::unique_ptr<AppOps>  appOps_;
     std::unique_ptr<FileOps> fileOps_;
-    // 操作串行化锁。
+    // 操作串行化锁。Capture/Info 使用 Capture 自身的锁，可以与操作并行。
     //
     // ⚠️ 锁必须在**这一层**，不能放在调用方。
     //

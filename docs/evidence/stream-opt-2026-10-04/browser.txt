@@ -1,0 +1,34 @@
+PASS desktop canvas contains a real image
+Screenshot: /tmp/rc-webui-final-device-desktop.png
+PASS desktop switches to webp without blanking
+PASS desktop switches to png without blanking
+PASS desktop switches to webp without blanking
+PASS desktop saving the token immediately creates a new stream
+PASS slow decoder has only one in-flight decode
+PASS slow decoder skips the overwritten middle frame
+PASS old socket events cannot close or clear the new connection
+PASS reconnect replaces stale decoded pixels with live image
+PASS unsupported format restores the actual format and keeps the stream
+PASS fatal H.264 errors fall back and stale close preserves the replacement
+PASS mobile canvas contains a real image
+Screenshot: /tmp/rc-webui-final-device-mobile.png
+PASS mobile keeps the image large enough to inspect
+PASS mobile opens controls below the image without overlap
+Screenshot: /tmp/rc-webui-final-device-mobile-panel.png
+PASS mobile switches to webp without blanking
+PASS mobile switches to png without blanking
+PASS mobile switches to webp without blanking
+PASS mobile saving the token immediately creates a new stream
+PASS H.264 decodes its first frame through WebCodecs
+PASS H.264 reconfigures its decoder after a size change
+PASS H.264 switches to JPEG and keeps rendering
+PASS JPEG switches back to H.264 and decodes a new keyframe
+PASS H.264 refresh drains and displays an output while stop detection is enabled
+H.264 frames received after refresh: 1
+Screenshot: /tmp/rc-webui-final-device-h264.png
+PASS no uncaught browser JavaScript errors
+Passed 24/24 checks
+PASS H.264 reconfiguration: fps 15→30 {'width': 360, 'height': 202, 'frames': 2, 'fps': 30, 'quality': 75}
+PASS H.264 reconfiguration: quality 75→42 {'width': 360, 'height': 202, 'frames': 3, 'fps': 30, 'quality': 42}
+PASS H.264 odd width 361 aligns to even 360 and decodes {'width': 360, 'height': 202, 'frames': 2}
+PASS H.264 quality/fps/odd-width checks have no uncaught browser errors
