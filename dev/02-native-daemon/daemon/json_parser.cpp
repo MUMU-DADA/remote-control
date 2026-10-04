@@ -126,7 +126,9 @@ bool Parse(const std::string& text, Value* out, std::string* error) {
         if (error) *error = errs.empty() ? "JSON 格式错误" : errs;
         return false;
     }
-    FromJson(root, out);
+    Value parsed;
+    FromJson(root, &parsed);
+    *out = std::move(parsed);
     return true;
 }
 

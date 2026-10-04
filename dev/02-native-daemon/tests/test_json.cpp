@@ -5,6 +5,8 @@
 // 边界情况（代理对、转义、非法输入）必须钉住。
 
 #include <cstdio>
+#include <cmath>
+#include <limits>
 #include <string>
 
 #include "json_parser.h"
@@ -119,6 +121,53 @@ void TestWriter() {
           "空容器与后续字段都对");
 }
 
+void TestIntegerBounds() {
+    printf("\n\033[1;34m[5] 数字转换：int64 边界\033[0m\n");
+    constexpr int64_t kDefault = 47;
+    const double inf = std::numeric_limits<double>::infinity();
+    const struct Case {
+        double number;
+        int64_t expected;
+        const char* what;
+    } cases[] = {
+        {-0x1p63, std::numeric_limits<int64_t>::min(), "接受 -2^63"},
+        {std::nextafter(-0x1p63, -inf), kDefault, "拒绝小于 -2^63"},
+        {std::nextafter(0x1p63, 0),
+         std::numeric_limits<int64_t>::max() - 1023, "接受小于 2^63 的最大 double"},
+        {0x1p63, kDefault, "拒绝 2^63"},
+        {1e100, kDefault, "拒绝正向溢出"},
+        {-1e100, kDefault, "拒绝负向溢出"},
+        {inf, kDefault, "拒绝正无穷"},
+        {-inf, kDefault, "拒绝负无穷"},
+        {std::numeric_limits<double>::quiet_NaN(), kDefault, "拒绝 NaN"},
+        {3.75, 3, "保留正小数截断"},
+        {-3.75, -3, "保留负小数截断"},
+    };
+    for (const auto& c : cases) {
+        json::Value v;
+        v.SetNumber(c.number);
+        Check(v.asInt(kDefault) == c.expected, "%s", c.what);
+    }
+}
+
+void TestParseReuse() {
+    printf("\n\033[1;34m[6] 重复解析：替换旧内容\033[0m\n");
+    json::Value v;
+    std::string err;
+    Check(json::Parse(R"({"old":1})", &v, &err) &&
+                  json::Parse(R"({"new":2})", &v, &err) &&
+                  v.size() == 1 && !v.has("old") && v.num("new") == 2,
+          "解析新对象时清除旧键");
+    Check(json::Parse("[1,2]", &v, &err) &&
+                  json::Parse("[3]", &v, &err) &&
+                  v.size() == 1 && v.at(0).asInt() == 3,
+          "解析新数组时清除旧元素");
+    Check(json::Parse("{}", &v, &err) && v.isObject() && v.size() == 0,
+          "数组切换为空对象时无旧内容");
+    Check(!json::Parse("{broken", &v, &err) && v.isObject() && v.size() == 0,
+          "解析失败时保留原输出");
+}
+
 }  // namespace
 
 int main() {
@@ -127,5 +176,7 @@ int main() {
     TestParseStrings();
     TestParseErrors();
     TestWriter();
+    TestIntegerBounds();
+    TestParseReuse();
     return Summary("JSON");
 }

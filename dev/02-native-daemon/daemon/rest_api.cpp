@@ -3,6 +3,7 @@
 #include "rest_api.h"
 
 #include <errno.h>
+#include <cctype>
 #include <fcntl.h>
 #include <cmath>
 #include <limits.h>
@@ -13,9 +14,11 @@
 #include <sys/stat.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <signal.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <iterator>
 #include <vector>
 
@@ -33,6 +36,10 @@
 #include "sha256.h"
 #include "websocket.h"
 #include "webui.h"
+
+#if !defined(SYS_renameat2) && defined(__NR_renameat2)
+#define SYS_renameat2 __NR_renameat2
+#endif
 
 namespace remote_control {
 namespace {
@@ -121,6 +128,77 @@ bool ParseGestureMs(const json::Value& body, const char* key,
     return true;
 }
 
+// JSON numbers are stored as doubles.  Converting an untrusted out-of-range
+// double directly to an integer is undefined, so validate the value before it
+// enters the fixed-width protocol fields.
+bool ParseInt32Value(const json::Value& value, const char* key, int32_t* out,
+                     HttpResponse* error) {
+    const double raw = value.asDouble(std::numeric_limits<double>::quiet_NaN());
+    if (!value.isNumber() || !std::isfinite(raw) || std::floor(raw) != raw ||
+        raw < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
+        raw > static_cast<double>(std::numeric_limits<int32_t>::max())) {
+        *error = HttpResponse::Error(
+                400, std::string(key) + " 必须是 int32 范围内的整数");
+        return false;
+    }
+    *out = static_cast<int32_t>(raw);
+    return true;
+}
+
+bool ParseFloatValue(const json::Value& value, const char* key, float minValue,
+                     float maxValue, float* out, HttpResponse* error) {
+    const double raw = value.asDouble(std::numeric_limits<double>::quiet_NaN());
+    if (!value.isNumber() || !std::isfinite(raw) ||
+        raw < static_cast<double>(minValue) ||
+        raw > static_cast<double>(maxValue)) {
+        *error = HttpResponse::Error(
+                400, std::string(key) + " 必须是有限数值，范围为 " +
+                             std::to_string(minValue) + " 到 " +
+                             std::to_string(maxValue));
+        return false;
+    }
+    *out = static_cast<float>(raw);
+    return std::isfinite(*out);
+}
+
+bool HasHeaderToken(const std::string& value, const char* token) {
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t end = value.find(',', start);
+        if (end == std::string::npos) end = value.size();
+        size_t first = start;
+        while (first < end && std::isspace(static_cast<unsigned char>(value[first]))) {
+            ++first;
+        }
+        size_t last = end;
+        while (last > first &&
+               std::isspace(static_cast<unsigned char>(value[last - 1]))) {
+            --last;
+        }
+        if (last - first == strlen(token)) {
+            bool equal = true;
+            for (size_t i = 0; i < last - first; ++i) {
+                if (std::tolower(static_cast<unsigned char>(value[first + i])) !=
+                    std::tolower(static_cast<unsigned char>(token[i]))) {
+                    equal = false;
+                    break;
+                }
+            }
+            if (equal) return true;
+        }
+        if (end == value.size()) break;
+        start = end + 1;
+    }
+    return false;
+}
+
+bool IsWebSocketUpgrade(const HttpRequest& req) {
+    return req.method == "GET" &&
+           HasHeaderToken(req.header("upgrade"), "websocket") &&
+           HasHeaderToken(req.header("connection"), "upgrade") &&
+           req.header("sec-websocket-version") == "13";
+}
+
 bool IsPathUnder(const std::string& path, const std::string& base) {
     if (path == base) return true;
     return path.size() > base.size() &&
@@ -130,8 +208,7 @@ bool IsPathUnder(const std::string& path, const std::string& base) {
 
 // Walk an already canonical absolute path without following any symlink.
 // The returned parent fd remains valid even if another process renames a
-// directory in the meantime; callers can therefore unlinkat() the same entry
-// safely after pm has consumed the opened fd.
+// directory in the meantime.
 bool OpenAbsoluteParentNoFollow(const std::string& path, int* parentFd,
                                 std::string* leaf, std::string* error) {
     if (path.empty() || path[0] != '/') return false;
@@ -169,9 +246,17 @@ bool OpenAbsoluteParentNoFollow(const std::string& path, int* parentFd,
 
 // ?path= 只接受共享存储中的已有普通文件。realpath() 只用于确定允许
 // 边界，真正打开和后续删除都通过 canonical path 的目录 fd 完成，避免
-// "检查后父目录被换成软链接" 的 TOCTOU。
-bool OpenSharedStorageFile(const std::string& path, int* outFd,
-                           std::string* canonicalPath, std::string* error) {
+// "检查后父目录被换成软链接" 的竞态；删除时还会核对文件身份。
+struct OpenedSharedStorageFile {
+    int fd = -1;
+    int parentFd = -1;
+    std::string leaf;
+    struct stat identity{};
+};
+
+bool OpenSharedStorageFile(const std::string& path,
+                           OpenedSharedStorageFile* out,
+                           std::string* error) {
     char canonical[PATH_MAX];
     if (realpath(path.c_str(), canonical) == nullptr) {
         if (error) *error = "文件不存在或无法解析: " + path;
@@ -197,9 +282,9 @@ bool OpenSharedStorageFile(const std::string& path, int* outFd,
         return false;
     }
     int parentFd = -1;
-    std::string leaf;
-    if (!OpenAbsoluteParentNoFollow(canonical, &parentFd, &leaf, error)) return false;
-    const int fd = openat(parentFd, leaf.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (!OpenAbsoluteParentNoFollow(canonical, &parentFd, &out->leaf, error)) return false;
+    const int fd = openat(parentFd, out->leaf.c_str(),
+                          O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
         const int savedErrno = errno;
         close(parentFd);
@@ -215,28 +300,99 @@ bool OpenSharedStorageFile(const std::string& path, int* outFd,
                              (savedErrno ? (" (" + std::string(strerror(savedErrno)) + ")") : "");
         return false;
     }
-    close(parentFd);
-    *outFd = fd;
-    *canonicalPath = canonical;
+    out->fd = fd;
+    out->parentFd = parentFd;
+    out->identity = st;
     return true;
 }
 
-bool UnlinkAbsoluteNoFollow(const std::string& path) {
-    int parentFd = -1;
-    std::string leaf;
-    if (!OpenAbsoluteParentNoFollow(path, &parentFd, &leaf, nullptr)) return false;
-    const bool ok = unlinkat(parentFd, leaf.c_str(), 0) == 0;
-    close(parentFd);
-    return ok;
+bool UnlinkOpenedSharedStorageFile(const OpenedSharedStorageFile& opened) {
+#if defined(SYS_renameat2)
+    // Move the current directory entry away atomically before checking its
+    // identity.  A replacement at the original leaf can then never be
+    // removed by the final unlinkat().  If the entry changed, restore it only
+    // when the original leaf is still vacant; otherwise leave it quarantined
+    // rather than deleting an unrelated file.
+    static std::atomic<uint64_t> sequence{0};
+    constexpr unsigned int kRenameNoReplace = 1u;  // RENAME_NOREPLACE
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const std::string quarantine =
+                ".remote-control-install-delete-" +
+                std::to_string(static_cast<long long>(getpid())) + "-" +
+                std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+        if (syscall(SYS_renameat2, opened.parentFd, opened.leaf.c_str(),
+                    opened.parentFd, quarantine.c_str(), kRenameNoReplace) != 0) {
+            if (errno == EEXIST) continue;
+            break;
+        }
+
+        struct stat current{};
+        const bool same = fstatat(opened.parentFd, quarantine.c_str(), &current,
+                                  AT_SYMLINK_NOFOLLOW) == 0 &&
+                          current.st_dev == opened.identity.st_dev &&
+                          current.st_ino == opened.identity.st_ino &&
+                          S_ISREG(current.st_mode);
+        if (same) return unlinkat(opened.parentFd, quarantine.c_str(), 0) == 0;
+
+        // The entry was replaced while installation was running.  Do not
+        // delete it; put it back only if nobody recreated the original leaf.
+        syscall(SYS_renameat2, opened.parentFd, quarantine.c_str(),
+                opened.parentFd, opened.leaf.c_str(), kRenameNoReplace);
+        return false;
+    }
+#endif
+
+    // Kernels without renameat2 retain the previous best-effort behavior.
+    struct stat current{};
+    if (fstatat(opened.parentFd, opened.leaf.c_str(), &current,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+        current.st_dev != opened.identity.st_dev ||
+        current.st_ino != opened.identity.st_ino ||
+        !S_ISREG(current.st_mode)) {
+        return false;
+    }
+    return unlinkat(opened.parentFd, opened.leaf.c_str(), 0) == 0;
 }
 
+// JSON 控制接口只接受小请求体。APK/文件上传走专门的二进制端点，不能让
+// 一个本应是 JSON 的路由把数 GB 的落盘正文重新读进内存。
+constexpr size_t kMaxJsonBodyBytes = 1u << 20;  // 1 MiB
+
 bool ParseJsonBody(const HttpRequest& req, json::Value* out, HttpResponse* err) {
-    if (req.body.empty()) {
+    // bodySize 由 HTTP 层按 Content-Length 设置；body 直接构造的请求（例如
+    // 单元测试）可能没有设置它，因此同时检查实际内存正文大小。
+    const size_t declaredSize = req.bodySize != 0 ? req.bodySize : req.body.size();
+    if (declaredSize > kMaxJsonBodyBytes) {
+        *err = HttpResponse::Error(413, "JSON 请求体超过上限 " +
+                                             std::to_string(kMaxJsonBodyBytes) +
+                                             " 字节");
+        return false;
+    }
+
+    std::string body;
+    if (!req.bodyFile.empty()) {
+        std::string readError;
+        if (!req.ReadBody(&body, &readError)) {
+            *err = HttpResponse::Error(400, "读取请求体失败: " + readError);
+            return false;
+        }
+    } else {
+        body = req.body;
+    }
+    // bodySize 是 HTTP 层提供的上限依据；再检查实际长度，避免调用方构造
+    // 不一致的 HttpRequest 时绕过限制。
+    if (body.size() > kMaxJsonBodyBytes) {
+        *err = HttpResponse::Error(413, "JSON 请求体超过上限 " +
+                                             std::to_string(kMaxJsonBodyBytes) +
+                                             " 字节");
+        return false;
+    }
+    if (body.empty()) {
         out->SetObject();     // 空体当空对象，允许 POST 无参数
         return true;
     }
     std::string perr;
-    if (!json::Parse(req.body, out, &perr)) {
+    if (!json::Parse(body, out, &perr)) {
         *err = HttpResponse::Error(400, "请求体不是合法 JSON: " + perr);
         return false;
     }
@@ -448,7 +604,6 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
     std::string path = req.queryParam("path", "");
     const bool fromBody = path.empty();
     bool spooled = false;      // 用的是 HttpServer 落盘的临时文件
-    std::string cleanupPath;
 
     if (fromBody) {
         if (req.bodySize == 0 && req.body.empty()) {
@@ -519,28 +674,29 @@ HttpResponse RestApi::HandleInstall(const HttpRequest& req) {
         ALOGI("收到上传的 APK: %s（%zu 字节）", path.c_str(), req.bodySize);
         }
     } else {
-        int sharedFd = -1;
+        OpenedSharedStorageFile opened;
         std::string sharedError;
-        if (!OpenSharedStorageFile(path, &sharedFd, &cleanupPath, &sharedError)) {
+        if (!OpenSharedStorageFile(path, &opened, &sharedError)) {
             return HttpResponse::Error(404, sharedError.empty() ?
                                                 "找不到或无法打开文件" : sharedError);
         }
         // Keep the securely opened fd; the generic open(path) below would
         // reintroduce the check/use race.  It is already O_NOFOLLOW and points
         // at the canonical file validated above.
-        const int fd = sharedFd;
+        const int fd = opened.fd;
         const bool replace = req.queryParam("replace", "1") != "0";
         const uint32_t flags = replace ? static_cast<uint32_t>(kFlagReplace) : 0u;
         HttpResponse resp = Call(Cmd::InstallApp, "", flags, fd);
-        close(fd);
         if (req.queryParam("keep", "0") != "1") {
-            if (UnlinkAbsoluteNoFollow(cleanupPath)) {
+            if (UnlinkOpenedSharedStorageFile(opened)) {
                 ALOGI("安装%s，已删除 %s", resp.status == 200 ? "成功" : "失败",
-                      cleanupPath.c_str());
+                      path.c_str());
             } else {
-                ALOGW("安装后删除 %s 失败", cleanupPath.c_str());
+                ALOGW("安装后删除 %s 失败", path.c_str());
             }
         }
+        close(fd);
+        close(opened.parentFd);
         return resp;
     }
 
@@ -597,9 +753,8 @@ HttpResponse RestApi::HandleGesture(const HttpRequest& req, Cmd cmd,
     // 而 longpress/doubletap 只有一个点，x/y 更自然。
     // 与其让调用方记两套，不如两种都收 —— 之前只认 x/y，
     // 结果网页发 x1/y1 的 drag 一直报"需要 x 与 y"。
-    auto pick = [&b](const char* a, const char* c) -> int64_t {
-        if (b.has(a)) return b.num(a);
-        return b.num(c);
+    auto pick = [&b](const char* a, const char* c) -> const char* {
+        return b.has(a) ? a : c;
     };
     const bool hasPoint = (b.has("x") || b.has("x1")) &&
                           (b.has("y") || b.has("y1"));
@@ -613,10 +768,13 @@ HttpResponse RestApi::HandleGesture(const HttpRequest& req, Cmd cmd,
     Request r{};
     r.magic = kMagic;
     r.cmd   = static_cast<uint32_t>(cmd);
-    r.x     = static_cast<int32_t>(pick("x", "x1"));
-    r.y     = static_cast<int32_t>(pick("y", "y1"));
-    r.x2    = static_cast<int32_t>(pick("x2", "x2"));
-    r.y2    = static_cast<int32_t>(pick("y2", "y2"));
+    const char* xKey = pick("x", "x1");
+    const char* yKey = pick("y", "y1");
+    if (!ParseInt32Value(b[xKey], xKey, &r.x, &err) ||
+        !ParseInt32Value(b[yKey], yKey, &r.y, &err)) return err;
+    if (needsEnd &&
+        (!ParseInt32Value(b["x2"], "x2", &r.x2, &err) ||
+         !ParseInt32Value(b["y2"], "y2", &r.y2, &err))) return err;
     if (!ParseGestureMs(b, "ms", 0, &r.durationMs, &err)) return err;
     if (b.flag("long")) r.flags |= kFlagKeyLongPress;
 
@@ -674,7 +832,11 @@ bool RestApi::HandleTouchEvent(const std::string& text, std::string* reply) {
     json::Value v;
     std::string perr;
     if (!json::Parse(text, &v, &perr)) {
-        *reply = "{\"ok\":false,\"error\":\"JSON 解析失败\"}";
+        *reply = HttpResponse::Error(400, "JSON 解析失败").body;
+        return false;
+    }
+    if (!v.isObject()) {
+        *reply = HttpResponse::Error(400, "触控事件必须是 JSON 对象").body;
         return false;
     }
 
@@ -690,19 +852,35 @@ bool RestApi::HandleTouchEvent(const std::string& text, std::string* reply) {
 
     Request r{};
     r.magic     = kMagic;
-    r.pointerId = static_cast<uint32_t>(v.num("id", 0));
-    r.x         = static_cast<int32_t>(v.num("x", 0));
-    r.y         = static_cast<int32_t>(v.num("y", 0));
-    r.x2        = static_cast<int32_t>(v.num("x2", 0));
-    r.y2        = static_cast<int32_t>(v.num("y2", 0));
     HttpResponse gestureErr;
+    int32_t pointerId = 0;
+    if (v.has("id") &&
+        (!ParseInt32Value(v["id"], "id", &pointerId, &gestureErr) ||
+         pointerId < 0)) {
+        *reply = HttpResponse::Error(400, "id 必须是非负 int32 整数").body;
+        return false;
+    }
+    r.pointerId = static_cast<uint32_t>(pointerId);
+    for (const auto& coordinate : {
+            std::pair<const char*, int32_t*>{"x", &r.x},
+            {"y", &r.y}, {"x2", &r.x2}, {"y2", &r.y2}}) {
+        if (v.has(coordinate.first) &&
+            !ParseInt32Value(v[coordinate.first], coordinate.first,
+                             coordinate.second, &gestureErr)) {
+            *reply = gestureErr.body;
+            return false;
+        }
+    }
     if (!ParseGestureMs(v, "ms", 0, &r.durationMs, &gestureErr)) {
         // HttpResponse::Error 已经用 JSON writer 正确转义了错误文本。
         *reply = gestureErr.body;
         return false;
     }
-    if (v.num("pressure", 0) > 0) {
-        r.pressure = static_cast<float>(v.num("pressure", 0));
+    if (v.has("pressure") &&
+        !ParseFloatValue(v["pressure"], "pressure", 0.0f, 1.0f,
+                         &r.pressure, &gestureErr)) {
+        *reply = gestureErr.body;
+        return false;
     }
 
     // 事件名 → 命令。
@@ -725,7 +903,7 @@ bool RestApi::HandleTouchEvent(const std::string& text, std::string* reply) {
     else if (t == "doubletap") { cmd = static_cast<uint32_t>(Cmd::DoubleTap); }
     else if (t == "drag")      { cmd = static_cast<uint32_t>(Cmd::Drag); }
     else {
-        *reply = "{\"ok\":false,\"error\":\"未知事件: " + t + "\"}";
+        *reply = HttpResponse::Error(400, "未知事件: " + t).body;
         return false;
     }
     if (v.num("ms", 0) > 0 && (t == "tap")) wantReply = true;
@@ -736,12 +914,16 @@ bool RestApi::HandleTouchEvent(const std::string& text, std::string* reply) {
     if (p.fd >= 0) close(p.fd);
 
     if (p.reply.status != kOk) {
-        *reply = "{\"ok\":false,\"t\":\"" + t + "\",\"error\":\"" +
-                 StatusName(p.reply.status) + "\"}";
+        json::Writer w;
+        w.Obj().Field("ok", false).Field("t", t)
+               .Field("error", StatusName(p.reply.status)).EndObj();
+        *reply = w.str();
         return false;
     }
     if (wantReply) {
-        *reply = "{\"ok\":true,\"t\":\"" + t + "\"}";
+        json::Writer w;
+        w.Obj().Field("ok", true).Field("t", t).EndObj();
+        *reply = w.str();
     }
     return true;
 }
@@ -749,7 +931,7 @@ bool RestApi::HandleTouchEvent(const std::string& text, std::string* reply) {
 HttpResponse RestApi::HandleTouchStream(const HttpRequest& req) {
     // 必须是一次 WebSocket 升级。普通 GET 落到这里说明调用方用错了方式 ——
     // 明确告诉他该怎么做，比返回一个看不懂的 400 好。
-    if (req.header("upgrade") != "websocket") {
+    if (!IsWebSocketUpgrade(req)) {
         return HttpResponse::Error(
                 400, "这个端点需要 WebSocket 升级（用 new WebSocket(...) 连，"
                      "不要用 fetch）。一次性手势仍可用 POST /api/v1/tap 等");
@@ -961,6 +1143,9 @@ HttpResponse RestApi::HandleStreamParams(const HttpRequest& req) {
 // 用序号做增量：客户端连上时先给一段历史（sinceSeq=0 就是全部），
 // 之后只在有新行时推 —— 而不是让客户端轮询 /api/v1/log。
 HttpResponse RestApi::HandleLogStream(const HttpRequest& req) {
+    if (!IsWebSocketUpgrade(req)) {
+        return HttpResponse::Error(400, "需要合法的 WebSocket 升级请求（版本 13）");
+    }
     std::string accept;
     if (!WsComputeAccept(req.header("sec-websocket-key"), &accept)) {
         return HttpResponse::Error(400, "Sec-WebSocket-Key 缺失或不合法");
@@ -1399,7 +1584,7 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
     // 两种都留着是有意的：MJPEG 能直接塞进 <img src>，零 JS，
     // 拿来调试或嵌到别的页面里最省事；WebSocket 延迟更低、可控性更好，
     // 是控制台自己用的那条。
-    if (req.header("upgrade") == "websocket") {
+    if (!req.header("upgrade").empty()) {
         return HandleStreamWs(req, p);
     }
 
@@ -1492,6 +1677,9 @@ HttpResponse RestApi::HandleStream(const HttpRequest& req) {
 //   - 能测往返延迟（和触控流同一个套路）
 HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                                      const StreamParams& params) {
+    if (!IsWebSocketUpgrade(req)) {
+        return HttpResponse::Error(400, "需要合法的 WebSocket 升级请求（版本 13）");
+    }
     std::string accept;
     if (!WsComputeAccept(req.header("sec-websocket-key"), &accept)) {
         return HttpResponse::Error(400, "Sec-WebSocket-Key 缺失或不合法");
@@ -1965,8 +2153,8 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         // 触控坐标走请求头字段（不是 payload）
         Request r{};
         r.magic = kMagic; r.cmd = static_cast<uint32_t>(Cmd::Tap);
-        r.x = static_cast<int32_t>(b.num("x"));
-        r.y = static_cast<int32_t>(b.num("y"));
+        if (!ParseInt32Value(b["x"], "x", &r.x, &err) ||
+            !ParseInt32Value(b["y"], "y", &r.y, &err)) return err;
         if (!ParseGestureMs(b, "ms", kDefaultTapMs, &r.durationMs, &err)) return err;
         ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
         ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Tap), p.reply.status);
@@ -1986,10 +2174,10 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         }
         Request r{};
         r.magic = kMagic; r.cmd = static_cast<uint32_t>(Cmd::Swipe);
-        r.x  = static_cast<int32_t>(b.num("x1"));
-        r.y  = static_cast<int32_t>(b.num("y1"));
-        r.x2 = static_cast<int32_t>(b.num("x2"));
-        r.y2 = static_cast<int32_t>(b.num("y2"));
+        if (!ParseInt32Value(b["x1"], "x1", &r.x, &err) ||
+            !ParseInt32Value(b["y1"], "y1", &r.y, &err) ||
+            !ParseInt32Value(b["x2"], "x2", &r.x2, &err) ||
+            !ParseInt32Value(b["y2"], "y2", &r.y2, &err)) return err;
         if (!ParseGestureMs(b, "ms", kDefaultSwipeMs, &r.durationMs, &err)) return err;
         ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
         ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Swipe), p.reply.status);
