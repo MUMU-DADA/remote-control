@@ -1,9 +1,11 @@
-# 09 · 部署与更新：init 固化（自启 / 保活）
+# 09 · 部署与更新：init 固化与 API 热更新
 
-> **状态：已实施。** §1–§4 已落地并实测（验收全过，见 §9.1）；
-> **§5 的「热替换通道」经实测决定不做** —— 原因见 §9.2–§9.5
-> （三条 neverallow 互相咬住，两条绕开的路又分别被动态分区和分区可见性堵死）。
-> 更新因此走正规通道：`build-rom.sh` + `package-rom.sh` + `emulator.sh restart`。
+> **状态：已实施。** §1–§4 已落地并实测（验收全过，见 §9.1）；服务端的
+> `/api/v1/update`、`/update/apply` 和 `/update/rollback` 已提供版本上传、原子切换
+> 与回滚。ROM 必须把 init 服务接到 `remote-control-launch`，并提供允许 launcher
+> 执行版本槽载荷的 SELinux 策略，API 热更新才会真正替换正在运行的进程。
+> 尚未接入 launcher 的旧 ROM 仍可暂存并校验文件，但应继续使用
+> `build-rom.sh` + `package-rom.sh` + `emulator.sh restart` 完成发布。
 >
 > **读法建议**：§1–§4 是"为什么这么改"的推导，§9 是**实际做了什么、以及哪些没做**。
 > 只想知道现状的话直接看 §9.5。
@@ -23,7 +25,8 @@
 
 **但** init 不重读 rc，模拟器的 `/system` 又没有任何持久写入通道 —— 所以
 "**启动后还能换**"必须靠间接层：`/system` 里放一个永不改动的**壳**，
-真正的二进制放 `/data` 里的**版本槽**，`ctl.restart` 秒级切换。
+真正的二进制放 `/data` 里的**版本槽**，`ctl.restart` 秒级切换。HTTP API 负责
+把载荷安全写入版本槽并切换 `current` 指针；init/launcher 负责启动它。
 
 ---
 
@@ -174,11 +177,12 @@ init 已创建的 socket。`docs/02-architecture.md` 对此只说明了历史兼
 
 ---
 
-## 5. 热替换通道（已否决的历史方案）
+## 5. 热替换通道（API 设计与 AOSP 约束）
 
-> 本节至 §8 保存的是实施前的方案草案。§9.2–§9.5 已通过策略编译和设备实测否决
-> `/data` 载荷方案及其绕行路径；以下设计、步骤和热替换验收项都不是当前可执行计划。
-> 当前更新方式见 §9.5。§7 中的未验证事项也已按实测结果更新。
+> 本节记录版本槽、launcher 和 SELinux 的设计。早期“直接让 coredomain 从
+> `/data` 执行载荷”的实现已被 §9.2–§9.4 的 neverallow 实测否决；当前 API
+> 仍采用版本槽的安全写入和原子指针，但必须先把 launcher/domain 接入 ROM。
+> HTTP 契约见 [`api/01-http.md`](api/01-http.md) 的“服务更新”一节。
 
 ### 5.1 先看物理限制（决定哪些做法根本不可行）
 
@@ -189,7 +193,7 @@ init 已创建的 socket。`docs/02-architecture.md` 对此只说明了历史兼
 | 重编 + 重打包 ROM | 重启实例 | ✅ | 正规发布通道（慢） |
 | 离线注入 `system.img` | 重启实例 | ✅ | 但 `PRODUCT_USE_DYNAMIC_PARTITIONS` + verity：guest 里 `/vendor`=`dm-3`、`/product`=`dm-2`、`ro.boot.veritymode=enforcing` `[实测]` → 要重做超级分区与 AVB，**不是捷径** |
 | Magisk 模块 | 重启 | ✅ | 该 guest **未安装**：`/data/adb/` 是空目录、无 `magisk` 二进制 `[实测]`；要装得先 patch ramdisk |
-| **`/data` 放载荷 + init 只跑壳** | 不支持 | 不可用 | **已否决**：AOSP neverallow 和 `/data` 类型约束阻断，见 §9.2–§9.4 |
+| **`/data` 放载荷 + init 只跑壳** | 需配套策略 | 版本槽可跨重启 | 当前实现：launcher 校验槽文件后复制到 sealed memfd，再由 `execveat` 启动 |
 
 **另外**：init 不重读 rc（§3）→ `.rc` 天然"一次定稿"。这正是"壳"必须存在的原因。
 
@@ -198,35 +202,37 @@ init 已创建的 socket。`docs/02-architecture.md` 对此只说明了历史兼
 ```
 /system/bin/remote-control-launch          ← 壳：几十行 C，几乎永不改（正规部分）
 /system/etc/init/remote-control.rc         ← 一次定稿，指向壳
-        │  读指针 → 校验 sha256 → exec
+        │  读指针 → 校验 sha256 → sealed memfd → execveat
         ▼
 /data/misc/remote-control/
-    ├── current -> releases/<sha256>/      ← 原子切换的指针
-    ├── releases/<sha256>/remote-control   ← 真正在跑的二进制（可随时替换）
+    ├── current -> releases/<sha256>/remote-control  ← 原子切换的指针
+    ├── releases/<sha256>/remote-control              ← 已校验的版本槽文件
     └── remote-control.conf                ← 配置：服务自己持久化（见 4.4）
 ```
 
 **为什么这样就能"启动后更新替换"**：
 
-- 换载荷 = push 新二进制 + 切指针 + `setprop ctl.restart remote-control` → **秒级生效，不重启、不重编镜像**。
-- `exec` 不改变 PID → init 的进程跟踪照旧，**保活逻辑完全不受影响**。
+- 换载荷 = 上传新二进制 + 调用 `apply` 切指针并请求服务重启 → **秒级生效，不重启设备、不重编镜像**。
+- launcher 保持 init 的服务监督关系；载荷在独立子进程中通过 sealed memfd 启动，启动失败可自动回退。
 - 跨重启保留（`/data` 持久）；回滚 = 指针切回去 + `ctl.restart`。
 
 ### 5.3 设计要点（每条都是会踩的坑）
 
-1. **替换运行中的二进制会 `ETXTBSY`** → 必须"写新文件 + `mv` 覆盖"（同分区 rename 原子），不能原地 `cp`。
-2. **sepolicy 要加执行权**：新类型 `remote_control_payload_exec`（`file_type, exec_type`）
-   + `file_contexts` 标 `/data/misc/remote-control/releases/[^/]+/remote-control`
-   + `allow remote_control <type>:file { execute execute_no_trans read open getattr }`。
-   用 `tools/integrate-sepolicy.sh --check` 编一次 sepolicy 就能暴露 neverallow 违反（脚本第 3 步就是干这个的）。
-   **万一被 neverallow 挡死，退路是 Magisk**（挂载覆盖到 `/system`，路径与标签都是原生正确的）。
-3. **`/data` 是 `nosuid,nodev`**（`[实测]` mount 输出），不影响 exec；但目录权限要够：
+1. **版本槽不可原地覆盖**：上传先写临时文件，完成 SHA-256 校验后再原子 `rename` 到版本目录。
+2. **sepolicy 要接入启动壳和 memfd 转换**：固定入口使用独立的
+   `remote_control_loader` 域；载荷槽只授予读取/校验权限，复制到带
+   `postinstall_file` 标签的 sealed memfd 后，通过 `domain_auto_trans` 进入
+   `remote_control` 域执行。运行 `tools/integrate-sepolicy.sh --check` 可同时检查
+   语法和 neverallow 约束。
+3. **`/data` 是 `nosuid,nodev`**（`[实测]` mount 输出），不影响读取和 memfd staging；但目录权限要够：
    服务用 `user shell` 时，`releases/` 各层需对 shell 可读可进（`0755`，或属主给 shell）。
 4. **版本必须可观测**：`--version` + `/api/v1/info` 带 `buildId` + sha256。
    不做必踩"推上去了，但跑的其实还是旧进程"——项目里 `integrate-aosp.sh` / `build-remote-control.sh`
    的源码新鲜度检查就是为同一个坑加的。
 5. **坏版本要能自救**：新载荷起不来时，init 会按 `restart_period` 一直拉它（§3 的熔断不适用），服务会彻底失联。
-   所以**壳要做探活回退**：起新版后 N 秒内没拿到就绪信号（载荷写 `ready-<sha>` 或壳探 socket）→ 指针切回上一版 → 自己 exit 让 init 拉起回退版本。宿主始终有 `adb root` 作最终兜底。
+   launcher 会等待载荷写入内容等于目标 SHA-256 的 ready 文件；超时或提前退出时按
+   `current -> previous -> last-good -> 镜像原版` 的顺序回退，再退出让 init 拉起回退版本。
+   因此连续升级失败时，至少仍会回到上一份已运行的载荷；所有槽版本都不可用时才使用镜像原版。
 6. **更新源绝不能放 `/sdcard`**：上位应用能写共享存储，把"可执行载荷"和它放一起 = 把 root 执行权交给任何能写 `/sdcard` 的东西。必须放 `/data/misc/remote-control/`（`0700`）。
 7. **配置跟着搬**：见 §4.4；上位应用改用 `POST /config`。
 
@@ -240,10 +246,10 @@ init 已创建的 socket。`docs/02-architecture.md` 对此只说明了历史兼
 
 ---
 
-## 6. 原计划的实施步骤与验收（已作废）
+## 6. API 热更新的实施与验收
 
-> §6.1 的步骤以已否决的壳与载荷方案为前提，不可照搬；§6.2 的 1–4 项记录 init
-> 自启、保活和重启验收，5–6 项热替换验收在当前 ROM 不可用。
+> 下面保留 ROM 接入步骤，并增加设备内 API 验收。旧的 `rc-update.sh` 命令仍可用于
+> 宿主侧调试；设备内发布优先使用 HTTP API。
 
 ### 6.1 步骤（命令级）
 
@@ -251,12 +257,12 @@ init 已创建的 socket。`docs/02-architecture.md` 对此只说明了历史兼
 # 1 修 §4 的阻塞项（4.1 域名、4.2 脚本路径、4.3 产品清单、4.4 UID/路径、4.5 socket 权限）
 # 2 .rc 定稿：指向壳；--config 指到 /data/misc/remote-control/remote-control.conf；以后不再动 rc
 # 3 加壳：daemon/launcher.cpp（进同一个 Android.bp）+ sepolicy 新类型 + file_contexts
-# 4 新增 tools/rc-update.sh：
-#     push     校验 sha256 → 写 releases/<sha>/ → 不动指针（安全）
-#     switch   原子切指针 + setprop ctl.restart remote-control
-#     rollback 指针切上一版 + ctl.restart
-#     list     列出所有版本 + 当前指针
-#     verify   比对 /api/v1/info 的 buildId/sha256 与本地二进制是否一致
+# 4 确认 API 热更新端点：
+#     POST /api/v1/update          上传并校验 ELF，保持 current 不变
+#     POST /api/v1/update/apply    原子切 current，并请求服务重启
+#     POST /api/v1/update/rollback 按 previous → last-good → 镜像原版回退，
+#                                  并请求服务重启
+#     GET  /api/v1/update           查看 running/buildId/current/staged/launcherManaged
 bash tools/integrate-sepolicy.sh
 cd dev/04-android-rom
 ./scripts/apply-overlay.sh
@@ -274,8 +280,8 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 | 2 | `logcat -d \| grep 'avc: denied' \| grep remote_control` | 空 |
 | 3 | `kill -9 $(pidof remote-control)` | ≤5 秒自己回来（保活） |
 | 4 | `POST /power {"action":"reboot"}` | 重启后**啥都不用做**，控制台直接可达（本次要修的病） |
-| 5 | `tools/rc-update.sh switch` | 原计划：5 秒内 `/api/v1/info` 的 buildId 变化；当前 ROM 不支持 |
-| 6 | `tools/rc-update.sh rollback` | 原计划：回到上一版；当前 ROM 不支持 |
+| 5 | `POST /api/v1/update` + `/update/apply` | 上传返回 `201`；接着轮询 `/api/v1/update`，5 秒内 `running/buildId` 变为目标 SHA-256 |
+| 6 | `POST /api/v1/update/rollback` | 返回 `202`；轮询 `/api/v1/update` 确认回到 `previous` 或 fallback 的 `last-good` |
 
 ---
 
@@ -285,7 +291,7 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 
 **原方案曾考虑的风险与退路（保留作历史记录）**
 
-- 坏载荷导致崩溃循环 → 原计划由壳探活回退（§5.3-5）；该壳未作为当前更新通道启用。
+- 坏载荷导致崩溃循环 → 当前 launcher 探活会按 `current -> previous -> last-good -> 镜像原版` 自动回退。
 - **壳与 `.rc` 本身仍只能靠重编 ROM 更新**（init 不重读 rc）。所以设计上要把"会变的东西"全部挤进载荷，
   让壳薄到几乎不需要动 —— 这是整套方案能长期成立的前提。
 - 手工部署的二进制与镜像里的可能**不同源**（改名重构期间就出现过：guest 里跑的是名字不同的旧构建）；
@@ -313,8 +319,9 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 
 ## 9. 实施记录（2026-09-29）
 
-> 本次按本计划实施后的实际结果。**§5 的核心机制实测被 AOSP 策略挡死**，
-> 下面把它逐条记下来，避免下次再花一遍时间。
+> 本次按本计划实施后的实际结果。早期“无配套策略、直接 exec `/data` 载荷”的
+> 核心机制被 AOSP 策略挡死；下面把它逐条记下来，并说明 API 热更新需要补齐的
+> launcher/domain 接入条件，避免把上传成功误认为版本已经运行。
 
 ### 9.1 §3 / §4 已落地
 
@@ -357,9 +364,9 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
    （`allow init x:{ sock_file create unlink };` —— `X:{ }` 是**类**的列表，
    权限不能写进去）。这份策略从来没被编译过，所以一直没人发现。
 
-### 9.2 §5 热替换通道：**实测被挡死**（§7 未验证项 2 的答案）
+### 9.2 旧的直接 `/data` 执行方案：**实测被挡死**（§7 未验证项 2 的答案）
 
-计划 §5 的机制是"壳 exec `/data` 里的载荷"。实测**三条 neverallow 互相咬住**，
+早期计划的机制是"壳 exec `/data` 里的载荷"。实测**三条 neverallow 互相咬住**，
 每条都单独试过：
 
 | # | 规则 | 挡住了什么 |
@@ -388,10 +395,9 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 | **A. 壳跑 `shell` 域 + 服务放弃 `coredomain`** | 当时推演认为可绕过 ②、③。代价：常驻服务跑在 **shell 域**（adb 调试域，权限很宽）；服务不再是 coredomain（SELinux 语义上"假装不是平台核心"，Treble 的分层保证就没了）。该推演后来被 §9.4 的 neverallow 级联实测否决。 |
 | **B. 载荷放 `/system`，用 `adb disable-verity` + `remount` 换** | 载荷使用 `system_file_type` 本身符合执行策略；当时预期可用 `disable-verity` + `remount` 更新。§9.4 的设备实测确认当前 ROM 无法这样改写分区。 |
 
-以上是后续实测前的判断。§9.4 确认 A、B 两条路都不适用于当前 ROM。
-`.rc` 因此直接指向 `/system/bin/remote-control`，自启与保活仍按 §3/§4 实施。
-`daemon/launcher.cpp`（壳）与 `tools/rc-update.sh`（推送/切换/回滚）虽保留在树中，
-但不能作为当前 ROM 的可用更新功能。
+以上是后续实测前的判断。§9.4 确认 A、B 两条路都不适用于未配套策略的当前 ROM。
+`daemon/launcher.cpp`（壳）与 `tools/rc-update.sh`（推送/切换/回滚）保留在树中，
+HTTP API 使用同一版本槽协议；接入新的 launcher/domain 后即可作为设备内更新通道。
 
 ### 9.4 两条路都实测过了：都不通
 
@@ -421,21 +427,43 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 要真走 A，得把载荷槽挪出 `/data`（否则躲不开 core_data_file_type），
 那又回到方案 B 的死路。**所以 A 不是"多花点工夫"，是此路不通。**
 
-### 9.5 最终结论
+### 9.5 当前结论与 API 更新通道
 
-热替换通道的**前提**（能执行 /data 里的载荷）在这个 AOSP 版本上对
-"非 appdomain 的常驻服务"不成立。三条 neverallow 互相咬住（§9.2），
-两条绕开的路又各自被动态分区和 neverallow 级联堵死（§9.4）。
+上面的实测结论仍适用于**直接从 `/data` 执行载荷、但没有配套 launcher/domain
+设计**的旧方案：三条 neverallow 互相咬住（§9.2），把服务改成普通 shell 域或
+把文件写进动态 `/system` 也不能绕开它们（§9.4）。这不是 HTTP API 本身的限制，
+而是 ROM 启动链和 SELinux 类型必须一起落地。
 
-**因此本次不做热替换**，更新走既有的正规通道：
+当前更新 API 的安全流程是：
+
+1. `POST /api/v1/update` 上传原始 ELF。服务端重新计算 SHA-256、检查 ELF magic，
+   用临时文件 + `fsync` + 原子提交写入 `releases/<sha256>/remote-control`，只暂存，
+   不改变当前运行版本。
+2. `POST /api/v1/update/apply` 提交一个已暂存的 SHA-256。服务端再次校验文件，
+   原子写入 `current` 指针，并通过 restart hook 请求 init/supervisor 重启。
+3. `GET /api/v1/update` 轮询 `running`/`buildId`；确认它等于目标 SHA-256 后，
+   才把更新视为成功。
+4. 新版本无法启动或验证失败时，启动壳按
+   `current -> previous -> last-good -> 镜像原版` 依次尝试；
+   `POST /api/v1/update/rollback` 也优先切回 `previous`，没有可用上一版时
+   才使用 `last-good` 或镜像原版，然后重启。
+
+要使第 2 步真正执行新载荷，ROM 需要同时满足：
+
+- `remote-control.rc` 的 service 命令指向 `/system/bin/remote-control-launch`；
+- launcher 与载荷的 SELinux domain、`exec_type`、`file_contexts` 和允许规则通过
+  当前 AOSP 的 `neverallow` 检查；
+- init 在 `post-fs-data` 创建 `/data/misc/remote-control/releases`，并授予 launcher
+  与服务运行 UID 读取、校验和维护版本槽的权限；版本槽本身不作为 SELinux entrypoint。
+
+如果 ROM 还保持旧的 `/system/bin/remote-control` service 定义，更新 API 仍会安全
+完成上传和校验，但 apply 后只能继续运行镜像中的旧版本。此时更新走既有的正规通道：
 
     cd dev/04-android-rom
     ./scripts/build-rom.sh && ./scripts/package-rom.sh && ./scripts/emulator.sh restart <实例>
 
-全流程约 3 分钟，改动被编进镜像、跨重启、可回滚（git）。它比"秒级热替换"慢，
-但**没有拿安全换** —— 服务保持专属 SELinux 域（计划 §2 的第 ③ 条腿），
-这才是这套东西的正规形态。
+全流程约 3 分钟，改动被编进镜像、跨重启、可回滚（git）。
 
-`daemon/launcher.cpp` 与 `tools/rc-update.sh` 保留在树里：若将来上
-Magisk（`/data/adb/modules` 是 appdomain 之外的另一条路）或换 AOSP 版本，
-它们可以直接接上；在那之前不要把它们当可用功能。
+`daemon/launcher.cpp` 与 `tools/rc-update.sh` 仍用于 ROM/宿主侧部署和排障；HTTP API
+是设备内的同一套版本槽协议。发布前请先以 `GET /api/v1/update` 验证运行版本，
+不要只根据上传请求的 HTTP `201` 判定替换已经生效。

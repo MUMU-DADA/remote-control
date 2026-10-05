@@ -157,7 +157,7 @@ enum class Cmd : uint32_t {
                          // → {"lines":[{"seq","level","text"}]}
     Shutdown      = 26,  // 优雅退出（清理 socket 文件、关闭 uinput 设备）
                          // → {"ok":true}
-    Restart       = 27,  // 退出并由 init 重新拉起（需要 remote-control.rc 的 oneshot/restart）
+    Restart       = 27,  // 退出并由 init 按 remote-control.rc 的 restart_period 拉起
                          // → {"ok":true}
 };
 

@@ -127,6 +127,18 @@ log "同步设备树 → ${DEVICE_DST#"$PROJECT_ROOT"/}（PRODUCT=$PRODUCT，含
 mkdir -p "$DEVICE_DST"
 cp -a "$DEVICE_SRC"/. "$DEVICE_DST"/
 
+# 2b) daemon 源码也有项目真源。AOSP/frameworks/native/cmds/remote-control
+#    位于被 git 忽略的构建树中，设备树同步不会覆盖它；热更新相关改动
+#    必须在构建前同步，否则会编译到旧的 REST/HTTP 实现。
+DAEMON_SRC="$PROJECT_ROOT/dev/02-native-daemon/daemon"
+DAEMON_DST="$AOSP_DIR/frameworks/native/cmds/remote-control/daemon"
+for rel in http_server.cpp http_server.h launcher.cpp main.cpp memfd_util.h protocol.h \
+           remote-control.rc rest_api.cpp rest_api.h sha256.cpp; do
+    [ -f "$DAEMON_SRC/$rel" ] || die "daemon 源文件不存在：$DAEMON_SRC/$rel"
+    cp -a "$DAEMON_SRC/$rel" "$DAEMON_DST/$rel"
+done
+log "同步 daemon 源码 → ${DAEMON_DST#"$PROJECT_ROOT"/}"
+
 if [ "$HAS_BRIDGE" = 1 ]; then
     # 3) 同步载荷
     BRIDGE_DST="$DEVICE_DST/$PRODUCT_NAME/bridge"
