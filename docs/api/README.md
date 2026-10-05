@@ -36,10 +36,16 @@ HTTP/JSON 和 Unix socket 的设备操作、查询命令共享 `Dispatcher`；HT
 
 ## 5 分钟上手
 
+正式实例默认开启鉴权。先按 [04-config.md](04-config.md) 取得令牌，并在下面的 API 请求中带上它：
+
+```bash
+TOKEN='<remote-control.conf 中的 token>'
+```
+
 ### 1. 确认服务在跑
 
 ```bash
-curl http://<设备IP>:8088/api/v1/describe
+curl -H "Authorization: Bearer $TOKEN" http://<设备IP>:8088/api/v1/describe
 ```
 
 返回 33 条命令的清单、各自的可用性，以及整体 `capabilities`。
@@ -48,7 +54,8 @@ curl http://<设备IP>:8088/api/v1/describe
 ### 2. 截图
 
 ```bash
-curl -o screen.png http://<设备IP>:8088/api/v1/capture
+curl -H "Authorization: Bearer $TOKEN" -o screen.png \
+     http://<设备IP>:8088/api/v1/capture
 ```
 
 默认返回 **PNG**（单次截图不在乎体积，要无损）。
@@ -60,6 +67,7 @@ curl -o screen.png http://<设备IP>:8088/api/v1/capture
 
 ```bash
 curl -X POST http://<设备IP>:8088/api/v1/tap \
+     -H "Authorization: Bearer $TOKEN" \
      -H 'Content-Type: application/json' \
      -d '{"x":540,"y":1200}'
 ```
@@ -72,7 +80,7 @@ curl -X POST http://<设备IP>:8088/api/v1/tap \
 ### 5. 看能调什么
 
 ```bash
-curl http://<设备IP>:8088/api/v1/params
+curl -H "Authorization: Bearer $TOKEN" http://<设备IP>:8088/api/v1/params
 ```
 
 画面流的画质、帧率、停检开关，以及运行时能通过 WebSocket 改哪些。
@@ -152,18 +160,13 @@ curl -H "Authorization: Bearer <令牌>" http://host:8088/api/v1/config
 
 ## 支持的 Android 版本
 
-**Android 11（API 30）及以上。** 这是实测出来的硬下限：
+**产品目标和当前设备运行验证是 Android 12（API 31）。** NDK 构建脚本默认也用 API 31；API 26 的编译已通过，但没有在 Android 8 设备上运行验证，不能据此承诺 Android 8 运行支持：
 
 ```bash
-API=30 bash tools/build-ndk.sh   # ✓
-API=29 bash tools/build-ndk.sh   # ✗ memfd_create / AndroidBitmap_compress
+API=26 ABI=arm64-v8a bash tools/build-ndk.sh   # ✓ 编译验证；不代表 Android 8 运行验证
 ```
 
-两个 API 都是 `__INTRODUCED_IN(30)`，API 28/26 报同样两条。
-
-**运行时下限已经压到 Android 8**：`memfd_create` 换成裸系统调用、
-`AndroidBitmap_compress` 改成 `dlopen` 运行时探测、内置了 libwebp
-源码。详见 [`docs/03-reference.md`](../03-reference.md) 的「最低支持的 Android 版本」。
+旧版曾因 API 30 才引入的 bionic 符号而无法用更低 API 编译；兼容改造已移除这些编译期依赖。构建与运行验证范围见 [`docs/03-reference.md`](../03-reference.md) 的「Android 版本与验证范围」。
 
 > 这与**协议版本**是两件事，别混：协议 v7 说的是接口形态，
 > API 级别说的是能跑在哪些设备上。
@@ -175,7 +178,8 @@ API=29 bash tools/build-ndk.sh   # ✗ memfd_create / AndroidBitmap_compress
 当前协议 **v7**，33 条命令。每条命令带 `since` 字段标明它从哪个版本开始存在：
 
 ```bash
-curl -s http://host:8088/api/v1/describe | jq '.protocolVersion, (.commands|length)'
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://host:8088/api/v1/describe | jq '.protocolVersion, (.commands|length)'
 ```
 
 | 版本 | 新增 |

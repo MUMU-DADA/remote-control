@@ -295,7 +295,7 @@ ws.send(JSON.stringify({t:'up',   x:110, y:210, id:0}));
 |---|---|
 | `t` | `down` / `move` / `up` / `cancel` |
 | `x` `y` | 坐标空间见 [01-http.md](01-http.md) 的「坐标」—— 是 `/info` 的 `touchWidth/Height`，**不是**屏幕像素 |
-| `id` | 触控槽位，0-9。多点触控时区分手指，默认 0 |
+| `id` | 非负 int32 指针 ID，不是硬件槽位号；默认 0。同一触点的 `down` / `move` / `up` / `cancel` 使用相同 ID。并发触点数由注入后端决定：uinput 最多 10 个，`virtual_touchpad` 最多 2 个；后者按 `id % 2` 映射槽位，因此同时活动的 ID 要有不同奇偶性 |
 | `pressure` | 可选，0.0-1.0 |
 | `ms` | 可选，手势时长 |
 
@@ -366,8 +366,8 @@ ws://host:8088/api/v1/logstream?since=0
 
 ```json
 {"t":"lines", "dropped":0, "lines":[
-  {"seq":1200,"ms":496573,"level":1,"tag":"","text":"截图后端就绪…"},
-  {"seq":1201,"ms":496580,"level":3,"tag":"","text":"注入失败: …"}
+  {"seq":1200,"ms":496573,"time":"09-28 08:28:29","level":1,"tag":"","text":"截图后端就绪…"},
+  {"seq":1201,"ms":496580,"time":"09-28 08:28:29","level":3,"tag":"","text":"注入失败: …"}
 ]}
 ```
 
@@ -375,9 +375,10 @@ ws://host:8088/api/v1/logstream?since=0
 |---|---|
 | `seq` | 单调序号。客户端记下它，断线重连时用 `?since=<seq>` 续上 |
 | `ms` | 单调时钟（毫秒） |
+| `time` | 本地时区墙上时间，格式 `MM-DD HH:MM:SS` |
 | `level` | `0`=Debug `1`=Info `2`=Warn `3`=Error |
 | `tag` | 一般空 |
-| `text` | 日志正文，**不含时间前缀**（时间在落盘文件里有，接口里用 `ms`） |
+| `text` | 日志正文，**不含时间前缀**；用 `ms` 稳定排序，用 `time` 查看墙上时间 |
 
 ### 客户端命令
 

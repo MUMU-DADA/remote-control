@@ -36,7 +36,7 @@
 | G5 arm32 下放（备选） | 📄 预案见 [`docs/06-arm32-fallback.md`](docs/06-arm32-fallback.md) |
 | **G6 可交付的 release 包** | ✅ `./scripts/release.sh` 默认产出 Linux + Windows 两个 zip；`--platform all` 可产出四个宿主/架构包。每包包含完整无头运行环境 + 虚拟机镜像 + 模板；默认两包使用**同一 build id** 的模拟器；Linux 那份已解压**真启动验收**（见 [`docs/15-release-packaging.md`](docs/15-release-packaging.md)） |
 | **G7 arm64 原生 ROM 产品线** | ✅ **已实测**：`PRODUCT=arm64` 全量构建 `EXIT=0`，产物全是 `ELF 64-bit ARM aarch64`，`libndk_translation*` = 0，`abilist64=arm64-v8a`（没有翻译层 —— 它是给 Apple Silicon 准备的） |
-| **G8 macOS 宿主支持** | 🟡 **代码完成、离线验证通过，缺真机**：`macos/` 备料脚本 + `packaging/bin/darwin/` 五个包内脚本 + `release.sh` 的 darwin 平台；`tools/test-macos-port.sh` **110 项全绿**；darwin 包已在 Linux 上真铺出来。**真 Mac 上的启动/开机/自启/签名未验**（见 [`docs/13-macos-port.md`](docs/13-macos-port.md) §8） |
+| **G8 macOS 宿主支持** | 🟡 **代码完成、离线验证通过，缺真机**：`macos/` 备料脚本 + `packaging/bin/darwin/` 五个包内脚本 + `release.sh` 的 darwin 平台；`tools/test-macos-port.sh` **121 项全绿**（2026-10-05）；darwin 包已在 Linux 上真铺出来。**真 Mac 上的启动/开机/自启/签名未验**（见 [`docs/13-macos-port.md`](docs/13-macos-port.md) §8） |
 
 ```bash
 # 一次性复现（构建→自检→打包→启动验收）
@@ -116,7 +116,7 @@ dev/04-android-rom/
 │   ├── test-windows-emulator.sh    ← 在 Linux 上用 pwsh 实跑 windows\emulator.ps1（55 项）
 │   ├── test-release.sh             ← release 打包体检（假 ROM 端到端 + 全部脚本语法，68 项）
 │   ├── test-script-safety.sh       ← 脚本命令边界、覆盖保护与并发数据目录检查（11 项）
-│   ├── test-macos-port.sh          ← macOS 移植与 darwin release 清单回归（110 项）
+│   ├── test-macos-port.sh          ← macOS 移植与 darwin release 清单回归（当前 121 项）
 │   ├── net-bridge.sh               ← 桥接模式：建 br0 把上行网卡桥进去（带自动回滚）
 │   └── net-bridge-ifup.sh          ← 模拟器拉起 TAP 时的回调，把它挂进桥
 ├── windows/                        ← Windows 侧（同一份镜像）
