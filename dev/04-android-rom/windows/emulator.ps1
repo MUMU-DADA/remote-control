@@ -198,6 +198,101 @@ function Get-ErrFile { param([string]$N) Join-Path $script:RunDir "emulator-$(Ge
 function Get-Serial  { param([string]$N) "emulator-$(Get-InstancePort $N)" }
 
 # ---------------------------------------------------------------------------
+# 模拟器主目录（ANDROID_EMULATOR_HOME / %USERPROFILE%\.android）
+#
+# ⚠️ 模拟器**不会**自己建这个目录，而它要在这里写 feature flags 的锁文件
+#    （emu-last-feature-flags.protobuf.lock）。目录不存在时 CreateFile 返回
+#    Win32 error 3（ERROR_PATH_NOT_FOUND），而模拟器**不退出**：它只是无限重试、
+#    无限刷同一行 ERROR，看起来就是"服务一直不就绪"。2026-10-05 实测踩到过。
+#    （与 packaging/bin/windows/common.ps1 的同名函数保持同一套语义。）
+# ---------------------------------------------------------------------------
+function Get-EmulatorHome {
+    if ($env:ANDROID_EMULATOR_HOME) { return $env:ANDROID_EMULATOR_HOME }
+    if ($env:ANDROID_PREFS_ROOT)     { return (Join-Path $env:ANDROID_PREFS_ROOT ".android") }
+    if ($env:USERPROFILE)            { return (Join-Path $env:USERPROFILE ".android") }
+    if ($env:HOME)                   { return (Join-Path $env:HOME ".android") }
+    return ""
+}
+
+function Assert-EmulatorHome {
+    $emuHome = Get-EmulatorHome
+    $hint = "    也可以换一个目录：`$env:ANDROID_EMULATOR_HOME = 'D:\emu-home'"
+    if (-not $emuHome) { Die "定位不到模拟器主目录（USERPROFILE / HOME 都没设）`n$hint" }
+    if (-not (Test-Path -LiteralPath $emuHome)) {
+        New-Item -ItemType Directory -Force -Path $emuHome -ErrorAction SilentlyContinue | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $emuHome)) {
+        Die "模拟器主目录不存在、也建不出来：$emuHome`n    这时模拟器只会报 'Unexpected error while creating: ...lock (error: 3)' 并无限重试。`n    手工建一个空目录后重试： New-Item -ItemType Directory -Force '$emuHome'`n$hint"
+    }
+    # ⚠️ 变量别叫 $home：PowerShell 变量名不区分大小写，$home 就是只读的自动变量 $HOME
+    $probe = Join-Path $emuHome (".autosnap-writetest-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $writable = $true
+    try { Set-Content -LiteralPath $probe -Value "ok" -ErrorAction Stop } catch { $writable = $false }
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    if (-not $writable) {
+        Die "模拟器主目录不可写：$emuHome`n    常见原因：杀软 /「受控文件夹访问」拦截、目录属主是别的账号、或它是指向已失效目标的 junction/符号链接。`n$hint"
+    }
+    return $emuHome
+}
+
+# ---------------------------------------------------------------------------
+# 模拟器日志：致命错误识别 / 最后一条 ERROR
+#
+# 有一类错误模拟器**不退出、只无限重试**（典型：主目录不在时的 error: 3）。
+# 等待循环里每轮扫一次日志尾部，命中就立刻失败并翻译成人话。
+# ---------------------------------------------------------------------------
+function Get-EmuLogFatal {
+    param([string]$LogFile)
+    if (-not $LogFile -or -not (Test-Path -LiteralPath $LogFile)) { return "" }
+    $tail = @(Get-Content -LiteralPath $LogFile -Tail 40 -ErrorAction SilentlyContinue)
+    if ($tail.Count -eq 0) { return "" }
+    $text = $tail -join "`n"
+
+    if ($text -match 'Unexpected error while creating:\s*(?<p>.+?)\s*\(error:\s*(?<e>\d+)\)') {
+        $path = $Matches['p']
+        $code = [int]$Matches['e']
+        $why = switch ($code) {
+            3       { "路径不存在（ERROR_PATH_NOT_FOUND）：多半是模拟器主目录 $(Get-EmulatorHome) 不在，或它指向了已失效的 junction/符号链接" }
+            5       { "拒绝访问（ERROR_ACCESS_DENIED）：目录权限、杀软或「受控文件夹访问」拦截" }
+            32      { "文件被占用（ERROR_SHARING_VIOLATION）：这个实例可能已经有另一个模拟器进程在跑" }
+            default { "Win32 error $code" }
+        }
+        return "模拟器创建文件失败：$path`n    原因：$why`n    这类错误模拟器不会退出，只会无限重试刷日志，所以这里直接判死。"
+    }
+    if ($text -match 'emulation currently requires hardware acceleration' -or
+        $text -match 'Android Emulator hypervisor driver is not installed') {
+        return "没有可用的硬件加速（WHPX / AEHD 都没生效）`n    修法一：启用或关闭 Windows 功能 → 勾选「Windows 虚拟机监控程序平台」→ 重启；`n    修法二：关掉 Hyper-V 后装 Android Emulator hypervisor driver（AEHD）。详见 windows\README.md"
+    }
+    if ($text -match 'WHPX is either not available or not installed') {
+        return "WHPX 没启用：启用或关闭 Windows 功能 → 勾选「Windows 虚拟机监控程序平台」→ 重启"
+    }
+    return ""
+}
+
+function Get-EmuLastError {
+    param([string]$LogFile, [int]$Tail = 200)
+    if (-not $LogFile -or -not (Test-Path -LiteralPath $LogFile)) { return "" }
+    $hits = @(Get-Content -LiteralPath $LogFile -Tail $Tail -ErrorAction SilentlyContinue |
+              Select-String -Pattern 'ERROR\s*\|' -ErrorAction SilentlyContinue)
+    if ($hits.Count -eq 0) { return "" }
+    return $hits[$hits.Count - 1].Line.Trim()
+}
+
+# 等一个条件成立；同时盯住"日志里出现致命错误"和"进程已经没了"，尽早失败而不是干等到超时。
+function Wait-EmulatorCondition {
+    param([string]$Name, [string]$LogFile, [scriptblock]$Test, [int]$TimeoutSec = 60, [int]$PollSec = 2)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($true) {
+        $fatal = Get-EmuLogFatal $LogFile
+        if ($fatal) { return [pscustomobject]@{ State = "fatal"; Reason = $fatal } }
+        if (& $Test) { return [pscustomobject]@{ State = "ready"; Reason = "" } }
+        if (-not (Test-InstanceRunning $Name)) { return [pscustomobject]@{ State = "exited"; Reason = "" } }
+        if ((Get-Date) -ge $deadline) { return [pscustomobject]@{ State = "timeout"; Reason = "" } }
+        Start-Sleep -Seconds $PollSec
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 找某端口上的模拟器进程
 #
 # ⚠️ 不能只按命令行匹配 —— 那样**会把调用者自己匹配上**（本脚本的命令行里
@@ -388,6 +483,9 @@ function Invoke-Start {
     if (-not (Test-Instance $N)) { Write-Log "实例 '$N' 不存在，先创建"; Invoke-Create $N }
     if (Test-InstanceRunning $N) { Write-Warn "实例 '$N' 已经在跑（端口 $(Get-InstancePort $N)）"; return }
 
+    # 模拟器不会自己建主目录，缺了它会无限重试刷日志（见本文件开头 Get-EmulatorHome 的说明）
+    [void](Assert-EmulatorHome)
+
     $emu = Find-Emulator
     Resolve-Hw
     $p = Get-InstancePort $N
@@ -411,8 +509,15 @@ function Invoke-Start {
         if ($g -ne $script:GpuMode) { Write-Warn "上一档（$script:GpuMode）没起来，退到 $g" }
         Start-Emu $N $emu $g
         Write-Host "    PID $($script:EmuProc.Id)"
-        if (Wait-ConsoleReady $p 60) { $started = $true; $used = $g; break }
+        $wait = Wait-EmulatorCondition -Name $N -LogFile (Get-LogFile $N) -Test { Test-ConsoleReady $p } -TimeoutSec 60
+        if ($wait.State -eq "ready") { $started = $true; $used = $g; break }
+        if ($wait.State -eq "fatal") {
+            # 这类错误换 GPU 档位也好不了，别浪费时间再试一遍
+            Stop-Process -Id $script:EmuProc.Id -Force -ErrorAction SilentlyContinue
+            Die "模拟器起不来（-gpu $g）：`n    $($wait.Reason)`n    日志：$(Get-LogFile $N)"
+        }
         $tail = (Get-Content (Get-ErrFile $N) -Tail 2 -ErrorAction SilentlyContinue) -join " "
+        if (-not $tail) { $tail = Get-EmuLastError (Get-LogFile $N) }
         Write-Warn "没起来（$tail）"
         Stop-Process -Id $script:EmuProc.Id -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
@@ -426,11 +531,11 @@ function Invoke-Start {
     if ($NoWait) { Write-Host "后续： .\emulator.ps1 status $N"; return }
 
     Write-Log "等 remote-control 服务就绪（WHPX 下通常几十秒）"
-    $deadline = (Get-Date).AddSeconds(300)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-ServiceReady $p) { Write-Ok "开机完成"; return }
-        if (-not (Test-InstanceRunning $N)) { break }
-        Start-Sleep -Seconds 2
+    $svcWait = Wait-EmulatorCondition -Name $N -LogFile (Get-LogFile $N) -Test { Test-ServiceReady $p } -TimeoutSec 300
+    if ($svcWait.State -eq "ready") { Write-Ok "开机完成"; return }
+    if ($svcWait.State -eq "fatal") {
+        Stop-Process -Id $script:EmuProc.Id -Force -ErrorAction SilentlyContinue
+        Die "模拟器起不来：`n    $($svcWait.Reason)`n    日志：$(Get-LogFile $N)"
     }
     Die "等服务超时（300s）—— 看 $(Get-ErrFile $N)"
 }

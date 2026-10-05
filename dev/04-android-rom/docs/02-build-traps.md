@@ -263,3 +263,68 @@ bash **不是**一次读完整个脚本，它边执行边按字节偏移继续�
 
 **适用范围**：任何"边执行边读自身"的脚本语言（sh/bash 尤其明显）。
 Python/Perl 这类先整体解析的不受影响。
+
+---
+
+## 10. ⭐ Windows 侧启动脚本的两个坑：`.android` 主目录与 StrictMode 下的空值属性
+
+2026-10-05 在 Windows 真机上第一次跑 `start-headless.ps1` 连续踩到这两个，
+共同特征是**"看起来像卡住/环境问题，其实是脚本自己没兜住"**。
+
+### 坑 10.1 模拟器主目录不存在 → `error: 3` 无限重试（不是崩溃，是刷屏）
+
+**现象**：
+
+```
+WARNING      | Please update the emulator to one that supports the feature(s): Vulkan
+ERROR        | Unexpected error while creating: C:\Users\PC\.android\emu-last-feature-flags.protobuf.lock (error: 3)
+（同一行无限重复、日志文件持续变大；进程一直活着，status.ps1 只说"服务未就绪"）
+```
+
+**真因**：模拟器要在 `%USERPROFILE%\.android` 写 feature flags 的锁文件，
+而它**不会自己创建这个目录**。目录不存在时 `CreateFile` 返回 Win32
+**error 3 = ERROR_PATH_NOT_FOUND**；模拟器对此**不退出**，只在后台无限重试 ——
+于是表现为"进程在、服务永不就绪、日志无限涨"。
+（另两种会报 error 3 的情况：目录是指向已失效目标的 junction/符号链接；权限被拒则是 error 5。）
+
+**定案**：`Test-Path "$env:USERPROFILE\.android"` 为 False；建一个空目录后立刻正常启动（几十秒开机）。
+社区同款记录：[Cannot run android emulator - Unexpected error while creating: C (error: 3)](https://stackoverflow.com/questions/76835937/cannot-run-android-emulator-unexpected-error-while-creating-c-error-3)。
+
+**已做的加固**（`packaging/bin/windows/common.ps1`、`packaging/bin/windows/start-headless.ps1`、
+`packaging/bin/windows/status.ps1`，以及 `windows/emulator.ps1` / `windows/preflight.ps1`）：
+
+- `Assert-EmulatorHome`：启动前创建主目录并**写测试**；建不出来/不可写就直接给中文修法，
+  而不是放模拟器进去刷日志；
+- `Get-EmuLogFatal`：等待循环每轮扫一遍日志尾部，命中 `error: N`、
+  `emulation currently requires hardware acceleration` 这类"只会重试"的错误就**立刻停进程 + 翻译成人话**，
+  不再干等到 `-TimeoutSec`；
+- `status.ps1`：服务不就绪时打印**日志最后一条 ERROR + 诊断**，并显示模拟器主目录是否存在。
+
+### 坑 10.2 `(...).Line` + `Set-StrictMode -Version 2.0` = 脚本当场终止
+
+**现象**（服务其实已经就绪）：
+
+```
+==> 等服务就绪（WHPX 下通常几十秒）
+start-headless.ps1: 在此对象上找不到属性"Line"。请验证该属性是否存在。
+```
+
+**真因**：解析开机耗时那行原本写的是
+
+```powershell
+$bt = (Select-String -Path $logf -Pattern '(boot time|Boot completed in) \d+ ms' | Select-Object -Last 1).Line
+```
+
+日志里**没有**这一行时（自编 ROM 不一定打印），管道给的是 `$null`；
+而 `common.ps1` 里有 `Set-StrictMode -Version 2.0` —— **访问 `$null` 的属性会抛错**，
+加上 `$ErrorActionPreference = "Stop"`，整个脚本就此终止，收尾那几行（序列号 / 验证提示）再也不会执行。
+
+**规矩**：
+
+- `Select-String` / `Select-Object -First|Last` 的结果**先判空再取属性**（现统一走 `Get-EmuBootTimeLine`）；
+- 这两个 Windows 脚本里**不要**给变量起名 `$home`：PowerShell 变量名不区分大小写，
+  `$home` 就是只读自动变量 `$HOME`，赋值会报 `Cannot overwrite variable HOME`
+  （写这次补丁时被 `test-packaging-windows.py` 当场抓到）；
+- **测试用的 mock 日志必须包含"不友好"形态**（没有 boot 标记、带致命错误、带 `-accel off` 的
+  `may not work without hardware acceleration` 警告）。原来的 mock 只写一行
+  `Boot completed in 100 ms`，所以坑 10.2 一路漏到了真机。

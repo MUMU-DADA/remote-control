@@ -50,6 +50,8 @@ cd windows
 
 前置：OpenSSH 客户端（Win10 1809+ 自带）、≥80 GB 可用磁盘空间（快照或多实例建议 ≥100 GB）、≥8 GB 内存、
 **BIOS 里开启虚拟化**（WHPX 需要；若用 Hyper-V/WSL2 已开启则天然满足）。
+脚本会在启动前自动创建 `%USERPROFILE%\.android`（**模拟器自己不会建**，缺了它会无限重试刷日志，
+见 [`docs/02-build-traps.md`](../docs/02-build-traps.md) 坑 10.1）。
 
 ---
 
@@ -76,6 +78,8 @@ cd windows
 | 项 | 说明 |
 |---|---|
 | 虚拟化 | `-accel on` 走 WHPX；若报 `WHPX is not installed`，到「启用或关闭 Windows 功能」勾选 *Windows 虚拟机监控程序平台* |
+| 模拟器主目录 | 脚本启动前自动建 `%USERPROFILE%\.android`（可用 `$env:ANDROID_EMULATOR_HOME` 换位置）。**模拟器自己不建它**：缺了会报 `Unexpected error while creating: ...lock (error: 3)` 并且**不退出**、只无限重试刷日志 |
+| 起不来时 | 脚本盯日志：命中 `error: 3`、缺硬件加速这类"只会重试"的错误会**立刻停进程 + 给中文诊断**，不再等到超时；服务不就绪时 `.\bin\status.ps1` 会打印日志最后一条 ERROR |
 | 镜像 | 只需 `system.img / vendor.img / ramdisk.img / kernel-ranchu / encryptionkey.img / userdata.img / build.prop / advancedFeatures.ini / source.properties` + `system\build.prop` |
 | `system\build.prop` | 模拟器靠它判断 guest 架构；AOSP 产物里天然有（`out/.../system/build.prop`），scp 时**必须带上 system 子目录** |
 | `initrd` | 模拟器 `-initrd` 指向 `<sysdir>\initrd`；AOSP 产物里有，缺了就 `copy ramdisk.img initrd` |

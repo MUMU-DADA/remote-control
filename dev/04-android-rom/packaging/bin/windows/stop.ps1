@@ -20,9 +20,15 @@ param(
 )
 
 . (Join-Path $PSScriptRoot "common.ps1")
-if ([string]::IsNullOrWhiteSpace($Name)) { $Name = $script:DefaultName }
+if ([string]::IsNullOrWhiteSpace($Name)) {
+    if ($Port -gt 0) { $Name = Get-InstanceNameForPort $Port }
+    else { $Name = $script:DefaultName }
+}
 if ($Port -le 0) { $Port = Get-InstancePort $Name }
 if ($Port -le 0) { Die "实例 '$Name' 没登记过端口（.\bin\status.ps1 看有哪些）" }
+$owners = @(Get-InstanceNamesForPort $Port)
+if ($owners.Count -ne 1) { Die "端口 $Port 没有唯一的已登记实例；拒绝停止未登记或重复登记的进程" }
+if ($owners[0] -ne $Name) { Die "端口 $Port 属于实例 '$($owners[0])'，不是 '$Name'" }
 
 if (-not (Test-InstanceRunning $Port)) {
     Write-Warn "端口 $Port 上没有模拟器在跑（实例 '$Name'）"
