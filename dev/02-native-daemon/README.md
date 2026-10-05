@@ -30,12 +30,22 @@
 
 **设备侧功能冒烟检查**：`python3 tools/functional-sweep.py [host:port]` —— 核对
 `/describe` 声明的命令清单仍有 33 条，并对部分 HTTP 功能做设备侧检查（截图、输入、
-应用管理、文件列表、旋转、服务状态和重启等）。它不逐条执行全部 33 条命令，也不覆盖
-WebSocket 协议、下载、APK 安装和完整文件操作；不能把它当作全接口回归。
+应用管理、文件列表、剪贴板、旋转、服务配置/日志和重启等），并检查 `/stream` 能完成
+基本握手并收到二进制帧。它不逐条执行全部 33 条命令，也不验证完整 WebSocket 协议、
+下载、APK 安装和完整文件操作；不能把它当作全接口回归。
 
 运行前提：该脚本不发送令牌，测试服务需关闭鉴权；ADB 需能连接脚本里固定的
-`emulator-5580`。它会实际重启设备，只应对可重启的测试实例运行。判据尽量取设备侧证据
-（例如重启看 `uptime` 归零、按键看焦点窗口变化、截图检查图像内容），不只看接口返回。
+`emulator-5580`。从仓库根目录测试默认本机端口时，先建立端口转发：
+
+```bash
+adb -s emulator-5580 forward tcp:8088 tcp:8088
+python3 tools/functional-sweep.py
+```
+
+脚本会操作屏幕、启动并结束 Settings、改变后恢复方向，最后实际重启设备；只应对可重启的
+测试实例运行。判据尽量取设备侧证据（例如重启看 `uptime` 归零、按键看焦点窗口变化、
+截图检查图像内容），不只看接口返回。`host:port` 参数只改变 HTTP 服务地址，ADB 目标仍是
+`emulator-5580`。
 
 ---
 
@@ -81,7 +91,7 @@ WebSocket 协议、下载、APK 安装和完整文件操作；不能把它当作
 │   ├── remote_control_log.h          日志兼容层（Android liblog / 主机 stderr）
 │   └── vendor/                       内置 libwebp / libjpeg-turbo 头
 │
-├── tests/                            主机侧测试（g++ 直接编译，不需要 AOSP）
+├── tests/                            主机侧测试（g++ 编译；JSON 测试需 AOSP jsoncpp 源码）
 │   ├── Makefile                       `make run` = 跑全部 + 核对 README 里的检查数
 │   ├── test_util.h                   公共工具（断言、计数上报、设备节点发现）
 │   ├── test_inject_uinput.cpp        注入后端单元测试（38 项）
@@ -135,12 +145,17 @@ WebSocket 协议、下载、APK 安装和完整文件操作；不能把它当作
 （完整论证见 [`docs/01-selection.md`](../../docs/01-selection.md) 第 7 节「硬约束与风险」。）
 已实现的 `inject_uinput.cpp` 走 `/dev/uinput`，绕开这个限制。
 
-### 验证方式：真实设备，不是 mock
+### 主机侧测试：真实 uinput 内核路径 + 截图桩
 
 ```bash
-cd tests
+cd dev/02-native-daemon/tests
 sudo make run   # 编译并运行全部测试
 ```
+
+这些测试在开发机上执行：uinput 和 socket 使用真实 Linux 内核路径；集成测试用桩截图，
+screencap 后端测试用 `fake_screencap`。它们不是 Android 设备端的验收。运行需要 root、
+已加载的 `uinput` 模块和仓库同步的 AOSP `jsoncpp`。设备侧功能检查见上面的
+`tools/functional-sweep.py`。
 
 | 测试 | 覆盖范围 | 检查项 |
 |---|---|---|

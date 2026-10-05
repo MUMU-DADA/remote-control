@@ -53,16 +53,31 @@ HTTP 服务默认最多保留 128 条并发连接。连接从 `accept` 后立即
 
 ### 鉴权
 
-正式实例默认开启鉴权；测试 release/新实例可显式关闭。开启后 `/api/` 下的一切都要带令牌：
+正式实例默认开启鉴权；测试 release/新实例可显式关闭。开启后 `/api/` 下的一切都要带令牌，
+包括 `/api` 和 `/api/v1` 索引。以下 shell 示例使用 `$T` 表示从设备配置中读取的令牌：
 
 ```bash
-curl -H "Authorization: Bearer <令牌>" ...
-curl -H "X-Remote-Control-Token: <令牌>" ...
-curl "http://host:8088/api/v1/stream?token=<令牌>"      # 给 <img>/WebSocket 等无法设置请求头的场景
+T='<从 remote-control.conf 读取的 token>'
+curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```
 
-`GET /`（网页本身）**不校验** —— 它只是静态页面，而用户得先打开它
-才有地方输入令牌。
+标准客户端优先使用 `Authorization: Bearer`；也支持 `X-Remote-Control-Token`。
+`GET /`、`GET /index.html`、`GET /ui`（网页本身）**不校验**，因为用户得先打开页面
+才有地方输入令牌。查询参数 `?token=` 留给 `<img>` 和 WebSocket 等无法设置请求头的场景；
+它会出现在 URL、访问日志和浏览器历史中。
+
+### 网页入口与 API 索引
+
+```text
+GET /             → 网页控制台（无需令牌）
+GET /index.html   → 同一网页（无需令牌）
+GET /ui           → 同一网页（无需令牌）
+GET /api          → JSON 服务索引（需要令牌）
+GET /api/v1       → 同一 JSON 服务索引（需要令牌）
+```
+
+索引返回服务名、构建 ID、协议版本和 `/api/v1/describe` 提示；完整设备能力见
+`GET /api/v1/describe`。
 
 ### 坐标
 
@@ -110,7 +125,7 @@ POST 必须提供布尔值 `enabled`，返回 `pending:true` 表示 init 正在�
 不要假设某个命令一定可用。
 
 ```bash
-curl http://host:8088/api/v1/describe
+curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```
 
 ```json
@@ -244,6 +259,7 @@ curl http://host:8088/api/v1/describe
 
 ```bash
 curl -X POST http://<设备IP>:8088/api/v1/rotate \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' -d '{"to":"90"}'
 ```
 
@@ -463,6 +479,10 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 
 ### GET /service
 
+```bash
+curl -H "Authorization: Bearer $T" http://host:8088/api/v1/service
+```
+
 ```json
 {"ok": true, "serving": true, "note": "服务对外可用"}
 ```
@@ -471,6 +491,7 @@ curl -X POST http://<设备IP>:8088/api/v1/rotate \
 
 ```bash
 curl -X POST http://host:8088/api/v1/service \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' -d '{"on":false}'
 ```
 
@@ -519,10 +540,10 @@ curl -X POST http://host:8088/api/v1/service \
 > 单次截图只编一张，不值得抠体积；画面流是持续在编，默认要偏小。
 
 ```bash
-curl -o s.png  'http://host:8088/api/v1/capture'                # 1280x720 → 1.5 MB
-curl -o s.jpg  'http://host:8088/api/v1/capture?format=jpeg'    # 同尺寸 → 约 200 KB
-curl -o s.raw  'http://host:8088/api/v1/capture?format=raw'     # = 宽 x 高 x 4 字节
-curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
+curl -H "Authorization: Bearer $T" -o s.png  'http://host:8088/api/v1/capture'                # 1280x720 → 1.5 MB
+curl -H "Authorization: Bearer $T" -o s.jpg  'http://host:8088/api/v1/capture?format=jpeg'    # 同尺寸 → 约 200 KB
+curl -H "Authorization: Bearer $T" -o s.raw  'http://host:8088/api/v1/capture?format=raw'     # = 宽 x 高 x 4 字节
+curl -H "Authorization: Bearer $T" -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 ```
 
 未知格式返回 400，**不会**静默给你 PNG。
@@ -546,7 +567,7 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 | | MJPEG | WebSocket |
 |---|---|---|
 | 触发 | 不带 `Upgrade` 头 | 带 `Upgrade: websocket` |
-| 客户端 | `<img src=".../stream?fps=5">`，零 JS | canvas + `createImageBitmap` |
+| 客户端 | `<img src=".../stream?fps=5&amp;token=<令牌>">`，零 JS | canvas + `createImageBitmap` |
 | 控制 | 无 | **能反过来改参数，不用重连** |
 
 完整说明见 [02-websocket.md](02-websocket.md)。
@@ -639,7 +660,10 @@ curl -o s.webp 'http://host:8088/api/v1/capture?format=webp&quality=90'
 **拖拽跟手必须用它，别用一连串 POST**。
 
 ```js
-const ws = new WebSocket('ws://host:8088/api/v1/touch');
+const token = '<从 remote-control.conf 读取的 token>';
+const touchUrl = new URL('ws://host:8088/api/v1/touch');
+touchUrl.searchParams.set('token', token);
+const ws = new WebSocket(touchUrl);
 ws.send(JSON.stringify({t:'down', x:100, y:200, id:0}));
 ws.send(JSON.stringify({t:'move', x:105, y:205, id:0}));   // 高频
 ws.send(JSON.stringify({t:'up',   x:110, y:210, id:0}));
@@ -660,6 +684,7 @@ ws.send(JSON.stringify({t:'up',   x:110, y:210, id:0}));
 
 ```bash
 curl -X POST http://host:8088/api/v1/key \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' -d '{"key":"home"}'
 ```
 
@@ -799,8 +824,9 @@ curl -X POST http://host:8088/api/v1/key \
 | `set` | 写入（POST） | `{"ok":true,"length":34}` |
 
 ```bash
-curl 'http://host:8088/api/v1/clipboard?op=get'
+curl -H "Authorization: Bearer $T" 'http://host:8088/api/v1/clipboard?op=get'
 curl -X POST http://host:8088/api/v1/clipboard \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' \
      -d '{"op":"set","text":"hello"}'
 ```
@@ -833,7 +859,7 @@ curl -X POST http://host:8088/api/v1/clipboard \
 以及 activities / services / receivers / providers 清单。
 
 ```bash
-curl http://host:8088/api/v1/apps/com.android.settings
+curl -H "Authorization: Bearer $T" http://host:8088/api/v1/apps/com.android.settings
 ```
 
 包名不存在返回 404。
@@ -902,10 +928,11 @@ curl http://host:8088/api/v1/apps/com.android.settings
 ```bash
 # 上传 APK（请求体 = 文件字节）
 curl -X POST --data-binary @app.apk \
+     -H "Authorization: Bearer $T" \
      'http://host:8088/api/v1/install?replace=1'
 
 # 安装设备上已有的文件
-curl -X POST 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
+curl -X POST -H "Authorization: Bearer $T" 'http://host:8088/api/v1/install?path=/sdcard/app.apk'
 ```
 
 | 参数 | 默认 | 说明 |
@@ -964,18 +991,18 @@ HTTP 接收用的 spool 临时文件会在请求处理结束后删除，包括�
 
 ```bash
 # 边界在哪 —— 别猜，问它
-curl 'http://<设备IP>:8088/api/v1/files?op=roots'
+curl -H "Authorization: Bearer $T" 'http://<设备IP>:8088/api/v1/files?op=roots'
 # {"ok":true,"storage":"/storage/emulated/0",
 #  "download":"/storage/emulated/0/Download",
 #  "note":"相对路径相对 download；绝对路径在 storage 之内即可"}
 
 # 列目录（三种写法都行）
-curl 'http://<设备IP>:8088/api/v1/files?path=/sdcard/DCIM'
-curl 'http://<设备IP>:8088/api/v1/files?path=/storage/emulated/0/DCIM'
-curl 'http://<设备IP>:8088/api/v1/files'            # 不带 = 下载目录
+curl -H "Authorization: Bearer $T" 'http://<设备IP>:8088/api/v1/files?path=/sdcard/DCIM'
+curl -H "Authorization: Bearer $T" 'http://<设备IP>:8088/api/v1/files?path=/storage/emulated/0/DCIM'
+curl -H "Authorization: Bearer $T" 'http://<设备IP>:8088/api/v1/files'            # 不带 = 下载目录
 
 # 列出下载目录的子目录（相对路径仍相对下载目录）
-curl 'http://<设备IP>:8088/api/v1/files?path=sub'
+curl -H "Authorization: Bearer $T" 'http://<设备IP>:8088/api/v1/files?path=sub'
 ```
 
 ```json
@@ -1003,14 +1030,17 @@ curl 'http://<设备IP>:8088/api/v1/files?path=sub'
 
 ```bash
 curl -X POST http://<设备IP>:8088/api/v1/files \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' \
      -d '{"op":"mkdir","path":"/sdcard/Documents/新目录"}'
 
 curl -X POST http://<设备IP>:8088/api/v1/files \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' \
      -d '{"op":"delete","path":"/sdcard/tmp","recursive":true}'
 
 curl -X POST http://<设备IP>:8088/api/v1/files \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' \
      -d '{"op":"rename","path":"/sdcard/a.txt","to":"/sdcard/b.txt"}'
 ```
@@ -1022,6 +1052,7 @@ curl -X POST http://<设备IP>:8088/api/v1/files \
 
 ```bash
 curl -X POST --data-binary @./report.pdf \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/octet-stream' \
      'http://<设备IP>:8088/api/v1/files/upload?path=%2Fsdcard%2FDocuments&name=report.pdf'
 ```
@@ -1151,6 +1182,7 @@ HTTP 429，稍后重试即可。大于 4 MiB 时 HTTP 层先 spool 到临时文�
 
 ```bash
 curl -X POST http://host:8088/api/v1/config \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' \
      -d '{"log-level":"debug"}'
 ```

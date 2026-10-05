@@ -68,22 +68,19 @@ error: frameworks/native/cmds/remote-control/daemon/Android.bp:206:1:
     os:android,image:,arch:x86_64,sdk:,link:static
 ```
 
-**原因**：`frameworks/native/cmds/remote-control/daemon/Android.bp` 里把 `libwebp_vendored` 放进了
-`shared_libs`，但该模块声明的是 `cc_library_static`（只提供 `link:static` 变体）。
-**这是 AOSP 树里 `remote-control` 自身的问题，与本项目的 ROM 无关**——而且该文件当时正在被同时编辑
-（文件 mtime 与构建时间只差 1 分钟）。
+**当时的原因**：`frameworks/native/cmds/remote-control/daemon/Android.bp` 曾把 `libwebp_vendored` 放进
+`shared_libs`，但该模块声明的是 `cc_library_static`（只提供 `link:static` 变体）。这是 AOSP 树中的临时依赖配置问题；后续已调整为静态依赖，`remote-control` 也已集成进 ROM。
 
-**解法**（本项目侧，避免和别人的在途改动打架）：
+**当时的临时绕过方式**（本项目侧，避免和别人的在途改动打架）：
 
 ```bash
 ALLOW_MISSING_DEPENDENCIES=true m -j12
 ```
 
-`build-rom.sh` 默认开启（`ALLOW_MISSING_DEPS=0` 可关）。Soong 会**跳过**有依赖问题的模块，
-而不是让整棵树编不过（`build/soong/ui/build/soong.go:226`）。本项目不需要 `remote-control`，跳过无影响。
+当时 `build-rom.sh` 默认开启（`ALLOW_MISSING_DEPS=0` 可关）。Soong 会**跳过**有依赖问题的模块，
+而不是让整棵树编不过（`build/soong/ui/build/soong.go:226`）。该绕过曾用于排除无关依赖问题，不能据此认为 `remote-control` 可以被跳过；当前产品依赖并集成此服务。
 
-**待办**：等 `remote-control` 那边的编辑稳定后，建议把 `libwebp_vendored` 从 `shared_libs` 移到
-`static_libs`（或把模块改成 `cc_library_shared`）——两种改法都能让严格模式编过。
+当前构建脚本仍默认允许 Soong 跳过存在依赖问题的模块。验证构建完整性时用 `ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh`，并检查构建日志中的 `missing dependencies`，避免目标服务被跳过。
 
 ---
 

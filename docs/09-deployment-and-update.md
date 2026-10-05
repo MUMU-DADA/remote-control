@@ -161,22 +161,24 @@ su 2000(shell)   读 /sdcard/...  → OK                     写 → WRITE_OK
 > ⚠️ `--selftest` **测不出 UID 问题**：`main.cpp` 里 selftest 在降权之前就 return 了。
 > 要验只能**整个进程以该 UID 启动**（init 的行为就是 exec 时已经是那个 UID）。
 
-### 4.5 socket 权限与上位应用不兼容
+### 4.5 Unix socket 的权限边界
 
-当前 `remote-control.rc` 不再声明 init 管理的 socket，daemon 自己 bind
-`/data/misc/remote-control/remote-control.sock` 并设置 `0660`；上位应用是
-`untrusted_app` 自己的 UID，默认**连不上**。而 `docs/02-architecture.md:111` 明确写着
-"**init 模式下 `--socket-mode` 无效**"；当前 Unix socket 连接还会经过
-`SO_PEERCRED` 校验，跨 UID 客户端必须显式使用 `--socket-peer-uid`，不能只靠
-把文件模式放宽到 `0666`。
+当前 `remote-control.rc` 不声明 init 管理的 socket；daemon 自己 bind
+`/data/misc/remote-control/remote-control.sock` 并设置 `0660`。因此即使由 init 启动，
+`--socket-mode` 仍然生效。它只在历史 `--init-socket` 模式下无效，因为那种模式接管
+init 已创建的 socket。`docs/02-architecture.md` 对此只说明了历史兼容模式。
 
-当前服务自己 bind `/data/misc/remote-control/remote-control.sock`，配置为 `0660`，
-并在连接建立后用 `SO_PEERCRED` 校验 UID。若确实需要跨 UID 的 Unix socket 客户端，
-应显式增加 `--socket-peer-uid <uid>`，同时配置对应的 SELinux 规则；不能只改文件模式。
+控制器应用当前走 HTTP API；若其他 `untrusted_app` 客户端直接连接 Unix socket，默认会被
+文件权限和 `SO_PEERCRED` 校验挡住。跨 UID 客户端需要显式设置
+`--socket-peer-uid <uid>` 并配置对应 SELinux 规则；单独放宽文件模式不能绕过 UID 校验。
 
 ---
 
-## 5. 热替换通道（本次新增的需求）
+## 5. 热替换通道（已否决的历史方案）
+
+> 本节至 §8 保存的是实施前的方案草案。§9.2–§9.5 已通过策略编译和设备实测否决
+> `/data` 载荷方案及其绕行路径；以下设计、步骤和热替换验收项都不是当前可执行计划。
+> 当前更新方式见 §9.5。§7 中的未验证事项也已按实测结果更新。
 
 ### 5.1 先看物理限制（决定哪些做法根本不可行）
 
@@ -187,7 +189,7 @@ su 2000(shell)   读 /sdcard/...  → OK                     写 → WRITE_OK
 | 重编 + 重打包 ROM | 重启实例 | ✅ | 正规发布通道（慢） |
 | 离线注入 `system.img` | 重启实例 | ✅ | 但 `PRODUCT_USE_DYNAMIC_PARTITIONS` + verity：guest 里 `/vendor`=`dm-3`、`/product`=`dm-2`、`ro.boot.veritymode=enforcing` `[实测]` → 要重做超级分区与 AVB，**不是捷径** |
 | Magisk 模块 | 重启 | ✅ | 该 guest **未安装**：`/data/adb/` 是空目录、无 `magisk` 二进制 `[实测]`；要装得先 patch ramdisk |
-| **`/data` 放载荷 + init 只跑壳** | **立即（`ctl.restart`）** | ✅ | `/data` 持久；只差一条 sepolicy |
+| **`/data` 放载荷 + init 只跑壳** | 不支持 | 不可用 | **已否决**：AOSP neverallow 和 `/data` 类型约束阻断，见 §9.2–§9.4 |
 
 **另外**：init 不重读 rc（§3）→ `.rc` 天然"一次定稿"。这正是"壳"必须存在的原因。
 
@@ -238,7 +240,10 @@ su 2000(shell)   读 /sdcard/...  → OK                     写 → WRITE_OK
 
 ---
 
-## 6. 实施步骤与验收
+## 6. 原计划的实施步骤与验收（已作废）
+
+> §6.1 的步骤以已否决的壳与载荷方案为前提，不可照搬；§6.2 的 1–4 项记录 init
+> 自启、保活和重启验收，5–6 项热替换验收在当前 ROM 不可用。
 
 ### 6.1 步骤（命令级）
 
@@ -269,34 +274,34 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 | 2 | `logcat -d \| grep 'avc: denied' \| grep remote_control` | 空 |
 | 3 | `kill -9 $(pidof remote-control)` | ≤5 秒自己回来（保活） |
 | 4 | `POST /power {"action":"reboot"}` | 重启后**啥都不用做**，控制台直接可达（本次要修的病） |
-| 5 | `tools/rc-update.sh switch` | 5 秒内 `/api/v1/info` 的 buildId 变化（热替换） |
-| 6 | `tools/rc-update.sh rollback` | 回到上一版并能正常工作 |
+| 5 | `tools/rc-update.sh switch` | 原计划：5 秒内 `/api/v1/info` 的 buildId 变化；当前 ROM 不支持 |
+| 6 | `tools/rc-update.sh rollback` | 原计划：回到上一版；当前 ROM 不支持 |
 
 ---
 
-## 7. 风险、退路、未验证项
+## 7. 原计划的风险与未验证项（结论已更新）
 
-**风险与退路**
+> 本节是旧热替换方案的记录，不是当前部署的风险清单。热替换相关结论以 §9.2–§9.5 为准。
 
-- 坏载荷导致崩溃循环 → 壳的探活回退（§5.3-5）；最终兜底是宿主 `adb root`。
-- `exec` 从 `/data` 可能触到 AOSP neverallow → 编译 sepolicy 即可暴露；退路是 Magisk 挂载覆盖。
+**原方案曾考虑的风险与退路（保留作历史记录）**
+
+- 坏载荷导致崩溃循环 → 原计划由壳探活回退（§5.3-5）；该壳未作为当前更新通道启用。
 - **壳与 `.rc` 本身仍只能靠重编 ROM 更新**（init 不重读 rc）。所以设计上要把"会变的东西"全部挤进载荷，
   让壳薄到几乎不需要动 —— 这是整套方案能长期成立的前提。
-- 手工部署的二进制与镜像里的可能**不同源**（改名重构期间就出现过：guest 里跑的是名字不同的旧构建）。
-  所以 `verify` 子命令比对 sha256 是必需的，不是锦上添花。
+- 手工部署的二进制与镜像里的可能**不同源**（改名重构期间就出现过：guest 里跑的是名字不同的旧构建）；
+  原计划因此提出用 `verify` 子命令比对 sha256。
 
-**未验证项（实施时必须先测）**
+**旧方案中仍未验证的事项**
 
-1. `user system` 能否抓帧 —— `validateScreenshotPermissions` 对 AID_SYSTEM 没有 UID 白名单，只能靠平台签名权限；`[未验证]`
+1. 若将来改为 `user system`，能否抓帧 —— `validateScreenshotPermissions` 对 AID_SYSTEM 没有 UID 白名单，只能靠平台签名权限；`[未验证]`
    （注意 `CAPTURE_DISPLAY_BY_ID` 那条路径在 `SurfaceFlinger.cpp:5336` 是显式白名单了 AID_SYSTEM 的，但走 `captureDisplay` 不是这条路。）
-2. `exec` 从 `/data` 是否被 neverallow 挡（§5.3-2）。
-3. `-writable-system` 的临时副本是否真在模拟器退出时销毁（§5.1，只信上游 help 文案）。
-4. 本次结论全部基于**改名重构后**的树（`autod → remote-control`）。若后续还有批量改名，
+2. `-writable-system` 的临时副本是否真在模拟器退出时销毁（§5.1，只信上游 help 文案；当前更新方式不依赖它）。
+3. 本次结论全部基于**改名重构后**的树（`autod → remote-control`）。若后续还有批量改名，
    §4.1/4.2 这类"连字符 vs 下划线"的错配会再次出现 —— 建议把这两条加进改名脚本的自检。
 
 ---
 
-## 8. 明确不做
+## 8. 明确不做（原计划）
 
 - **不把更新源放 `/sdcard`**（见 §5.3-6）。
 - **不用"进程保活"替换软开关**：`enabled=0` 必须继续是 HTTP 503 的软开关、不真停进程，
@@ -376,18 +381,17 @@ ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh   # libwebp 已改 static_libs（And
 
 **只让开一条没用** —— 三条一起才构成"服务能起来"的完整链路。
 
-### 9.3 要绕开的话，只有这两条路（都需要人来定）
+### 9.3 曾提出的两条绕行方案（后续均被否决）
 
 | 方案 | 代价 |
 |---|---|
-| **A. 壳跑 `shell` 域 + 服务放弃 `coredomain`** | ②对 `-shell` 有豁免、③只管 coredomain，两条都绕开了。代价：一个常驻服务跑在 **shell 域**（adb 调试域，权限很宽）；服务不再是 coredomain（SELinux 语义上"假装不是平台核心"，Treble 的分层保证就没了）。已确认没有 neverallow 挡非 coredomain 调 SurfaceFlinger，技术上可行。 |
-| **B. 载荷放 `/system`，用 `adb disable-verity` + `remount` 换** | 完全合法（载荷是 `system_file_type`，本来就能执行）。代价：要先关 verity（测试机可接受，正式机不行）；换版本 = push 到 `/system/bin` + `ctl.restart`，仍是秒级、也跨重启。计划的 §5.1 表格里列过这条。 |
+| **A. 壳跑 `shell` 域 + 服务放弃 `coredomain`** | 当时推演认为可绕过 ②、③。代价：常驻服务跑在 **shell 域**（adb 调试域，权限很宽）；服务不再是 coredomain（SELinux 语义上"假装不是平台核心"，Treble 的分层保证就没了）。该推演后来被 §9.4 的 neverallow 级联实测否决。 |
+| **B. 载荷放 `/system`，用 `adb disable-verity` + `remount` 换** | 载荷使用 `system_file_type` 本身符合执行策略；当时预期可用 `disable-verity` + `remount` 更新。§9.4 的设备实测确认当前 ROM 无法这样改写分区。 |
 
-**本次先不选**：这两个都是安全/架构层面的取舍，不是"哪个能编过"的问题。
-在定下来之前，`.rc` 直接指向 `/system/bin/remote-control`（§3/§4 的自启与保活
-不受影响 —— 那才是本次需求的根因部分）。
-`daemon/launcher.cpp`（壳）与 `tools/rc-update.sh`（推送/切换/回滚）都已写好、
-能编译，选 A 或 B 之后接上即可。
+以上是后续实测前的判断。§9.4 确认 A、B 两条路都不适用于当前 ROM。
+`.rc` 因此直接指向 `/system/bin/remote-control`，自启与保活仍按 §3/§4 实施。
+`daemon/launcher.cpp`（壳）与 `tools/rc-update.sh`（推送/切换/回滚）虽保留在树中，
+但不能作为当前 ROM 的可用更新功能。
 
 ### 9.4 两条路都实测过了：都不通
 

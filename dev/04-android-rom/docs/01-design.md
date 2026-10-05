@@ -161,5 +161,4 @@ AOSP 默认**禁止**用 `PRODUCT_COPY_FILES` 拷贝 ELF（`build/make/core/Make
 | D2 | 进程存活 + `/proc/<pid>/maps` 里有 `/system/lib64/arm64/` | 条数 ≥ 1 |
 | D3 | `primaryCpuAbi` | `arm64-v8a` |
 
-D 组用的 APK 默认取自 F-Droid 镜像（312 KB，带 `lib/arm64-v8a` 原生库，sha256 固定在脚本里）。
-后续会换成项目自建的探针 APK，去掉外部依赖。
+D 组现用项目自建探针 APK（纯 `arm64-v8a`，sha256 固定在验收脚本里）；此前使用的 F-Droid APK 已替换，验收不再依赖外部 APK 镜像。

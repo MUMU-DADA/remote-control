@@ -77,17 +77,15 @@ $ADB -s $S shell 'logcat -d | grep -i "avc: denied" | grep remote-control'   # �
 
 ---
 
-## 3. ⚠️ 两个与"编进 ROM"直接相关的现状
+## 3. 与"编进 ROM"直接相关的注意事项
 
-### 3.1 构建当前开着 `ALLOW_MISSING_DEPENDENCIES`
+### 3.1 严格验证缺失依赖
 
-原因：树里 `frameworks/native/cmds/remote-control/daemon/Android.bp` 把 `libwebp_vendored`
-（声明为 `cc_library_static`）放进了 `shared_libs`，x86_64 变体解析失败，会让**整棵树**编不过。
+过去一次构建中，`frameworks/native/cmds/remote-control/daemon/Android.bp` 曾把 `libwebp_vendored`
+（声明为 `cc_library_static`）放进 `shared_libs`，导致 x86_64 变体解析失败。该配置后来调整为静态依赖，`remote-control` 已集成进交付 ROM。
 
-- 这个开关只影响**有依赖问题的模块**（会被跳过），不影响我们的 ROM 内容；
-- 但**要真的把 `remote-control` 编进 ROM**，就必须先修好它：
-  把 `libwebp_vendored` 从 `shared_libs` 挪到 `static_libs`（或把模块改成 `cc_library_shared`）；
-- 修好后用严格模式验证一次：`ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh`。
+`build-rom.sh` 目前默认允许 Soong 跳过存在依赖问题的模块，因此严格验证构建时应显式运行
+`ALLOW_MISSING_DEPS=0 ./scripts/build-rom.sh`，并检查日志中的 `missing dependencies`，确认目标组件没有被跳过。
 
 ### 3.2 载荷可以瘦身（可选优化）
 
@@ -100,7 +98,7 @@ libndk_translation.so + 20 个 proxy + program_runner + binfmt 规则 + ndk_tran
 
 瘦身做法：`fetch-payload.sh` 里跳过 `system/lib64/arm64` 与 `system/bin/arm64` 的提取，
 载荷从 23 MB 降到约 3.6 MB，同时消掉 61 条 `overriding commands` 警告。
-**等当前验收通过后再做**（要重编一次验证）。
+这是可选优化；实施后需重编 ROM 并重新验收。
 
 ---
 

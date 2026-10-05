@@ -48,7 +48,7 @@ cd windows
 > `partition(s) not found in /sys` / `failed to find device default fstab` 卡死并无限重启——
 > 这是本机实测踩过的（见 [`../docs/02-build-traps.md`](../docs/02-build-traps.md) 坑 8）。
 
-前置：OpenSSH 客户端（Win10 1809+ 自带）、≥15 GB 磁盘、≥8 GB 内存、
+前置：OpenSSH 客户端（Win10 1809+ 自带）、≥20 GB 磁盘、≥8 GB 内存、
 **BIOS 里开启虚拟化**（WHPX 需要；若用 Hyper-V/WSL2 已开启则天然满足）。
 
 ---

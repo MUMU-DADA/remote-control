@@ -12,7 +12,9 @@
 | **协议状态码** | JSON 的 `status` 字段 | 精确原因，跨传输一致 |
 
 ```bash
-$ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+T='<从设备配置中读取的 token>'
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+    -H "Authorization: Bearer $T" \
     -H 'Content-Type: application/json' -d '{"key":"nonsense"}' \
     http://host:8088/api/v1/key
 400
@@ -83,7 +85,11 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
  用 POST /api/v1/service {\"on\":true} 重新开启"}
 ```
 
-并发连接达到上限时，HTTP 服务器在读取请求前直接返回 503，并带有 `Retry-After: 1`；响应 JSON 只有 `ok` 和 `error`，没有 `status`。软关闭产生的 503 由路由处理器返回 JSON `status: 503`，恢复入口仍可用。
+并发连接达到上限时，HTTP 服务器在读取请求前直接返回 503，并带有 `Retry-After: 1`；
+响应 JSON 只有 `ok` 和 `error`，没有 `status`。软关闭产生的 503 由路由处理器返回
+JSON `status: 503`，恢复入口仍可用。客户端应检查响应 JSON 的 `status` 是否存在：
+`status:503` 表示服务被软关闭；没有 `status` 的 503 表示连接名额暂满，应遵循
+`Retry-After` 并做有上限的重试。
 
 ---
 
@@ -183,8 +189,14 @@ if (r.status === 401) {
   return;
 }
 if (r.status === 503) {
-  // 服务被关了。把开关状态同步过来，而不是弹一堆失败提示
-  setServiceSwitch(false);
+  if (j.status === 503) {
+    // 服务被软关闭
+    setServiceSwitch(false);
+  } else {
+    // HTTP 并发连接达到上限；按 Retry-After 有上限地重试
+    const seconds = Number(r.headers.get('Retry-After') || 1);
+    scheduleRetry(Math.max(1, seconds));
+  }
   return;
 }
 ```
@@ -194,7 +206,10 @@ if (r.status === 503) {
 不同设备的 `capture.backend`、`inject.backend`、可用命令都可能不同：
 
 ```js
-const d = await (await fetch('/api/v1/describe')).json();
+const token = '<从 remote-control.conf 读取的 token>';
+const d = await (await fetch('/api/v1/describe', {
+  headers: {Authorization: 'Bearer ' + token}
+})).json();
 if (!d.capabilities.keyInjection) {
   disableKeyButtons('这台设备无法注入按键：'
                     + d.commands.find(c => c.name === 'KeyEvent').reason);

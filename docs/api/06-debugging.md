@@ -34,7 +34,8 @@ adb shell "REMOTE_CONTROL_FORCE_FALLBACK=1 setsid nohup \
 ### 怎么确认它生效了
 
 ```bash
-curl -s http://host:8088/api/v1/params | jq .codecs
+T='<从设备配置中读取的 token>'
+curl -s -H "Authorization: Bearer $T" http://host:8088/api/v1/params | jq .codecs
 ```
 
 ```json

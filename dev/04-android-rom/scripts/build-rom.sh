@@ -84,8 +84,8 @@ fi
 CMD="cd $BUILDER_AOSP_PATH && source build/envsetup.sh >/dev/null && lunch $LUNCH_TARGET && m -j$JOBS QEMU_DISABLE_AVB=${QEMU_DISABLE_AVB:-true}"
 
 # AOSP 树里可能同时有别人在编辑的模块（例如 frameworks/native/cmds/remote-control 正处于改动中，
-# 其 libwebp_vendored 变体暂时对不上）。ALLOW_MISSING_DEPENDENCIES=true 让 Soong
-# **跳过**这类模块而不是让整棵树编不过——本项目不需要 remote-control，跳过它没有任何影响。
+# 其 libwebp_vendored 变体暂时对不上）。ALLOW_MISSING_DEPENDENCIES=true 允许 Soong 跳过
+# 有缺失依赖的模块；构建后应检查日志，确认 remote-control 及其依赖没有被跳过。
 # 想严格模式： ALLOW_MISSING_DEPS=0 ./build-rom.sh
 ALLOW_MISSING_DEPS="${ALLOW_MISSING_DEPS:-1}"
 if [ "$ALLOW_MISSING_DEPS" = 1 ]; then

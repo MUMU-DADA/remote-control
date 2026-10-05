@@ -120,7 +120,7 @@ release 启动脚本生成 32 字节的随机数并保存为十六进制 token�
 
 ```bash
 grep '^token=' /data/misc/remote-control/remote-control.conf
-# token=nonKbvyus_2bkj9e849gWgleEDjp_UYP
+# token=<实际令牌；请勿把令牌值复制到文档或日志>
 ```
 
 **只生成一次**（不是每次启动都生成）：令牌一变，已经配好它的客户端
@@ -137,6 +137,7 @@ grep '^token=' /data/misc/remote-control/remote-control.conf
 | `?token=<t>` | `<img src>` / WebSocket 这类**没法设请求头**的场景 |
 
 ```bash
+T='<从设备配置中读取的 token>'
 curl -H "Authorization: Bearer $T" http://host:8088/api/v1/config
 curl -H "X-Remote-Control-Token: $T"        http://host:8088/api/v1/config
 curl "http://host:8088/api/v1/config?token=$T"
@@ -216,6 +217,7 @@ remote-control [选项]
 
 ```bash
 curl -X POST http://host:8088/api/v1/config \
+     -H "Authorization: Bearer $T" \
      -H 'Content-Type: application/json' \
      -d '{"log-level":"debug"}'
 ```

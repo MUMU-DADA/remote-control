@@ -1,13 +1,13 @@
 # 13 · macOS 宿主支持：arm64 ROM 产品 + 第三套宿主脚本
 
-> **状态：macOS 宿主脚本与发布接入已完成，离线验证通过；arm64 ROM 全量集成与真机（真 Mac）验证仍待完成。**（最后更新 2026-10-05）
+> **状态：arm64 ROM 镜像集成、macOS 发布接入与离线验证已完成；真 Mac 上的加速、开机和服务自启仍待验证。**（最后更新 2026-10-05）
 >
 > | | 位置 | 到什么程度 |
 > |---|---|---|
 > | **原始评估与方案** | §1–§6 | ✅ 作为设计记录保留；估算与拟改项不是当前待办清单 |
 > | **实测记录** | §7.0.1–§7.0.16 | ✅ 逐轮留痕（带 sha1、文件清单、测试输出） |
 > | **实现** | 见下方"交付物" | ✅ arm64 产品设备树、macOS 源码树入口、Darwin 包内脚本与发布目标已接入 |
-> | **验证** | §7.0.8 / §7.0.13–§7.0.16 | ✅ 离线：`tools/test-macos-port.sh` **121 项全绿**（2026-10-05）；Darwin 包已在 Linux 上生成并检查 |
+> | **验证** | §7.0.8 / §7.0.13–§7.0.16 | ✅ 离线：`tools/test-macos-port.sh` **121 项全绿**（2026-10-05）；Darwin 包已在 Linux 上生成并检查，arm64 ROM 含完整镜像集与服务 |
 > | **真机验证** | §8 清单 | ❌ **未做** —— 需要一台真 Mac，见 §8 里逐条标出的未验项 |
 >
 > **交付物**（都在仓库里）：
@@ -333,12 +333,12 @@ Mac 包 = **运行时控制面 + 打包**这一层，不包含构建链。
 
 ## 4. 两条 ROM 产品线与发布目标
 
-两条 ROM 产品线分别服务 x86_64 桥接 guest 与原生 arm64 guest。当前发布脚本将它们映射到 Linux、Windows、Intel Mac、Apple Silicon 四个目标；宿主实机验证状态单独列出：
+两条 ROM 产品线分别服务 x86_64 桥接 guest 与原生 arm64 guest。当前发布脚本将它们映射到 Linux x86_64、Windows x86_64、Intel Mac、Apple Silicon 四个目标；arm64 Linux 尚不是已接入的发布目标，宿主实机验证状态单独列出：
 
 | ROM 产品 | `lunch` 目标 | guest 架构 | 发布目标与宿主验证 | 当前状态 |
 |---|---|---|---|---|
 | `remote_control_x64_arm64` | `remote_control_x64_arm64-userdebug` | x86_64 + 翻译层 | Linux x86_64、Windows x86_64、Intel Mac（Darwin 发布目标） | 产品已建并在 Linux 使用；Windows WHPX 与 Intel Mac 实机启动未验证 |
-| `remote_control_arm64` | `remote_control_arm64-userdebug` | arm64 原生 | Apple Silicon、arm64 Linux | 设备树/lunch 与服务二进制已验证；全量 ROM 集成仍进行中；Apple Silicon 与 arm64 Linux 实机启动未验证 |
+| `remote_control_arm64` | `remote_control_arm64-userdebug` | arm64 原生 | Apple Silicon（Darwin aarch64 发布目标） | 镜像集已包含 `vendor.img` 与 `remote-control` 服务；Apple Silicon 实机启动及服务自启未验证 |
 
 **两边的公共部分**：`remote-control` 服务本体、`emulator/config.ini`、`packaging/` 的模板与
 `START-HERE.md` 骨架、`release.sh` 的分派表结构、`docs/` 的验收口径。
@@ -442,25 +442,26 @@ Mac 包 = **运行时控制面 + 打包**这一层，不包含构建链。
 | `emulator-windows_x64-16428233.zip` | 37.2.12 | 434 MB |
 | `platform-tools_r37.0.1-{linux,darwin,win}.zip` | 37.0.1 | —（darwin 那份同时适用两种 Mac） |
 
-> 注意：项目现在用的是 **37.1.11**（`docs/03-delivery.md` 记录的 `emulator-windows_x64-15917651.zip`）。
-> 加 macOS 时如果要"三平台同 build id"，就是整条线一起升到 37.2.12。**这是一次版本决策，不是 macOS 独有的改动。**
-> 升级要重新验收：`docs/08-emulator-version-notes.md` 记录过 37.2.11 已移除 arm64 后端 ——
+> 本节记录的是当时的版本状态。后续已采用 Stable **37.2.12 / build 16428233**，Linux、Windows、Intel Mac 与 Apple Silicon 的模拟器包均有同 build 版本；当前版本见 [`15-release-packaging.md`](15-release-packaging.md)。
+> `docs/08-emulator-version-notes.md` 记录过 37.2.11 已移除 arm64 后端 ——
 > 那条结论针对的是**跨架构**场景（x86_64 宿主跑 arm64 guest），与本方案的 arm64 宿主 + arm64 guest 不是同一件事。
 
-#### 7.0.4 一条被挡住的验证（不隐瞒）
+#### 7.0.4 初次验证受阻的记录（问题已后续处理）
+
+以下保留首次尝试时的日志与定位过程；其中缺少 `vendor.img` 的问题已修复，当前待验证项见 §7.1。
 
 想让这套 arm64 ROM 在**本机 Linux 上真跑一次开机**当基线，**没成功**，原因是模拟器版本而不是 ROM：
 
 | 尝试 | 结果 |
 |---|---|
-| 直接用产物目录当 `-sysdir` | `ERROR: Your system directory is missing the 'vendor.img' image file` —— arm64 产物**没有 `vendor.img`**（x86_64 那个产品有；差异待查，见 §7.2） |
+| 直接用产物目录当 `-sysdir` | `ERROR: Your system directory is missing the 'vendor.img' image file` —— 当时 arm64 产物还没有 `vendor.img`，后续用 `m vendorimage` 补齐（见下） |
 | 加 `-vendor vendor_boot.img` / `-qemu -audiodev none` | 均失败，停在 `qemu-system-aarch64-headless: PCI bus not available for hda` |
 | AOSP 自带模拟器 | 是 **30.8.3**，`prebuilts/android-emulator/` 下**没有 `qemu/` 目录**；`docs/08-emulator-version-notes.md` 已记录它"太旧，镜像要求 ≥31.2.7" |
 
 **关于 `vendor.img`：已定位并修好（本轮）**
 
 两个产品的对比显示 x86_64 的 `vendor.img`/`vendor-qemu.img` 时间戳（08:12/08:13）**晚于**其他镜像，
-说明它是**单独的镜像目标**产物，不是 `droid` 全量构建的副产品。arm64 那套是"编到能开机为止"的，
+说明它是**单独的镜像目标**产物，不是 `droid` 全量构建的副产品。当时 arm64 那套只编到了基础镜像，
 从没编过这个目标。修法：
 
 ```bash
@@ -492,11 +493,7 @@ emulator: INFO: userspace-boot-properties.cpp:249: Sending adb public key [...]
 
 > 所以 `hda` 那条报错**不是**根因，别再往音频设备方向查。真正的天花板是模拟器版本：
 > Linux 侧手上只有 30.8.3（AOSP 自带）和 27.x（`/opt/android/emulator-new`），
-> 而 **37.2.12 的 Linux 包必须在 Linux 上验证时需要联网下载 333 MB** ——
-> 这条验证的正确落点仍是**目标 Mac + darwin-aarch64 包**。
-
-> 正确的验证路径是：**在目标 Mac 上用 37.2.12 的 darwin-aarch64 包起这套 arm64 ROM**。
-> 在没有 Mac 的构建机上无法完成这一步，别再花时间试 Linux 侧的组合。
+> 当时尚未用新版 Linux 模拟器包复测 arm64 guest，因此把验证落点记为目标 Mac；当前仍需在 Apple Silicon 上用 37.2.12 的 darwin-aarch64 包验证 HVF 加速与完整开机。
 
 #### 7.0.5 已写出 arm64 产品的设备树（本轮）
 
@@ -525,7 +522,7 @@ device/
 5. `PRODUCT_MODEL` 写成 `remote-control arm64 (native, no translation layer)`，
    便于 `getprop ro.product.model` 一眼区分两个产品。
 
-**尚未验证**：`m` 全量构建、开机、服务起没起（见 §7.1 #3/#5）。
+设备树编写时尚未完成全量构建；后续已将完整镜像集和服务写入交付产物（见 §7.1 #5）。真机开机与服务自启仍待验证。
 **但构建系统层面已验通**，见下。
 
 #### 7.0.6 新产品的 lunch 已验通（本轮）
@@ -1179,22 +1176,20 @@ linux          windows          darwin-aarch64          darwin-x86_64
 | # | 事项 | 为什么重要 | 怎么验 | 状态 |
 |---|---|---|---|---|
 | 1 | **arm64 guest 在 Apple Silicon 上是否真走 HVF** | 若退到 TCG → 量级问题（§1.3 锚点：23.8 s vs 5–8 min） | `emulator -accel-check`、`-verbose` 日志里找 `hvf` | ⏳ 待真机 |
-| 2 | **这套 arm64 ROM 能不能真走到 `boot_completed`** | Linux 侧被 30.8.3 旧模拟器挡住（§7.0.4 已复现，并排除 vendor.img） | 目标 Mac + 37.2.12 darwin-aarch64 包，`-accel on` | ⏳ 待真机 |
+| 2 | **这套 arm64 ROM 能不能真走到 `boot_completed`** | 尚未在 Apple Silicon 上完成完整启动验证 | 目标 Mac + 37.2.12 darwin-aarch64 包，`-accel on` | ⏳ 待真机 |
 | 3 | ~~新产品的设备树能否 lunch 通~~ | —— | —— | ✅ **已验通**（§7.0.6） |
 | 4 | ~~`m remote-control rcctl` 在 arm64 产品下能否编出~~ | —— | —— | ✅ **已编出**（§7.0.7，三个产物均为 ARM aarch64 ELF） |
-| 5 | **arm64 ROM 全量构建 + 放进镜像** | 服务能编 ≠ 能装进镜像 | `m` 全量 → 查 `system/bin/` 与 `system/etc/init/` | 🔄 **进行中**（本轮已启动；服务三件套与 rc 已进镜像树） |
+| 5 | ~~arm64 ROM 全量构建 + 放进镜像~~ | —— | —— | ✅ **已完成**（交付镜像含 `vendor.img` 及 `remote-control`、`remote-control-launch`、`rcctl`） |
 | 5b | **服务在 arm64 guest 里能否开机自启** | 全量构建成功不等于服务真起来了；rc/sepolicy 在 arm64 上还没跑过 | 起模拟器 → `ps -A \| grep remote-control` + `dumpsys` | ⏳ 待验 |
-| 6 | **arm64 包体积与开机时间**（相对 x86_64） | §7.2 里那条"可能变大也可能变小"的估算 | 全量构建后实测，替换估算 | ⏳ 待验 |
+| 6 | **arm64 包体积与开机时间**（相对 x86_64） | 尚无 Apple Silicon 真机启动数据 | 记录当前镜像大小，并在 Apple Silicon 上测启动时间 | ⏳ 待验 |
 
 ### 7.2 已知风险
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| **arm64 产物没有 `vendor.img`**（§7.0.4 实测；x86_64 产品有 `vendor.img` + `vendor-qemu.img`） | 模拟器直接拒绝启动（`missing the 'vendor.img' image file`），交付包也无法按现有 `REQUIRED` 清单组装 | §7.1 #3 先查清原因（`m vendorimage` / `installed-files-vendor.txt` / 动态分区配置差异），再决定 `package-rom.sh` 的清单是否按产品分叉 |
 | arm64 内核 5.10 与 API 31 的配对（`EMULATOR_KERNEL_FILE` 在 `arm64-kernel.mk` 里是 `kernel-5.10-gz` 变体） | 起不来 / 起得慢 | 产物已在（§7.0.1），在真机上直接试；这是 `sdk_phone64_arm64` 的官方配对 |
-| **模拟器版本决策**：项目现用 37.1.11，而 macOS 三包只有 37.2.12（稳定）/37.3.2（beta） | 加 macOS 就得整条线升版本，Windows/Linux 的验收要重跑 | §7.0.3：稳定渠道三平台同版本齐全，一次升级解决；升级后按 `docs/03-delivery.md` 的口径重验 |
-| arm64 系统库体积比 x86_64 大（同一套代码编 arm64 通常更大），加上**不再有翻译层文件**（80+ 个小文件） | arm64 包体积**可能变大也可能变小，未实测** | 按 §7.1 #4 实测对比，别按直觉写进文档 |
-| `dev/05-controller-app` 的 APK 若含预编译 `.so` | 原生 arm64 ROM 上**没有翻译层兜底**，必须自带 `arm64-v8a` | 编产品前先 `unzip -l` 看一眼 `lib/` 目录 |
+| arm64 系统库体积与启动时间相对 x86_64 的差异 | 尚无可比较的真机启动数据 | 按 §7.1 #6 在 Apple Silicon 上实测后记录 |
+| 新增应用 APK 含预编译 `.so` | 原生 arm64 ROM 上**没有翻译层兜底**，必须自带 `arm64-v8a` | 集成应用时检查 APK 的 `lib/` 目录 |
 | 两个产品的 `remote-control` 行为差异（例如 `Ro属性` 上报、`abilist`） | 体检脚本的期望值要按产品区分 | 让 `functional-sweep.py` 的期望设备感知（它已经支持"已知平台限制"这个机制） |
 
 ### 7.3 未决（需要人来定，不是技术能定的）
@@ -1214,16 +1209,17 @@ linux          windows          darwin-aarch64          darwin-x86_64
 - [x] 1. 上游 arm64 产品能编出来 —— **已完成**（§7.0.1：`emulator64_arm64` 全套产物在，2026-09-28）
 - [x] 2. `macosx` host-os 的 SDK emulator 包含 arm64 guest 后端 —— **已确认**（§7.0.2：`qemu/darwin-aarch64/qemu-system-aarch64(-headless)`，sha1 与清单一致）
 - [ ] 3. Apple Silicon 上确认走 HVF（§7.1 #1；需真机）
-- [ ] 3b. arm64 ROM 在真机上走到 `boot_completed`（§7.1 #2；本机被 30.8.3 旧模拟器挡住，见 §7.0.4）
+- [ ] 3b. arm64 ROM 在真机上走到 `boot_completed`（§7.1 #2；Apple Silicon 上尚未完成启动验证）
 - [x] 4. 新增 `device/remote_control_arm64/`（`BoardConfig.mk` / `device.mk` / `product/*.mk`） —— **已完成**（§7.0.5）
 - [x] 5. `AndroidProducts.mk` 两个产品并列，`lunch` 都能识别 —— **已验通**（§7.0.6）
 - [x] 6. `apply-overlay.sh` / `build-rom.sh` / `package-rom.sh` / `status.sh` 加产品分支 —— **已完成并回归**（§7.0.9；`release.sh` 未改，它属打包层，见 #16）
-- [ ] 7. sepolicy 复用同一份（不复制，§2.5），`remote-control.rc` 自启验证
+- [x] 7. sepolicy 复用同一份（不复制，§2.5）
+- [ ] 7b. `remote-control.rc` 在 arm64 guest 中开机自启（§7.1 #5b）
 - [ ] 8. `tools/functional-sweep.py` 跑 33 条命令（含 uinput 触控）
 - [ ] 9. §2.6 的 6 处翻译层断言加闸门并如实打印 ⊘
 - [ ] 10. `dev/05-controller-app` 的 APK 确认有 `arm64-v8a` 库
 - [x] 10b. `m remote-control rcctl remote-control-launch` 在 arm64 产品下编出 —— **已完成**（§7.0.7）
-- [ ] 10c. arm64 ROM 全量构建（`m`），并把服务装进镜像
+- [x] 10c. arm64 ROM 全量构建（`m`），并把服务装进镜像 —— **已完成**（§7.1 #5）
 
 **B. macOS 宿主脚本**
 
