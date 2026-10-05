@@ -1,7 +1,7 @@
 # 15 · release 打包：一个平台一个 zip
 
-> 一条命令可产出多个平台的可交付包，每个包里都有三样东西：
-> **完整无头运行环境** + **对应的虚拟机镜像** + **模板**。
+> 一条命令可产出多个平台的可交付包，每个包里都有完整无头运行环境、对应镜像、模板，
+> 以及从当前源码构建的上位应用 APK。
 > 命令：`./scripts/release.sh`　产物：`release/autosnap-<版本>-<平台>-x86_64.zip`
 
 > ℹ️ **平台范围（后加的）**：`--platform` 支持 `linux` / `windows` / `darwin` / `both` / `all`，
@@ -64,7 +64,7 @@ release/
     ├── START-HERE.md          ← 首读：一页纸的"解压就能跑"
     ├── RELEASE.json           ← 版本 / ROM 指纹 / 运行时 build id / 入口清单
     ├── SHA256SUMS             ← 整包逐文件校验（除自己外的每个文件都在里面）
-    ├── bin/                   ← 入口：start-headless / stop / status / verify
+    ├── bin/                   ← 统一入口 emulator.sh / emulator.ps1 + 平台实现
     ├── runtime/               ← ① 无头运行环境（模拟器 + 目标 qemu 后端 + 自带 adb）
     │   └── RUNTIME.txt        ← 包名 / 渠道 / 版本 / build id / 来源 URL / sha1
     ├── images/                ← ② 虚拟机镜像（ROM 交付目录原样）
@@ -72,9 +72,14 @@ release/
     │   ├── SHA256SUMS         ← ROM 自带的逐文件清单
     │   └── MANIFEST.txt       ← 指纹 / abilist / 翻译层统计
     ├── templates/             ← ③ 模板：config.ini（硬件唯一真源）/ instance.env / 说明
-    └── tools/                 ← 验收探针（arm64-probe、arm64-probe.apk）
-        └── net-bridge*.sh     ← 仅 linux 包：guest 桥接到物理 LAN
+    └── tools/                 ← 上位应用 APK、验收探针与 Linux 桥接工具
+        ├── remote-control-controller.apk ← release 时重新构建
+        └── CONTROLLER-APP.md  ← 安装方法和当前能力说明
 ```
+
+release 会调用 `dev/05-controller-app/build-apk.sh`，需要本地 Android build-tools、JDK 11 和 API 31 `android.jar`。
+APK 的 SHA256 与源码文件 SHA256 写入 `RELEASE.json`。上位应用当前仍使用旧的共享存储配置文件协议；
+与 release ROM 的 init 服务尚未接通，具体限制见包内 `tools/CONTROLLER-APP.md`。
 
 **为什么每个平台包各自带一份镜像**：交付方要的是"一个 zip 拿走就能跑"，
 而不是"再配一个镜像包"。镜像在打包机上是**硬链接**进 staging 的（不复制实体），
@@ -97,13 +102,17 @@ cd dev/04-android-rom
 ./scripts/release.sh --smoke            # 打完解压 linux 那份**真启动验收**
 ```
 
+release ZIP 默认重建上位应用 APK。`--zip-only` 会把这次源码构建更新到已有 staging 并重算清单；
+`--reuse-zip` 会比对 ZIP 内的文件校验表、打包源码指纹和上位应用源码指纹；
+管理脚本或其他文件有变化时会拒绝复用，需去掉该选项重新压缩。
+
 | 选项 | 作用 |
 |---|---|
 | `--version VER` | 发布版本号（默认 `<日期>-<git 短 sha>`，已跟踪文件有未提交改动时带 `-dirty`） |
 | `--platform linux\|windows\|darwin\|both\|all` | 打哪些（默认 both=linux+windows；all=四端） |
 | `--darwin-arch aarch64\|x64\|both` | mac 出哪一档（默认 aarch64=Apple Silicon） |
 | `--images-arm64 PATH` | arm64 原生 ROM 目录（`darwin-aarch64` 用；默认自动找） |
-| `--reuse-zip` | 配合 `--zip-only`：已有 zip 就不重压，只做结构自检（补跑冒烟用） |
+| `--reuse-zip` | 配合 `--zip-only`：清单完全匹配且上位应用源码未变时才复用已有 zip（补跑冒烟用） |
 | `--channel NAME` | 模拟器渠道（默认 `Stable`） |
 | `--images DIR` | 指定 ROM 交付目录（默认 `artifacts/rom-<product>`） |
 | `--out DIR` | 输出目录（默认 `release/`） |
@@ -187,6 +196,8 @@ qcow2 约 1.08 GiB，合计约 1.63 GiB。模板改小只影响重建后的数�
 
 | | Linux | Windows | Darwin |
 |---|---|---|---|
+| 统一入口 | `bin/emulator.sh` | `bin\emulator.ps1` | `bin/emulator.sh` |
+| 管理命令 | create / start / stop / kill / restart / clone / delete / status / list / verify / reset / inspect | 同左 | 同左 |
 | 启动（无头） | `bin/start-headless.sh` | `bin\start-headless.ps1` | `bin/start-headless.sh` |
 | 停止 | `bin/stop.sh` | `bin\stop.ps1` | `bin/stop.sh` |
 | 状态 | `bin/status.sh` | `bin\status.ps1` | `bin/status.sh` |
@@ -223,16 +234,16 @@ Windows 侧的链接按能力降级（符号链接 → 硬链接 → 复制；�
 # ① 快速体检（几十秒，不需要网络，不需要真镜像）
 bash tools/test-release.sh
 #   [0] 所有脚本语法（bash -n + pwsh 语法分析）
-#   [1] 假 ROM + 假运行时 → 真跑 release.sh → 断言两个 zip 的结构、
+#   [1] 假 ROM + 假运行时 + 假 APK → 真跑 release.sh → 断言两个 zip 的结构、
 #       SHA256SUMS 逐文件校验通过、清单覆盖每个文件、RELEASE.json 字段、
-#       START-HERE 占位符全替换、包内没有别的平台的后端
+#       START-HERE 占位符全替换、统一管理 CLI、包内没有别的平台的后端
 #   [2] 解压出来的包能自述（status、--help、Windows 工作目录构建）
 
 # ② 真包 + 真启动（下载运行时、打两个 zip、解压 linux 那份起来做 4 组验收）
 ./scripts/release.sh --smoke --smoke-port 5588 --smoke-adb /usr/bin/adb
 ```
 
-`--smoke` 会：解压 → `bin/start-headless.sh`（等 `sys.boot_completed=1`）→
+`--smoke` 会：解压 → `bin/emulator.sh start`（等 `sys.boot_completed=1`）→
 `bin/verify.sh`（ABI / 翻译层 / aarch64 静态 ELF / 纯 arm64-v8a 探针 APK）→ `bin/stop.sh`。
 冒烟目录留在 `.run/release-smoke/`（含启动日志与验收输出），`--clean-smoke` 可清掉。
 

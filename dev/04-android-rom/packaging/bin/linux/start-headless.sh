@@ -195,7 +195,7 @@ log "服务地址：http://127.0.0.1:$SERVICE_HTTP_PORT"
 [ "$SERVICE_AUTH" != 1 ] || log "访问令牌保存在 $(service_token_file "$NAME")（不在日志中显示）"
 
 if [ "$WAIT" = 0 ]; then
-    printf '\n后续： ./bin/status.sh --port %s     ./bin/verify.sh --port %s     ./bin/stop.sh --port %s\n' "$PORT" "$PORT" "$PORT"
+    printf '\n后续： ./bin/emulator.sh status --port %s     ./bin/emulator.sh verify --port %s     ./bin/emulator.sh stop --port %s\n' "$PORT" "$PORT" "$PORT"
     exit 0
 fi
 
@@ -216,4 +216,4 @@ ok "服务检测完成 ${BOOTTIME:+（$BOOTTIME）}"
 log "设备序列号：$SERIAL"
 log "工作目录：  $SYSDIR（镜像在 $IMAGES，只读；状态全在这里）"
 log "日志：      $LOGF"
-printf '\n下一步： ./bin/verify.sh --port %s      ./bin/stop.sh --port %s\n' "$PORT" "$PORT"
+printf '\n下一步： ./bin/emulator.sh verify --port %s      ./bin/emulator.sh stop --port %s\n' "$PORT" "$PORT"

@@ -11,6 +11,7 @@
 |---|---|---|
 | CPU 虚拟化 | `CPU 虚拟化已在固件层启用` | 进 BIOS/UEFI 打开 VT-x / AMD-V |
 | WHPX 功能 | `Windows Hypervisor Platform 已启用` | 「启用或关闭 Windows 功能」勾选 *Windows 虚拟机监控程序平台* → 重启 |
+| 模拟器主目录 | `模拟器主目录存在：C:\Users\<你>\.android` | 缺了它会报 `...lock (error: 3)` 并**无限重试刷日志**；`preflight.ps1` / `start-headless.ps1` 现在都会自动创建，建不出来才报错 |
 | 磁盘 | 可用 ≥ 20 GB（镜像 5.7 GB + 解包与覆盖层） | 换盘或清理 |
 | 必需镜像 | `system-qemu.img / vendor-qemu.img / product-qemu.img / ramdisk-qemu.img / kernel-ranchu / encryptionkey.img / userdata.img / advancedFeatures.ini / config.ini / system\build.prop` 全部 `[OK]` | 缺哪个重跑 `fetch-images.ps1` |
 | `SHA256SUMS` | `校验通过（N 个文件）` | 传输损坏 → 重跑 `fetch-images.ps1 -Force` |
@@ -52,6 +53,7 @@
 | 日志里 `unexpected system image feature string` | AOSP 自编镜像与模拟器特性字符串不完全对齐，无影响 |
 | 没有 `initrd` 文件也没关系 | 模拟器会自己从 `ramdisk-qemu.img` 生成（`preflight.ps1` 会提示） |
 | `adb devices` 一开始显示 `offline` | 正常，等开机完成 |
+| 日志里没有 `boot time` / `Boot completed in` 行 | 自编 ROM 不一定打印，**不是故障**（脚本只把它当附注显示） |
 | Windows 防火墙弹窗 | 允许即可（adb 需要本地端口） |
 
 ---
@@ -66,6 +68,9 @@
 | 模拟器报 `missing the 'kernel-qemu' image file` | 缺 `ANDROID_PRODUCT_OUT` / `ANDROID_BUILD_TOP` 环境变量 | `run-windows.ps1` 已设；手工起模拟器时别漏 |
 | 报 WHPX 不可用 | 前置检查没过 | 先跑 `preflight.ps1` |
 | 装 arm64 APK 报 `ABI arm64-v8a not supported` | 属性没生效（不是这份 ROM） | 核对 `ro.product.cpu.abilist` |
+| 日志被 `Unexpected error while creating: ...lock (error: 3)` 刷屏、进程不退 | 模拟器主目录 `%USERPROFILE%\.android` 不存在（**模拟器自己不建这个目录**） | 先 `.\bin\stop.ps1 -Force` 止血；`start-headless.ps1` 现在会自动创建，手工建：`New-Item -ItemType Directory -Force "$env:USERPROFILE\.android"` |
+| `start-headless.ps1: 在此对象上找不到属性"Line"` | 旧版解析日志 boot time 行时没判空（StrictMode 下访问 `$null` 属性 = 终止脚本） | 已修（`Get-EmuBootTimeLine`）；服务其实已就绪，可直接 `.\bin\verify.ps1 -Port <端口>` |
+| 服务一直不就绪、日志里同一条 ERROR 反复出现 | 模拟器"只重试不退出"类错误 | `.\bin\status.ps1` 现在会打印**日志最后一条 ERROR + 中文诊断**；启动阶段也会立刻判死而不是干等超时 |
 
 本机 Linux 侧这三种启动失败都真实踩过并修好，完整记录见
 [`../docs/02-build-traps.md`](../docs/02-build-traps.md) 坑 7、8。

@@ -37,6 +37,8 @@ if ([string]::IsNullOrWhiteSpace($Name)) { $Name = $script:DefaultName }
 
 Assert-Emulator
 Assert-Images
+# 模拟器不会自己建主目录，缺了它会无限重试刷日志（见 common.ps1 的说明）
+[void](Assert-EmulatorHome)
 
 # ---------------------------------------------------------------------------
 # 端口：显式 > 该实例已登记的 > 自动分配（偶数为 console 口，ADB 口 = port+1）
@@ -47,9 +49,9 @@ if ($Port % 2 -ne 0) { Die "端口必须是偶数：$Port（console 口为偶数
 $owners = @(Get-InstanceNamesForPort $Port)
 if ($owners.Count -gt 0 -and ($owners.Count -ne 1 -or $owners[0] -ne $Name)) {
     $ownerText = $owners -join ", "
-    Die "端口 $Port 已登记给实例 '$ownerText'；不能让 '$Name' 覆盖它（.\bin\status.ps1 查看实例）"
+    Die "端口 $Port 已登记给实例 '$ownerText'；不能让 '$Name' 覆盖它（.\bin\emulator.ps1 list 查看实例）"
 }
-if (Test-InstanceRunning $Port) { Die "端口 $Port 已经有模拟器在跑（.\bin\status.ps1 看是谁）" }
+if (Test-InstanceRunning $Port) { Die "端口 $Port 已经有模拟器在跑（.\bin\emulator.ps1 status 看是谁）" }
 $serial  = Get-Serial  $Port
 $sysdir  = Get-SysDir  $Port
 $datadir = Get-DataDir $Port
@@ -131,8 +133,11 @@ else {
 
 $drive = (Get-Item $script:RunDir -Force -ErrorAction SilentlyContinue)
 if (-not $drive) { New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null; $drive = Get-Item $script:RunDir -Force }
-$freeGB = (Get-PSDrive $drive.PSDrive.Name).Free / 1GB
-if ($freeGB -lt 8) { Write-Warn ("工作目录所在盘只剩 {0:N1} GB —— 数据分区是 qcow2 覆盖层、会随用量增长" -f $freeGB) }
+# ⚠️ 别直接写 (Get-PSDrive ...).Free：UNC/网络盘上 PSDrive 可能是空的，
+#    空值取属性在 StrictMode 2.0 下会直接终止脚本。取不到就跳过这项检查。
+$freeGB = -1
+try { $freeGB = (Get-PSDrive $drive.PSDrive.Name).Free / 1GB } catch { }
+if ($freeGB -ge 0 -and $freeGB -lt 8) { Write-Warn ("工作目录所在盘只剩 {0:N1} GB —— 数据分区是 qcow2 覆盖层、会随用量增长" -f $freeGB) }
 
 # ---------------------------------------------------------------------------
 # 工作目录
@@ -189,8 +194,15 @@ foreach ($g in $gpuCands) {
     if ($g -ne $gpuMode) { Write-Warn "上一档（$gpuMode）没起来，退到 $g" }
     Write-Log "启动：-gpu $g -memory $memMB -cores $coreN -accel $accel 端口 $Port"
     Start-EmuOnce $g
-    if (Wait-ConsoleReady $Port 60) { $started = $true; $usedGpu = $g; break }
+    $wait = Wait-EmulatorCondition $Port { Test-ConsoleReady $Port } 60
+    if ($wait.State -eq "ready") { $started = $true; $usedGpu = $g; break }
+    if ($wait.State -eq "fatal") {
+        # 这类错误换 GPU 档位也好不了，别浪费时间再试一遍
+        Stop-Process -Id $script:EmuProc.Id -Force -ErrorAction SilentlyContinue
+        Die "模拟器起不来（-gpu $g）：`n    $($wait.Reason)`n    日志：$logf"
+    }
     $tail = (Get-Content $errf -Tail 2 -ErrorAction SilentlyContinue) -join " "
+    if (-not $tail) { $tail = Get-EmuLastError $logf }
     Write-Warn "没起来（$tail）"
     Stop-Process -Id $script:EmuProc.Id -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3
@@ -205,22 +217,30 @@ if ($gpuAuto) { Write-Log "GPU 自适应依据：$(Get-GpuReason)" }
 
 if ($NoWait) {
     Write-Host ""
-    Write-Host "后续： .\bin\status.ps1 -Port $Port    .\bin\verify.ps1 -Port $Port    .\bin\stop.ps1 -Port $Port"
+    Write-Host "后续： .\bin\emulator.ps1 status -Port $Port    .\bin\emulator.ps1 verify -Port $Port    .\bin\emulator.ps1 stop -Port $Port"
     exit 0
 }
 
 Write-Log "等服务就绪（WHPX 下通常几十秒）"
-if (-not (Wait-ServiceReady $Port $TimeoutSec)) { Die "等 remote-control 服务超时（${TimeoutSec}s）—— 看 $logf / $errf" }
+$ready = Wait-EmulatorCondition $Port { Test-ServiceReady $Port } $TimeoutSec
+if ($ready.State -ne "ready") {
+    if ($ready.State -eq "fatal") {
+        Stop-Process -Id $script:EmuProc.Id -Force -ErrorAction SilentlyContinue
+        Die "模拟器起不来：`n    $($ready.Reason)`n    日志：$logf"
+    }
+    Die "等 remote-control 服务超时（${TimeoutSec}s）—— 看 $logf / $errf"
+}
 
-$bt = (Select-String -Path $logf -Pattern '(boot time|Boot completed in) \d+ ms' -ErrorAction SilentlyContinue |
-       Select-Object -Last 1).Line
+# ⚠️ 别再写成 (...).Line：日志里没有 boot time 行时管道给的是 $null，StrictMode 2.0
+#    下访问它的属性会抛「在此对象上找不到属性"Line"」把脚本带崩（2026-10-05 实测踩过）。
+$bt = Get-EmuBootTimeLine @($logf, $errf)
 # ⚠️ 别把 "$( ... 里面再套 "" ...)" 写进双引号字符串：PowerShell 词法分析会当场崩
 #    （run-windows.ps1 踩过，那个脚本因此从来没能运行过）。先取到变量再拼。
 $btMsg = ""
-if ($bt) { $btMsg = "（" + $bt.Trim() + "）" }
+if ($bt) { $btMsg = "（" + $bt.Trim() + "）" } else { Write-Log "日志里没有 boot time 行（自编 ROM 可能不打印，属正常）" }
 Write-Ok "开机完成$btMsg"
 Write-Log "设备序列号：$serial"
 Write-Log "工作目录：  $sysdir（镜像在 $($script:Images)，只读；状态全在这里）"
 Write-Log "日志：      $logf"
 Write-Host ""
-Write-Host "下一步： .\bin\verify.ps1 -Port $Port     .\bin\stop.ps1 -Port $Port"
+Write-Host "下一步： .\bin\emulator.ps1 verify -Port $Port     .\bin\emulator.ps1 stop -Port $Port"

@@ -1,7 +1,7 @@
 # packaging · release 包的骨架（**源码**，不是产物）
 
 这里的东西会被 `../scripts/release.sh` 原样拷进 zip 的根目录，构成"解压即用"的
-那一层：启动脚本、模板、首读文档。
+那一层：统一入口、平台实现脚本、模板和首读文档。
 
 > 产物在 `../release/`（已 gitignore）。别把解出来的包又提交回来。
 
@@ -12,31 +12,36 @@
 ```
 packaging/
 ├── START-HERE.md               ← 包内首读。含 @VER@ / @PLATFORM@ 等占位符，打包时替换
+├── CONTROLLER-APP.md           ← 包内上位应用安装说明与当前能力状态
 ├── bin/
-│   ├── linux/                  ← 进 Linux 包：生命周期脚本及 console/storage helpers
+│   ├── linux/                  ← 进 Linux 包：emulator.sh 统一入口与平台实现
+│   │   ├── emulator.sh         统一管理：create/start/stop/kill/restart/clone/delete/status/list/verify/reset/inspect
 │   │   ├── lib.sh              公共函数（路径、config.ini、实例登记、adb/模拟器定位）
 │   │   ├── start-headless.sh   无头启动（默认 -no-window，后台 + 等开机）
 │   │   ├── stop.sh             优雅停（**先 sync 再 kill**，见下）
 │   │   ├── status.sh           实例/进程/开机状态 + ROM 指纹
-│   │   ├── console.sh          打开模拟器命令行
-│   │   ├── storage.sh          管理模拟器存储
+│   │   ├── console.sh          console / 服务管理公共函数
+│   │   ├── storage.sh          镜像稀疏空间优化函数
 │   │   └── verify.sh           4 组验收（ABI / 翻译层 / arm64 机器码 / arm64 应用）
-│   ├── windows/                ← 进 Windows 包：PowerShell 入口及管理脚本
+│   ├── windows/                ← 进 Windows 包：emulator.ps1 统一入口与管理脚本
+│   │   ├── emulator.ps1        统一管理：create/start/stop/kill/restart/clone/delete/status/list/verify/reset/inspect
 │   │   ├── common.ps1
 │   │   ├── start-headless.ps1
 │   │   ├── stop.ps1
 │   │   ├── status.ps1
-│   │   ├── console.ps1
-│   │   ├── storage.ps1
+│   │   ├── console.ps1         console / 服务管理公共函数
+│   │   ├── storage.ps1         镜像稀疏空间优化函数
 │   │   ├── reset.ps1            清空实例数据与快照
 │   │   └── verify.ps1
-│   └── darwin/                 ← 进 macOS 包：bash 生命周期脚本及 console/storage helpers
+│   └── darwin/                 ← 进 macOS 包：与 Linux 同语义的 emulator.sh 和实现脚本
+│       ├── emulator.sh         统一管理：create/start/stop/kill/restart/clone/delete/status/list/verify/reset/inspect
 │       ├── lib.sh
 │       ├── start-headless.sh
 │       ├── stop.sh
 │       ├── status.sh
-│       ├── console.sh
-│       ├── storage.sh
+│       ├── reset.sh
+│       ├── console.sh          console / 服务管理公共函数
+│       ├── storage.sh          镜像稀疏空间优化函数
 │       └── verify.sh
 └── templates/
     └── README.md               ← 模板说明（config.ini / instance.env 的解释）
@@ -50,8 +55,17 @@ packaging/
 | `templates/instance.env` | `release.sh` 生成的实例登记模板 |
 | `tools/net-bridge*.sh` | `../tools/`（**仅 linux 包**；Windows 侧 `-net-tap` 没实现） |
 | `tools/arm64-probe.apk` | `../artifacts/arm64-probe.apk`（项目自建 arm64 验收探针） |
+| `tools/remote-control-controller.apk` | release 前从 `dev/05-controller-app/` 当前源码重新构建 |
+| `tools/CONTROLLER-APP.md` | `CONTROLLER-APP.md`（APK 安装方法、签名类型和能力状态） |
 | `images/**` | `../artifacts/rom-<product>/`（ROM 交付目录，硬链接） |
 | `runtime/**` | SDK 模拟器包 + platform-tools（按平台下载并校验 sha1） |
+
+release 调用 `dev/05-controller-app/build-apk.sh` 重新构建 APK；本地 Android build-tools、JDK 11 与 API 31 `android.jar`
+必须可用。构建签名写到 `.run/controller-app-debug.keystore`，不会覆盖上位应用目录里既有的密钥文件。
+
+日常操作从包内统一入口开始：`./bin/emulator.sh help`（Windows: `.\bin\emulator.ps1 help`）。
+它统一提供创建、启动、停止、强停、重启、克隆、删除、状态/列表、验收和重置；旧平台脚本仍作为实现层保留。
+已有实例默认保留数据，`reset` 和 `delete` 会再次确认后才清理数据。导出/导入尚未验证恢复后数据完整性，当前不作为 release 能力提供。
 
 ---
 

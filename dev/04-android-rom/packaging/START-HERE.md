@@ -22,8 +22,16 @@
 
 * 设备序列号就是 `emulator-<端口>`（默认 `emulator-5580`），用包内 adb 直接连：
   `@ADB_EXAMPLE@`
-* 停机器：@STOP_CMD@（**先 sync 再关**，别直接杀进程 —— 见 §5）
-* 验收：@VERIFY_CMD@（宿主 / 产品类型 / 服务产物架构 / 设备 / 服务，逐项打勾）
+* 停机器：`@STOP_CMD@`（**先 sync 再关**，别直接杀进程 —— 见 §5）
+* 验收：`@VERIFY_CMD@`（宿主 / 产品类型 / 服务产物架构 / 设备 / 服务，逐项打勾）
+
+统一管理入口是 `bin/emulator.sh`（Windows 为 `bin\emulator.ps1`），支持 `start`、`stop`、
+`kill`、`restart`、`status`、`list`、`verify`、`reset`、`create`、`clone` 和 `delete`。
+实例存在时执行 `start` 会复用原数据；只有新实例会从空数据启动。`reset` 和 `delete` 会先确认，再清除所选实例的数据。
+
+@MANAGER_EXAMPLES@
+
+当前入口不提供归档导出/导入：现有恢复实现尚未验证数据完整性，不应作为备份使用。
 
 ---
 
@@ -34,13 +42,16 @@
 ├── START-HERE.md          ← 本文件
 ├── RELEASE.json           ← 版本、ROM 指纹、运行时 build id、入口清单
 ├── SHA256SUMS             ← 整包逐文件校验
-├── bin/                   ← 入口脚本（@ENTRY_NAMES@）
+├── bin/                   ← 统一入口 bin/emulator.*，以及平台实现脚本
 ├── images/                ← 虚拟机镜像（ROM 交付目录，只读）
 ├── runtime/               ← 无头运行环境（模拟器 + qemu x86_64 后端 + adb）
 │   └── RUNTIME.txt        ← 包名/版本/build id/来源 URL/sha1
 ├── templates/             ← 模板：config.ini（硬件）/ instance.env（实例登记）
-└── tools/                 ← 验收探针（arm64-probe、arm64-probe.apk）@TOOLS_EXTRA@
+└── tools/                 ← 上位应用 APK、验收探针 @TOOLS_EXTRA@
 ```
+
+上位应用源码构建的 APK 位于 `tools/remote-control-controller.apk`，安装命令和当前能力说明见
+[`tools/CONTROLLER-APP.md`](tools/CONTROLLER-APP.md)。
 
 `images/` 是**只读**的：启动时会在 `.run/sysdir-<端口>/` 里建一份工作目录，
 把镜像链接进去，模拟器写的状态（`userdata-qemu.img`、快照、`build.avd/`）全落在

@@ -27,7 +27,7 @@
 #   1. runtime/   完整**无头**运行环境：SDK 模拟器（含 qemu x86_64 后端）+ 自带 adb
 #   2. images/    对应的虚拟机镜像：artifacts/rom-<product>/ 交付目录（硬链接，不复制实体）
 #   3. templates/ 模板：config.ini（硬件唯一真源）、实例登记、工作目录布局说明
-#   另有 bin/ 入口脚本（起/停/看状态/验收）与 START-HERE.md 首读文档。
+#   另有 bin/emulator.* 统一入口、tools/ 上位应用 APK 与 START-HERE.md 首读文档。
 #
 # 设计要点（每条都是踩出来的，别随手改）：
 #   · 各平台用**同一个渠道、同一个 build id** 的模拟器（linux/windows/darwin 同版本发布），
@@ -69,6 +69,14 @@ ZIP_LEVEL=1
 LIST_ONLY=0; STAGE_ONLY=0; ZIP_ONLY=0; NO_DOWNLOAD=0; SLIM=0; SMOKE=0; REUSE_ZIP=0
 KEEP_STAGE=0; CLEAN_SMOKE=0; VERIFY_IMAGES=1
 TEST_RELEASE=0
+CONTROLLER_APK_INPUT="${AUTOSNAP_CONTROLLER_APK:-}"
+CONTROLLER_APK=""
+CONTROLLER_PACKAGE_NAME="com.remotecontrol.controller"
+CONTROLLER_BUILD_METHOD="source"
+CONTROLLER_SIGNATURE="debug"
+ALLOW_CONTROLLER_APK_FIXTURE="${AUTOSNAP_ALLOW_TEST_APK_FIXTURE:-0}"
+CONTROLLER_SOURCE_SHA256=""
+RELEASE_SOURCE_SHA256=""
 SMOKE_PORT="${SMOKE_PORT:-5588}"
 SMOKE_ADB="${SMOKE_ADB:-/usr/bin/adb}"
 declare -A EMU_ZIP_OVERRIDE=() PT_ZIP_OVERRIDE=()
@@ -284,6 +292,53 @@ resolve_version() {
         sha="$sha-dirty"
     fi
     VERSION="$(date +%Y%m%d)-$sha"
+}
+
+prepare_controller_apk() {
+    local app_dir="$PROJECT_ROOT/dev/05-controller-app"
+    if [ -n "$CONTROLLER_APK_INPUT" ]; then
+        [ -s "$CONTROLLER_APK_INPUT" ] || die "上位应用 APK 不存在：$CONTROLLER_APK_INPUT"
+        CONTROLLER_APK="$CONTROLLER_APK_INPUT"
+        log "使用指定的上位应用 APK：$CONTROLLER_APK"
+        if [ "$ALLOW_CONTROLLER_APK_FIXTURE" = 1 ]; then
+            CONTROLLER_PACKAGE_NAME="unverified-test-fixture"
+            CONTROLLER_BUILD_METHOD="test-fixture"
+            CONTROLLER_SIGNATURE="unverified"
+        else
+            CONTROLLER_BUILD_METHOD="provided"
+            CONTROLLER_SIGNATURE="provided"
+            validate_controller_apk "$CONTROLLER_APK"
+        fi
+    else
+        local builder="$app_dir/build-apk.sh"
+        CONTROLLER_APK="$app_dir/build/remote-control-controller.apk"
+        [ -x "$builder" ] || die "找不到上位应用构建脚本：$builder"
+        log "从当前源码构建上位应用 APK"
+        KEYSTORE="$RUN_DIR/controller-app-debug.keystore" bash "$builder" \
+            || die "上位应用 APK 构建失败"
+        [ -s "$CONTROLLER_APK" ] || die "构建脚本没有生成 APK：$CONTROLLER_APK"
+        validate_controller_apk "$CONTROLLER_APK"
+        log "上位应用 APK 就绪：$CONTROLLER_APK"
+    fi
+    CONTROLLER_SOURCE_SHA256="$(find "$app_dir" -type f \
+        ! -path "$app_dir/build/*" ! -name '*.keystore' -print0 | LC_ALL=C sort -z | \
+        xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    RELEASE_SOURCE_SHA256="$(
+        {
+            find "$PACKAGING_DIR" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+            sha256sum "$X64_DIR/scripts/release.sh" "$X64_DIR/scripts/common.sh" "$X64_DIR/emulator/config.ini" \
+                "$X64_DIR/tools/net-bridge.sh" "$X64_DIR/tools/net-bridge-ifup.sh"
+        } | sha256sum | cut -d' ' -f1
+    )"
+}
+
+validate_controller_apk() {
+    local apk="$1" aapt2="${BT:-/opt/android/btools/android-13}/aapt2" badging
+    [ -x "$aapt2" ] || die "找不到 aapt2：$aapt2"
+    badging="$("$aapt2" dump badging "$apk" 2>/dev/null)" \
+        || die "无法读取上位应用 APK 清单：$apk"
+    printf '%s\n' "$badging" | grep -q "^package: name='com.remotecontrol.controller'" \
+        || die "上位应用包名不是 com.remotecontrol.controller：$apk"
 }
 
 # ---------------------------------------------------------------------------
@@ -612,13 +667,17 @@ EOF
     # 验收探针 +（Linux）桥接工具
     [ -s "$ARTIFACTS_DIR/arm64-probe.apk" ] && cp -f "$ARTIFACTS_DIR/arm64-probe.apk" "$root/tools/"
     [ -s "$RUN_DIR/arm64-probe" ] && cp -f "$RUN_DIR/arm64-probe" "$root/tools/"
+    cp -f "$CONTROLLER_APK" "$root/tools/remote-control-controller.apk"
+    cp -f "$PACKAGING_DIR/CONTROLLER-APP.md" "$root/tools/CONTROLLER-APP.md"
     # 桥接工具只进 linux 包：macOS 没有 -net-tap 等价物，Windows 侧也没实现
     # （三平台一致的口径，见 docs/13-macos-port.md §3.5）
     if [ "$(target_platform "$plat")" = linux ]; then
         cp -f "$X64_DIR/tools/net-bridge.sh" "$root/tools/" 2>/dev/null || true
         cp -f "$X64_DIR/tools/net-bridge-ifup.sh" "$root/tools/" 2>/dev/null || true
     fi
-    chmod +x "$root"/tools/* 2>/dev/null || true
+    for tool in "$root"/tools/*; do
+        case "$tool" in *.apk|*.md) ;; *) chmod +x "$tool" 2>/dev/null || true ;; esac
+    done
     rm -f "$root/tools/.gitkeep"
 
     STAGED_ROOT="$root"
@@ -647,21 +706,37 @@ import os, sys
 def quickstart():
     if plat == "windows":
         return "\n".join(["```powershell", f"cd {rootdir}",
-                          ".\\bin\\start-headless.ps1                 # 默认端口 5580，全新冷启动，等开机完成",
+                          ".\\bin\\emulator.ps1 start                 # 首次创建；之后启动会保留数据",
                           "```"])
-    # linux 与 darwin 都是 bash 三件套（bin/ 下同名同语义，平台差异在 lib.sh 里）
     return "\n".join(["```bash", f"cd {rootdir}",
-                      "./bin/start-headless.sh                 # 默认端口 5580，全新冷启动，等开机完成",
+                      "./bin/emulator.sh start                  # 首次创建；之后启动会保留数据",
                       "```"])
 
 def multi():
     if plat == "windows":
-        return "\n".join([".\\bin\\start-headless.ps1 -Name vm2 -Port 5584    # 第二台（走 NAT）",
-                          ".\\bin\\start-headless.ps1 -Name vm2 -Reuse        # 复用它的数据再起",
-                          ".\\bin\\status.ps1                                # 看所有实例"])
-    return "\n".join(["./bin/start-headless.sh --name vm2 --port 5584    # 第二台（走 NAT）",
-                      "./bin/start-headless.sh --name vm2 --reuse        # 复用它的数据再起",
-                      "./bin/status.sh                                   # 看所有实例"])
+        return "\n".join([".\\bin\\emulator.ps1 start vm2 -Port 5584 -NoWait    # 第二台（走 NAT）",
+                          ".\\bin\\emulator.ps1 start vm2                  # 保留数据再次启动",
+                          ".\\bin\\emulator.ps1 list                      # 看所有实例"])
+    return "\n".join(["./bin/emulator.sh start vm2 --port 5584 --no-wait    # 第二台（走 NAT）",
+                      "./bin/emulator.sh start vm2                      # 保留数据再次启动",
+                      "./bin/emulator.sh list                           # 看所有实例"])
+
+def manager_examples():
+    if plat == "windows":
+        return "\n".join(["```powershell",
+                          ".\\bin\\emulator.ps1 create test -Port 5582",
+                          ".\\bin\\emulator.ps1 start test -NoWait",
+                          ".\\bin\\emulator.ps1 clone test test-copy -Port 5584",
+                          ".\\bin\\emulator.ps1 list",
+                          ".\\bin\\emulator.ps1 delete test-copy",
+                          "```"])
+    return "\n".join(["```bash",
+                      "./bin/emulator.sh create test --port 5582",
+                      "./bin/emulator.sh start test --no-wait",
+                      "./bin/emulator.sh clone test test-copy --port 5584",
+                      "./bin/emulator.sh list",
+                      "./bin/emulator.sh delete test-copy",
+                      "```"])
 
 # 运行时信息从包内 RUNTIME.txt 读，保证"文档写的 == 包里实际带的"
 rt = {}
@@ -725,13 +800,15 @@ def dist_rows(rt, rootdir, romdir_abs):
     ])
 
 adb = ".\\runtime\\platform-tools\\adb.exe" if plat == "windows" else "./runtime/platform-tools/adb"
+manager = ".\\bin\\emulator.ps1" if plat == "windows" else "./bin/emulator.sh"
 subs = {
     "@VER@": ver, "@PLATFORM_LABEL@": label, "@BUILT_AT@": built, "@ROM_FINGERPRINT@": fp,
     "@RUNTIME_PKG@": rt.get("包名", "?"), "@RUNTIME_VER@": rt.get("版本", "?"),
     "@BUILD_ID@": rt.get("BuildId", "?"), "@IMAGES_SIZE@": imgsize,
     "@QUICKSTART@": quickstart(), "@MULTI_EXAMPLE@": multi(),
-    "@STOP_CMD@": ".\\bin\\stop.ps1" if plat == "windows" else "./bin/stop.sh",
-    "@VERIFY_CMD@": ".\\bin\\verify.ps1" if plat == "windows" else "./bin/verify.sh",
+    "@MANAGER_EXAMPLES@": manager_examples(),
+    "@STOP_CMD@": manager + " stop",
+    "@VERIFY_CMD@": manager + " verify",
     "@ADB_EXAMPLE@": f"{adb} -s emulator-5580 shell getprop ro.product.cpu.abilist",
     "@ROOT_DIR@": rootdir,
     # 第 6 节（交付约束）按**产品类型**渲染 —— 判据取包内 build.prop 的 abilist64，
@@ -743,7 +820,7 @@ subs = {
                      "应用需自带 arm64-v8a 库")
                     if plat == "darwin" and target.endswith("aarch64")
                     else "x86_64，另有 ARM64 用户态翻译层（可跑 arm64 应用）",
-    "@ENTRY_NAMES@": "start-headless / stop / status / verify",
+    "@ENTRY_NAMES@": "emulator lifecycle CLI / platform helpers",
     "@TOOLS_EXTRA@": "（另有 net-bridge.sh / net-bridge-ifup.sh：guest 桥接到物理 LAN）" if plat == "linux" else "",
     # macOS 专属提示：让 START-HERE 里直接写清"这台机器只能跑哪种 ROM"
     "@PLATFORM_HINT@": "\n> ⚠️ **这台是 Apple Silicon**：只能跑 arm64 原生 ROM。"
@@ -768,9 +845,10 @@ PY
 # RELEASE.json + SHA256SUMS
 write_manifest() {   # write_manifest <目标> <root> <ROM 目录>
     local plat="$1" root="$2" rom="$3" tag; tag="$(platform_tag "$plat")"
-    local emu_zip emu_url emu_sha emu_ver emu_build _emubase pt_zip pt_url pt_sha pt_ver
+    local emu_zip emu_url emu_sha emu_ver emu_build _emubase pt_zip pt_url pt_sha pt_ver controller_sha
     IFS='|' read -r emu_zip emu_url emu_sha emu_ver emu_build _emubase pt_zip pt_url pt_sha pt_ver \
         < "$STAGE_DIR/.runtime-$plat.meta"
+    controller_sha="$(sha256sum "$root/tools/remote-control-controller.apk" | cut -d' ' -f1)"
 
     if [ "$VERIFY_IMAGES" = 1 ]; then
         log "[$plat] 校验镜像（sha256sum -c images/SHA256SUMS，$(du -sh "$root/images" | cut -f1)）"
@@ -784,10 +862,14 @@ write_manifest() {   # write_manifest <目标> <root> <ROM 目录>
     local n
     n="$(python3 - "$root" "$VERSION" "$plat" "$tag" "$emu_zip" "$emu_url" "$emu_sha" "$emu_ver" "$emu_build" \
              "$pt_zip" "$pt_url" "$pt_sha" "$pt_ver" "$rom" "$PROJECT_ROOT" \
-             "$(platform_backend "$plat")" <<'PY'
+             "$(platform_backend "$plat")" "$controller_sha" "$CONTROLLER_SOURCE_SHA256" \
+             "$RELEASE_SOURCE_SHA256" "$CONTROLLER_PACKAGE_NAME" \
+             "$CONTROLLER_BUILD_METHOD" "$CONTROLLER_SIGNATURE" <<'PY'
 import json, os, subprocess, sys
 (root, ver, plat, tag, emu_zip, emu_url, emu_sha, emu_ver, emu_build,
- pt_zip, pt_url, pt_sha, pt_ver, romdir, projroot, backend) = sys.argv[1:17]
+ pt_zip, pt_url, pt_sha, pt_ver, romdir, projroot, backend, controller_sha,
+ controller_source_sha, release_source_sha, controller_package_name,
+ controller_build_method, controller_signature) = sys.argv[1:23]
 
 def from_manifest(prefix):
     man = os.path.join(root, "images", "MANIFEST.txt")
@@ -876,11 +958,13 @@ for dirpath, _dirs, names in os.walk(root):
 sums_lines = files + 1
 
 if plat == "windows":
+    manager = "bin\\emulator.ps1"
     start = "bin\\start-headless.ps1"
     stop = "bin\\stop.ps1"
     status = "bin\\status.ps1"
     verify = "bin\\verify.ps1"
 else:
+    manager = "bin/emulator.sh"
     start = "bin/start-headless.sh"
     stop = "bin/stop.sh"
     status = "bin/status.sh"
@@ -897,6 +981,7 @@ doc = {
     "builtAt": subprocess.run(["date", "-Iseconds"], capture_output=True, text=True).stdout.strip(),
     "builtBy": "dev/04-android-rom/scripts/release.sh",
     "gitHead": git_head(),
+    "packageSourceSha256": release_source_sha,
     "rom": {
         "product": product,
         "lunch": lunch,
@@ -920,10 +1005,20 @@ doc = {
     },
     "platformTools": {"package": os.path.basename(pt_zip), "version": pt_ver, "url": pt_url, "sha1": pt_sha},
     "entrypoints": {
+        "manager": manager,
         "start": start,
         "stop": stop,
         "status": status,
         "verify": verify,
+    },
+    "commands": ["create", "start", "stop", "kill", "restart", "clone", "delete", "status", "list", "verify", "reset", "inspect"],
+    "controllerApp": {
+        "packageName": controller_package_name,
+        "apk": "tools/remote-control-controller.apk",
+        "sha256": controller_sha,
+        "sourceSha256": controller_source_sha,
+        "buildMethod": controller_build_method,
+        "signature": controller_signature,
     },
     "templates": ["templates/config.ini", "templates/instance.env", "templates/README.md"],
     "files": {"count": files + 1, "bytes": total, "sha256sumsLines": sums_lines},
@@ -975,7 +1070,7 @@ make_zip() {   # make_zip <平台> <root>  → 打印 zip 路径（最后一行�
 }
 
 check_zip() {   # check_zip <平台> <zip>：结构自检（三样东西都在），打印条目数
-    local plat="$1" zip="$2" name entries must missing="" adbname listing
+    local plat="$1" zip="$2" name entries must missing="" adbname listing manager reset
     name="$(basename "$zip" .zip)"
     # ⚠️ 清单**只取一次**再比对：
     #    `unzip -Z1 "$zip" | grep -qxF ...` 里 grep 一命中就退出，unzip 吃 SIGPIPE（141），
@@ -985,7 +1080,11 @@ check_zip() {   # check_zip <平台> <zip>：结构自检（三样东西都在�
     unzip -Z1 "$zip" > "$listing"
     entries="$(wc -l < "$listing")"
     adbname="adb"; [ "$(target_platform "$plat")" = windows ] && adbname="adb.exe"
+    manager="emulator.sh"; reset="reset.sh"
+    [ "$(target_platform "$plat")" != windows ] || { manager="emulator.ps1"; reset="reset.ps1"; }
     for must in \
+        "$name/bin/$manager" \
+        "$name/bin/$reset" \
         "$name/bin/start-headless.$([ "$(target_platform "$plat")" = windows ] && echo ps1 || echo sh)" \
         "$name/runtime/emulator/$(platform_backend "$plat")" \
         "$name/runtime/platform-tools/$adbname" \
@@ -994,6 +1093,8 @@ check_zip() {   # check_zip <平台> <zip>：结构自检（三样东西都在�
         "$name/images/system/build.prop" \
         "$name/templates/config.ini" \
         "$name/templates/instance.env" \
+        "$name/tools/remote-control-controller.apk" \
+        "$name/tools/CONTROLLER-APP.md" \
         "$name/RELEASE.json" \
         "$name/SHA256SUMS" \
         "$name/START-HERE.md"; do
@@ -1041,7 +1142,7 @@ smoke_linux() {   # smoke_linux <zip> <平台>
     if ! host_can_smoke "$SMOKE_PLAT"; then
         warn "[$SMOKE_PLAT] 当前宿主（$(uname -s)）跑不了这个平台的产物 —— 跳过冒烟，只做结构检查"
         warn "  这是正常的：在 Linux 上打 darwin 包时没法真启动 macOS 的模拟器。"
-        warn "  真冒烟请在目标平台上跑：解压后 ./bin/start-headless.sh && ./bin/verify.sh"
+        warn "  真冒烟请在目标平台上跑：解压后 ./bin/emulator.sh start && ./bin/emulator.sh verify"
         return 0
     fi
     local smoke_adb; smoke_adb="$(resolve_smoke_adb "$SMOKE_PLAT")"
@@ -1051,11 +1152,11 @@ smoke_linux() {   # smoke_linux <zip> <平台>
     pkg="$dir/$root"
     [ -d "$pkg" ] || die "解压后没有 $root 目录"
     if [ -x "$smoke_adb" ]; then
-        AUTOSNAP_ADB="$smoke_adb" "$pkg/bin/start-headless.sh" --port "$SMOKE_PORT" --timeout 420 \
+        AUTOSNAP_ADB="$smoke_adb" "$pkg/bin/emulator.sh" start --port "$SMOKE_PORT" --timeout 420 \
             || die "冒烟失败：从 release 包里起不来（看 $pkg/.run/emulator-$SMOKE_PORT.log）"
-        AUTOSNAP_ADB="$smoke_adb" "$pkg/bin/verify.sh" --port "$SMOKE_PORT" || die "冒烟失败：验收没过"
-        AUTOSNAP_ADB="$smoke_adb" "$pkg/bin/stop.sh" --port "$SMOKE_PORT" \
-            || warn "停机没干净，手工看：$pkg/bin/stop.sh --port $SMOKE_PORT --force"
+        AUTOSNAP_ADB="$smoke_adb" "$pkg/bin/emulator.sh" verify --port "$SMOKE_PORT" || die "冒烟失败：验收没过"
+        AUTOSNAP_ADB="$smoke_adb" "$pkg/bin/emulator.sh" stop --port "$SMOKE_PORT" \
+            || warn "停机没干净，手工看：$pkg/bin/emulator.sh stop --port $SMOKE_PORT --force"
     else
         warn "没有可用的 adb（$smoke_adb），只做解压 + 结构检查，不启动"
         warn "  提示：darwin 包在 macOS 上默认找 /usr/local/bin/adb；"
@@ -1190,7 +1291,7 @@ if [ "$LIST_ONLY" = 1 ]; then
     else
         printf '  （还没有 SDK 清单缓存：正式跑一次会先下载 %s/repository2-3.xml）\n' "$SDK_MIRROR"
     fi
-    printf '  打包内容   runtime/（无头模拟器 + adb） + images/ + templates/ + bin/ + START-HERE.md\n'
+    printf '  打包内容   runtime/ + images/ + templates/ + bin/emulator.* + 上位应用 APK + START-HERE.md\n'
     while IFS= read -r _rd; do
         printf '    images ← %s（%s）\n' "${_rd#"$PROJECT_ROOT"/}" "$(du -sh --apparent-size "$_rd" | cut -f1)"
     done <<EOF
@@ -1202,6 +1303,7 @@ fi
 mkdir -p "$RUN_DIR" "$CACHE_DIR" "$STAGE_DIR" "$RELEASE_DIR"
 exec 9>"$RUN_DIR/release.lock"
 flock -n 9 || die "另一个 release 打包实例正在跑（锁：$RUN_DIR/release.lock）"
+prepare_controller_apk
 
 if [ "$ZIP_ONLY" = 0 ]; then
     # 只有真的需要"按清单找包"时才去下载清单（全程用本地 zip 覆盖时可以完全离线）
@@ -1221,6 +1323,22 @@ for plat in $(target_list); do
     if [ "$ZIP_ONLY" = 1 ]; then
         root="$STAGE_DIR/autosnap-$VERSION-$(platform_tag "$plat")"
         [ -d "$root" ] || die "--zip-only 但 staging 不在：$root"
+        [ -s "$root/RELEASE.json" ] || die "--zip-only staging 缺少 RELEASE.json；请重新运行完整打包或 --stage-only"
+        staged_source_sha="$(python3 - "$root/RELEASE.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    print(json.load(source).get("packageSourceSha256", ""))
+PY
+        )" || die "--zip-only staging 的 RELEASE.json 无法读取：$root/RELEASE.json"
+        [ "$staged_source_sha" = "$RELEASE_SOURCE_SHA256" ] \
+            || die "--zip-only staging 来自不同的打包源码；请重新运行完整打包或 --stage-only：$root"
+        mkdir -p "$root/tools"
+        cp -f "$CONTROLLER_APK" "$root/tools/remote-control-controller.apk"
+        cp -f "$PACKAGING_DIR/CONTROLLER-APP.md" "$root/tools/CONTROLLER-APP.md"
+        rm -f "$root/RELEASE.json" "$root/SHA256SUMS"
+        rom="$(rom_dir_for_target "$plat")"
+        render_start_here "$plat" "$root" "$rom"
+        write_manifest "$plat" "$root" "$rom"
     else
         # 这个目标用哪份 ROM（可能与其他目标不同 —— darwin-aarch64 用的是 arm64 那份）
         stage_release "$plat" "$(rom_dir_for_target "$plat")"; root="$STAGED_ROOT"
@@ -1231,9 +1349,82 @@ for plat in $(target_list); do
         log "[$plat] --stage-only：只铺到 ${root#"$PROJECT_ROOT"/}（$(du -sh "$root" | cut -f1)）"
         ZIPS+=("$root")
     elif [ "$REUSE_ZIP" = 1 ] && [ -s "$RELEASE_DIR/$(basename "$root").zip" ]; then
-        log "[$plat] --reuse-zip：复用已有 $(basename "$root").zip（只做结构自检）"
-        check_zip "$plat" "$RELEASE_DIR/$(basename "$root").zip"
-        ZIPS+=("$RELEASE_DIR/$(basename "$root").zip")
+        log "[$plat] --reuse-zip：核对清单后复用 $(basename "$root").zip"
+        existing_zip="$RELEASE_DIR/$(basename "$root").zip"
+        check_zip "$plat" "$existing_zip"
+        zip_sums="$STAGE_DIR/.reuse-sums-$plat"
+        if ! unzip -p "$existing_zip" "$(basename "$root")/SHA256SUMS" > "$zip_sums"; then
+            rm -f "$zip_sums"
+            die "已有 ZIP 缺少 SHA256SUMS：$existing_zip"
+        fi
+        if ! python3 - "$root/SHA256SUMS" "$zip_sums" "$existing_zip" "$(basename "$root")" <<'PY'
+import hashlib, sys, zipfile
+
+ignored = {"START-HERE.md", "RELEASE.json", "SHA256SUMS"}
+def read_sums(path):
+    result = {}
+    with open(path, encoding="utf-8") as source:
+        for line in source:
+            digest, name = line.rstrip("\n").split("  ", 1)
+            if name.startswith("./"):
+                name = name[2:]
+            if name in result:
+                raise SystemExit(f"duplicate SHA256SUMS entry: {name}")
+            result[name] = digest
+    return result
+
+stage = read_sums(sys.argv[1])
+archive = read_sums(sys.argv[2])
+if {k: v for k, v in stage.items() if k not in ignored} != \
+   {k: v for k, v in archive.items() if k not in ignored}:
+    raise SystemExit("archive manifest differs from current staging")
+
+root, archive_path = sys.argv[4], sys.argv[3]
+expected = dict(archive)
+expected["SHA256SUMS"] = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
+prefix = root + "/"
+with zipfile.ZipFile(archive_path) as zf:
+    infos = [item for item in zf.infolist() if not item.is_dir()]
+    actual = {}
+    for item in infos:
+        if not item.filename.startswith(prefix):
+            raise SystemExit(f"unexpected ZIP entry: {item.filename}")
+        name = item.filename[len(prefix):]
+        if name in actual:
+            raise SystemExit(f"duplicate ZIP entry: {name}")
+        actual[name] = item
+    if set(actual) != set(expected):
+        raise SystemExit("ZIP file set differs from SHA256SUMS")
+    for name, item in actual.items():
+        digest = hashlib.sha256()
+        with zf.open(item) as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected[name]:
+            raise SystemExit(f"ZIP content hash mismatch: {name}")
+PY
+        then
+            rm -f "$zip_sums"
+            die "已有 ZIP 内容、条目或清单与当前 staging 不一致；去掉 --reuse-zip 重新压缩：$existing_zip"
+        fi
+        rm -f "$zip_sums"
+        zip_apk="$STAGE_DIR/.reuse-controller-$plat.apk"
+        zip_manifest="$STAGE_DIR/.reuse-release-$plat.json"
+        unzip -p "$existing_zip" "$(basename "$root")/tools/remote-control-controller.apk" > "$zip_apk" \
+            || die "已有 ZIP 缺少上位应用 APK：$existing_zip"
+        unzip -p "$existing_zip" "$(basename "$root")/RELEASE.json" > "$zip_manifest" \
+            || die "已有 ZIP 缺少 RELEASE.json：$existing_zip"
+        zip_app_sha="$(sha256sum "$zip_apk" | cut -d' ' -f1)"
+        expected_app_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["controllerApp"]["sha256"])' "$zip_manifest")"
+        zip_source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["controllerApp"]["sourceSha256"])' "$zip_manifest")"
+        zip_package_source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("packageSourceSha256", ""))' "$zip_manifest")"
+        rm -f "$zip_apk" "$zip_manifest"
+        [ "$zip_app_sha" = "$expected_app_sha" ] || die "已有 ZIP 里的 APK 与 RELEASE.json 校验值不符：$existing_zip"
+        [ "$zip_source_sha" = "$CONTROLLER_SOURCE_SHA256" ] \
+            || die "已有 ZIP 里的上位应用不是当前源码构建；去掉 --reuse-zip 重新压缩"
+        [ "$zip_package_source_sha" = "$RELEASE_SOURCE_SHA256" ] \
+            || die "已有 ZIP 的打包源码与当前源码不一致；去掉 --reuse-zip 重新压缩"
+        ZIPS+=("$existing_zip")
     else
         ZIPS+=("$(make_zip "$plat" "$root" | tail -1)")
     fi

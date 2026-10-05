@@ -17,11 +17,16 @@ param(
 )
 
 . (Join-Path $PSScriptRoot "common.ps1")
-if ([string]::IsNullOrWhiteSpace($Name)) { $Name = $script:DefaultName }
-if ($Port -le 0) { $Port = Get-InstancePort $Name }
+if ($Port -le 0) {
+    if ([string]::IsNullOrWhiteSpace($Name)) { $Name = $script:DefaultName }
+    $Port = Get-InstancePort $Name
+}
 if ($Port -le 0) { Die "实例 '$Name' 没登记过端口" }
-$owner = Get-InstanceNameForPort $Port
-if (-not $owner) { Die "端口 $Port 没有已登记实例；拒绝清理未登记数据" }
+$owners = @(Get-InstanceNamesForPort $Port)
+if ($owners.Count -ne 1) { Die "端口 $Port 没有唯一的已登记实例；拒绝清理未登记或重复登记的数据" }
+$owner = $owners[0]
+if ([string]::IsNullOrWhiteSpace($Name)) { $Name = $owner }
+if ($owner -ne $Name) { Die "端口 $Port 属于实例 '$owner'，不是 '$Name'" }
 if (-not $Yes) {
     Write-Warn "重置 '$owner' 会清空已装应用、应用数据、sdcard 与快照"
     if ((Read-Host "输入 yes 继续") -ne "yes") { Die "已取消" }

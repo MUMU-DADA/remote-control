@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Run packaged PowerShell lifecycle commands against isolated console/HTTP peers."""
 import http.server
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import socketserver
 import subprocess
+import tarfile
 import tempfile
 import threading
+import time
 
 
 project = Path(__file__).resolve().parents[1]
@@ -56,7 +59,9 @@ function Start-Process {
           $RedirectStandardOutput, $RedirectStandardError)
     Set-Content -LiteralPath $env:MOCK_RUNNING -Value alive
     $ArgumentList | ConvertTo-Json | Set-Content -LiteralPath $env:MOCK_ARGUMENTS
-    Set-Content -LiteralPath $RedirectStandardOutput -Value 'Boot completed in 100 ms'
+    # 默认写一行 boot 标记；测试可用 MOCK_STDOUT 换成"真实但不友好"的日志
+    $stdout = if ($env:MOCK_STDOUT) { $env:MOCK_STDOUT } else { 'Boot completed in 100 ms' }
+    Set-Content -LiteralPath $RedirectStandardOutput -Value $stdout
     Set-Content -LiteralPath $RedirectStandardError -Value ''
     return [pscustomobject]@{ Id = 424242; HasExited = $false }
 }
@@ -179,9 +184,12 @@ function Stop-Process {
     for server in (console, http):
         threading.Thread(target=server.serve_forever, daemon=True).start()
     port = console.server_address[1]
+    # 隔离模拟器主目录：被测脚本会在缺失时自动创建它（缺了它模拟器会报 error: 3 并无限重试）
+    emu_home = root / "emu-home"
     env = dict(os.environ, DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="1",
                AUTOSNAP_HTTP_PORT=str(http.server_address[1]),
                AUTOSNAP_CONSOLE_TOKEN_FILE=str(console_token),
+               ANDROID_EMULATOR_HOME=str(emu_home),
                MOCK_RUNNING=str(running), MOCK_ARGUMENTS=str(arguments))
     count = 0
 
@@ -191,9 +199,9 @@ function Stop-Process {
         count += 1
         print(f"[OK] {label}")
 
-    def run(script, *args, success=True, directory=bindir):
+    def run(script, *args, success=True, directory=bindir, cwd=None):
         result = subprocess.run([pwsh, "-NoProfile", "-File", str(directory / script), *args],
-                                env=env, capture_output=True, text=True, timeout=30)
+                                env=env, capture_output=True, text=True, timeout=30, cwd=cwd)
         if success:
             assert result.returncode == 0, f"{script}: {result.stdout}\n{result.stderr}"
         else:
@@ -252,6 +260,146 @@ function Stop-Process {
         check(all(path != "/api/v1/shutdown" for _, path, _ in state.calls), "lifecycle never shuts down only the daemon")
         state.drop_shutdown_reply = False
         state.shutdown_delay = 0
+
+        # --- 回归：2026-10-05 在 Windows 真机上踩到的三个坑 ---
+        # 1) 日志里没有 boot time 行时不能崩：旧版写 (...).Line，没有匹配时管道给的是 $null，
+        #    StrictMode 2.0 下访问它的属性会抛「在此对象上找不到属性"Line"」直接终止脚本。
+        #    顺便验证 -accel off 的 "may not work" 警告不会被误判成致命错误。
+        env["MOCK_STDOUT"] = ("INFO | Android emulator (fake)\n"
+                              "WARNING | x86_64 emulation may not work without hardware acceleration!\n"
+                              "INFO | 这行故意不含 boot 标记")
+        output = run("start-headless.ps1", "-Reuse", "-Port", str(port), "-NoAccel", "-TimeoutSec", "5")
+        check("找不到属性" not in output and "开机完成" in output,
+              "start survives a log without a boot-time line")
+        # 2) 模拟器主目录必须被自动建出来（缺了它模拟器只会无限重试、把日志刷爆）
+        check(emu_home.is_dir(), "start creates the emulator home directory when it is missing")
+        run("stop.ps1", "-Port", str(port), "-TimeoutSec", "2")
+
+        # 3) 致命且会无限重试的错误必须快速失败 + 中文诊断，而不是一路等到超时
+        env["MOCK_STDOUT"] = ("INFO | Android emulator (fake)\n"
+                              "ERROR   | Unexpected error while creating: "
+                              r"C:\Users\PC\.android\emu-last-feature-flags.protobuf.lock (error: 3)" "\n")
+        started = time.monotonic()
+        output = run("start-headless.ps1", "-Reuse", "-Port", str(port), "-NoAccel",
+                     "-TimeoutSec", "300", success=False)
+        elapsed = time.monotonic() - started
+        check("模拟器创建文件失败" in output and "ERROR_PATH_NOT_FOUND" in output,
+              "fatal emulator log produces a readable diagnosis")
+        check(elapsed < 60, f"fatal log fails fast instead of waiting for the 300s timeout ({elapsed:.1f}s)")
+        check(not running.exists(), "fatal path stops the stuck emulator instead of leaving it spinning")
+        output = run("status.ps1", "-Port", str(port))
+        check("模拟器主目录" in output, "status reports the emulator home directory")
+        env.pop("MOCK_STDOUT", None)
+
+        manager_run = root / ".run"
+        manager_instances = manager_run / "instances"
+        run("emulator.ps1", "create", "manager-source", "-Port", "5680")
+        manager_start = bindir / "start-headless.ps1"
+        saved_manager_start = manager_start.read_bytes()
+        manager_start_args = root / "manager-start-args.json"
+        env["MOCK_MANAGER_START_ARGS"] = str(manager_start_args)
+        manager_start.write_text(r'''[CmdletBinding()]
+param(
+    [string]$Name = "", [int]$Port = 0, [int]$TimeoutSec = 300,
+    [string]$Gpu = "", [int]$Memory = 0, [int]$Cores = 0,
+    [switch]$Reuse, [switch]$WipeData, [switch]$NoWait, [switch]$Gui,
+    [switch]$TestInstance, [switch]$NoAccel
+)
+$PSBoundParameters | ConvertTo-Json -Compress | Set-Content -LiteralPath $env:MOCK_MANAGER_START_ARGS
+''')
+        try:
+            output = run("emulator.ps1", "start", "manager-source", "-Port", "5682", success=False)
+            check("manager-source" in output and
+                  "5680，不是 5682" in output and not manager_start_args.exists(),
+                  "manager rejects a mismatched name/port before starting")
+            output = run("emulator.ps1", "status", "-Port", "5680")
+            check("实例 manager-source（端口 5680" in output,
+                  "manager status preserves the name resolved from its port")
+            (manager_instances / "restart-probe.env").write_text("PORT=5684\n")
+            run("emulator.ps1", "restart", "restart-probe", "-TimeoutSec", "17", "-NoWait")
+            start_args = json.loads(manager_start_args.read_text())
+            check(start_args.get("TimeoutSec") == 17,
+                  "manager restart forwards an explicit timeout to startup")
+        finally:
+            manager_start.write_bytes(saved_manager_start)
+            env.pop("MOCK_MANAGER_START_ARGS", None)
+
+        duplicate = manager_instances / "duplicate.env"
+        duplicate.write_text("PORT=5680\n")
+        for command in (
+            ("start", "manager-source"),
+            ("stop", "manager-source"),
+            ("restart", "manager-source"),
+            ("reset", "manager-source", "-Yes"),
+            ("delete", "manager-source", "-Yes"),
+        ):
+            output = run("emulator.ps1", *command, success=False)
+            check("没有唯一" in output or "重复登记" in output,
+                  f"manager {command[0]} refuses a duplicate port owner")
+        check((manager_run / "sysdir-5680/system-qemu.img").exists(),
+              "duplicate-owner guards preserve the instance working directory")
+        duplicate.unlink()
+
+        external_token = root / "external-token"
+        external_token.write_text("secret-token\n")
+        source_token = manager_instances / "manager-source.token"
+        source_token.symlink_to(external_token)
+        output = run("emulator.ps1", "clone", "manager-source", "token-link-copy", "-Port", "5696",
+                     success=False)
+        check("令牌是 reparse point" in output and
+              not (manager_instances / "token-link-copy.env").exists(),
+              "manager clone rejects a reparse-point service token")
+        source_token.unlink()
+
+        source_sys = manager_run / "sysdir-5690"
+        source_sys.symlink_to(manager_run / "sysdir-5680", target_is_directory=True)
+        (manager_instances / "sys-link.env").write_text("PORT=5690\n")
+        output = run("emulator.ps1", "clone", "sys-link", "sys-link-copy", "-Port", "5692",
+                     success=False)
+        check("工作目录是 reparse point" in output and
+              not (manager_instances / "sys-link-copy.env").exists(),
+              "manager clone rejects a reparse-point system directory root")
+        source_sys.unlink()
+        (manager_run / "sysdir-5690").mkdir()
+        (manager_run / "datadir-5690").symlink_to(root / "external-data", target_is_directory=True)
+        (root / "external-data").mkdir()
+        output = run("emulator.ps1", "clone", "sys-link", "data-link-copy", "-Port", "5694",
+                     success=False)
+        check("数据目录是 reparse point" in output and
+              not (manager_instances / "data-link-copy.env").exists(),
+              "manager clone rejects a reparse-point data directory root")
+
+        output = run("emulator.ps1", "create", "below-minimum", "-Port", "2", success=False)
+        check("5554..65534" in output, "Windows manager rejects console ports below 5554")
+
+        inspect_work = root / "inspect work"
+        inspect_work.mkdir()
+        archive = root / "instance archive.tar"
+        manifest = b'{"name":"archive-fixture","port":5580}\n'
+        payload_name = "inspect-payload-marker.txt"
+        with tarfile.open(archive, "w") as bundle:
+            manifest_info = tarfile.TarInfo("INSTANCE-MANIFEST.json")
+            manifest_info.size = len(manifest)
+            bundle.addfile(manifest_info, io.BytesIO(manifest))
+            payload = b"must not be extracted"
+            payload_info = tarfile.TarInfo(payload_name)
+            payload_info.size = len(payload)
+            bundle.addfile(payload_info, io.BytesIO(payload))
+        output = run("emulator.ps1", "inspect", str(archive), cwd=inspect_work)
+        check('"name":"archive-fixture"' in output and payload_name in output,
+              "manager inspect reads the manifest and archive listing")
+        check(not (inspect_work / payload_name).exists(),
+              "manager inspect does not extract archive entries")
+        missing_manifest_archive = root / "without manifest.tar"
+        with tarfile.open(missing_manifest_archive, "w") as bundle:
+            payload_info = tarfile.TarInfo("payload.txt")
+            payload_info.size = 1
+            bundle.addfile(payload_info, io.BytesIO(b"x"))
+        output = run("emulator.ps1", "inspect", str(missing_manifest_archive),
+                     success=False, cwd=inspect_work)
+        check("没有 INSTANCE-MANIFEST.json" in output,
+              "manager inspect reports archives without a manifest")
+
         instance_path = legacy / ".run/instances/default.env"
         token_path_for_http = legacy / ".run/instances/default.token"
         output = run("emulator.ps1", "start", "default", "-Port", str(port), directory=legacy)
