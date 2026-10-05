@@ -12,19 +12,36 @@
 ```bash
 # 从仓库根目录运行；当前证据环境是 1280x720，其他设备按 /api/v1/info 调整。
 cd dev/02-native-daemon/tools/bench
+set -e
 
-# 编译（NDK，x86_64 模拟器）
-CXX=/opt/android/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android31-clang++
-$CXX -std=c++20 -O2 -fno-exceptions -I ../../daemon -o bench_encoder \
-     bench_encoder.cpp ../../daemon/image_encoder.cpp \
-     ../../daemon/png_encoder.cpp ../../daemon/log_buffer.cpp \
-     -ljnigraphics -llog -static-libstdc++
+# 编译（NDK，x86_64 模拟器）。image_encoder 需要全部编码器实现；
+# libwebp 的 C 源码先用 NDK C 编译器分别编译。
+NDK=/opt/android/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin
+CC=$NDK/x86_64-linux-android31-clang
+CXX=$NDK/x86_64-linux-android31-clang++
+WEBP_DIR=../../daemon/vendor/webp
+WEBP_OBJ=build/webp
+mkdir -p "$WEBP_OBJ"
+for src in "$WEBP_DIR"/src/{enc,dsp,utils}/*.c; do
+    rel=${src#"$WEBP_DIR"/src/}
+    mkdir -p "$WEBP_OBJ/$(dirname "$rel")"
+    "$CC" -O2 -DANDROID -DWEBP_SWAP_16BIT_CSP -DWEBP_USE_THREAD \
+        -I"$WEBP_DIR" -c "$src" -o "$WEBP_OBJ/${rel%.c}.o"
+done
+$CXX -std=c++20 -O2 -fno-exceptions -I ../../daemon -I "$WEBP_DIR" \
+     -o bench_encoder bench_encoder.cpp \
+     ../../daemon/image_encoder.cpp ../../daemon/png_encoder.cpp \
+     ../../daemon/log_buffer.cpp ../../daemon/h264_encoder.cpp \
+     ../../daemon/jpeg_encoder.cpp ../../daemon/webp_encoder.cpp \
+     "$WEBP_OBJ"/enc/*.o "$WEBP_OBJ"/dsp/*.o "$WEBP_OBJ"/utils/*.o \
+     -ljnigraphics -lmediandk -llog -ldl -lm -static-libstdc++
 
 # 抓一张真实帧（raw RGBA），推到设备
 REMOTE_CONTROL_TOKEN='从设备配置读取的令牌'
-curl -H "Authorization: Bearer ${REMOTE_CONTROL_TOKEN}" \
+# 鉴权关闭时可省略 -H 参数；开启时将上面的占位值替换为服务令牌。
+curl --fail --show-error -H "Authorization: Bearer ${REMOTE_CONTROL_TOKEN}" \
      -o real.raw 'http://<设备>:8088/api/v1/capture?format=raw'
-adb push real.raw /data/local/tmp/
+adb push bench_encoder real.raw /data/local/tmp/
 
 # 跑
 adb shell "/data/local/tmp/bench_encoder 1280 720 40 /data/local/tmp/real.raw"
@@ -278,12 +295,13 @@ JPEG/MJPEG。不能假设客户端都能解。
 ```bash
 # 从仓库根目录运行；当前证据环境是 1280x720，其他设备按 /api/v1/info 调整。
 cd dev/02-native-daemon/tools/bench
+set -e
 CXX=/opt/android/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android31-clang++
 $CXX -std=c++20 -O2 -fno-exceptions -I ../../daemon -o h264b h264_bench.cpp \
      ../../daemon/h264_encoder.cpp ../../daemon/log_buffer.cpp \
      -lmediandk -llog -static-libstdc++
 REMOTE_CONTROL_TOKEN='从设备配置读取的令牌'
-curl -H "Authorization: Bearer ${REMOTE_CONTROL_TOKEN}" \
+curl --fail --show-error -H "Authorization: Bearer ${REMOTE_CONTROL_TOKEN}" \
      -o real.raw 'http://<设备>:8088/api/v1/capture?format=raw'
 adb push h264b real.raw /data/local/tmp/
 adb shell '/data/local/tmp/h264b /data/local/tmp/real.raw 1280 720 30 /data/local/tmp/out.h264'

@@ -24,7 +24,7 @@ HTTP/JSON 和 Unix socket 的设备操作、查询命令共享 `Dispatcher`；HT
 | 传输 | 地址 | 适合 | 不适合 |
 |---|---|---|---|
 | **HTTP/JSON** | `http://host:8088/api/v1/...` | 任何语言、任何工具（curl、浏览器、脚本） | 高频事件（每次都要 TCP 往返 + HTTP 解析） |
-| **WebSocket（HTTP Upgrade）** | `ws://host:8088/api/v1/{stream,touch,logstream}` | 实时画面、触控、日志 | 一次性调用；它运行在 HTTP 监听器上 |
+| **WebSocket（HTTP Upgrade）** | `ws://host:8088/api/v1/{stream,touch,logstream}?token=...` | 实时画面、触控、日志 | 一次性调用；它运行在 HTTP 监听器上 |
 | **Unix socket** | `/data/local/tmp/remote-control.sock`（SEQPACKET） | 本机；用 `SCM_RIGHTS` 传递截图、APK 等 fd | 跨机器；HTTP 专属路由和 WebSocket 流 |
 
 `/stream`、`/touch`、`/logstream` 是 WebSocket 路由；只有 `/stream` 另支持无 Upgrade 的 MJPEG，`/touch` 和 `/logstream` 仅支持 WebSocket。ADB 管理、网页和 `/files/upload` 也属于 HTTP 侧扩展；其余是否有对应 socket 命令请以 [03-socket.md](03-socket.md) 的命令表为准。
@@ -117,12 +117,12 @@ curl -H "Authorization: Bearer $TOKEN" http://<设备IP>:8088/api/v1/params
 | 我想…… | 用哪个 |
 |---|---|
 | 截一张图 | `GET /capture` |
-| 看实时画面 | `ws://.../stream`；零 JS 就用 `<img src=".../stream?fps=5">`（MJPEG） |
+| 看实时画面 | `ws://.../stream?token=...`；零 JS 就用 `<img src=".../stream?fps=5&amp;token=...">`（MJPEG） |
 | 点一下 / 滑一下 | `POST /tap` / `POST /swipe` |
-| 拖拽（要跟手） | `ws://.../touch` —— **别用一连串 POST** |
+| 拖拽（要跟手） | `ws://.../touch?token=...` —— **别用一连串 POST** |
 | 输入文字 | `POST /key`（逐个键码），或配合输入法 |
 | 装应用 | `POST /install`（请求体 = APK 字节） |
-| 看日志 | `ws://.../logstream`（实时）或 `GET /logfile`（历史） |
+| 看日志 | `ws://.../logstream?token=...`（实时）或 `GET /logfile`（历史） |
 | 看有哪些应用 | `GET /apps`（已安装）/ `GET /running`（正在运行） |
 | 关掉服务对外能力 | `POST /service {"on":false}` |
 | 关设备 / 重启设备 | `POST /power {"action":"shutdown"}` |
@@ -135,7 +135,8 @@ curl -H "Authorization: Bearer $TOKEN" http://<设备IP>:8088/api/v1/params
 开启后，`/api/` 下的一切都要带令牌：
 
 ```bash
-curl -H "Authorization: Bearer <令牌>" http://host:8088/api/v1/config
+TOKEN='<从设备配置中读取的 token>'
+curl -H "Authorization: Bearer $TOKEN" http://host:8088/api/v1/config
 ```
 
 三种携带方式、令牌从哪来、怎么开关 —— 见 [04-config.md](04-config.md)。
@@ -151,7 +152,7 @@ curl -H "Authorization: Bearer <令牌>" http://host:8088/api/v1/config
 
 - 进程继续运行（pid 不变）
 - 普通业务 API 返回 `503`
-- `/api/v1/service`、`/api/v1/adb`、`/api/v1/power` 和 `/api` 索引仍可访问，且仍须通过 HTTP 鉴权
+- `/api/v1/service`、`/api/v1/adb`、`/api/v1/power`、`/api` 和 `/api/v1` 索引仍可访问，且仍须通过 HTTP 鉴权
 - **网页本身也仍然放行** —— 否则用户够不着开关
 
 真停进程需要杀 PID 或改 supervisor；那是另一个层面的操作。

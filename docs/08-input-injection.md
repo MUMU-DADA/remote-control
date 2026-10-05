@@ -93,8 +93,12 @@
 
 ### Java 服务
 
+以下代码是结构骨架，不是可直接编译的完整实现。Java 的 `LocalServerSocket`
+使用抽象命名空间的 `SOCK_STREAM`；native 客户端必须使用相同类型。由于 stream
+不保留消息边界，实际实现还需要为触控请求和响应定义一致的长度或固定大小 framing。
+
 ```java
-package com.remote-control.input;
+package com.remotecontrol.input;
 
 public class RemoteControlInputService extends Service {
     private static final String SOCKET_NAME = "remote_control_input";
@@ -196,7 +200,7 @@ public class RemoteControlInputService extends Service {
 
 ```xml
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.remote-control.input">
+    package="com.remotecontrol.input">
 
     <uses-permission android:name="android.permission.INJECT_EVENTS" />
 
@@ -244,7 +248,7 @@ android_app {
 
 ```cpp
 // inject_socket.cpp（替代 inject_binder.cpp）
-int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+int fd = socket(AF_UNIX, SOCK_STREAM, 0);
 sockaddr_un addr{};
 addr.sun_family = AF_UNIX;
 strncpy(addr.sun_path + 1, "remote_control_input", sizeof(addr.sun_path) - 1);
@@ -267,10 +271,10 @@ connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
 m RemoteControlInputService remote-control rcctl
 
 # 2. 确认服务起来了
-adb shell dumpsys activity services com.remote-control.input
+adb shell dumpsys activity services com.remotecontrol.input
 
 # 3. 确认有 INJECT_EVENTS 权限
-adb shell dumpsys package com.remote-control.input | grep -i inject
+adb shell dumpsys package com.remotecontrol.input | grep -i inject
 
 # 4. 冒烟测试
 adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock tap 540 1200"
