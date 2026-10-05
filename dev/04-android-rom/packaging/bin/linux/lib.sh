@@ -41,8 +41,8 @@ config_get() {   # config_get <键> [默认值]
     if [ -n "$v" ]; then printf '%s' "$v"; else printf '%s' "$def"; fi
 }
 
-build_service_property_args() {   # build_service_property_args [test-instance]
-    local test_instance="${1:-0}" enabled bind port auth token adb_enabled
+build_service_property_args() {
+    local enabled bind port auth token adb_enabled
     enabled="${SERVICE_ENABLED:-$(config_get service.enabled 1)}"
     bind="${SERVICE_BIND:-$(config_get service.bind 0.0.0.0)}"
     port="${SERVICE_GUEST_PORT:-$(config_get service.port 8088)}"
@@ -57,7 +57,6 @@ build_service_property_args() {   # build_service_property_args [test-instance]
     [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "service.port 必须是 1-65535 的整数"
     [[ "$bind" =~ ^[A-Za-z0-9.:_-]+$ ]] || die "service.bind 格式不受支持：$bind"
     [[ "$token" =~ ^[A-Za-z0-9_-]{0,80}$ ]] || die "service.token 仅支持 80 字节内的字母、数字、下划线和连字符"
-    if [ "$test_instance" = 1 ]; then auth=0; token=""; fi
     SERVICE_PROPERTY_ARGS=(
         -prop "qemu.rc.enabled=$enabled"
         -prop "qemu.rc.bind=$bind"

@@ -196,13 +196,15 @@ nohup() { mock_launch "$@"; }
                 assert result.returncode != 0, f"{kind}/{script}: unexpectedly succeeded"
             return result.stdout + result.stderr
 
-        def start(reuse=False):
+        def start(reuse=False, test_instance=False):
             if kind == "emulator":
-                return run("emulator.sh", "start", "default", "--port", str(port), "--nat")
+                return run("emulator.sh", "start", "default", "--port", str(port), "--nat",
+                           *(('--test-instance',) if test_instance else ()))
             if kind == "run-linux":
                 return run("run-linux.sh", "--name", "default", "--port", str(port), *(('--reuse',) if reuse else ()))
             return run("start-headless.sh", "--port", str(port), "--accel", "off", "--timeout", "5",
-                       *(('--reuse',) if reuse else ()))
+                       *(('--reuse',) if reuse else ()),
+                       *(('--test-instance',) if test_instance else ()))
 
         def stop(success=True, force=False, timeout=2):
             env["AUTOSNAP_STOP_TIMEOUT"] = str(timeout)
@@ -237,13 +239,21 @@ nohup() { mock_launch "$@"; }
             check(token_path.read_text().strip() == token and f"qemu.rc.token={token}" in props
                   and "qemu.rc.port=8088" in props and "qemu.rc.auth=1" in props,
                   f"{kind}: reuse preserves port/auth/token despite template changes")
+            if kind in ("linux", "darwin", "emulator"):
+                stop()
+                start(reuse=True, test_instance=True)
+                props = json.loads(args_file.read_text())
+                check(token_path.read_text().strip() == token and f"qemu.rc.token={token}" in props
+                      and "qemu.rc.auth=1" in props,
+                      f"{kind}: test-instance flag preserves authentication on reuse")
             state["drop"] = True
             state["exit_delay"] = 3.5
             shutdown_started = time.monotonic()
             stop(timeout=6)
-            check(not running.exists() and time.monotonic() - shutdown_started >= 3.4
-                  and "kill" not in state["commands"],
-                  f"{kind}: dropped shutdown response waits for delayed process exit beyond 3s")
+            shutdown_elapsed = time.monotonic() - shutdown_started
+            check(not running.exists() and shutdown_elapsed >= 3.4 and "kill" not in state["commands"],
+                  f"{kind}: dropped shutdown response waits for delayed process exit beyond 3s "
+                  f"(elapsed={shutdown_elapsed:.2f}s, running={running.exists()}, commands={state['commands']})")
             state["drop"] = False
             state["exit_delay"] = 0
             start(reuse=True)
@@ -251,6 +261,7 @@ nohup() { mock_launch "$@"; }
             stop(success=False)
             check(running.exists() and "kill" not in state["commands"], f"{kind}: failed graceful request preserves guest")
             stop(force=True)
+            state["reject"] = False
             check(not running.exists() and "kill" in state["commands"], f"{kind}: explicit force uses console kill")
             check(not adb_log.exists(), f"{kind}: lifecycle never invokes ADB")
             if kind == "emulator":
@@ -275,6 +286,18 @@ nohup() { mock_launch "$@"; }
                 run("emulator.sh", "reset", "default", "--yes")
                 check(not token_path.exists() and "SERVICE_PORT=" not in (work / ".run/instances/default.env").read_text(),
                       "emulator: reset clears persisted host service defaults and token")
+                start(test_instance=True)
+                props = json.loads(args_file.read_text())
+                check(not token_path.exists() and "qemu.rc.auth=0" in props
+                      and not any(arg.startswith("qemu.rc.token=") for arg in props),
+                      "emulator: test-instance starts a new guest without a service token")
+                stop()
+                start(reuse=True, test_instance=True)
+                props = json.loads(args_file.read_text())
+                check(not token_path.exists() and "qemu.rc.auth=0" in props
+                      and not any(arg.startswith("qemu.rc.token=") for arg in props),
+                      "emulator: test-instance reuse preserves the guest's unauthenticated settings")
+                stop()
             if kind in ("linux", "darwin", "run-linux"):
                 token_path.unlink()
                 if kind == "run-linux":
@@ -283,6 +306,19 @@ nohup() { mock_launch "$@"; }
                     output = run("start-headless.sh", "--port", str(port), "--accel", "off", "--reuse", success=False)
                 check("缺少服务令牌" in output and not running.exists(),
                       f"{kind}: missing reuse token fails before launching guest")
+                if kind in ("linux", "darwin"):
+                    start(test_instance=True)
+                    props = json.loads(args_file.read_text())
+                    check(not token_path.exists() and "qemu.rc.auth=0" in props
+                          and not any(arg.startswith("qemu.rc.token=") for arg in props),
+                          f"{kind}: test-instance starts a new guest without a service token")
+                    stop()
+                    start(reuse=True, test_instance=True)
+                    props = json.loads(args_file.read_text())
+                    check(not token_path.exists() and "qemu.rc.auth=0" in props
+                          and not any(arg.startswith("qemu.rc.token=") for arg in props),
+                          f"{kind}: test-instance reuse preserves the guest's unauthenticated settings")
+                    stop()
             if kind == "run-linux":
                 env["ADB"] = str(root / "missing-adb")
                 output = run("run-linux.sh", "--verify", "--port", str(port), success=False)

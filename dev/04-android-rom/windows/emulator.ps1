@@ -335,7 +335,7 @@ function Invoke-Create {
     Write-Host ("    显示     {0}x{1} @{2}dpi  {3}" -f $w, $h, (Get-ConfigValue "hw.lcd.density" "320"),
                 $(if ([int]$w -gt [int]$h) { "横屏" } else { "竖屏" }))
     Write-Host ("    内存/核  {0} MB / {1} 核" -f (Get-ConfigValue "hw.ramSize" "6144"), (Get-ConfigValue "hw.cpu.ncore" "4"))
-    Write-Host ("    数据分区 {0}（实际占用看 qcow2 长到多大）" -f (Get-ConfigValue "disk.dataPartition.size" "16G"))
+    Write-Host ("    数据分区 {0}（实际占用看 qcow2 长到多大）" -f (Get-ConfigValue "disk.dataPartition.size" "64G"))
     Write-Host "    下一步   .\emulator.ps1 start $N"
 }
 

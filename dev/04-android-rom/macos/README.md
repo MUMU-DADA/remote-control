@@ -109,7 +109,7 @@ Mac 侧的 `hw.gpu.mode=auto` 已由 Darwin 启动逻辑通过 `system_profiler 
 |---|---|
 | Xcode Command Line Tools | `xcode-select --install` —— 提供 `python3`（脚本用它解析 SDK 仓库清单） |
 | 硬件虚拟化 | `preflight.sh` 会查 `sysctl kern.hv_support`。**为 0 就只能退到 TCG**，开机从 20 秒变几分钟（量级差，见 [`../docs/09-why-not-full-arm64-sim.md`](../docs/09-why-not-full-arm64-sim.md)）。在虚拟机里跑 macOS 通常拿不到 HVF |
-| 磁盘 | 数据分区本身 32 G，加镜像与快照要 **60 GiB 以上**可用空间 |
+| 磁盘 | 数据卷上限为 64 GiB，实际占用随使用增长；建议至少留 **80 GiB**，快照或多实例建议 **100 GiB 以上** |
 | Gatekeeper / quarantine | 从浏览器下载的 zip 会给解出的**每个文件**打 `com.apple.quarantine`，模拟器一执行就被拦。`preflight.sh --rom-dir DIR` 会检查；解除：`xattr -dr com.apple.quarantine <目录>` |
 | **`unzip` 丢可执行位** | macOS 上解压后 `emulator`/`adb` 是 0644，直接执行报 `Permission denied`。`fetch-emulator.sh` 已自动补，**手工解压时要自己 chmod** |
 | 宿主 bash 是 3.2 | macOS 自带的是 2007 年的 GPLv2 版。本目录四个脚本都只用 3.2 语法；但 `../scripts/release.sh` 用了 `declare -A`（需 bash 4+），**在 Mac 上跑打包要先 `brew install bash`** |

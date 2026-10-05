@@ -16,7 +16,7 @@
 | `hw.ramSize` | `6144` | MB。宿主机内存的 1/4 左右比较稳 |
 | `hw.cpu.ncore` | `4` | 核数。别超过宿主物理核 |
 | `hw.gpu.mode` | `auto` | `auto` = 宿主有可用 GPU 渲染节点就用 `host`，否则 `swiftshader_indirect`；**起不来会自动退软件渲染** |
-| `disk.dataPartition.size` | `16G` | 数据分区。**改小/改大都要 `reset`** 才会重建（旧 `userdata-qemu.img` 不删不会跟着变）。16G 为 4G 上传文件保留安装峰值空间 |
+| `disk.dataPartition.size` | `64G` | 数据分区容量上限，实际占用随数据增长。**改小/改大都要 `reset`** 才会重建；重置会清除实例数据 |
 | `fastboot.forceColdBoot` | `yes` | `yes` = 每次冷启动、忽略快照。要用快照启动改成 `no` |
 
 数据卷的逻辑容量与宿主实际占用不同：32 GiB 的历史实例基础镜像实测只分配约

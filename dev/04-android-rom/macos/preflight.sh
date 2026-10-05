@@ -149,7 +149,7 @@ fi
 # ---------------------------------------------------------------------------
 hdr "磁盘与 Gatekeeper"
 
-# 数据盘要有地方放 datadir：32 G 的 userdata + 快照
+# 为最多 64 GiB 的数据卷、ROM 镜像和快照留出空间。
 if [ -n "$ROM_DIR" ] && [ -d "$ROM_DIR" ]; then
     AVAIL_KB="$(df -Pk "$ROM_DIR" 2>/dev/null | awk 'NR==2{print $4}')"
 else
@@ -157,9 +157,9 @@ else
 fi
 if [ -n "$AVAIL_KB" ]; then
     AVAIL_GB=$(( AVAIL_KB / 1048576 ))
-    if [ "$AVAIL_GB" -ge 60 ]; then pass "可用空间 ${AVAIL_GB} GiB"
-    elif [ "$AVAIL_GB" -ge 40 ]; then warn "可用空间 ${AVAIL_GB} GiB —— 够跑一台，但快照/多实例要省着用"
-    else fail "可用空间只有 ${AVAIL_GB} GiB —— 数据分区本身就要 32 G，再加镜像与快照会爆"; fi
+    if [ "$AVAIL_GB" -ge 100 ]; then pass "可用空间 ${AVAIL_GB} GiB"
+    elif [ "$AVAIL_GB" -ge 80 ]; then warn "可用空间 ${AVAIL_GB} GiB —— 够跑一台，快照/多实例要省着用"
+    else fail "可用空间只有 ${AVAIL_GB} GiB —— 建议至少留 80 GiB 给最多 64 GiB 的数据卷、镜像与快照"; fi
 fi
 
 if [ -n "$ROM_DIR" ] && [ -d "$ROM_DIR" ]; then

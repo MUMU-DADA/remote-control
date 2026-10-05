@@ -57,16 +57,15 @@ service_load_token() {
 }
 
 service_prepare_token() { # <name> <test-instance> [reuse]
-    local file configured auth
+    local file configured auth existing_auth=""
     SERVICE_TOKEN=""
     auth="$(config_get service.auth 1)"
     if [ "${3:-0}" = 1 ]; then
-        local existing_auth
         existing_auth="$(instance_service_value "$1" SERVICE_AUTH)"
         [ -z "$existing_auth" ] || auth="$existing_auth"
     fi
     file="$(service_token_file "$1")"
-    [ "${2:-0}" = 1 ] && return 0
+    [ "${2:-0}" = 1 ] && [ -z "$existing_auth" ] && return 0
     [ "$auth" = 1 ] || return 0
     if [ "${3:-0}" = 1 ] && [ -s "$file" ]; then
         service_load_token "$1"
