@@ -48,7 +48,7 @@ cd windows
 > `partition(s) not found in /sys` / `failed to find device default fstab` 卡死并无限重启——
 > 这是本机实测踩过的（见 [`../docs/02-build-traps.md`](../docs/02-build-traps.md) 坑 8）。
 
-前置：OpenSSH 客户端（Win10 1809+ 自带）、≥20 GB 磁盘、≥8 GB 内存、
+前置：OpenSSH 客户端（Win10 1809+ 自带）、≥80 GB 可用磁盘空间（快照或多实例建议 ≥100 GB）、≥8 GB 内存、
 **BIOS 里开启虚拟化**（WHPX 需要；若用 Hyper-V/WSL2 已开启则天然满足）。
 
 ---
@@ -62,7 +62,7 @@ cd windows
 |---|---|
 | 屏幕 | 1280x720 横屏 @320dpi |
 | CPU / 内存 | 4 核 / 6144 MB |
-| 数据分区 | 16G |
+| 数据分区 | 64G |
 | GPU | `auto`（自适应：有真显卡就 `host`，否则 `swiftshader_indirect`；`host` 起不来还会再退一次） |
 
 > ⚠️ 以前这两个脚本的参数默认值是写死的（`-MemoryMB 4096`、`-Gpu

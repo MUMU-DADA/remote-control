@@ -16,6 +16,7 @@
 #   ./scripts/emulator.sh inspect dev2-xxx.tar      # 只看归档里是什么，不解包
 #   ./scripts/emulator.sh list                      # 所有实例
 #   ./scripts/emulator.sh status  dev2
+#   ./scripts/emulator.sh start   dev2 --test-instance   # 新测试实例：不开鉴权（仅首次启动生效）
 #
 # 网络：默认「桥没被别的实例占用才桥接」。guest 的 MAC 所有实例都一样，
 #       两台同时桥接到物理 LAN 会冲突，所以第二台自动走 NAT。
@@ -36,7 +37,7 @@ require_console_helper
 
 DEFAULT_NAME="default"
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ---------------------------------------------------------------------------
 # 实例路径
@@ -214,7 +215,7 @@ cmd_create() {
            "$(config_get hw.lcd.density 320)" \
            "$([ "$(config_get hw.lcd.width 1280)" -gt "$(config_get hw.lcd.height 720)" ] && echo 横屏 || echo 竖屏)"
     printf '    内存/核  %s MB / %s 核\n' "$(config_get hw.ramSize 4096)" "$(config_get hw.cpu.ncore 4)"
-    printf '    数据分区 %s（实际占用看 qcow2 长到多大）\n' "$(config_get disk.dataPartition.size 16G)"
+    printf '    数据分区 %s（实际占用看 qcow2 长到多大）\n' "$(config_get disk.dataPartition.size 64G)"
     printf '    下一步   ./scripts/emulator.sh start %s\n' "$name"
 }
 
@@ -245,9 +246,11 @@ cmd_start() {
     # reachable through the emulator console's NAT redirect.  Persisted
     # instance values win on subsequent starts so template edits do not mutate
     # an existing guest unexpectedly.
-    service_prepare_token "$name" 0 1
-    service_register "$name" "$port" 0 1
-    build_service_property_args 0
+    # --test-instance 只对**新**实例生效：宿主不生成令牌，guest 首启按 auth=0 持久化；
+    # 复用实例由下面各函数内部读回已存设置，flag 不会改写一台已有机器。
+    service_prepare_token "$name" "$OPT_TEST" 1
+    service_register "$name" "$port" "$OPT_TEST" 1
+    build_service_property_args
 
     if [ -n "$OPT_GPU" ]; then
         log "硬件参数： -memory $MEM_MB  -cores $CORES  -gpu $GPU_MODE（命令行指定）"
@@ -834,7 +837,7 @@ cmd_status() {
 # 入口
 # ---------------------------------------------------------------------------
 OPT_PORT=""; OPT_GPU=""; OPT_MEM=""; OPT_CORE=""; OPT_NOWAIT=0; OPT_YES=0; OPT_GUI=0
-OPT_BRIDGE=0; OPT_NAT=0
+OPT_BRIDGE=0; OPT_NAT=0; OPT_TEST=0
 OPT_OUT=""; OPT_NAME=""; OPT_FORCE=0; OPT_START=0; OPT_UNSAFE=0
 CMD=""; ARGS=()
 while [ $# -gt 0 ]; do
@@ -848,6 +851,8 @@ while [ $# -gt 0 ]; do
         # 网络：默认按"桥有没有被别的实例占用"自动决定
         --bridge)  OPT_BRIDGE=1 ;;
         --nat)     OPT_NAT=1 ;;
+        # 新测试实例：宿主不给令牌、guest 以 auth=0 首启。复用实例沿用 guest 已存配置。
+        --test-instance) OPT_TEST=1 ;;
         # export / import
         -o|--out)  OPT_OUT="${2:?}"; shift ;;
         -n|--name) OPT_NAME="${2:?}"; shift ;;

@@ -59,7 +59,7 @@
 | `hw.ramSize` | 6144 | MB |
 | `hw.cpu.ncore` | 4 | 核数 |
 | `hw.gpu.mode` | auto | 有可用 GPU 就用 `host`，否则软件渲染；**起不来会自动退软件渲染** |
-| `disk.dataPartition.size` | 16G | 数据卷容量上限；实际占用随数据增长，改容量须重建数据卷 |
+| `disk.dataPartition.size` | 64G | 数据卷容量上限；实际占用随数据增长，改容量须重建数据卷 |
 
 详见 [`templates/README.md`](templates/README.md)。
 

@@ -10,7 +10,7 @@
 [CmdletBinding()]
 param(
     [string]$ImagesDir = "$PSScriptRoot\images",
-    [int]$NeedGB = 20
+    [int]$NeedGB = 80
 )
 
 $ErrorActionPreference = "Continue"
