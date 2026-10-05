@@ -22,6 +22,7 @@ BT="${BT:-/opt/android/btools/android-13}"
 ANDROID_JAR="${ANDROID_JAR:-$PROJECT_ROOT/aosp/prebuilts/sdk/31/public/android.jar}"
 OUT="$APP_DIR/build"
 PKG=com.remotecontrol.controller
+KEYSTORE="${KEYSTORE:-$APP_DIR/debug.keystore}"
 
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -145,9 +146,10 @@ ok "已 4 字节对齐"
 # -----------------------------------------------------------------------------
 step "签名"
 # -----------------------------------------------------------------------------
-KS="$APP_DIR/debug.keystore"
+KS="$KEYSTORE"
 if [ ! -f "$KS" ]; then
     # 调试用密钥。生产环境应换成自己的密钥，并把应用装成系统应用。
+    mkdir -p "$(dirname "$KS")"
     "$KEYTOOL" -genkeypair -keystore "$KS" -alias remote-control -keyalg RSA -keysize 2048 \
         -validity 10000 -storepass android -keypass android \
         -dname "CN=remote-control debug, OU=dev, O=AutoSnapshotAndroid, L=, S=, C=CN" \
@@ -156,6 +158,7 @@ if [ ! -f "$KS" ]; then
 else
     ok "复用已有密钥"
 fi
+chmod 600 "$KS"
 
 "$BT/apksigner" sign \
     --ks "$KS" --ks-pass pass:android --key-pass pass:android \

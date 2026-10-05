@@ -237,11 +237,10 @@ if [ -n "$DZIP" ]; then
     mkdir -p "$SANDBOX/dx"; ( cd "$SANDBOX/dx" && unzip -q "$DZIP" )
     DROOT="$(ls -d "$SANDBOX/dx"/autosnap-* | head -1)"
 
-    # bin/ 必须是 mac 那五个（不是 linux 的、也不是空的）
+    # bin/ must contain the Darwin helpers and unified lifecycle entrypoint.
     NB="$(ls "$DROOT/bin" 2>/dev/null | wc -l)"
-    # console/storage helpers are shipped alongside the five lifecycle scripts.
-    chk "包内 bin/ 文件数" "$NB" "7"
-    for s in lib.sh start-headless.sh stop.sh status.sh verify.sh; do
+    chk "包内 bin/ 文件数" "$NB" "9"
+    for s in lib.sh emulator.sh reset.sh start-headless.sh stop.sh status.sh verify.sh; do
         if [ -f "$DROOT/bin/$s" ]; then okc "包内有 bin/$s"; else badc "包内缺 bin/$s"; fi
     done
     [ -x "$DROOT/bin/start-headless.sh" ] && okc "bin/ 有可执行位" || badc "bin/ 缺可执行位"
@@ -267,7 +266,7 @@ print(d.get("platform",""), r.get("backend",""))
     # START-HERE：占位符全替换 + 命令是 bash + 第 6 节按产品类型渲染
     SH="$(cat "$DROOT/START-HERE.md")"
     hasnt "START-HERE 无未替换占位符" "$SH" "@"
-    has "START-HERE 快速开始是 bash" "$SH" "./bin/start-headless.sh"
+    has "START-HERE 快速开始是 bash" "$SH" "./bin/emulator.sh start"
     hasnt "START-HERE 不出现 powershell" "$SH" "start-headless.ps1"
     has "START-HERE 第 6 节：无翻译层" "$SH" "**不适用**"
     has "START-HERE 第 6 节：ABI 只有 arm64-v8a" "$SH" "本 ROM 是 \`arm64-v8a\`"

@@ -34,13 +34,29 @@ if ($Port -gt 0 -or (Test-Instance $Name)) {
         $procs = @(Get-EmuProcess $Port)
         Show-Row "进程" ("在跑（PID " + (($procs | ForEach-Object { $_.ProcessId }) -join ",") + "）")
         # 先取变量再拼字符串：双引号里再套 $() 与引号是 PowerShell 的经典坑
-        Show-Row "服务状态" (Get-BootState $Port)
+        $svcReady = Test-ServiceReady $Port
+        $svcText = if ($svcReady) { "服务已就绪" } else { "服务未就绪" }
+        Show-Row "服务状态" $svcText
         Show-Row "管理地址" ("http://127.0.0.1:" + (Get-ServiceHttpPort $Port))
+        if (-not $svcReady) {
+            # 服务不就绪时最有用的是日志尾巴：有一类错误模拟器只刷日志、不退出
+            $logNow = Get-LogFile $Port
+            $lastErr = Get-EmuLastError $logNow
+            if ($lastErr) { Write-Host ("  {0,-16} {1}" -f "日志最后一条", $lastErr) -ForegroundColor Yellow }
+            $fatal = Get-EmuLogFatal $logNow
+            if ($fatal) { Write-Host ("  [!] " + $fatal) -ForegroundColor Yellow }
+        }
     } else {
         Show-Row "进程" "没在跑"
     }
     Show-Row "工作目录" $sysdir
     Show-Row "日志" (Get-LogFile $Port)
+    $emuHome = Get-EmulatorHome
+    if ($emuHome -and (Test-Path -LiteralPath $emuHome)) {
+        Show-Row "模拟器主目录" $emuHome
+    } else {
+        Write-Host ("  {0,-16} {1}" -f "模拟器主目录", "$emuHome（不存在！模拟器会报 error: 3 并无限重试刷日志）") -ForegroundColor Yellow
+    }
     $hw = Join-Path $sysdir "hardware-qemu.ini"
     if (Test-Path $hw) {
         $vals = @(Select-String -Path $hw -Pattern '^(hw\.ramSize|hw\.cpu\.ncore|hw\.lcd\.width|hw\.lcd\.height)\s*=' |
