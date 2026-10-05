@@ -2,7 +2,7 @@
 
 > **状态：脚本已就位，尚未在真 Mac 上跑过。**
 > 本文写的是**怎么用**，不是"已验证可用"。设计依据与实测记录见
-> [`../docs/13-macos-port.md`](../docs/13-macos-port.md)（尤其 §3 与 §7.0.8）。
+> [`../docs/13-macos-port.md`](../docs/13-macos-port.md)（尤其 §7.0.8、§7.0.15、§7.0.16）。
 
 ---
 
@@ -35,35 +35,33 @@ cd dev/04-android-rom/macos
 #   只用某个本地包：        ./fetch-emulator.sh --emulator-zip ~/Downloads/emulator-darwin_aarch64-*.zip
 
 # 3) 把 ROM 拉到本机（从构建机 scp，或从 U 盘/本地目录拷）
-./fetch-images.sh                                     # 默认从 192.168.0.108 拉 x64_arm64 那份
-./fetch-images.sh --remote-dir .../rom-remote_control_arm64     # 拉 arm64 那份
-./fetch-images.sh --local /Volumes/usb/rom-xxx        # 从本地目录拷，不走网络
-./fetch-images.sh --dequarantine                      # 拉完顺手清 quarantine
+./fetch-images.sh --dest ../artifacts/rom-remote_control_x64_arm64
+./fetch-images.sh --remote-dir /path/to/rom-remote_control_arm64 \
+  --dest ../artifacts/rom-remote_control_arm64
+./fetch-images.sh --local /Volumes/usb/rom-xxx \
+  --dest ../artifacts/rom-remote_control_arm64            # 从本地目录拷
+./fetch-images.sh --dequarantine --dest ../artifacts/rom-remote_control_x64_arm64
 ```
 
-**这三步只准备"料"。** 起停查那套脚本（`bin/`）是**发布包内**的，见下一节。
+运行时默认放在 `macos/sdk/`，镜像按产品放进对应的 `artifacts/rom-*` 目录，供源码树入口查找。
 
 ---
 
 ## 两条使用路径
 
-### A. 你现在就在源码树里开发（用 `macos/` 三个脚本）
+### A. 源码树开发
 
-上面三步跑完，手工起机器：
+准备好运行时和镜像后，用 `run-darwin.sh` 启动。它会做宿主架构与镜像 ABI 检查，再委托给与发布包共用的 macOS 启动逻辑：
 
 ```bash
-# 参数照抄 ../scripts/run-linux.sh 的 launch()，把宿主路径与 -accel 换掉：
 cd dev/04-android-rom/macos
-ANDROID_PRODUCT_OUT="$PWD/images" ANDROID_BUILD_TOP="$PWD" \
-  ./sdk/emulator/emulator -sysdir "$PWD/images" -datadir /tmp/avd -port 5580 \
-    -no-window -gpu host -accel on -memory 6144 -cores 4 -no-audio -no-boot-anim \
-    -no-snapshot &
-./sdk/platform-tools/adb -s emulator-5580 wait-for-device
+./run-darwin.sh                         # default 实例，端口 5580
+./run-darwin.sh --reuse                 # 保留这台实例的数据
+./run-darwin.sh --port 5584 --name vm2
+./run-darwin.sh --no-wait
 ```
 
-> 为什么这里还要手工拼参数：`../scripts/` 那套里的 `run-linux.sh` / `emulator.sh`
-> **是 Linux 宿主侧的**（探 `/dev/dri`、用 `/proc` 找进程、`setsid`）。
-> Mac 的对应实现已经写好，但它们在**发布包内**（下一条），不是源码树脚本。
+`run-darwin.sh` 查找镜像的顺序是 `release/autosnap-*/images/`、`.run/release-stage/*/images/`，然后是 `artifacts/rom-remote_control_arm64/` 与 `artifacts/rom-remote_control_x64_arm64/`。目前 artifacts 候选固定先查 arm64；Intel Mac 上若两种 artifact 都存在且没有更高优先级的兼容镜像，会选中 arm64 并被架构检查拒绝。此时请让源码入口可见的首个镜像目录只包含本机兼容的 ROM；或直接使用下一节按目标打包的发布包。
 
 ### B. 你是最终用户（用发布包里的 `bin/`）
 
@@ -92,10 +90,7 @@ autosnap-<版本>-darwin-aarch64/
 ./bin/stop.sh --port 5580             # 停（先 sync）
 ```
 
-> ⚠️ **`bin/darwin/` 这五个脚本还没打进发布包** —— `../scripts/release.sh` 目前只认
-> `linux` / `windows` 两个平台（它的三分派表与 `START-HERE.md` 模板分支还没加 mac）。
-> 也就是说路径 B **尚未可用**，先把脚本按路径 A 用起来。
-> 打包那一层是独立一步，见 [`../docs/13-macos-port.md`](../docs/13-macos-port.md) §8 的 #16。
+`release.sh` 已支持 `darwin-aarch64` 与 `darwin-x86_64` 目标，并按目标校验 ROM 架构。Apple Silicon 目标需要 `remote_control_arm64`，Intel Mac 目标需要 `remote_control_x64_arm64`；命令与 ROM 选择方式见 [`../docs/15-release-packaging.md`](../docs/15-release-packaging.md)。发布打包已在 Linux 上通过离线/假包验证，真 Mac 解压与启动验收仍待完成。
 
 ---
 
@@ -104,10 +99,7 @@ autosnap-<版本>-darwin-aarch64/
 `../emulator/config.ini` 是唯一真源（1280×720 @320dpi、`hw.ramSize=6144`、`hw.cpu.ncore=4`、`hw.gpu.mode=auto`）。
 它**不参与 AOSP 构建**，由启动脚本在运行期覆盖进工作目录。
 
-Mac 侧要注意的一条：`hw.gpu.mode=auto` 在 Linux 上靠探 `/dev/dri/renderD*` 判断，
-**macOS 没有 `/dev/dri`**，所以 mac 版的 GPU 判定要换成 `system_profiler SPDisplaysDataType`
-（对应 Windows 侧的 `Get-CimInstance Win32_VideoController`）。这条**还没写**，
-在 mac 版启动脚本落地前，先手工指定 `-gpu host` 或 `-gpu swiftshader_indirect`。
+Mac 侧的 `hw.gpu.mode=auto` 已由 Darwin 启动逻辑通过 `system_profiler SPDisplaysDataType` 检查 Metal 支持：可用时先尝试 `host`，启动未通过 console 检查时回退到 `swiftshader_indirect`。也可用 `run-darwin.sh --gpu host` 或 `--gpu swiftshader_indirect` 显式覆盖。探测与回退已有 stub 测试；尚未在真 Mac 上验证实际 GPU/驱动行为。
 
 ---
 
@@ -120,22 +112,21 @@ Mac 侧要注意的一条：`hw.gpu.mode=auto` 在 Linux 上靠探 `/dev/dri/ren
 | 磁盘 | 数据分区本身 32 G，加镜像与快照要 **60 GiB 以上**可用空间 |
 | Gatekeeper / quarantine | 从浏览器下载的 zip 会给解出的**每个文件**打 `com.apple.quarantine`，模拟器一执行就被拦。`preflight.sh --rom-dir DIR` 会检查；解除：`xattr -dr com.apple.quarantine <目录>` |
 | **`unzip` 丢可执行位** | macOS 上解压后 `emulator`/`adb` 是 0644，直接执行报 `Permission denied`。`fetch-emulator.sh` 已自动补，**手工解压时要自己 chmod** |
-| 宿主 bash 是 3.2 | macOS 自带的是 2007 年的 GPLv2 版。本目录两个脚本都只用 3.2 语法；但 `../scripts/release.sh` 用了 `declare -A`（需 bash 4+），**在 Mac 上跑打包要先 `brew install bash`** |
+| 宿主 bash 是 3.2 | macOS 自带的是 2007 年的 GPLv2 版。本目录四个脚本都只用 3.2 语法；但 `../scripts/release.sh` 用了 `declare -A`（需 bash 4+），**在 Mac 上跑打包要先 `brew install bash`** |
 | 网络桥接 | **macOS 没有 `-net-tap` 的等价物**，与 Windows 侧一样走模拟器默认用户态 NAT。这不是待修的缺陷，是与 windows 包一致的能力面（见 `../docs/13-macos-port.md` §3.5） |
 
 ---
 
 ## ⚠️ 未在真机验证
 
-本文与两个脚本都**没有在真 Mac 上执行过**（编写环境是 x86_64 Linux）。
-已经验到的只有这些：
+本文及四个 `macos/*.sh` 源码树脚本都**没有在真 Mac 上执行过**（编写环境是 x86_64 Linux）。当前已通过的离线检查包括源码树入口、Darwin 包生成、架构校验和 GPU 探测 stub：
 
 | 项 | 验证方式 |
 |---|---|
 | 选包逻辑（按 host-os + host-arch + 渠道） | 对**真实 SDK 清单**跑了 6 组，含一组应当失败的不存在组合（§7.0.8） |
-| 两个脚本的语法 | `bash -n` 通过 |
+| macOS 源码树及包内脚本语法 | `bash -n` 通过 |
 | 在非 macOS 上会正确拒绝 | 在 Linux 上实跑，`preflight.sh` 报"不是 macOS"并继续做完其余检查 |
 | macOS 包确有 arm64 后端 | 下载 `emulator-darwin_aarch64-16428233.zip`（416,112,708 字节，sha1 与清单一致）后列包内目录（§7.0.2） |
+| macOS 离线测试台 | `bash tools/test-macos-port.sh`：121 项全绿（2026-10-05；stub/假包测试，不替代真机验证） |
 
-**首次在 Mac 上跑，请把 `preflight.sh` 与 `fetch-emulator.sh` 的输出贴回**，
-好把上面这张表换成真机结论。
+首次在 Mac 上完成预检、下载、解压与启动后，应按实际输出更新真机验证记录。

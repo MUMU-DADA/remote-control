@@ -11,7 +11,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 目标 Android | **12**（编译期 API 30；运行时下限 Android 8，见 [`docs/03-reference.md`](docs/03-reference.md)） |
+| 目标 Android | **12（API 31）**；NDK daemon 的 API 26 编译已验证，低于 Android 12 的设备运行尚未验证，见 [`docs/03-reference.md`](docs/03-reference.md) |
 | 架构 | native daemon（`remote-control`） |
 | 协议 | **v7，33 条命令**；HTTP/JSON 与 Unix socket 共用 `Dispatcher`，WebSocket 提供实时流 |
 | 截图 | ✅ SurfaceFlinger 直连（8–12 ms/帧）／screencap exec（~197 ms） |

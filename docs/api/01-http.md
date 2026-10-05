@@ -1110,15 +1110,15 @@ HTTP 429，稍后重试即可。大于 4 MiB 时 HTTP 层先 spool 到临时文�
 
 ### GET /logfile
 
-落盘的历史日志，`/sdcard/remote-control.log`，**最多 10KB**。
+落盘的历史日志，产品默认路径为 `/data/misc/remote-control/remote-control.log`，**最多 10KB**。部署时可通过 `--config` / `--log` 改路径；以响应中的 `path` 字段为准。
 
 ```json
-{"ok":true, "path":"/sdcard/remote-control.log", "bytes":5413, "maxBytes":10240,
+{"ok":true, "path":"/data/misc/remote-control/remote-control.log", "bytes":5413, "maxBytes":10240,
  "text":"09-28 08:31:46 W 图像编码器: AndroidBitmap_compress…\n…"}
 ```
 
 内存缓冲关掉进程就没了，而排障时最需要的恰恰是"上次为什么退出的"。
-所以同时往共享存储写一份。
+所以同时写入配置文件同目录的历史日志文件。
 
 裁剪带**滞回**：超过 10KB 裁到 7.5KB。裁到"刚好 10KB"的话下一行又超、
 又裁一次 —— 每写一行就要读写 20KB。带滞回后每 ~2.5KB 才裁一次，
