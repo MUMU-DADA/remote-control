@@ -13,7 +13,7 @@
 #
 # 完整设计见 docs/09-deployment-and-update.md。
 
-service remote-control /system/bin/remote-control --socket /data/misc/remote-control/remote-control.sock --socket-mode 0660 --config /data/misc/remote-control/remote-control.conf --log /data/misc/remote-control/remote-control.log
+service remote-control /system/bin/remote-control-launch --socket /data/misc/remote-control/remote-control.sock --socket-mode 0660 --config /data/misc/remote-control/remote-control.conf --log /data/misc/remote-control/remote-control.log
     class core
 
     # ── 运行身份：shell，不是 system ──────────────────────────────────────
@@ -48,13 +48,9 @@ service remote-control /system/bin/remote-control --socket /data/misc/remote-con
     #    域不存在，init 起服务时会失败。
     # ⚠️ 用 remote_control 域（下划线）—— 上游 sepolicy 里没有带连字符的类型名。
     #
-    #    这里本来要指向启动壳的域（计划 §5 的热替换通道）。实测那条路被
-    #    AOSP 策略挡死了，而且是三条 neverallow 互相咬住，详见
-    #    dev/04-android-rom/device/remote_control_x64_arm64/sepolicy/remote_control.te
-    #    里「载荷槽的类型暂时不声明」那一节，以及
-    #    docs/09-deployment-and-update.md 末尾的「实施记录」。
-    #    取舍定了之后这里再换成 remote-control-launch。
-    seclabel u:r:remote_control:s0
+    #    init 固定执行 /system 上几乎不变的启动壳；壳把 /data 中已校验的
+    #    载荷复制到 sealed memfd 后 fexecve，因此服务仍保持这个 coredomain。
+    seclabel u:r:remote_control_loader:s0
 
     # 当前服务自己 bind /data/misc/remote-control 下的 socket，权限先收紧为 0660。
     # SocketServer 还会通过 SO_PEERCRED 校验对端 UID；需要跨 UID 的客户端时，
@@ -97,6 +93,7 @@ service remote-control /system/bin/remote-control --socket /data/misc/remote-con
 on post-fs-data
     mkdir /data/misc/remote-control 0770 shell shell
     mkdir /data/misc/remote-control/releases 0755 shell shell
+    restorecon_recursive /data/misc/remote-control
 
 # Apply the template once persisted properties have loaded. The empty value
 # matches only a new data volume; API changes on an existing guest win.

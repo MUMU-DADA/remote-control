@@ -73,7 +73,28 @@ std::string DefaultSpoolDir() {
 }
 
 bool IsFileUploadRoute(const std::string& path) {
+    // Both file uploads and service binary updates can spool the request body
+    // and therefore need the same in-flight disk reservation.  Keep this
+    // matcher segment-based so trailing or repeated slashes follow the same
+    // routing rules as the rest of the HTTP parser.
     const char* expected[] = {"api", "v1", "files", "upload"};
+    const char* update[] = {"api", "v1", "update"};
+    const auto matches = [&path](const char* const* route, size_t routeSize) {
+        size_t segment = 0;
+        size_t pos = 0;
+        while (pos < path.size()) {
+            while (pos < path.size() && path[pos] == '/') ++pos;
+            if (pos == path.size()) break;
+            if (segment == routeSize) return false;
+            size_t end = path.find('/', pos);
+            if (end == std::string::npos) end = path.size();
+            if (path.compare(pos, end - pos, route[segment]) != 0) return false;
+            ++segment;
+            pos = end;
+        }
+        return segment == routeSize;
+    };
+    if (matches(update, sizeof(update) / sizeof(update[0]))) return true;
     size_t segment = 0;
     size_t pos = 0;
     while (pos < path.size()) {
@@ -190,6 +211,7 @@ const char* StatusText(int code) {
     switch (code) {
         case 200: return "OK";
         case 201: return "Created";
+        case 202: return "Accepted";
         case 204: return "No Content";
         case 400: return "Bad Request";
         case 401: return "Unauthorized";
@@ -198,6 +220,8 @@ const char* StatusText(int code) {
         case 405: return "Method Not Allowed";
         case 409: return "Conflict";
         case 413: return "Payload Too Large";
+        case 415: return "Unsupported Media Type";
+        case 422: return "Unprocessable Entity";
         case 429: return "Too Many Requests";
         case 500: return "Internal Server Error";
         case 507: return "Insufficient Storage";
@@ -530,7 +554,7 @@ void HttpServer::SetTokenProvider(std::function<std::string()> fn) {
 }
 
 void HttpServer::Stop() {
-    stop_.store(true);
+    SignalStop();
     const int callerFd = gActiveHttpServer == this ? gActiveHttpFd : -1;
 
     // 先关监听，再把活跃连接踢掉。
@@ -539,15 +563,6 @@ void HttpServer::Stop() {
     // write 失败为止。不主动 shutdown 的话，客户端不松手它们就永远
     // 不退出，而 main() 随后就会析构 Dispatcher —— 那些线程再去碰
     // 它的操作锁就是一个已销毁的互斥量。
-    {
-        std::lock_guard<std::mutex> lk(connMutex_);
-        if (listenFd_ >= 0) {
-            shutdown(listenFd_, SHUT_RDWR);
-            close(listenFd_);
-            listenFd_ = -1;
-        }
-    }
-
     KickAllConnections("服务关闭", 600, callerFd);
 
     // Shutdown 中断读写，但不能取消已经进入 handler 的调用。若 Stop
@@ -558,6 +573,19 @@ void HttpServer::Stop() {
 
     std::unique_lock<std::mutex> lk(connMutex_);
     connCv_.wait(lk, [this] { return connFds_.empty(); });
+}
+
+void HttpServer::SignalStop() noexcept {
+    stop_.store(true);
+
+    // 只关闭监听 fd；活动连接由主线程稍后 Stop() 统一处理。此函数可以
+    // 从请求 worker 或延迟重启线程调用，绝不等待 worker。
+    std::lock_guard<std::mutex> lk(connMutex_);
+    if (listenFd_ >= 0) {
+        shutdown(listenFd_, SHUT_RDWR);
+        close(listenFd_);
+        listenFd_ = -1;
+    }
 }
 
 void HttpServer::Run(HttpHandler handler) {
@@ -1139,6 +1167,9 @@ void HttpServer::ServeConnection(int connFd, const HttpHandler& handler) {
     // 处理器本来就不抛。真出了 bad_alloc 这类，-fno-exceptions 下
     // 本来就是 abort，catch 也救不回来。
     const HttpResponse resp = handler(req);
+    ScopeExit responseCompletionGuard([&resp]() {
+        if (resp.onComplete) resp.onComplete();
+    });
 
     // ── WebSocket 升级 ──
     //

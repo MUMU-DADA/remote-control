@@ -13,9 +13,12 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <pthread.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "fileops.h"
@@ -84,13 +87,25 @@ class HttpServer;
 
 class RestApi {
   public:
-    explicit RestApi(Dispatcher* dispatcher) : dispatcher_(dispatcher) {}
+    explicit RestApi(Dispatcher* dispatcher,
+                     std::string updateRoot = "/data/misc/remote-control")
+        : dispatcher_(dispatcher),
+          updateRoot_(std::move(updateRoot)),
+          updateReleases_(updateRoot_ + "/releases") {}
 
     // 让 RestApi 能踢掉活跃连接。
     //
     // 用在两处：**关闭服务**和**开启鉴权** —— 那两种情况下，
     // 已经连上的客户端不该继续享受服务。main() 里注入。
     void SetHttpServer(HttpServer* server) { httpServer_ = server; }
+
+    // 热更新完成后唤醒 init 传输和 HTTP 线程，让当前进程优雅退出，
+    // 由 init/监督器重新拉起并加载新版本。
+    void SetRestartHook(std::function<void()> hook) { restartHook_ = std::move(hook); }
+
+    // 主线程退出传输循环后调用，等待延迟重启线程结束，避免它继续访问
+    // main() 栈上的 SocketServer/HttpServer。
+    void JoinRestartThread();
 
     HttpResponse Handle(const HttpRequest& req);
 
@@ -111,6 +126,13 @@ class RestApi {
 
     // 文件上传：请求体就是文件字节；大请求直接从 HTTP spool 文件复制。
     HttpResponse HandleFileUpload(const HttpRequest& req);
+
+    // 服务载荷热更新：二进制上传到版本槽，随后由 apply 切换指针并重启。
+    HttpResponse HandleUpdate(const HttpRequest& req);
+    HttpResponse HandleUpdateApply(const HttpRequest& req);
+    HttpResponse HandleUpdateRollback(const HttpRequest& req);
+    HttpResponse HandleUpdateStatus(const HttpRequest& req);
+    bool ScheduleRestart();
 
     // 画面流。同一个端点两种传输：
     //   有 Upgrade 头 → WebSocket（二进制帧，控制台用这条）
@@ -154,6 +176,18 @@ class RestApi {
     bool uploadFileOpsInitialized_ = false;
     // 可能为空（没启用 HTTP 时）
     HttpServer* httpServer_ = nullptr;
+    std::function<void()> restartHook_;
+    std::mutex updateMutex_;
+    // 可注入的版本槽根目录；生产环境使用 /data/misc/remote-control，
+    // host 集成测试使用临时目录，避免触碰设备持久化状态。
+    std::string updateRoot_;
+    std::string updateReleases_;
+    // apply/rollback 提交后直到当前进程退出前只允许这一笔更新；否则
+    // 第二个请求可能在首个响应写回期间改写 current 指针。
+    bool updateRestartPending_ = false;
+    pthread_t restartThread_{};
+    bool restartThreadStarted_ = false;
+    std::mutex restartThreadMutex_;
 };
 
 }  // namespace remote_control

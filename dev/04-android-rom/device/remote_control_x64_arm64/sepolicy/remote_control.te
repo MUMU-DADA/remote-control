@@ -27,6 +27,18 @@
 
 type remote_control, domain;
 type remote_control_exec, system_file_type, exec_type, file_type;
+type remote_control_loader, domain, coredomain;
+type remote_control_loader_exec, system_file_type, exec_type, file_type;
+type remote_control_tmpfs, file_type;
+domain_auto_trans(remote_control_loader, remote_control_exec, remote_control)
+type_transition remote_control_loader tmpfs:file postinstall_file;
+allow remote_control_loader postinstall_file:file {
+    read write getattr map open setattr execute
+};
+domain_auto_trans(remote_control_loader, postinstall_file, remote_control)
+
+# The service only creates non-executable anonymous files for responses/frames.
+tmpfs_domain(remote_control)
 
 # 自建的 socket。coredomain_socket 属性让它能被 init 正确处理。
 # 参考 public/file.te 里 statsdw_socket 的声明方式。
@@ -57,27 +69,10 @@ type remote_control_exec, system_file_type, exec_type, file_type;
 #    里那两条 allow 精确限定（只放开这一个 socket，不是整个 domain）。
 type remote_control_socket, file_type, data_file_type, app_data_file_type;
 
-# 热替换通道用的两个类型（见下面的「载荷槽」一节）：
-#   payload_exec  /data 里那份真正在跑的二进制
-#   data_file     槽目录、指针、就绪标记、配置、日志
-# ── 载荷槽的类型暂时**不声明** ──
-#
-# 计划里的 §5「热替换通道」想让服务执行 /data 里的载荷，实测被 AOSP 策略挡死了，
-# 而且是**三条 neverallow 互相咬住**（每一条都单独试过）：
-#
-#   ① private/domain.te:315  只有 appdomain 能执行 /data 下的东西
-#   ② public/domain.te:1186  只有 zygote/runas 那几家能转换**进** appdomain
-#                            —— 所以 init 拉不起一个 appdomain 的壳
-#   ③ public/domain.te:959   coredomain 只能对 system_file_type 有 entrypoint
-#                            —— 所以 coredomain 的服务没法从 /data 的载荷进入
-#
-# 只让开一条没用：三条一起才构成"服务能起来"的完整链路。
-# 全部绕开需要两处**架构上的让步**（壳跑在 shell 域 + 服务放弃 coredomain），
-# 那是安全相关的取舍，得由人来定 —— 见 docs/09-deployment-and-update.md
-# 末尾的「实施记录」。在定下来之前，这一节不声明任何类型。
-#
-# 服务现在直接从 /system 执行（remote_control_exec 是 system_file_type），
-# §1/§3/§4 的自启与保活不受影响，那是本次需求的根因部分。
+# 热替换载荷保存在 remote_control_data_file。launcher 只读取并校验这里的版本
+# 文件和指针，随后将字节写入 sealed memfd；服务执行的是 tmpfs 上的匿名文件，
+# 因此不需要给 /data 文件增加 execute 权限，也不会触发 coredomain 的 entrypoint
+# 限制。下面的 data_file allow 同时覆盖 launcher 与载荷自身的配置/日志访问。
 
 # ⚠️ 这里**故意不加 data_file_type**。
 #
@@ -106,6 +101,29 @@ typeattribute remote_control coredomain;
 # 由 init 启动并做域转换。
 # 宏展开就是 domain_auto_trans(init, remote_control_exec, remote-control)
 init_daemon_domain(remote_control)
+
+# The fixed launcher is started by init in a small helper domain. It only
+# selects, verifies, and stages a payload before handing execution to the
+# remote_control domain above.
+domain_auto_trans(init, remote_control_loader_exec, remote_control_loader)
+allow remote_control_loader self:process { fork sigchld signal };
+allow remote_control_loader remote_control:process { sigchld signal };
+allow remote_control_loader remote_control_exec:file {
+    read open getattr map execute
+};
+# The payload inherits the launcher's executable fd across the domain
+# transition. Android checks that descriptor as a cross-domain fd use when
+# the child starts.
+allow remote_control remote_control_loader:fd use;
+allow remote_control_loader remote_control_exec:file {
+    read open getattr map execute
+};
+allow remote_control remote_control_exec:file {
+    read open getattr map execute execute_no_trans
+};
+allow remote_control postinstall_file:file {
+    read open getattr map execute execute_no_trans
+};
 
 # -----------------------------------------------------------------------------
 # Binder 基础设施
@@ -286,16 +304,16 @@ allow remote_control remote_control_exec:file { read open execute execute_no_tra
 # 载荷槽：/data/misc/remote-control（热替换通道）
 # =============================================================================
 #
-# 启动壳从 /data 里取真正的二进制并 exec —— 这样"服务起来之后还能换版本"
-# 才成立（init 不重读 rc，/system 又没有持久写入通道；
-# 见 docs/09-deployment-and-update.md §5）。
+# 启动壳从 /data 里选择并校验版本槽，将载荷复制到 sealed memfd 后执行；
+# 这样服务无需修改 /system 内容即可在运行期间切换版本（init 不重读 rc）。
 #
 # ⚠️ 这是整套方案**唯一的安全依据**：
 #   · 更新源必须放 /data/misc/remote-control，**绝不能放 /sdcard** ——
 #     那是共享存储，任何应用都能写，等于把可执行载荷和执行权一起交出去。
 #   · 壳在 exec 之前核对 sha256（槽目录名就是期望的哈希）。
 #
-# 壳与服务要能读写槽目录：指针（current / last-good）、就绪标记、配置、日志
+# 服务要能读写槽目录：指针（current / last-good）、就绪标记、配置、日志。
+# launcher 通过下面的独立规则读取和原子更新版本槽。
 allow remote_control remote_control_data_file:dir {
     open read search write add_name remove_name create getattr setattr
 };
@@ -305,6 +323,18 @@ allow remote_control remote_control_data_file:dir {
 allow remote_control remote_control_data_file:file {
     create read write append open getattr unlink rename setattr map
 };
+
+# The launcher is the only writer/reader outside the service domain. It needs
+# the same slot-directory permissions to atomically select and validate a
+# release, but it never owns the service socket or any device access.
+allow remote_control_loader remote_control_data_file:dir {
+    open read search write add_name remove_name create getattr setattr
+};
+allow remote_control_loader remote_control_data_file:file {
+    create read write append open getattr unlink rename setattr map
+};
+allow remote_control_loader remote_control:process2 nosuid_transition;
+allow remote_control_loader remote_control:process noatsecure;
 
 # 服务自己 bind 的 Unix socket（放在自己的目录里，见 remote-control.rc）。
 #
@@ -475,10 +505,12 @@ allow remote_control system_file:file {
     read open getattr map execute execute_no_trans
 };
 
-# JSON 响应是先写进 memfd 再发出去的 —— 少了这条，响应根本拼不出来，
-# 表现为**服务在跑、端口在听、连接却永远不返回**（实测 HTTP 000）。
-# memfd 落在通用 tmpfs 类型上（我们的域没有 tmpfs 的 type_transition）。
-allow remote_control tmpfs:file { read write open getattr map };
+# JSON 响应和帧数据先写进 memfd 再传输。tmpfs_domain(remote_control)
+# 提供 read/write/getattr/map 以及从通用 tmpfs 到 remote_control_tmpfs
+# 的类型转换；这里补上打开和修改属性所需的权限。
+allow remote_control remote_control_tmpfs:file {
+    open setattr
+};
 
 # HTTP / JSON API 的 TCP 监听。
 #

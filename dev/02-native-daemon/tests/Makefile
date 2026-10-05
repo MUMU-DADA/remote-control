@@ -97,7 +97,7 @@ SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
 APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
                  $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_transport test_core_lifetime test_encoded_frame_cache test_h264_encoder test_fileops test_sha256
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_transport test_update test_core_lifetime test_encoded_frame_cache test_h264_encoder test_fileops test_sha256
 
 all: $(BINS) fake_screencap
 
@@ -128,6 +128,31 @@ TP_SRCS = test_transport.cpp $(DAEMON)/http_server.cpp \
 test_transport: $(TP_SRCS) test_util.h $(DAEMON)/http_server.h \
                 $(DAEMON)/socket_server.h $(DAEMON)/websocket.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(TP_SRCS)
+
+# [4] REST update API: version-slot upload/apply/rollback with an injected
+# temporary root. Link the host daemon sources without main() so the test uses
+# the production RestApi implementation and SHA-256 verifier.
+UPDATE_SRCS = test_update.cpp \
+              $(DAEMON)/socket_server.cpp $(DAEMON)/dispatch.cpp \
+              $(DAEMON)/selftest.cpp $(DAEMON)/capture_stub.cpp \
+              $(DAEMON)/inject.cpp $(DAEMON)/inject_uinput.cpp \
+              $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
+              $(DAEMON)/fileops.cpp $(DAEMON)/http_client.cpp \
+              $(DAEMON)/service_state.cpp $(DAEMON)/log_buffer.cpp \
+              $(DAEMON)/http_server.cpp $(DAEMON)/rest_api.cpp \
+              $(DAEMON)/json_parser.cpp $(DAEMON)/png_encoder.cpp \
+              $(DAEMON)/keyboard.cpp $(DAEMON)/clipops.cpp \
+              $(DAEMON)/webui.cpp $(DAEMON)/image_encoder.cpp \
+              $(DAEMON)/websocket.cpp $(DAEMON)/config_file.cpp \
+              $(DAEMON)/frame_hub.cpp $(DAEMON)/encode_pool.cpp \
+              $(DAEMON)/h264_encoder.cpp $(DAEMON)/jpeg_encoder.cpp \
+              $(DAEMON)/webp_encoder.cpp $(DAEMON)/sha256.cpp \
+              $(JSONCPP_SRCS)
+
+test_update: $(UPDATE_SRCS) test_util.h $(DAEMON)/rest_api.h $(DAEMON)/sha256.h \
+             $(WEBP_OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -I$(WEBP_DIR) -pthread -o $@ \
+	    $(UPDATE_SRCS) $(WEBP_OBJS) -lm
 
 CORE_LIFETIME_SRCS = test_core_lifetime.cpp $(DAEMON)/http_client.cpp \
                      $(DAEMON)/png_encoder.cpp $(DAEMON)/inject.cpp \
@@ -204,6 +229,7 @@ _run: all
 	 ./test_keyboard;                            k=$$?; echo; \
 	 ./test_websocket;                           w=$$?; echo; \
 	 ./test_transport;                           t=$$?; echo; \
+	 ./test_update;                              u2=$$?; echo; \
 	 LD_LIBRARY_PATH="$$(pwd)/build/fakes$${LD_LIBRARY_PATH:+:$${LD_LIBRARY_PATH}}" ./test_core_lifetime; q=$$?; echo; \
 	 ./test_encoded_frame_cache;                 e=$$?; echo; \
 	 ./test_h264_encoder;                        h=$$?; echo; \
@@ -218,6 +244,7 @@ _run: all
 	 printf "  %-34s %s\n" "按键注入"            "$$([ $$k -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "WebSocket 握手"       "$$([ $$w -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "传输层生命周期"       "$$([ $$t -eq 0 ] && echo 通过 || echo 失败)"; \
+	 printf "  %-34s %s\n" "REST 更新"             "$$([ $$u2 -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "daemon 资源生命周期" "$$([ $$q -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "共享编码缓存" "$$([ $$e -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "H.264 编码器" "$$([ $$h -eq 0 ] && echo 通过 || echo 失败)"; \
@@ -234,7 +261,7 @@ _run: all
 	     printf "  %-34s %s\n" "检查数与 README 一致" \
 	         "✗ 实际 $$total，README 写 $$want —— 改了测试就要同步改 README"; r=1; \
 	 fi; \
-	 exit $$(( u + i + c + a + j + k + w + t + q + e + h + f + s + r ))
+	 exit $$(( u + i + c + a + j + k + w + t + u2 + q + e + h + f + s + r ))
 
 clean:
 	rm -rf $(WEBP_OBJ)

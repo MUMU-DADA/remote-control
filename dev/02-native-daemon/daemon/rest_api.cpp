@@ -4,9 +4,11 @@
 
 #include <errno.h>
 #include <cctype>
+#include <dirent.h>
 #include <fcntl.h>
 #include <cmath>
 #include <limits.h>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -37,6 +39,7 @@
 #include "protocol.h"
 #include "service_state.h"
 #include "sha256.h"
+#include "thread_util.h"
 #include "websocket.h"
 #include "webui.h"
 
@@ -361,6 +364,18 @@ bool UnlinkOpenedSharedStorageFile(const OpenedSharedStorageFile& opened) {
 // 一个本应是 JSON 的路由把数 GB 的落盘正文重新读进内存。
 constexpr size_t kMaxJsonBodyBytes = 1u << 20;  // 1 MiB
 
+struct RestartTask {
+    std::function<void()> hook;
+};
+
+void* RestartThreadMain(void* opaque) {
+    RestartTask* task = static_cast<RestartTask*>(opaque);
+    usleep(100 * 1000);
+    task->hook();
+    delete task;
+    return nullptr;
+}
+
 bool ParseJsonBody(const HttpRequest& req, json::Value* out, HttpResponse* err) {
     // bodySize 由 HTTP 层按 Content-Length 设置；body 直接构造的请求（例如
     // 单元测试）可能没有设置它，因此同时检查实际内存正文大小。
@@ -403,6 +418,131 @@ bool ParseJsonBody(const HttpRequest& req, json::Value* out, HttpResponse* err) 
         *err = HttpResponse::Error(400, "请求体必须是 JSON 对象");
         return false;
     }
+    return true;
+}
+
+bool IsSha256Name(const std::string& value) {
+    if (value.size() != 64) return false;
+    for (char c : value) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+bool IsReleaseRel(const std::string& value) {
+    constexpr const char* kPrefix = "releases/";
+    constexpr const char* kSuffix = "/remote-control";
+    if (value.size() != strlen(kPrefix) + 64 + strlen(kSuffix) ||
+        value.compare(0, strlen(kPrefix), kPrefix) != 0 ||
+        value.compare(value.size() - strlen(kSuffix), strlen(kSuffix), kSuffix) != 0) {
+        return false;
+    }
+    return IsSha256Name(value.substr(strlen(kPrefix), 64));
+}
+
+// 只有 init 通过 remote-control-launch 拉起载荷时，切换 current 才会在
+// 当前服务退出后被重新解析。直接执行 remote-control 的旧部署没有这个
+// 能力；拒绝 apply/rollback，避免 API 返回成功但实际仍运行旧二进制。
+bool LauncherUpdateSupported() {
+    const char* value = getenv("REMOTE_CONTROL_UPDATE_SUPPORTED");
+    return value != nullptr && strcmp(value, "1") == 0;
+}
+
+std::string ReadTrimmedFile(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (f == nullptr) return {};
+    char buf[512];
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    std::string out(buf);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' ||
+                            out.back() == ' ' || out.back() == '\t')) {
+        out.pop_back();
+    }
+    return out;
+}
+
+bool WriteAtomicText(const std::string& path, const std::string& text,
+                     std::string* error) {
+    std::string tmp = path + ".tmp-XXXXXX";
+    std::vector<char> tmpName(tmp.begin(), tmp.end());
+    tmpName.push_back('\0');
+    const int fd = mkstemp(tmpName.data());
+    if (fd < 0) {
+        if (error) *error = "创建临时文件失败: " + std::string(strerror(errno));
+        return false;
+    }
+    tmp.assign(tmpName.data());
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    fchmod(fd, 0600);
+    size_t off = 0;
+    bool ok = true;
+    while (off < text.size()) {
+        const ssize_t n = write(fd, text.data() + off, text.size() - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = false; break; }
+        off += static_cast<size_t>(n);
+    }
+    if (ok && fsync(fd) != 0) ok = false;
+    const int saved = errno;
+    close(fd);
+    if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
+        const int e = ok ? errno : saved;
+        unlink(tmp.c_str());
+        if (error) *error = "写入 " + path + " 失败: " + std::string(strerror(e));
+        return false;
+    }
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? std::string(".")
+                                                       : path.substr(0, slash);
+    const int dirFd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd < 0 || fsync(dirFd) != 0) {
+        const int saved = errno;
+        if (dirFd >= 0) close(dirFd);
+        if (error) *error = "持久化 " + path + " 的目录失败: " +
+                             std::string(strerror(saved));
+        return false;
+    }
+    close(dirFd);
+    return true;
+}
+
+bool FsyncDirectory(const std::string& path, std::string* error) {
+    const int fd = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0 || fsync(fd) != 0) {
+        const int saved = errno;
+        if (fd >= 0) close(fd);
+        if (error) *error = "持久化目录失败: " + std::string(strerror(saved));
+        return false;
+    }
+    close(fd);
+    return true;
+}
+
+bool EnsureUpdateDirs(const std::string& root, const std::string& releases,
+                      std::string* error) {
+    auto ensureDir = [error](const std::string& path, mode_t mode, const char* label) {
+        if (mkdir(path.c_str(), mode) != 0 && errno != EEXIST) {
+            if (error) *error = std::string("创建") + label + "失败: " + strerror(errno);
+            return false;
+        }
+        struct stat st{};
+        if (lstat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+            if (error) *error = std::string(label) + "不是普通目录";
+            return false;
+        }
+        return true;
+    };
+    if (!ensureDir(root, 0770, "更新目录")) return false;
+    if (!ensureDir(releases, 0755, "版本目录")) return false;
+    return true;
+}
+
+bool IsRegularFile(const std::string& path, struct stat* st = nullptr) {
+    struct stat local{};
+    if (lstat(path.c_str(), &local) != 0 || !S_ISREG(local.st_mode)) return false;
+    if (st) *st = local;
     return true;
 }
 
@@ -821,7 +961,373 @@ HttpResponse RestApi::HandleFileUpload(const HttpRequest& req) {
     w.Obj().Field("ok", true).Field("name", filename)
         .Field("path", savedPath).Field("bytes", static_cast<uint64_t>(size))
      .EndObj();
+
     return HttpResponse::Json(201, w.str());
+}
+
+bool RestApi::ScheduleRestart() {
+    if (!restartHook_) return false;
+
+    std::lock_guard<std::mutex> lock(restartThreadMutex_);
+    if (restartThreadStarted_) return true;
+
+    RestartTask* task = new (std::nothrow) RestartTask{restartHook_};
+    if (task == nullptr) return false;
+    const int rc = pthread_create(&restartThread_, nullptr, &RestartThreadMain, task);
+    if (rc != 0) {
+        delete task;
+        return false;
+    }
+    restartThreadStarted_ = true;
+    return true;
+}
+
+void RestApi::JoinRestartThread() {
+    pthread_t thread{};
+    {
+        std::lock_guard<std::mutex> lock(restartThreadMutex_);
+        if (!restartThreadStarted_) return;
+        thread = restartThread_;
+    }
+    // Keep restartThreadStarted_ true until the join completes.  A late
+    // request worker can otherwise observe false while this thread is still
+    // joining and create a second delayed callback that outlives main().
+    const int rc = pthread_join(thread, nullptr);
+    if (rc == 0) {
+        std::lock_guard<std::mutex> lock(restartThreadMutex_);
+        if (restartThreadStarted_ && pthread_equal(restartThread_, thread)) {
+            restartThreadStarted_ = false;
+        }
+    }
+}
+
+// ── 服务热更新 ─────────────────────────────────────────────────────────────
+HttpResponse RestApi::HandleUpdate(const HttpRequest& req) {
+    if (req.method == "GET") return HandleUpdateStatus(req);
+    if (req.method != "POST") {
+        return HttpResponse::Error(405, "update 只支持 GET / POST");
+    }
+
+    std::lock_guard<std::mutex> lock(updateMutex_);
+    std::string contentType = req.header("content-type", "");
+    std::transform(contentType.begin(), contentType.end(), contentType.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (contentType.empty()) {
+        return HttpResponse::Error(415, "更新正文必须声明 Content-Type: application/octet-stream");
+    }
+    if (contentType != "application/octet-stream" &&
+        contentType.rfind("application/octet-stream;", 0) != 0) {
+        return HttpResponse::Error(415, "更新正文必须是 application/octet-stream");
+    }
+    const uint64_t expectedBytes = req.bodyFile.empty()
+            ? static_cast<uint64_t>(req.bodySize != 0 ? req.bodySize : req.body.size())
+            : static_cast<uint64_t>(req.bodySize);
+    if (expectedBytes == 0) {
+        return HttpResponse::Error(400, "更新正文为空");
+    }
+    if (!req.bodyFile.empty() && req.bodySize == 0) {
+        return HttpResponse::Error(400, "更新正文长度无效");
+    }
+    if (req.bodyFile.empty() && req.bodySize != 0 && req.bodySize != req.body.size()) {
+        return HttpResponse::Error(400, "更新正文长度不一致");
+    }
+    if (expectedBytes > static_cast<uint64_t>(kMaxHttpUploadBytes)) {
+        return HttpResponse::Error(413, "更新正文超过上限 " +
+                                             std::to_string(kMaxHttpUploadBytes) +
+                                             " 字节");
+    }
+
+    std::string error;
+    if (!EnsureUpdateDirs(updateRoot_, updateReleases_, &error)) {
+        return HttpResponse::Error(500, error);
+    }
+
+    int sourceFd = -1;
+    if (!req.bodyFile.empty()) {
+        sourceFd = open(req.bodyFile.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (sourceFd < 0) {
+            return HttpResponse::Error(500, "打开更新暂存文件失败: " +
+                                                std::string(strerror(errno)));
+        }
+        struct stat st{};
+        if (fstat(sourceFd, &st) != 0 || !S_ISREG(st.st_mode) ||
+            static_cast<uint64_t>(st.st_size) != req.bodySize) {
+            close(sourceFd);
+            return HttpResponse::Error(400, "更新暂存文件无效");
+        }
+    }
+    struct FdGuard {
+        int fd = -1;
+        ~FdGuard() { if (fd >= 0) close(fd); }
+    } sourceGuard{sourceFd};
+
+    std::string temp = updateRoot_ + "/.update-XXXXXX";
+    std::vector<char> tempName(temp.begin(), temp.end());
+    tempName.push_back('\0');
+    const int outFd = mkstemp(tempName.data());
+    if (outFd < 0) {
+        return HttpResponse::Error(500, "创建更新临时文件失败: " +
+                                             std::string(strerror(errno)));
+    }
+    temp.assign(tempName.data());
+    fcntl(outFd, F_SETFD, FD_CLOEXEC);
+    fchmod(outFd, 0755);
+
+    Sha256 digest;
+    uint64_t copied = 0;
+    bool ok = true;
+    int writeErr = 0;
+    uint8_t elfMagic[4] = {};
+    size_t elfMagicBytes = 0;
+    char buf[64 * 1024];
+    for (;;) {
+        ssize_t n = 0;
+        if (sourceFd >= 0) {
+            do { n = read(sourceFd, buf, sizeof(buf)); } while (n < 0 && errno == EINTR);
+        } else if (copied < req.body.size()) {
+            n = static_cast<ssize_t>(std::min<uint64_t>(sizeof(buf), req.body.size() - copied));
+            memcpy(buf, req.body.data() + copied, static_cast<size_t>(n));
+        }
+        if (n < 0) { ok = false; writeErr = errno; break; }
+        if (n == 0) break;
+        if (elfMagicBytes < sizeof(elfMagic)) {
+            const size_t take = std::min(sizeof(elfMagic) - elfMagicBytes,
+                                         static_cast<size_t>(n));
+            memcpy(elfMagic + elfMagicBytes, buf, take);
+            elfMagicBytes += take;
+        }
+        digest.Update(buf, static_cast<size_t>(n));
+        size_t off = 0;
+        while (off < static_cast<size_t>(n)) {
+            const ssize_t w = write(outFd, buf + off, static_cast<size_t>(n) - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) { ok = false; writeErr = errno ? errno : EIO; break; }
+            off += static_cast<size_t>(w);
+        }
+        if (!ok) break;
+        copied += static_cast<uint64_t>(n);
+    }
+    if (ok && fsync(outFd) != 0) { ok = false; writeErr = errno; }
+    close(outFd);
+    if (!ok || copied != expectedBytes) {
+        unlink(temp.c_str());
+        return HttpResponse::Error(500, "写入更新文件失败: " +
+                                             std::string(strerror(writeErr ? writeErr : EIO)));
+    }
+    if (elfMagicBytes != sizeof(elfMagic) ||
+        memcmp(elfMagic, "\x7f" "ELF", sizeof(elfMagic)) != 0) {
+        unlink(temp.c_str());
+        return HttpResponse::Error(400, "更新文件不是 ELF 可执行文件");
+    }
+    uint8_t hashBytes[32];
+    digest.Final(hashBytes);
+    const std::string version = ToHex(hashBytes, sizeof(hashBytes));
+    std::string expected = req.header("x-remote-control-sha256",
+                                      req.queryParam("sha256", ""));
+    std::transform(expected.begin(), expected.end(), expected.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!expected.empty() && !IsSha256Name(expected)) {
+        unlink(temp.c_str());
+        return HttpResponse::Error(400, "SHA-256 必须是 64 位十六进制字符串");
+    }
+    if (!expected.empty() && expected != version) {
+        unlink(temp.c_str());
+        return HttpResponse::Error(422, "SHA-256 校验失败，实际为 " + version);
+    }
+
+    const std::string dir = updateReleases_ + "/" + version;
+    if (mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) {
+        unlink(temp.c_str());
+        return HttpResponse::Error(500, "创建版本目录失败: " + std::string(strerror(errno)));
+    }
+    struct stat releaseDir{};
+    if (lstat(dir.c_str(), &releaseDir) != 0 || !S_ISDIR(releaseDir.st_mode)) {
+        unlink(temp.c_str());
+        return HttpResponse::Error(409, "版本目录不是普通目录");
+    }
+    const std::string target = dir + "/remote-control";
+    struct stat existing{};
+    if (lstat(target.c_str(), &existing) == 0) {
+        if (!S_ISREG(existing.st_mode)) {
+            unlink(temp.c_str());
+            return HttpResponse::Error(409, "版本目录中的载荷不是普通文件");
+        }
+        std::string existingSha;
+        if (!Sha256FileHex(target, &existingSha) || existingSha != version) {
+            unlink(temp.c_str());
+            return HttpResponse::Error(409, "版本目录中的载荷 SHA-256 不匹配");
+        }
+        unlink(temp.c_str());
+    } else if (errno == ENOENT) {
+        if (rename(temp.c_str(), target.c_str()) != 0) {
+            const int e = errno;
+            unlink(temp.c_str());
+            return HttpResponse::Error(500, "提交更新文件失败: " + std::string(strerror(e)));
+        }
+        if (!FsyncDirectory(dir, &error)) {
+            return HttpResponse::Error(500, error);
+        }
+    } else {
+        const int e = errno;
+        unlink(temp.c_str());
+        return HttpResponse::Error(500, "检查更新文件失败: " + std::string(strerror(e)));
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("staged", true)
+        .Field("version", version).Field("bytes", copied)
+        .Field("path", target).EndObj();
+    return HttpResponse::Json(201, w.str());
+}
+
+HttpResponse RestApi::HandleUpdateApply(const HttpRequest& req) {
+    std::lock_guard<std::mutex> lock(updateMutex_);
+    if (updateRestartPending_) {
+        return HttpResponse::Error(409, "已有更新正在等待重启");
+    }
+    if (!LauncherUpdateSupported()) {
+        return HttpResponse::Error(503,
+                                   "当前服务未由 remote-control-launch 管理，不能应用更新");
+    }
+    if (!restartHook_) {
+        return HttpResponse::Error(503, "当前服务没有可用的重启管理器");
+    }
+    json::Value body;
+    HttpResponse err;
+    if (!ParseJsonBody(req, &body, &err)) return err;
+    std::string version = body.str("sha256");
+    if (version.empty()) version = body.str("version");
+    if (!IsSha256Name(version)) {
+        return HttpResponse::Error(400, "需要 64 位小写十六进制 sha256");
+    }
+    const std::string target = updateReleases_ + "/" + version +
+                               "/remote-control";
+    struct stat st{};
+    std::string actual;
+    if (!IsRegularFile(target, &st) || !Sha256FileHex(target, &actual) ||
+        actual != version) {
+        return HttpResponse::Error(404, "版本未暂存或校验失败: " + version);
+    }
+    const std::string previous = ReadTrimmedFile(updateRoot_ + "/current");
+    const std::string rel = "releases/" + version + "/remote-control";
+    if (previous == rel && SelfBuildId() == version) {
+        json::Writer same;
+        same.Obj().Field("ok", true).Field("action", "already-active")
+            .Field("version", version).Field("buildId", SelfBuildId()).EndObj();
+        return HttpResponse::Json(200, same.str());
+    }
+    // 指针已经指向目标但进程仍报告旧 buildId 时，只重启当前进程；不要
+    // 把 current 再写进 previous，否则回滚会失去真正的上一版本。
+    if (previous != rel) {
+        if (!WriteAtomicText(updateRoot_ + "/previous", previous + "\n",
+                             &err.body) ||
+            !WriteAtomicText(updateRoot_ + "/current", rel + "\n",
+                             &err.body)) {
+            return HttpResponse::Error(500, err.body);
+        }
+    }
+    updateRestartPending_ = true;
+    ServiceState::Instance().RequestShutdown(true);
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("action", "restart")
+        .Field("version", version).Field("previous", previous).EndObj();
+    HttpResponse response = HttpResponse::Json(202, w.str());
+    response.onComplete = [this]() {
+        // 启动可 join 的延迟线程，让 HTTP 响应先完成发送。
+        if (!ScheduleRestart() && restartHook_) restartHook_();
+    };
+    return response;
+}
+
+HttpResponse RestApi::HandleUpdateRollback(const HttpRequest&) {
+    std::lock_guard<std::mutex> lock(updateMutex_);
+    if (updateRestartPending_) {
+        return HttpResponse::Error(409, "已有更新正在等待重启");
+    }
+    if (!LauncherUpdateSupported()) {
+        return HttpResponse::Error(503,
+                                   "当前服务未由 remote-control-launch 管理，不能回滚更新");
+    }
+    if (!restartHook_) {
+        return HttpResponse::Error(503, "当前服务没有可用的重启管理器");
+    }
+    const std::string currentPath = updateRoot_ + "/current";
+    const std::string previousPath = updateRoot_ + "/previous";
+    const std::string current = ReadTrimmedFile(currentPath);
+    const std::string previous = ReadTrimmedFile(previousPath);
+    const std::string lastGood = ReadTrimmedFile(updateRoot_ + "/last-good");
+    struct stat previousStat{};
+    const bool hasPrevious = lstat(previousPath.c_str(), &previousStat) == 0 &&
+                             S_ISREG(previousStat.st_mode);
+    // 首次从镜像版本切到槽版本时，previous 文件存在但内容为空，这代表
+    // "回到 system"，不能和 previous 文件不存在混淆。
+    const std::string targetRel = hasPrevious ? previous
+            : (!current.empty() ? lastGood : std::string());
+    if (targetRel.empty() && current.empty()) {
+        return HttpResponse::Error(404, "没有可回退的版本");
+    }
+    const bool targetSystem = targetRel.empty();
+    if (!targetSystem && !IsReleaseRel(targetRel)) {
+        return HttpResponse::Error(409, "previous 指向无效版本");
+    }
+    const std::string version = targetSystem
+            ? std::string()
+            : targetRel.substr(strlen("releases/"), 64);
+    if (!targetSystem) {
+        const std::string target = updateReleases_ + "/" + version +
+                                   "/remote-control";
+        std::string actual;
+        if (!IsRegularFile(target) || !Sha256FileHex(target, &actual) || actual != version) {
+            return HttpResponse::Error(404, "回退版本不存在或校验失败: " + version);
+        }
+    }
+    const std::string rel = targetSystem ? std::string() :
+        "releases/" + version + "/remote-control";
+    std::string writeError;
+    if (!WriteAtomicText(updateRoot_ + "/previous", current + "\n",
+                         &writeError) ||
+        !WriteAtomicText(updateRoot_ + "/current", rel + "\n",
+                         &writeError)) {
+        return HttpResponse::Error(500, writeError);
+    }
+    updateRestartPending_ = true;
+    ServiceState::Instance().RequestShutdown(true);
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("action", "rollback")
+        .Field("version", targetSystem ? "system" : version)
+        .Field("previous", current).EndObj();
+    HttpResponse response = HttpResponse::Json(202, w.str());
+    response.onComplete = [this]() {
+        if (!ScheduleRestart() && restartHook_) restartHook_();
+    };
+    return response;
+}
+
+HttpResponse RestApi::HandleUpdateStatus(const HttpRequest&) {
+    std::lock_guard<std::mutex> lock(updateMutex_);
+    const std::string current = ReadTrimmedFile(updateRoot_ + "/current");
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("current", current)
+        .Field("running", SelfBuildId()).Field("buildId", SelfBuildId())
+        .Field("launcherManaged", LauncherUpdateSupported())
+        .Key("staged").Arr();
+    DIR* d = opendir(updateReleases_.c_str());
+    if (d != nullptr) {
+        struct dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            const std::string name(ent->d_name);
+            if (!IsSha256Name(name)) continue;
+            const std::string file = updateReleases_ + "/" + name +
+                                     "/remote-control";
+            std::string actual;
+            if (IsRegularFile(file) && Sha256FileHex(file, &actual) && actual == name) {
+                w.Val(name);
+            }
+        }
+        closedir(d);
+    }
+    w.EndArr().EndObj();
+    return HttpResponse::Json(200, w.str());
 }
 
 // ── 手势 ────────────────────────────────────────────────────────────────────
@@ -2069,6 +2575,8 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         const bool isPage = (p == "/" || p == "/index.html" || p == "/ui");
         const bool isManagement = (p == "/api/v1/service" ||
                 p == "/api/v1/adb" || p == "/api/v1/power" ||
+                p == "/api/v1/update" || p == "/api/v1/update/apply" ||
+                p == "/api/v1/update/rollback" ||
                 p == "/api/v1" || p == "/api");
         if (!isPage && !isManagement) {
             return HttpResponse::Error(
@@ -2170,6 +2678,18 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
     }
     if (res == "restart" && method == "POST") {
         return Call(Cmd::Restart, "", 0, -1);
+    }
+    if (res == "update") {
+        if (seg.size() == 3 && (method == "GET" || method == "POST")) {
+            return HandleUpdate(req);
+        }
+        if (seg.size() == 4 && seg[3] == "apply" && method == "POST") {
+            return HandleUpdateApply(req);
+        }
+        if (seg.size() == 4 && seg[3] == "rollback" && method == "POST") {
+            return HandleUpdateRollback(req);
+        }
+        return HttpResponse::Error(405, "update 只支持 GET/POST，以及 POST apply/rollback");
     }
 
     if (res == "adb" && seg.size() == 3) {

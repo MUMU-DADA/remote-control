@@ -200,8 +200,46 @@ void TestHttpStopFromHandler() {
     runner.join();
 }
 
+void TestHttpResponseCompletionHook() {
+    printf("\n\033[1;34m[4] HTTP 响应完成回调\033[0m\n");
+    HttpServer server;
+    HttpServer::Options options;
+    options.port = 0;
+    std::string error;
+    if (!server.Start(options, &error)) {
+        Check(false, "启动 HTTP server: %s", error.c_str());
+        return;
+    }
+
+    std::atomic<int> completions{0};
+    HttpHandler handler = [&](const HttpRequest&) {
+        HttpResponse response = HttpResponse::Text(202, "accepted");
+        response.onComplete = [&]() { completions.fetch_add(1); };
+        return response;
+    };
+    std::thread runner([&]() { server.Run(handler); });
+
+    const int fd = ConnectHttp(server.port());
+    const char request[] = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const bool sent = fd >= 0 && SendAll(fd, request, sizeof(request) - 1);
+    const std::string response = fd >= 0 ? ReadToClose(fd) : "";
+    if (fd >= 0) close(fd);
+    for (int i = 0; sent && i < 100 && completions.load() == 0; ++i) {
+        usleep(1000);
+    }
+    Check(sent && response.find("HTTP/1.1 202 ") != std::string::npos &&
+                  response.find("accepted") != std::string::npos,
+          "响应完成前正常发送 body");
+    Check(completions.load() == 1,
+          "普通响应发送流程结束后执行一次 onComplete（实际 %d）",
+          completions.load());
+
+    server.Stop();
+    runner.join();
+}
+
 void TestHttpSpoolCleanup() {
-    printf("\n\033[1;34m[4] HTTP spool 生命周期\033[0m\n");
+    printf("\n\033[1;34m[5] HTTP spool 生命周期\033[0m\n");
     char dirTemplate[] = "/tmp/remote-control-transport-XXXXXX";
     char* dirName = mkdtemp(dirTemplate);
     if (!dirName) {
@@ -285,7 +323,7 @@ void TestHttpSpoolCleanup() {
 }
 
 void TestHttpContentLengthValidation() {
-    printf("\n\033[1;34m[5] HTTP Content-Length 校验\033[0m\n");
+    printf("\n\033[1;34m[6] HTTP Content-Length 校验\033[0m\n");
     HttpServer server;
     HttpServer::Options options;
     options.port = 0;
@@ -327,7 +365,7 @@ void TestHttpContentLengthValidation() {
 }
 
 void TestHttpFileUploadBudget() {
-    printf("\n\033[1;34m[6] HTTP 文件上传空间配额\033[0m\n");
+    printf("\n\033[1;34m[7] HTTP 文件上传空间配额\033[0m\n");
     char dirTemplate[] = "/tmp/remote-control-upload-budget-XXXXXX";
     char* dirName = mkdtemp(dirTemplate);
     if (!dirName) {
@@ -427,7 +465,7 @@ void TestHttpFileUploadBudget() {
 }
 
 void TestHttpFourGiBFileUploadLimit() {
-    printf("\n\033[1;34m[7] HTTP 文件上传 4 GiB 上限\033[0m\n");
+    printf("\n\033[1;34m[8] HTTP 文件上传 4 GiB 上限\033[0m\n");
     HttpServer server;
     HttpServer::Options options;
     options.port = 0;
@@ -477,7 +515,7 @@ void TestHttpFourGiBFileUploadLimit() {
 }
 
 void TestUnixShortPacketFdCleanup() {
-    printf("\n\033[1;34m[7] Unix socket 短包 fd 清理\033[0m\n");
+    printf("\n\033[1;34m[9] Unix socket 短包 fd 清理\033[0m\n");
     char pathTemplate[] = "/tmp/remote-control-transport-sock-XXXXXX";
     const int tempFd = mkstemp(pathTemplate);
     if (tempFd < 0) {
@@ -607,7 +645,7 @@ void TestUnixShortPacketFdCleanup() {
 }
 
 void TestUnixPeerUidAuthorization() {
-    printf("\n\033[1;34m[7] Unix socket SO_PEERCRED 鉴权\033[0m\n");
+    printf("\n\033[1;34m[10] Unix socket SO_PEERCRED 鉴权\033[0m\n");
     char pathTemplate[] = "/tmp/remote-control-transport-auth-XXXXXX";
     const int tempFd = mkstemp(pathTemplate);
     if (tempFd < 0) {
@@ -666,7 +704,7 @@ void TestUnixPeerUidAuthorization() {
 }
 
 void TestUnixPathTypeGuard() {
-    printf("\n\033[1;34m[8] Unix socket 路径类型保护\033[0m\n");
+    printf("\n\033[1;34m[11] Unix socket 路径类型保护\033[0m\n");
     char pathTemplate[] = "/tmp/remote-control-transport-path-XXXXXX";
     const int regularFd = mkstemp(pathTemplate);
     if (regularFd < 0) {
@@ -691,7 +729,7 @@ void TestUnixPathTypeGuard() {
 }
 
 void TestUnixActiveSocketGuard() {
-    printf("\n\033[1;34m[9] Unix socket 活跃实例保护\033[0m\n");
+    printf("\n\033[1;34m[12] Unix socket 活跃实例保护\033[0m\n");
     char pathTemplate[] = "/tmp/remote-control-transport-active-XXXXXX";
     const int tempFd = mkstemp(pathTemplate);
     if (tempFd < 0) {
@@ -722,7 +760,7 @@ void TestUnixActiveSocketGuard() {
 }
 
 void TestConfigSaveTempFileSafety() {
-    printf("\n\033[1;34m[10] 配置文件临时文件安全写入\033[0m\n");
+    printf("\n\033[1;34m[13] 配置文件临时文件安全写入\033[0m\n");
     char dirTemplate[] = "/tmp/remote-control-config-XXXXXX";
     char* dirName = mkdtemp(dirTemplate);
     if (!dirName) {
@@ -777,6 +815,7 @@ int main() {
     TestHttpConnectionReservationAndStop();
     TestHttpStopWaitsForHandler();
     TestHttpStopFromHandler();
+    TestHttpResponseCompletionHook();
     TestHttpSpoolCleanup();
     TestHttpContentLengthValidation();
     TestHttpFileUploadBudget();

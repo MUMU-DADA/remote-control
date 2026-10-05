@@ -81,14 +81,14 @@
 ```bash
 python3 tools/check-api-docs.py [host:port]     # 文档与活服务一致性（98 项断言）
 python3 tools/functional-sweep.py [host:port]   # 全功能体检（判据取设备侧证据）
-cd dev/02-native-daemon/tests && make run       # 13 个测试套件 + 核对 README 里的检查数
+cd dev/02-native-daemon/tests && make run       # 14 个测试套件 + 核对 README 里的检查数
 ```
 
 `check-api-docs.py` 还会**读 README 里声称的断言条数**并与实际比对 ——
 改了断言不同步改 README 就会失败。文档里的数字因此不会悄悄过期。
 
-同样的闸门也加在了测试侧：`make run` 会把 13 个套件自报的检查数求和，
-与 README 里写的「单元/集成 N 项检查」比对；当前为 497 项，对不上就失败。
+同样的闸门也加在了测试侧：`make run` 会把 14 个套件自报的检查数求和，
+与 README 里写的「单元/集成 N 项检查」比对；当前为 509 项，对不上就失败。
 这条闸门曾抓到新增 `test_sha256` 后 README 仍停在 298 项的过期计数。
 
 > `functional-sweep.py` 对**平台上确实做不到**的项（如后台进程写剪贴板）

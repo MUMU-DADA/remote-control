@@ -25,12 +25,12 @@ namespace remote_control {
 // 创建一个匿名内存文件，返回 fd（失败返回 -1，errno 已设置）。
 //
 // 名字只用于调试（显示在 /proc/<pid>/fd 的目标里），不影响行为。
-inline int MakeMemfd(const char* name) {
+inline int MakeMemfd(const char* name, unsigned flags = MFD_CLOEXEC) {
 #if defined(SYS_memfd_create)
     // MFD_CLOEXEC：这个 fd 是给同进程用的，不该泄漏给子进程
     // （exec screencap / pm install 时会 fork，泄漏过去就是隐患）。
     return static_cast<int>(
-            syscall(SYS_memfd_create, name, static_cast<unsigned>(MFD_CLOEXEC)));
+            syscall(SYS_memfd_create, name, flags));
 #else
     // 理论上不会有：Android/Linux 都有这个系统调用号。
     // 编不过总比静默降级成一个不安全的实现好。

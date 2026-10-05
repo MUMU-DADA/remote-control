@@ -28,6 +28,17 @@
 | 鉴权 / 服务开关 | ✅ 令牌鉴权；`enabled=0` 是**软开关**（不真停进程） |
 | **init 固化** | ✅ 开机自启 + 崩了自动拉起 + 专属 SELinux 域 → [`docs/09`](../../docs/09-deployment-and-update.md) |
 
+### API 热更新
+
+设备端提供版本槽管理接口：`POST /api/v1/update` 上传并校验原始 ELF（只暂存），
+`POST /api/v1/update/apply` 原子切换 `current` 并请求服务重启，
+`POST /api/v1/update/rollback` 优先切回 `previous`，必要时使用 `last-good`，
+`GET /api/v1/update` 查看运行和
+暂存版本。上传时服务端重新计算 SHA-256，不能通过请求参数指定路径。当前 AOSP 产品已将
+init 服务接到 `remote-control-launch`，并部署 sealed memfd 所需的 SELinux 规则；apply
+会执行版本槽中的新载荷。未接入该启动链的旧 ROM 仍只能暂存和校验文件。完整请求示例和
+策略约束见 [`docs/api/01-http.md`](../../docs/api/01-http.md) 及 [`docs/09`](../../docs/09-deployment-and-update.md)。
+
 **设备侧功能冒烟检查**：`python3 tools/functional-sweep.py [host:port]` —— 核对
 `/describe` 声明的命令清单仍有 33 条，并对部分 HTTP 功能做设备侧检查（截图、输入、
 应用管理、文件列表、剪贴板、旋转、服务配置/日志和重启等），并检查 `/stream` 能完成
@@ -166,14 +177,15 @@ screencap 后端测试用 `fake_screencap`。它们不是 Android 设备端的�
 | `test_json` | JSON 解析 / 输出（用 AOSP 树内的 jsoncpp） | 49 |
 | `test_keyboard` | 按键注入（键名映射 → 键码） | 79 |
 | `test_websocket` | WebSocket 帧 / Close 控制帧 | 47 |
-| `test_transport` | HTTP / Unix socket 生命周期 | 37 |
+| `test_transport` | HTTP / Unix socket 生命周期 | 39 |
+| `test_update` | REST 版本槽上传 / 应用 / 回滚 | 10 |
 | `test_core_lifetime` | 动态库初始化与注入后端生命周期 | 7 |
 | `test_encoded_frame_cache` | 共享编码缓存 | 13 |
 | `test_h264_encoder` | H.264 编码器边界 | 43 |
 | `test_fileops` | 文件路径与上传原子落盘 | 35 |
 | `test_sha256` | SHA-256（NIST 官方向量 + 分块一致性） | 9 |
 
-> `make run` 除了跑这 13 个套件，还会把各套件自报的检查数求和并与根
+> `make run` 除了跑这 14 个套件，还会把各套件自报的检查数求和并与根
 > [`README.md`](../../README.md) 里写的「单元/集成 N 项检查」比对 ——
 > 数字对不上就直接失败。加测试忘了改 README 会被当场拦住。
 
@@ -187,7 +199,7 @@ screencap 后端测试用 `fake_screencap`。它们不是 Android 设备端的�
                                                                   └─ /dev/uinput ──> 内核 ──> eventN 读回
 ```
 
-**实测结果：13 个套件、497 项检查全部通过**
+**实测结果：14 个套件、509 项检查全部通过**
 
 ```
 test_inject_uinput（38 项）
@@ -358,7 +370,7 @@ python3 rc_client.py --socket /tmp/remote-control.sock swipe 540 1600 540 400
 | 请求处理并发 | 🤔 **刻意限制** | `Dispatcher::Handle()` 用共享的 `opMutex_` 串行化触控等有状态操作及其它非 `Info`/`Capture` 命令，HTTP 与 Unix socket 共用此锁。`Info`/`Capture` 在前置分支绕过它；抓帧由 Capture 后端自己的锁保护，不会因触控排队，但同一后端的抓帧仍串行。编码侧另由 `encode_pool` 限流 |
 | 文本输入（`input text` 那类） | ⏳ **未做** | 按键注入（`keyboard.cpp`）已有；整串文本输入没有 |
 | 剪贴板写入 | ⛔ **平台做不到** | Android 10+ 只允许前台应用写。**不是本项目的缺陷**，见 [`docs/api/01-http.md`](../../docs/api/01-http.md) 第五节 |
-| 热替换（启动后换二进制） | ⛔ **实测否决** | 三条 neverallow 互相咬住，两条绕开的路也都不通。见 [`docs/09`](../../docs/09-deployment-and-update.md) §9.2–9.5 |
+| 热替换（启动后换二进制） | ✅ **API 与当前 ROM 启动链已实现** | `POST /api/v1/update` 暂存，`/update/apply` 原子切换并重启，`/update/rollback` 回滚；sealed memfd 与 SELinux 接入见 [`docs/09`](../../docs/09-deployment-and-update.md) |
 
 ---
 

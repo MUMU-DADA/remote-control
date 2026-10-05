@@ -80,7 +80,7 @@ live = set()
 for res in ["describe","config","selftest","stats","log","logfile","logstream","shutdown",
             "restart","capture","stream","touch","longpress","drag","doubletap","key",
             "clipboard","service","running","params","power","info","tap","swipe","apps",
-            "foreground","install","download","files","rotate"]:
+            "foreground","install","download","files","rotate","update"]:
     live.add(res)
 missing = sorted(live - doc_eps)
 chk(not missing, "活着的端点都写进了文档", f"缺 {missing}")

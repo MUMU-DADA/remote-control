@@ -36,6 +36,8 @@
 | 405 | 此资源不接受该 HTTP 方法 | HTTP 状态码原样放入 JSON `status` |
 | 409 | 上传目标已存在 | HTTP 状态码原样放入 JSON `status` |
 | 413 | 请求体或文件超过限制 | HTTP 状态码原样放入 JSON `status` |
+| 415 | 上传媒体类型不受支持 | HTTP 状态码原样放入 JSON `status` |
+| 422 | 上传内容校验失败（例如 SHA-256 不匹配） | HTTP 状态码原样放入 JSON `status` |
 | 429 | 上传配额正被占用 | HTTP 状态码原样放入 JSON `status` |
 | 500 | 服务端内部错 | 其他 |
 | 501 | 这台设备/这个构建不支持 | `kErrUnsupported` |
@@ -1167,7 +1169,94 @@ HTTP 429，稍后重试即可。大于 4 MiB 时 HTTP 层先 spool 到临时文�
 
 ---
 
-## 十、服务自身
+## 十、服务更新
+
+服务支持通过 HTTP 热更新载荷。更新文件只能写入服务自己的版本槽，服务端会重新计算
+SHA-256 并检查 ELF magic；客户端提供的版本名或路径不会被当作文件路径使用。请求仍受
+通用鉴权、上传大小上限和并发上传限制约束。
+
+### GET /update
+
+查看正在运行的构建、当前指针和已暂存版本：
+
+```bash
+curl -H "Authorization: Bearer $T" http://host:8088/api/v1/update
+```
+
+```json
+{
+  "ok": true,
+  "running": "<当前进程的 buildId>",
+  "buildId": "<当前进程的 buildId>",
+  "current": "releases/<sha256>/remote-control",
+  "launcherManaged": true,
+  "staged": ["<sha256>"]
+}
+```
+
+`running`/`buildId` 来自当前进程自身；`current` 是持久化的版本指针，
+`staged` 列出版本槽中已通过上传校验的 SHA-256。`launcherManaged=false` 表示当前
+ROM 不是由 `remote-control-launch` 管理；这种部署仍可上传暂存，但 apply/rollback
+会返回 `503`，不会切换指针。
+
+### POST /update
+
+上传一个 ELF 到版本槽。请求体是原始二进制，不是 JSON；上传成功只表示**已暂存**，
+不会改变 `current`，也不会重启服务。
+
+```bash
+sha=$(sha256sum remote-control | awk '{print $1}')
+curl -X POST http://host:8088/api/v1/update \
+     -H "Authorization: Bearer $T" \
+     -H 'Content-Type: application/octet-stream' \
+     -H "X-Remote-Control-Sha256: $sha" \
+     --data-binary @remote-control
+```
+
+成功返回 HTTP `201`：
+
+```json
+{"ok":true,"staged":true,"version":"<sha256>","bytes":123456}
+```
+
+服务端会检查 `Content-Type`、请求长度、ELF magic 和实际 SHA-256。重复上传同一
+SHA-256 是幂等的；错误的摘要返回 `422`，非 ELF 返回 `400`，媒体类型不支持返回
+`415`。版本槽写入采用临时文件、`fsync` 和原子提交，不能通过请求参数指定任意路径。
+
+### POST /update/apply
+
+将已暂存版本原子切换为 `current`，然后请求 init/supervisor 重启服务。请求必须是 JSON，
+`sha256`（也接受兼容字段 `version`）为 64 位十六进制字符串：
+
+```bash
+curl -X POST http://host:8088/api/v1/update/apply \
+     -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+     -d '{"sha256":"<sha256>"}'
+```
+
+成功返回 HTTP `202`。响应写回后当前 HTTP 连接会断开，客户端应轮询
+`GET /api/v1/info` 或 `GET /api/v1/update`，直到 `buildId` 等于目标 SHA-256。
+如果目标已经是当前版本，返回 HTTP `200` 和 `action: "already-active"`。
+
+### POST /update/rollback
+
+将 `current` 切换到服务记录的 `previous` 版本并请求重启；首次没有可用的
+`previous` 时，才回退到 `last-good`：
+
+```bash
+curl -X POST http://host:8088/api/v1/update/rollback \
+     -H "Authorization: Bearer $T"
+```
+
+成功返回 HTTP `202`，包含 `action: "rollback"`、`version` 和 `previous`。没有可用
+回退版本返回 `404`；指针或版本校验失败返回 `409`。
+
+> **部署前提**：当前 AOSP 12 产品的 `remote-control.rc` 已指向
+> `remote-control-launch`，并包含 launcher 将载荷复制到 sealed memfd 所需的 SELinux
+> 策略。未接入这套启动链的旧 ROM 仍会暂存文件，但 `apply` 后不会运行新版本。设计和
+> 验收步骤见[部署与更新说明](../09-deployment-and-update.md)。
+
+## 十一、服务自身
 
 | 端点 | 说明 |
 |---|---|

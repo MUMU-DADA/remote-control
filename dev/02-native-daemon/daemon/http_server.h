@@ -71,6 +71,10 @@ struct HttpResponse {
     std::string body;
     std::vector<std::pair<std::string, std::string>> extraHeaders;
 
+    // 普通 HTTP 响应发送流程结束后调用，包括响应头或响应体写入失败。
+    // 可用于只有在客户端收到操作结果后才应发生的生命周期动作。
+    std::function<void()> onComplete;
+
     // 流式响应。
     //
     // 非空时 body/status 只用来写响应头（通常 200 + 一个长连接的
@@ -159,6 +163,10 @@ class HttpServer {
     // 停止接收请求、关闭其他连接并等待 worker 退出。handler 可调用 Stop；
     // 此时 Stop 等待其他 worker，当前 handler 返回后连接自行收尾。
     void Stop();
+
+    // 只停止监听入口，不等待或关闭当前连接。调用方随后应在主线程调用
+    // Stop()，统一踢掉并等待所有 worker。
+    void SignalStop() noexcept;
 
     // 请求踢掉所有**其它**连接，但**不立刻执行**。
     //

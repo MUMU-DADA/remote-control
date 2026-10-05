@@ -29,7 +29,7 @@
 // 无限重拉一个起不来的东西，服务彻底失联，只能到宿主上 adb root 救。
 //
 // 所以留一个父进程做**探活**：拉起载荷后等它就绪（载荷写 ready 文件），
-// 超时或提前退出就认为这版是坏的 → 指针切回 last-good 再来一次。
+// 超时或提前退出就认为这版是坏的 → 按 previous/last-good/镜像原版回退。
 //
 // =============================================================================
 // 就绪信号
@@ -42,12 +42,14 @@
 //    上一版留下的残留文件会让一个根本起不来的新版被判成就绪。
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -57,14 +59,19 @@
 #include <vector>
 
 #include "sha256.h"
+#include "memfd_util.h"
 
 using remote_control::Sha256FileHex;
+using remote_control::MakeMemfd;
+using remote_control::Sha256;
+using remote_control::ToHex;
 
 namespace {
 
 // 载荷槽的根。init 在 post-fs-data 里建好并给 shell 属主（见 remote-control.rc）。
 constexpr const char* kRoot = "/data/misc/remote-control";
 constexpr const char* kCurrent = "/data/misc/remote-control/current";
+constexpr const char* kPrevious = "/data/misc/remote-control/previous";
 constexpr const char* kLastGood = "/data/misc/remote-control/last-good";
 constexpr const char* kReady = "/data/misc/remote-control/ready";
 constexpr const char* kLog = "/data/misc/remote-control/launcher.log";
@@ -120,7 +127,9 @@ bool WriteFileAtomic(const std::string& path, const std::string& content) {
     FILE* f = fopen(tmp.c_str(), "wb");
     if (f == nullptr) return false;
     const bool ok = fwrite(content.data(), 1, content.size(), f) == content.size();
-    if (fclose(f) != 0 || !ok) {
+    const int fd = fileno(f);
+    const bool synced = ok && fd >= 0 && fsync(fd) == 0;
+    if (fclose(f) != 0 || !synced) {
         remove(tmp.c_str());
         return false;
     }
@@ -128,6 +137,15 @@ bool WriteFileAtomic(const std::string& path, const std::string& content) {
         remove(tmp.c_str());
         return false;
     }
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? std::string(".")
+                                                       : path.substr(0, slash);
+    const int dirFd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd < 0 || fsync(dirFd) != 0) {
+        if (dirFd >= 0) close(dirFd);
+        return false;
+    }
+    close(dirFd);
     return true;
 }
 
@@ -144,6 +162,43 @@ std::string BaseName(const std::string& p) {
 bool FileExists(const std::string& p) {
     struct stat st{};
     return stat(p.c_str(), &st) == 0;
+}
+
+bool IsSha256Name(const std::string& value) {
+    if (value.size() != 64) return false;
+    for (char c : value) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+bool IsReleaseRel(const std::string& rel) {
+    constexpr const char* kPrefix = "releases/";
+    constexpr const char* kSuffix = "/remote-control";
+    if (rel.size() != strlen(kPrefix) + 64 + strlen(kSuffix) ||
+        rel.compare(0, strlen(kPrefix), kPrefix) != 0 ||
+        rel.compare(rel.size() - strlen(kSuffix), strlen(kSuffix), kSuffix) != 0) {
+        return false;
+    }
+    return IsSha256Name(rel.substr(strlen(kPrefix), 64));
+}
+
+void ResetCurrentAfterFailure(const std::string& current,
+                              const std::string& previous,
+                              const std::string& lastGood) {
+    if (current.empty()) return;
+    const std::string fallback =
+            (!previous.empty() && previous != current && IsReleaseRel(previous))
+                    ? previous
+                    : ((!lastGood.empty() && lastGood != current && IsReleaseRel(lastGood))
+                               ? lastGood
+                               : std::string());
+    if (!WriteFileAtomic(kCurrent, fallback)) {
+        Log("回退 current 指针失败: %s", strerror(errno));
+        return;
+    }
+    Log("载荷启动失败，current 已回退到 %s",
+        fallback.empty() ? "镜像自带版本" : fallback.c_str());
 }
 
 int64_t NowMs() {
@@ -175,7 +230,99 @@ Version ResolveVersion(const std::string& rel) {
     return v;
 }
 
-// 拉起载荷，返回 pid；失败返回 -1。
+// bionic 没有在所有平台 API level 导出 fexecve；execveat 是同一内核
+// 能力的稳定系统调用。AT_EMPTY_PATH 让内核直接执行已打开的载荷，
+// 不需要把 fd 拼成 /proc/self/fd 路径，也不会在校验后重新打开文件。
+int ExecFd(int fd, char* const argv[], char* const envp[]) {
+#if defined(SYS_execveat)
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+    return static_cast<int>(syscall(SYS_execveat, fd, "", argv, envp,
+                                    AT_EMPTY_PATH));
+#else
+#error "这个平台没有 SYS_execveat，无法安全执行已校验载荷"
+#endif
+}
+
+bool CopyToMemfd(const Version& v, int* outFd) {
+    if (outFd == nullptr) return false;
+    *outFd = -1;
+    const int source = open(v.path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (source < 0) {
+        Log("打开载荷失败 %s: %s", v.path.c_str(), strerror(errno));
+        return false;
+    }
+    struct stat st{};
+    if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode)) {
+        Log("载荷不是普通文件：%s", v.path.c_str());
+        close(source);
+        return false;
+    }
+    const int memfd = MakeMemfd("remote-control-payload",
+                                static_cast<unsigned>(MFD_CLOEXEC | MFD_ALLOW_SEALING));
+    if (memfd < 0) {
+        close(source);
+        return false;
+    }
+    Sha256 hash;
+    char buf[64 * 1024];
+    for (;;) {
+        const ssize_t n = read(source, buf, sizeof(buf));
+        if (n == 0) break;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            Log("读取载荷失败 %s: %s", v.path.c_str(), strerror(errno));
+            close(source);
+            close(memfd);
+            return false;
+        }
+        hash.Update(buf, static_cast<size_t>(n));
+        size_t off = 0;
+        while (off < static_cast<size_t>(n)) {
+            const ssize_t w = write(memfd, buf + off, static_cast<size_t>(n) - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) { close(source); close(memfd); return false; }
+            off += static_cast<size_t>(w);
+        }
+    }
+    close(source);
+    uint8_t digest[32];
+    hash.Final(digest);
+    if (ToHex(digest, sizeof(digest)) != v.sha) {
+        Log("载荷在校验期间发生变化，拒绝执行 %s", v.path.c_str());
+        close(memfd);
+        errno = EINVAL;
+        return false;
+    }
+    if (fchmod(memfd, 0755) != 0 || fcntl(memfd, F_ADD_SEALS,
+            F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) != 0) {
+        close(memfd);
+        return false;
+    }
+    *outFd = memfd;
+    return true;
+}
+
+#if defined(__LP64__)
+constexpr const char* kI18nLibDir = "/apex/com.android.i18n/lib64";
+#else
+constexpr const char* kI18nLibDir = "/apex/com.android.i18n/lib";
+#endif
+
+bool SetMemfdLinkerPreload() {
+    std::string preload = std::string(kI18nLibDir) + "/libandroidicu.so:" +
+                          kI18nLibDir + "/libicu.so:" +
+                          kI18nLibDir + "/libicui18n.so:" +
+                          kI18nLibDir + "/libicuuc.so";
+    const char* existing = getenv("LD_PRELOAD");
+    if (existing != nullptr && *existing != '\0') {
+        preload += ":";
+        preload += existing;
+    }
+    return setenv("LD_PRELOAD", preload.c_str(), 1) == 0;
+}
+
 pid_t Spawn(const Version& v, int argc, char** argv, const std::string& readyFile) {
     std::vector<std::string> args;
     args.push_back(v.path);
@@ -188,18 +335,46 @@ pid_t Spawn(const Version& v, int argc, char** argv, const std::string& readyFil
     for (auto& a : args) cargv.push_back(const_cast<char*>(a.c_str()));
     cargv.push_back(nullptr);
 
+    int payloadFd = -1;
+    if (!v.fromSystem && !CopyToMemfd(v, &payloadFd)) return -1;
+
     const pid_t pid = fork();
     if (pid < 0) {
         Log("fork 失败: %s", strerror(errno));
+        if (payloadFd >= 0) close(payloadFd);
         return -1;
     }
     if (pid == 0) {
-        execv(v.path.c_str(), cargv.data());
+        // The API is only able to apply a staged payload when init launched
+        // this fixed launcher. Keep the marker explicit for both the system
+        // payload and memfd payload paths.
+        if (setenv("REMOTE_CONTROL_UPDATE_SUPPORTED", "1", 1) != 0) {
+            fprintf(stderr, "[launcher] 设置热更新能力标记失败: %s\n", strerror(errno));
+            _exit(127);
+        }
+        if (v.fromSystem) {
+            unsetenv("REMOTE_CONTROL_BUILD_ID");
+            execv(v.path.c_str(), cargv.data());
+        } else {
+            // execveat 从 sealed memfd 切换到 remote_control 域。载荷内容
+            // 已在父进程按版本 SHA-256 校验，子进程只继承不可修改的 fd。
+            if (setenv("REMOTE_CONTROL_BUILD_ID", v.sha.c_str(), 1) != 0) {
+                fprintf(stderr, "[launcher] 设置 build id 失败: %s\n", strerror(errno));
+                _exit(127);
+            }
+            if (!SetMemfdLinkerPreload()) {
+                fprintf(stderr, "[launcher] 设置 memfd 动态链接依赖失败: %s\n",
+                        strerror(errno));
+                _exit(127);
+            }
+            ExecFd(payloadFd, cargv.data(), environ);
+        }
         // exec 失败：127 是约定俗成的"找不到/执行不了"
-        fprintf(stderr, "[launcher] exec %s 失败: %s\n", v.path.c_str(),
+        fprintf(stderr, "[launcher] 执行 %s 失败: %s\n", v.path.c_str(),
                 strerror(errno));
         _exit(127);
     }
+    if (payloadFd >= 0) close(payloadFd);
     return pid;
 }
 
@@ -210,19 +385,29 @@ pid_t Spawn(const Version& v, int argc, char** argv, const std::string& readyFil
 bool WaitReady(pid_t pid, const std::string& wantSha) {
     const int64_t deadline = NowMs() + kReadyTimeoutSec * 1000;
     while (NowMs() < deadline) {
-        const std::string got = ReadFileTrim(kReady);
-        if (!got.empty() && (wantSha.empty() || got == wantSha)) return true;
-
         int status = 0;
         const pid_t r = waitpid(pid, &status, WNOHANG);
         if (r == pid) {
-            Log("载荷在就绪前退出（退出码 %d）", WEXITSTATUS(status));
+            if (WIFEXITED(status)) {
+                Log("载荷在就绪前退出（退出码 %d）", WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                Log("载荷在就绪前被信号 %d 杀死", WTERMSIG(status));
+            } else {
+                Log("载荷在就绪前结束（状态 0x%x）", status);
+            }
             return false;
         }
         if (r < 0 && errno != EINTR) {
             Log("waitpid 出错: %s", strerror(errno));
             return false;
         }
+
+        // Check that the payload is still alive before accepting its ready
+        // marker.  A process can write the marker and exit immediately; in
+        // that case treating the marker as success would make launcher report
+        // a dead version as healthy and init would repeatedly restart it.
+        const std::string got = ReadFileTrim(kReady);
+        if (!got.empty() && (wantSha.empty() || got == wantSha)) return true;
         usleep(100 * 1000);
     }
     Log("载荷 %d 秒内没有就绪", kReadyTimeoutSec);
@@ -264,6 +449,7 @@ int main(int argc, char** argv) {
     mkdir(kRoot, 0770);
 
     const std::string want = ReadFileTrim(kCurrent);
+    const std::string previous = ReadFileTrim(kPrevious);
     const std::string lastGood = ReadFileTrim(kLastGood);
 
     // REMOTE_CONTROL_LAUNCH_DRY=1：只报告选中的版本，不拉起。
@@ -276,13 +462,16 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // 候选顺序：指针指的版本 → last-good → 镜像自带的那份。
+    // 候选顺序：当前提交版本 → 真正的上一版本 → 最近确认可用版本
+    // → 镜像自带的原版。previous 必须排在 last-good 前面：启动新提交
+    // 版本时 last-good 会先被更新，只有 previous 才能保留紧邻的上一版。
     //
-    // ⚠️ 必须是**三条**。只留两条的话，"当前版坏 + last-good 也坏"就直接
+    // ⚠️ 必须保留这**四层**。只留前两层的话，"当前版坏 + 上一版也坏"就直接
     //    放弃了，而镜像里那份明明还能跑 —— 全新设备或 /data 被清过之后
     //    正是这个组合。按顺序去重，最多试三次。
     std::vector<std::string> candidates;
     candidates.push_back(want);
+    if (!previous.empty()) candidates.push_back(previous);
     if (!lastGood.empty()) candidates.push_back(lastGood);
     candidates.push_back("");   // "" = /system/bin/remote-control
     {
@@ -299,13 +488,21 @@ int main(int argc, char** argv) {
 
     for (size_t attempt = 0; attempt < candidates.size(); ++attempt) {
         const std::string rel = candidates[attempt];
+        if (!rel.empty() && !IsReleaseRel(rel)) {
+            Log("版本指针格式无效，拒绝执行: %s", rel.c_str());
+            if (attempt == 0) ResetCurrentAfterFailure(want, previous, lastGood);
+            continue;
+        }
         Version v = ResolveVersion(rel);
 
         // ── 校验 ──────────────────────────────────────────────────────────
         // 槽目录名就是期望的哈希。**必须在 exec 之前核对** ——
         // 这是"更新源放在 /data"这套方案唯一的安全依据。
         if (!v.fromSystem) {
-            if (!FileExists(v.path)) {
+            if (!IsReleaseRel(rel)) {
+                Log("版本指针格式无效：%s", rel.c_str());
+                v.path.clear();
+            } else if (!FileExists(v.path)) {
                 Log("版本槽不存在：%s", v.path.c_str());
                 v.sha.clear();
                 v.path.clear();
@@ -323,6 +520,7 @@ int main(int argc, char** argv) {
             }
             if (v.path.empty()) {
                 // 这版不可用 → 试下一个候选
+                if (attempt == 0) ResetCurrentAfterFailure(want, previous, lastGood);
                 Log("这份载荷不可用，试下一个候选");
                 continue;
             }
@@ -338,11 +536,13 @@ int main(int argc, char** argv) {
 
         const pid_t pid = Spawn(v, argc, argv, kReady);
         if (pid < 0) {
+            if (attempt == 0) ResetCurrentAfterFailure(want, previous, lastGood);
             continue;   // 试下一个候选
         }
 
         if (!WaitReady(pid, v.sha)) {
             KillAndReap(pid);
+            if (attempt == 0) ResetCurrentAfterFailure(want, previous, lastGood);
             Log("这版没起来，试下一个候选");
             continue;
         }
@@ -356,6 +556,19 @@ int main(int argc, char** argv) {
 
         // 载荷在跑。等它退出，然后**自己也退出** —— init 会重新拉壳，
         // 壳重新读指针。保活与"指针可能已经被换掉"这两件事就都自动成立了。
+        // 如果 current 和 last-good 都失效，system payload 是最终可用候选；
+        // 清掉两个坏指针，避免每次 init 重启都重复尝试已知坏版本。
+        if (attempt > 0 && v.fromSystem) {
+            if (!WriteFileAtomic(kCurrent, "")) {
+                Log("清理失效 current 指针失败: %s", strerror(errno));
+            }
+            if (!WriteFileAtomic(kPrevious, "")) {
+                Log("清理失效 previous 指针失败: %s", strerror(errno));
+            }
+            if (!WriteFileAtomic(kLastGood, "")) {
+                Log("清理失效 last-good 指针失败: %s", strerror(errno));
+            }
+        }
         int status = 0;
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
         }
