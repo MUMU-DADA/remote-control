@@ -528,6 +528,15 @@ int main(int argc, char** argv) {
     HttpServer httpServer;
     RestApi    restApi(&dispatcher);
 
+    // apply/rollback 返回响应后由这个回调唤醒两个 accept 循环，
+    // 让 init 重新执行 launcher 并加载 current 指针指向的版本。
+    restApi.SetRestartHook([&server, &httpServer]() {
+        // 延迟线程只关闭监听入口，不等待活动 worker；主线程随后统一
+        // Stop()/join，避免在 HTTP 请求线程中互相等待。
+        httpServer.SignalStop();
+        server.SignalStop();
+    });
+
     // 让"关闭服务 / 开启鉴权"能踢掉已经连上的客户端。
     //
     // 不给它的话，`{"on":false}` 只挡得住**新**请求 —— 一个正在拉流
@@ -779,9 +788,10 @@ int main(int argc, char** argv) {
     gServer = nullptr;
     httpServer.Stop();
     if (httpThreadStarted) pthread_join(httpThread, nullptr);
+    restApi.JoinRestartThread();
     capture.Shutdown();
 
-    // Restart 用退出码 1：init 的 `oneshot` + 外部监督脚本据此区分
+    // Restart 用退出码 1：init 的 restart_period + 外部监督脚本据此区分
     // "正常关闭"和"要求重启"。自己不明说，监督方就只能一律重启，
     // 那 Shutdown 就没意义了。
     if (ServiceState::Instance().RestartRequested()) {

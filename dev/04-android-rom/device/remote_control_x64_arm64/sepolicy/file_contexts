@@ -10,21 +10,17 @@
 # 二进制
 # 二进制：启动壳 + 镜像自带的载荷
 #
-# ⚠️ 壳和服务是**两个域**（见 remote_control.te）：壳必须是 appdomain
-#    才能执行 /data 里的载荷，服务本体必须是 coredomain 才能调
-#    SurfaceFlinger。两者靠 exec 时的域转换接上。
-/system/bin/remote-control-launch u:object_r:remote_control_exec:s0
+# 启动壳和载荷共用 remote_control 域。壳只直接执行 /system 上的固定入口，
+# 载荷经校验后复制到 sealed memfd，再由同一域 fexecve，避免直接执行 /data。
+/system/bin/remote-control-launch u:object_r:remote_control_loader_exec:s0
 /system/bin/remote-control u:object_r:remote_control_exec:s0
 
 # 载荷槽（热替换通道）。
 #
-# ⚠️ 顺序有意义：file_contexts 里**最后一条匹配的生效**，
-#    所以"具体路径"必须写在"通配"**后面**。反过来的话
-#    releases/<sha>/remote-control 会被通配标成 data_file，壳执行不了。
-# 载荷槽。
-#
-# ⚠️ 顺序有意义：file_contexts 里**最后一条匹配的生效**，
-#    所以"具体路径"必须写在"通配"**后面**，否则载荷会被通配标成 data_file。
+# 版本槽由 launcher 读取并校验后通过已打开的 fd 执行；
+# 使用独立 entrypoint 类型，让 bionic 按 /data 路径选择 system linker namespace。
+# 目录中的其他文件仍保持 remote_control_data_file 标签。
+# 版本槽目录及其状态文件。
 /data/misc/remote-control(/.*)? u:object_r:remote_control_data_file:s0
 
 # 对外 socket

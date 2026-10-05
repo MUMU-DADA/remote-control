@@ -172,6 +172,28 @@ bool Sha256SelfHex(std::string* out) {
     const ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
     if (n <= 0) return false;
     path[n] = '\0';
+
+    // fexecve(memfd) 后 /proc/self/exe 通常是 "/memfd:<name> (deleted)"，
+    // 这个名字无法重新打开。launcher 已在 exec 前校验载荷，使用它传入
+    // 的 build id 维持 --ready-file、/info 和 /describe 的版本语义。
+    if (strncmp(path, "/memfd:", 7) == 0) {
+        const char* expected = getenv("REMOTE_CONTROL_BUILD_ID");
+        if (expected == nullptr || strlen(expected) != 64) return false;
+        for (size_t i = 0; i < 64; ++i) {
+            const unsigned char c = static_cast<unsigned char>(expected[i]);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                  (c >= 'A' && c <= 'F'))) {
+                return false;
+            }
+        }
+        if (out != nullptr) {
+            *out = expected;
+            for (char& c : *out) {
+                if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        return true;
+    }
     return Sha256FileHex(path, out);
 }
 
