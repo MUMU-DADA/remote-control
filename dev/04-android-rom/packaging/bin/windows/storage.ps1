@@ -1,6 +1,6 @@
 # Host disk accounting and lossless NTFS sparse recovery.
-# ZIP does not carry sparse-file extents.  An extracted 4 GiB GPT disk and a
-# 16/32 GiB userdata base can therefore occupy their whole logical size.
+# ZIP does not carry sparse-file extents. An extracted disk image can therefore
+# occupy its whole logical size until zero ranges are reclaimed below.
 # Reclaim only zero ranges, with an exclusive file handle, before QEMU starts.
 
 function Initialize-SparseFileApi {

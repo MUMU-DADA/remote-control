@@ -110,7 +110,7 @@ mkdir -p "$DATADIR"
 # 服务配置来自 release/templates/config.ini；只在 guest 首次创建配置文件时生效。
 service_prepare_token "$NAME" "$TEST_INSTANCE" "$REUSE"
 service_register "$NAME" "$PORT" "$TEST_INSTANCE" "$REUSE"
-build_service_property_args "$TEST_INSTANCE"
+build_service_property_args
 
 # ---------------------------------------------------------------------------
 # 硬件参数

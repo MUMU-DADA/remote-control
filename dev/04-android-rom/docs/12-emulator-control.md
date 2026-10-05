@@ -20,6 +20,7 @@
 ./scripts/emulator.sh create  dev2             # 建一台（备好工作目录，不启动）
 ./scripts/emulator.sh start   dev2             # 启动 + 等 HTTP 服务就绪
 ./scripts/emulator.sh start   dev2 --no-wait   # 起了就返回
+./scripts/emulator.sh start   dev2 --test-instance  # 新测试实例：不开鉴权（仅首次启动生效）
 ./scripts/emulator.sh stop    dev2             # 优雅关机（等进程真的退出）
 ./scripts/emulator.sh kill    dev2             # 强制关闭（SIGKILL）
 ./scripts/emulator.sh restart dev2
@@ -38,6 +39,7 @@
 | `--no-wait` | console 就绪后返回，不等 HTTP 管理服务 |
 | `--gui` | 带窗口启动（默认 `-no-window`，服务器上用） |
 | `--bridge` / `--nat` | **仅 Linux**：强行桥接 / 强行 NAT（默认自动，见 §6） |
+| `--test-instance` | **新实例**不开鉴权：宿主不生成 `.token`，guest 首启就按 `auth=0` 持久化。只在**首次启动**生效 —— 复用实例沿用 guest 已存的设置，flag 不会改写一台已有机器。等价于发布包 `start-headless.sh --test-instance`（Windows `-TestInstance`） |
 
 Windows 侧对应 `-Port` / `-Gpu` / `-Memory` / `-Cores` / `-NoWait` / `-Gui` / `-Yes`。
 | `-y` / `--yes` | `reset` / `delete` 跳过二次确认 |
@@ -84,7 +86,7 @@ console 认证文件默认是 `~/.emulator_console_auth_token`。
 |---|---|---|
 | 屏幕 | 1280x720 横屏 @320dpi | `hw.lcd.*` / `skin.*` |
 | CPU / 内存 | 4 核 / 6144 MB | `hw.cpu.ncore` / `hw.ramSize` |
-| 数据分区 | 16G | `disk.dataPartition.size` |
+| 数据分区 | 64G | `disk.dataPartition.size` |
 | GPU | `auto`（自适应） | `hw.gpu.mode` |
 
 > ⚠️ **不要在命令行上写死这些值。** 命令行**优先于** config.ini ——
@@ -98,11 +100,11 @@ console 认证文件默认是 `~/.emulator_console_auth_token`。
 ```
 config.ini（唯一真源 dev/04-android-rom/emulator/config.ini）：
   hw.ramSize               6144
-  disk.dataPartition.size  16G
+  disk.dataPartition.size  64G
 
 上次启动**实际生效**的（hardware-qemu.ini）：
   hw.ramSize               6144
-  disk.dataPartition.size  16g
+  disk.dataPartition.size  64g
 ```
 
 ---
