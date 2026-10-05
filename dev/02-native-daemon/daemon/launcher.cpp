@@ -570,11 +570,33 @@ int main(int argc, char** argv) {
             }
         }
         int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        pid_t waited;
+        do {
+            waited = waitpid(pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited != pid) {
+            // The child must be reaped before trying another candidate.  A
+            // wait error means the launcher cannot establish that this
+            // version stayed alive, so treat it like a failed candidate.
+            Log("等待载荷结束失败: %s", strerror(errno));
+            if (attempt == 0) ResetCurrentAfterFailure(want, previous, lastGood);
+            continue;
         }
         if (WIFSIGNALED(status)) {
-            Log("载荷被信号 %d 杀死", WTERMSIG(status));
-            return 128 + WTERMSIG(status);
+            // A payload that reaches ready and then dies from a signal is
+            // still a failed upgrade (for example an immediate SIGSEGV).
+            // Keep exit code 1 reserved for the daemon's deliberate restart
+            // request; that path must return to init so it can re-read the
+            // newly written current pointer.
+            Log("载荷在就绪后被信号 %d 杀死", WTERMSIG(status));
+            if (attempt == 0) ResetCurrentAfterFailure(want, previous, lastGood);
+            Log("这版在就绪后崩溃，试下一个候选");
+            continue;
+        }
+        if (!WIFEXITED(status)) {
+            Log("载荷以未知状态结束（状态 0x%x）", status);
+            if (attempt == 0) ResetCurrentAfterFailure(want, previous, lastGood);
+            continue;
         }
         Log("载荷退出（退出码 %d），退出让 init 重拉", WEXITSTATUS(status));
         return WEXITSTATUS(status);
