@@ -330,7 +330,7 @@ Google 的 Android 11 镜像正是照它做的。
 | 项 | 状态 |
 |---|---|
 | 官方镜像能跑 arm64 应用 | ✅ 本次实测（含 A/B 对照） |
-| **把翻译层移植进自编 AOSP 12 x86_64 ROM** | ✅ **已验证**（§2.6：在 AOSP 风格镜像上端到端跑通，含属性三处分区、SELinux 标签、binfmt 注册）。**构建级落位**（`PRODUCT_COPY_FILES` + 属性 + 真跑一次 `m`）尚未走完，但用的是同一套文件与属性 |
+| **把翻译层移植进自编 AOSP 12 x86_64 ROM** | ✅ **已完成并验收**：构建级落位（`PRODUCT_COPY_FILES` + 属性）已进入自编 ROM；release 包的启动验收覆盖翻译层接线、binfmt、aarch64 ELF 与 arm64 探针 APK（见 [`15-release-packaging.md`](15-release-packaging.md)） |
 | 翻译层对"你们要跑的那个应用"是否够用 | ⚠️ **未测**。必须先拿真实 APK 试（尤其是重原生计算的、带 JNI 的、有反模拟检测的） |
 | 32 位 ARM 应用 | ❌ 该镜像不支持（§2.5） |
 | 许可 / 可分发性 | ⚠️ `libndk_translation` 是 Google 专有（只随 SDK 镜像分发），houdini 是 Intel 专有。**内部开发测试无碍；若要随整机交付给客户，必须先过法务** |

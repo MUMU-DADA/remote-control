@@ -1,6 +1,6 @@
 # WebSocket 流
 
-> 三条流，都是 `ws://<设备IP>:8088/api/v1/<名字>`
+> 三条流，都是 `ws://<设备IP>:8088/api/v1/<名字>?token=<令牌>`
 > 走 RFC 6455 的一个**子集** —— 只实现文本帧、二进制帧、ping/pong、close。
 > **不做** permessage-deflate 扩展，**不做**分片续帧。
 
@@ -35,11 +35,14 @@
 浏览器无法给 WebSocket 设请求头，所以令牌走**查询参数**：
 
 ```js
-new WebSocket('ws://host:8088/api/v1/touch?token=' + encodeURIComponent(tok))
+const token = '<从 remote-control.conf 读取的 token>';
+const touchUrl = new URL('ws://host:8088/api/v1/touch');
+touchUrl.searchParams.set('token', token);
+const ws = new WebSocket(touchUrl);
 ```
 
-⚠️ 令牌会出现在 URL 里，可能被日志和浏览器历史留下。
-只在确实没法带头的场合用它（WebSocket 就是这种场合）。
+⚠️ 令牌会出现在 URL 里，可能被服务端访问日志、代理和浏览器历史留下。
+只在确实没法带头的场合用它（WebSocket 和 `<img>` 就是这种场合）。
 
 ### 帧
 
@@ -72,7 +75,7 @@ ping/close 响应的整帧写入期限为 1 秒，发送失败后结束连接。
 ## 一、画面流 `/api/v1/stream`
 
 ```
-ws://host:8088/api/v1/stream?fps=30&format=jpeg&quality=75&maxWidth=720&skipUnchanged=1
+ws://host:8088/api/v1/stream?fps=30&format=jpeg&quality=75&maxWidth=720&skipUnchanged=1&token=<令牌>
 ```
 
 ### 查询参数
@@ -212,7 +215,10 @@ ws.send(JSON.stringify({t:'ping', s:1}));
 处理 H.264 时应另外维护参考帧和关键帧恢复，不能照此任意丢弃 delta chunk。
 
 ```js
-const ws = new WebSocket('ws://host:8088/api/v1/stream?fps=30&format=jpeg');
+const token = '<从 remote-control.conf 读取的 token>';
+const streamUrl = new URL('ws://host:8088/api/v1/stream?fps=30&format=jpeg');
+streamUrl.searchParams.set('token', token);
+const ws = new WebSocket(streamUrl);
 ws.binaryType = 'blob';
 let pending = null, decoding = false;
 async function decodeLatest() {
@@ -265,7 +271,7 @@ H.264 解码队列拥塞时会重置解码器并请求新的关键帧。
 同一端点**不带 `Upgrade` 头**就是 MJPEG：
 
 ```html
-<img src="http://host:8088/api/v1/stream?fps=5">
+<img src="http://host:8088/api/v1/stream?fps=5&amp;token=<令牌>">
 ```
 
 `multipart/x-mixed-replace`，浏览器原生支持，零 JS。
@@ -276,7 +282,7 @@ H.264 解码队列拥塞时会重置解码器并请求新的关键帧。
 ## 二、触控流 `/api/v1/touch`
 
 ```
-ws://host:8088/api/v1/touch
+ws://host:8088/api/v1/touch?token=<令牌>
 ```
 
 **拖拽跟手必须用这条。** 一个手势一个 HTTP 请求是行不通的 ——
@@ -353,7 +359,7 @@ canvas.addEventListener('pointercancel', endPointer);
 ## 三、日志流 `/api/v1/logstream`
 
 ```
-ws://host:8088/api/v1/logstream?since=0
+ws://host:8088/api/v1/logstream?since=0&token=<令牌>
 ```
 
 ### 查询参数

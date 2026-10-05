@@ -49,7 +49,7 @@ packaging/
 | `templates/config.ini` | `../emulator/config.ini`（硬件参数与 guest 首次服务配置的唯一真源） |
 | `templates/instance.env` | `release.sh` 生成的实例登记模板 |
 | `tools/net-bridge*.sh` | `../tools/`（**仅 linux 包**；Windows 侧 `-net-tap` 没实现） |
-| `tools/arm64-probe.apk` | `../artifacts/arm64-probe.apk`（验收用，12 KB） |
+| `tools/arm64-probe.apk` | `../artifacts/arm64-probe.apk`（项目自建 arm64 验收探针） |
 | `images/**` | `../artifacts/rom-<product>/`（ROM 交付目录，硬链接） |
 | `runtime/**` | SDK 模拟器包 + platform-tools（按平台下载并校验 sha1） |
 
