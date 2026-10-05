@@ -6,15 +6,13 @@
 
 ---
 
-## 最低支持的 Android 版本
+## Android 版本与验证范围
 
-**编译期：Android 11（API 30）。运行时：Android 8 起。**
+**产品目标和当前设备运行验证：Android 12（API 31）。** NDK daemon 构建脚本默认使用 API 31；API 26 编译验证已通过，但没有在 Android 8 设备上运行验证，因此这里不把 Android 8 列为已验证的运行下限。
 
-代码已经改造成**运行时探测**，所以下限由编译期决定 —— 而编译期
-下限现在是 API 30，因为用的是 NDK 默认的 `minSdk`。要真正支持
-Android 8，编译时传 `API=26` 即可（见下面"怎么把下限压下去"）。
+代码通过**运行时探测**处理 API 30 才提供的编码库符号，并以系统调用替代 API 30 才导出的 `memfd_create` 包装。因此 NDK daemon 可用 API 26 编译；这只证明该构建目标能编译，不等于已验证它在 Android 8 上运行。
 
-### 原来的硬下限（改造前）
+### 原来的构建硬下限（兼容改造前）
 
 **Android 11（API 30）。实测出来的，不是估计。**
 
@@ -137,16 +135,13 @@ Skia 用 3 是为了跟 Chrome 对齐，不是因为它最优。
 `GET /api/v1/describe` 和 `/params` 的 `codecs` 字段仍然如实报告，
 客户端照旧不该假设 —— 只是现在三个格式在任何版本上都是 `true`。
 
-### 怎么真正编出 Android 8 版本
+### API 26 构建与 Android 8 运行验证
 
 ```bash
 API=26 ABI=arm64-v8a bash tools/build-ndk.sh
 ```
 
-⚠️ **低于 Android 11 的设备仍然没有实测过。** 上面的分析基于编译期
-报错、源码 `__INTRODUCED_IN` 标注，以及在 Android 12 上对
-各条回退路径的独立验证（dlopen libjpeg 跑通、syscall 跑通）。
-"能不能在真 Android 8 上跑起来"还需要真机。
+API 26 编译结果记录在 [`docs/evidence/stream-opt-2026-10-04/builds.txt`](evidence/stream-opt-2026-10-04/builds.txt)。⚠️ **低于 Android 12 的设备仍未完成运行验证。** 回退路径（dlopen libjpeg、系统调用）是在 Android 12 上独立验证的；Android 8 是否能完整运行仍需设备实测。
 
 再往下会遇到别的：`cmd`（Android 7）、`dumpsys activity lru` 的输出格式、
 `/dev/uinput` 的属主（Android 11 起是 `0660 uhid:uhid`，更早是 `system:input`）。

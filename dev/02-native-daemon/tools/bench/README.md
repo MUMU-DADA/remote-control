@@ -1,14 +1,18 @@
 # 编码器基准
 
-> ⚠️ 这份是**基准程序的说明**。其中结论性的东西（编码器怎么选、
-> 各格式什么性能）已经并进正式文档，并且**后来被推翻过一部分**：
-> 见 [`docs/03-reference.md`](../../../../docs/03-reference.md) 的
+> ⚠️ 这份保留的是**历史基准程序和早期测量记录**。测量时间未记录，
+> 采集环境为 Android 12 / x86_64 模拟器 / 320×480；它们不能代表当前性能。
+> 2026-10-04 的项目证据使用 1280×720 模拟器。测量方法与当前性能结论见：
+> [`docs/03-reference.md`](../../../../docs/03-reference.md) 的
 > 「编码器现在按格式选」和 [`docs/06-capture-performance.md`](../../../../docs/06-capture-performance.md)。
-> 数字以那两份为准。
+> 以下命令示例从仓库根目录执行；抓到的 raw 帧尺寸必须与传给基准程序的宽高一致。
 
 回答"换编码器会损失多少性能"用。
 
 ```bash
+# 从仓库根目录运行；当前证据环境是 1280x720，其他设备按 /api/v1/info 调整。
+cd dev/02-native-daemon/tools/bench
+
 # 编译（NDK，x86_64 模拟器）
 CXX=/opt/android/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android31-clang++
 $CXX -std=c++20 -O2 -fno-exceptions -I ../../daemon -o bench_encoder \
@@ -17,12 +21,16 @@ $CXX -std=c++20 -O2 -fno-exceptions -I ../../daemon -o bench_encoder \
      -ljnigraphics -llog -static-libstdc++
 
 # 抓一张真实帧（raw RGBA），推到设备
-curl -o real.raw 'http://<设备>:8088/api/v1/capture?format=raw'
+REMOTE_CONTROL_TOKEN='从设备配置读取的令牌'
+curl -H "Authorization: Bearer ${REMOTE_CONTROL_TOKEN}" \
+     -o real.raw 'http://<设备>:8088/api/v1/capture?format=raw'
 adb push real.raw /data/local/tmp/
 
 # 跑
-adb shell '/data/local/tmp/bench_encoder 320 480 40 /data/local/tmp/real.raw'
+adb shell "/data/local/tmp/bench_encoder 1280 720 40 /data/local/tmp/real.raw"
 ```
+
+如果测试服务在隔离环境中关闭了鉴权，可以省略 `curl` 的 `Authorization` 请求头。
 
 ## ⚠️ 一定要传真实抓帧
 
@@ -32,12 +40,14 @@ adb shell '/data/local/tmp/bench_encoder 320 480 40 /data/local/tmp/real.raw'
 
 **图像内容的压缩特性差异极大，合成图给的结论是失真的。**
 
-## ⚠️ 分辨率要按真机来
+## ⚠️ 历史分辨率
 
-本项目实测环境是 320×480（模拟器）。真机 1080×1920 是 **13 倍**的像素，
-编码耗时同比例增长 —— 拿 320×480 的数字去推真机性能会严重低估。
+下表记录的是早期 320×480 模拟器上的测量，不是当前模拟器配置。当前项目证据记录的
+模拟器分辨率为 1280×720；真机和其他模拟器也可能不同。每次运行都应从 `/api/v1/info`
+读取实际宽高，并让 raw 抓帧、基准程序的宽高参数保持一致；不要用这里的历史数字推算
+其他分辨率下的实际耗时。
 
-## 实测结果（Android 12 / x86_64 模拟器，320×480 真实抓帧）
+## 历史测量（Android 12 / x86_64 模拟器，320×480 真实抓帧）
 
 | 编码器 | ms/次 | 字节 | 相对 JPEG |
 |---|---|---|---|
@@ -107,15 +117,21 @@ JPEG image data, JFIF standard 1.01, baseline, precision 8, 320x480, components 
 
 段序列 APP0 DQT DQT SOF0 DHT DHT DHT DHT SOS —— 结构完整。
 
-## 所以结论要改成
+## 历史结论的后续修正
+
+下面的 WebP 结论记录了内置 libwebp 之前的状态，不代表当前实现：
 
 | 能力 | Android 11+ | Android 8~10（改用 dlopen 后） |
 |---|---|---|
 | **JPEG** | AndroidBitmap（Skia） | **dlopen libjpeg** ✅ 保留 |
-| WebP | AndroidBitmap（Skia） | ⚠️ 要 vendor libwebp 源码（5.9 MB），否则失去 |
+| WebP（当时的判断） | AndroidBitmap（Skia） | ⚠️ 当时认为需要额外 vendor libwebp，否则失去 |
 | PNG | AndroidBitmap / zlib | zlib ✅ |
 
-**只有 WebP 有风险，而它不是默认格式。**
+当前 daemon 已随仓库内置 libwebp 源码；API 30 以下的编码路径也使用该库，不需要
+另外 vendor，也不依赖 `AndroidBitmap_compress`。API 26 的编译已验证，但较旧 Android
+版本的整机运行尚未验证。见
+[`docs/03-reference.md`](../../../../docs/03-reference.md) 的「WebP 也内置了」和
+[`daemon/vendor/webp/README.md`](../../daemon/vendor/webp/README.md)。
 
 ⚠️ 一个诚实的保留：0.5 ms 是在合成图上测的，而 Skia 的 1.2 ms 是在
 真实抓帧上测的 —— **两者不可直接比较**。要比较得用同一张图。
@@ -260,14 +276,22 @@ JPEG/MJPEG。不能假设客户端都能解。
 # h264_bench —— H264Encoder 的实测
 
 ```bash
-$CXX -std=c++20 -O2 -fno-exceptions -I daemon -o h264b h264_bench.cpp \
-     daemon/h264_encoder.cpp daemon/log_buffer.cpp -lmediandk -llog -static-libstdc++
-curl -o real.raw 'http://<设备>:8088/api/v1/capture?format=raw'
+# 从仓库根目录运行；当前证据环境是 1280x720，其他设备按 /api/v1/info 调整。
+cd dev/02-native-daemon/tools/bench
+CXX=/opt/android/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android31-clang++
+$CXX -std=c++20 -O2 -fno-exceptions -I ../../daemon -o h264b h264_bench.cpp \
+     ../../daemon/h264_encoder.cpp ../../daemon/log_buffer.cpp \
+     -lmediandk -llog -static-libstdc++
+REMOTE_CONTROL_TOKEN='从设备配置读取的令牌'
+curl -H "Authorization: Bearer ${REMOTE_CONTROL_TOKEN}" \
+     -o real.raw 'http://<设备>:8088/api/v1/capture?format=raw'
 adb push h264b real.raw /data/local/tmp/
-adb shell '/data/local/tmp/h264b /data/local/tmp/real.raw 320 480 30 /data/local/tmp/out.h264'
+adb shell '/data/local/tmp/h264b /data/local/tmp/real.raw 1280 720 30 /data/local/tmp/out.h264'
 ```
 
-## 实测（Android 12 / x86_64 模拟器，320x480 真实抓帧）
+服务关闭鉴权时可以省略 `curl` 的 `Authorization` 请求头。raw 帧的宽高必须匹配命令参数。
+
+## 历史测量（Android 12 / x86_64 模拟器，320x480 真实抓帧）
 
 ```
 + 编码器已启动

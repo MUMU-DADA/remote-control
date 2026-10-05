@@ -1,13 +1,13 @@
 # 13 · macOS 宿主支持：arm64 ROM 产品 + 第三套宿主脚本
 
-> **状态：代码已完成、离线验证通过；真机（真 Mac）验证未做。**（最后更新 2026-10-03）
+> **状态：macOS 宿主脚本与发布接入已完成，离线验证通过；arm64 ROM 全量集成与真机（真 Mac）验证仍待完成。**（最后更新 2026-10-05）
 >
 > | | 位置 | 到什么程度 |
 > |---|---|---|
-> | **评估**（改动量有多少） | §1–§6 | ✅ 完成，数字都是实测的 |
-> | **实测记录** | §7.0.1–§7.0.15 | ✅ 逐轮留痕（带 sha1、文件清单、测试输出） |
-> | **实现** | 见下方"交付物" | ✅ arm64 ROM 产品线 + 三套宿主脚本 + 打包接入 |
-> | **验证** | §7.0.8 / §7.0.13 / §7.0.14 | ✅ 离线：`tools/test-macos-port.sh` **110 项全绿**；darwin 包已在 Linux 上真铺出来 |
+> | **原始评估与方案** | §1–§6 | ✅ 作为设计记录保留；估算与拟改项不是当前待办清单 |
+> | **实测记录** | §7.0.1–§7.0.16 | ✅ 逐轮留痕（带 sha1、文件清单、测试输出） |
+> | **实现** | 见下方"交付物" | ✅ arm64 产品设备树、macOS 源码树入口、Darwin 包内脚本与发布目标已接入 |
+> | **验证** | §7.0.8 / §7.0.13–§7.0.16 | ✅ 离线：`tools/test-macos-port.sh` **121 项全绿**（2026-10-05）；Darwin 包已在 Linux 上生成并检查 |
 > | **真机验证** | §8 清单 | ❌ **未做** —— 需要一台真 Mac，见 §8 里逐条标出的未验项 |
 >
 > **交付物**（都在仓库里）：
@@ -242,9 +242,11 @@ AOSP 12 在 macOS 上编完整 ROM（含 Linux 内核、x86_64-only 的构建工
 
 ## 3. 方案 B：macOS 宿主（第三套脚本）
 
-### 3.1 平台能力对照（这张表就是"要写多少"的答案）
+> 本节保留实现前的能力评估与方案草稿。§3.2 的文件名/行数是当时估算，§3.3–§3.6 的“要改/要写”描述记录原始工作项，不代表当前状态；实际落地以 §7 的实施记录和 [`../macos/README.md`](../macos/README.md) 为准。
 
-| 能力 | Linux（现有） | Windows（现有） | macOS（要写） |
+### 3.1 初稿平台能力对照（用于当时的改动量估算）
+
+| 能力 | Linux（现有） | Windows（现有） | macOS（初稿方案） |
 |---|---|---|---|
 | 虚拟化加速 | KVM | WHPX | **Hypervisor.framework（`hvf`）**，前置检查 `sysctl kern.hv_support` |
 | 后端路径 | `qemu/linux-x86_64/qemu-system-x86_64-headless` | `qemu/windows-x86_64/qemu-system-x86_64.exe` | **已实测**：`qemu/darwin-aarch64/qemu-system-aarch64-headless`（§7.0.2）；Intel Mac 包为 `emulator-darwin_x64-*` |
@@ -261,18 +263,18 @@ AOSP 12 在 macOS 上编完整 ROM（含 Linux 内核、x86_64-only 的构建工
 | 自启 | systemd / supervisord | 计划任务 | **launchd（LaunchAgent，理由见 `14-macos-host-notes.md` §6）** |
 | 脚本解释器 | 宿主 bash（≥4） | PowerShell | **`/bin/bash` 是 3.2**（见 §3.3 第 6 条） |
 
-### 3.2 要新写的文件
+### 3.2 初稿拟新增文件（历史设计估算）
 
-| 文件 | 参照 | 估算行数 |
-|---|---|---|
-| `macos/emulator.sh` | `scripts/emulator.sh`(818) 的子集 | 300–450 |
-| `macos/run-macos.sh` | `run-linux.sh`(354) / `run-windows.ps1`(233) | 150–250 |
-| `macos/fetch-emulator.sh` | `windows/fetch-emulator.ps1`(131)，host-os 取 `macosx` | 80–120 |
-| `macos/fetch-images.sh` | `fetch-images.ps1`(112) | 60–100 |
-| `macos/preflight.sh` | `preflight.ps1`(85) | 80–120 |
-| `packaging/bin/darwin/`：`lib.sh` / `start-headless.sh` / `stop.sh` / `status.sh` / `verify.sh` | `bin/linux/`(570) + `bin/windows/`(690) | 350–550 |
+| 初稿设想 | 当前落地 |
+|---|---|
+| `macos/emulator.sh`：复制共享控制面的子集 | 未单独创建；起停查验逻辑集中在 `packaging/bin/darwin/`，源码树入口委托给这些脚本 |
+| `macos/run-macos.sh`：独立启动脚本 | 实际入口为 `macos/run-darwin.sh`，只负责路径配置与镜像架构检查 |
+| `macos/fetch-emulator.sh`、`fetch-images.sh`、`preflight.sh` | 均已实现，位于 `macos/` |
+| `packaging/bin/darwin/` 的 `lib.sh` / `start-headless.sh` / `stop.sh` / `status.sh` / `verify.sh` | 五个包内脚本已实现并接入 Darwin 发布包 |
 
-### 3.3 共享层要改的点（少，但每一条都会真拦人）
+表格中的初稿命名和估算行数只用于回看方案形成过程，不是当前文件清单或未完成事项。
+
+### 3.3 初稿列出的共享层改动（历史方案）
 
 1. **`host_gpu_available()`（`common.sh:88-117`）在 macOS 上永远返回"没有 GPU"** —— 它探的是
    `/dev/dri/renderD*`，于是 `-gpu auto` 被判成 `swiftshader_indirect`。**有显卡却用软渲染**，是最容易
@@ -329,14 +331,14 @@ Mac 包 = **运行时控制面 + 打包**这一层，不包含构建链。
 
 ---
 
-## 4. 两条线的关系：三个产品，别只保一条
+## 4. 两条 ROM 产品线与发布目标
 
-用户决策：**Intel Mac 也要支持 → 两条 ROM 线都保留**。于是产品矩阵是：
+两条 ROM 产品线分别服务 x86_64 桥接 guest 与原生 arm64 guest。当前发布脚本将它们映射到 Linux、Windows、Intel Mac、Apple Silicon 四个目标；宿主实机验证状态单独列出：
 
-| 产品 | `lunch` 目标 | guest 架构 | 跑在哪 | 状态 |
+| ROM 产品 | `lunch` 目标 | guest 架构 | 发布目标与宿主验证 | 当前状态 |
 |---|---|---|---|---|
-| 现有 | `remote_control_x64_arm64-userdebug` | x86_64 + 翻译层 | Linux x86_64（KVM）、Windows x86_64（WHPX）、**Intel Mac**（HVF，未实测） | ✅ 已建出并使用 |
-| 新增 | `remote_control_arm64-userdebug` | arm64 原生 | **Apple Silicon**（HVF）、arm64 Linux 宿主（KVM，未实测） | 📄 本文方案 A |
+| `remote_control_x64_arm64` | `remote_control_x64_arm64-userdebug` | x86_64 + 翻译层 | Linux x86_64、Windows x86_64、Intel Mac（Darwin 发布目标） | 产品已建并在 Linux 使用；Windows WHPX 与 Intel Mac 实机启动未验证 |
+| `remote_control_arm64` | `remote_control_arm64-userdebug` | arm64 原生 | Apple Silicon、arm64 Linux | 设备树/lunch 与服务二进制已验证；全量 ROM 集成仍进行中；Apple Silicon 与 arm64 Linux 实机启动未验证 |
 
 **两边的公共部分**：`remote-control` 服务本体、`emulator/config.ini`、`packaging/` 的模板与
 `START-HERE.md` 骨架、`release.sh` 的分派表结构、`docs/` 的验收口径。
@@ -1140,6 +1142,8 @@ linux          windows          darwin-aarch64          darwin-x86_64
 
 `tools/test-macos-port.sh` 加到 **107 项**（新增目标展开、缺 arm64 ROM 的报错文案等断言）；
 原有 `tools/test-release.sh` 仍 **65 项全绿**。
+
+以上是该轮记录的计数；当前工作区重新运行 `tools/test-macos-port.sh` 为 **121 项全绿**（见文首）。
 
 > ⚠️ 这次完整打包里我自己踩了一个坑：**在 release 正跑的时候编辑了 release.sh**
 > ——bash 边读边执行，于是它按旧偏移读到了新文件的中间，报出
