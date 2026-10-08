@@ -119,6 +119,18 @@ class SocketServer {
     mutable std::mutex connMutex_;
     std::condition_variable connCv_;
     std::set<int> connFds_;
+
+    // 正在**执行请求**的连接（从进 handler 到应答发完）。
+    //
+    // ⚠️ Stop() 必须跳过它们。应答是在 handler 返回**之后**才发的，
+    //    而 Stop() 会 shutdown 所有连接 —— 连自己这条一起 —— 于是
+    //    Shutdown/Restart 的应答永远发不出去：客户端收到 EOF，
+    //    `rcctl shutdown` 每次都报失败（退出码 1），服务却真的退了。
+    //    实测 logcat：`发应答失败: Broken pipe`。
+    //
+    //    跳过的那些不会让 Stop() 卡住：它们发完应答就会看到 stop_ 并退出，
+    //    而 Stop() 本来就在等 connFds_ 变空。
+    std::set<int> busyFds_;
 };
 
 }  // namespace remote_control

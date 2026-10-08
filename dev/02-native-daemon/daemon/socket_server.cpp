@@ -2,6 +2,7 @@
 
 #include "socket_server.h"
 
+#include <algorithm>
 #include <string.h>
 
 #include "thread_util.h"
@@ -365,6 +366,14 @@ void SocketServer::Stop() {
             if (fd != callerFd) peers.push_back(fd);
         }
     }
+    // 跳过正在执行请求的连接：它们的应答还没发出去，此刻 shutdown
+    // 只会把应答掐掉（见 busyFds_ 的说明）。它们发完就会自己退出。
+    {
+        std::lock_guard<std::mutex> lk(connMutex_);
+        peers.erase(std::remove_if(peers.begin(), peers.end(),
+                                   [this](int fd) { return busyFds_.count(fd) > 0; }),
+                    peers.end());
+    }
     for (int fd : peers) shutdown(fd, SHUT_RDWR);
 
     // 如果 Stop 是由某个 worker 的 handler 调用，不能在这里等待其它
@@ -528,10 +537,21 @@ void SocketServer::ServeConnection(int connFd, const RequestHandler& handler) {
             break;
         }
 
+        // 标成"正在执行请求"：Stop() 要跳过这条连接，别把应答掐掉。
+        // 从进 handler 一直到应答发完都算。
+        {
+            std::lock_guard<std::mutex> lk(connMutex_);
+            busyFds_.insert(connFd);
+        }
         ReplyPacket packet = handler(req, payload, reqFd, cred.uid);
         if (reqFd >= 0) close(reqFd);   // handler 若需要保留会自己 dup
 
-        if (!SendReply(connFd, packet)) {
+        const bool sent = SendReply(connFd, packet);
+        {
+            std::lock_guard<std::mutex> lk(connMutex_);
+            busyFds_.erase(connFd);
+        }
+        if (!sent) {
             ALOGW("remote-control: 发应答失败: %s", strerror(errno));
             if (packet.fd >= 0) close(packet.fd);
             break;

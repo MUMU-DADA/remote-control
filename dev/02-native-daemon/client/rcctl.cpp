@@ -86,7 +86,14 @@ bool Transact(int sockFd, const Request& req, Reply* reply, int* outFd) {
     } while (n < 0 && errno == EINTR);
 
     if (n != static_cast<ssize_t>(sizeof(Reply))) {
-        fprintf(stderr, "接收应答失败: %s\n", n < 0 ? strerror(errno) : "长度不符");
+        // 说清楚"收到了多少" —— 只说"长度不符"排查时等于没说：
+        // n == 0 是"对端在应答前就关了连接"，和"收到半条"完全是两回事。
+        std::string why;
+        if (n < 0) why = strerror(errno);
+        else if (n == 0) why = "对端在应答前就关了连接（收到了 EOF）";
+        else why = "长度不符（收到 " + std::to_string(n) + " 字节，应为 " +
+                   std::to_string(sizeof(Reply)) + "）";
+        fprintf(stderr, "接收应答失败: %s\n", why.c_str());
         return false;
     }
 
@@ -427,7 +434,14 @@ bool TransactV2(int sockFd, Cmd cmd, const std::string& payload, uint32_t flags,
         n = recvmsg(sockFd, &m, 0);
     } while (n < 0 && errno == EINTR);
     if (n != static_cast<ssize_t>(sizeof(Reply))) {
-        fprintf(stderr, "接收应答失败: %s\n", n < 0 ? strerror(errno) : "长度不符");
+        // 说清楚"收到了多少" —— 只说"长度不符"排查时等于没说：
+        // n == 0 是"对端在应答前就关了连接"，和"收到半条"完全是两回事。
+        std::string why;
+        if (n < 0) why = strerror(errno);
+        else if (n == 0) why = "对端在应答前就关了连接（收到了 EOF）";
+        else why = "长度不符（收到 " + std::to_string(n) + " 字节，应为 " +
+                   std::to_string(sizeof(Reply)) + "）";
+        fprintf(stderr, "接收应答失败: %s\n", why.c_str());
         return false;
     }
 

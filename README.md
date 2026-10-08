@@ -62,12 +62,25 @@ H.264 优先使用系统 libyuv 转换像素。传输写入有 1 秒期限，控
 JSONCPP_DIR=/path/to/jsoncpp bash tools/build-ndk.sh
                                             # 默认 arm64-v8a / API 31
 adb push dev/02-native-daemon/out/ndk/arm64-v8a/remote-control /data/local/tmp/
-adb shell chmod 755 /data/local/tmp/remote-control
+adb push dev/02-native-daemon/out/ndk/arm64-v8a/rcctl          /data/local/tmp/   # 停服务要用
+adb shell chmod 755 /data/local/tmp/remote-control /data/local/tmp/rcctl
+# 令牌自己定一个，省得回头去设备上找（理由见下）
 adb shell "setsid /data/local/tmp/remote-control --socket /data/local/tmp/remote-control.sock \
-           --http-bind 0.0.0.0 --foreground >/dev/null 2>&1 &"
+           --http-bind 0.0.0.0 --http-token mytoken --foreground >/dev/null 2>&1 &"
 ```
 
-浏览器打开 `http://<设备IP>:8088/` 就是控制台。
+浏览器打开 `http://<设备IP>:8088/`，把 `mytoken` 粘进页面顶部的令牌框。
+
+> ⚠️ **鉴权默认是开的**（`Config::auth` 默认 `true`，daemon 的 `--help` 也写着
+> "开启鉴权并生成随机令牌"）。不给 `--http-token` 时它会随机生成一个并写回
+> 设备上的 `/data/misc/remote-control/remote-control.conf` —— 那个文件要 root
+> 才读得到。所以**自己指定一个**是最省事的走法。
+>
+> ⚠️ 跑起来之后想停掉：arm64 版在 x86_64 设备上是经 `binfmt_misc` 交给翻译层
+> 跑的，进程名是 `ndk_translation_program_runner_binfmt_misc_arm64` ——
+> `pidof remote-control` / `pkill remote-control` **找不到它**。
+> 用 `adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock shutdown"`
+> （`rcctl` 就在同一个目录里，`adb push` 时一起推上去）。
 
 要 **SurfaceFlinger 后端**（快 20 倍）才需要 AOSP 树：
 
