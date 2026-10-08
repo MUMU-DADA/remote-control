@@ -160,6 +160,19 @@ bool DropPrivileges(uid_t uid, gid_t gid, std::string* error) {
 
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// HTTP 绑定失败后的重试节奏。
+//
+// 端口被占多半是**暂时**的（重启时老实例还没退干净）。不重试的话，
+// 一次瞬时冲突就等于"这个进程活到死都没有 HTTP"。
+// 3 秒 × 40 次 = 两分钟：够覆盖任何正常退出，之后还占着就是真冲突了，
+// 那时日志里说清楚，人去看。
+constexpr int kHttpRetrySecs  = 3;
+constexpr int kHttpRetryTries = 40;
+
+}  // namespace
+
 int main(int argc, char** argv) {
     std::string socketPath;
     std::string initSocketName;
@@ -678,8 +691,13 @@ int main(int argc, char** argv) {
         server.SetAllowedPeerUid(socketPeerUid);
     }
 
+    HttpServer::Options httpOpts;
+    bool httpEnabled = false;
+    // true = 现在没绑上，交给 HTTP 线程**等一会儿再试**。
+    bool httpRetryBind = false;
     if (!httpBind.empty()) {
-        HttpServer::Options opts;
+        httpEnabled = true;
+        HttpServer::Options& opts = httpOpts;
         opts.bindAddr = httpBind;
         opts.port     = httpPort;
         opts.token    = httpToken;
@@ -698,12 +716,20 @@ int main(int argc, char** argv) {
             //    socket 启动失败那处兜住（那里 return 1 是对的）。
             ALOGE("HTTP API 启动失败（仅 HTTP 不可用，socket 仍可服务）: %s",
                   error.c_str());
+            //    但**只做到"不退"是不够的**：端口被占常常是**暂时**的
+            //    （重启时老实例还没退干净、另一个进程正好也在启动）。
+            //    原来那条 `return 1` 至少还能靠 init 重拉自愈；改成"不退"
+            //    之后如果不重试，就会变成"HTTP 永远没了，直到下次重启" ——
+            //    用一个永久降级换掉了崩溃循环，不划算。
+            //
+            //    所以这里交给下面那个 HTTP 线程**隔几秒再试**：
+            //    socket 立刻可用，HTTP 自己追上来。
             fprintf(stderr,
                     "remote-control: HTTP API 启动失败: %s\n"
-                    "  → 只有 HTTP 不可用；Unix socket 照常服务。"
-                    "（端口被占？换 --http-port，或关掉占用的那个进程）\n",
-                    error.c_str());
+                    "  → Unix socket 照常服务；HTTP 会每 %d 秒重试，最多 %d 次\n",
+                    error.c_str(), kHttpRetrySecs, kHttpRetryTries);
             error.clear();
+            httpRetryBind = true;
         }
     }
 
@@ -713,14 +739,39 @@ int main(int argc, char** argv) {
     struct HttpThreadCtx {
         HttpServer* server;
         RestApi*    api;
+        HttpServer::Options opts;   // 重试绑定时要用
+        bool retryBind;             // true = 先重试绑定，成了再 Run
     };
-    HttpThreadCtx httpCtx{&httpServer, &restApi};
+    HttpThreadCtx httpCtx{&httpServer, &restApi, httpOpts, httpRetryBind};
 
-    if (httpServer.running()) {
+    if (httpEnabled) {
         const int rc = pthread_create(
             &httpThread, nullptr,
             [](void* arg) -> void* {
                 auto* c = static_cast<HttpThreadCtx*>(arg);
+                if (c->retryBind) {
+                    // 端口被占 —— 隔几秒再试，而不是就此放弃。
+                    // 见上面 httpRetryBind 那段的说明：端口被占多半是暂时的，
+                    // 不重试就等于"这个进程活到死都没有 HTTP"。
+                    std::string rerr;
+                    bool bound = false;
+                    for (int i = 0; i < kHttpRetryTries; ++i) {
+                        sleep(kHttpRetrySecs);
+                        if (c->server->Start(c->opts, &rerr)) { bound = true; break; }
+                        rerr.clear();
+                    }
+                    if (!bound) {
+                        ALOGW("HTTP 端口重试 %d 次仍未成功，放弃"
+                              "（Unix socket 一直在服务）", kHttpRetryTries);
+                        return nullptr;
+                    }
+                    // 也写 stderr：排查的人 tail 的是日志文件，而失败那条
+                    // 就在那儿。只写 logcat 的话，他看到"失败"却永远等不到
+                    // "恢复"，会以为 HTTP 一直是坏的。
+                    ALOGI("HTTP 端口空出来了，已补上监听");
+                    fprintf(stderr,
+                            "remote-control: HTTP 端口空出来了，已补上监听\n");
+                }
                 // 不再在这里加锁 —— 操作串行化在 Dispatcher::Handle 里。
                 // 放这里对流式响应是无效的：streamer 回调是在处理器返回
                 // **之后**才跑的，那时锁已经释放了。
