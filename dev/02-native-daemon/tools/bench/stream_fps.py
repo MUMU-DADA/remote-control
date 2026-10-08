@@ -17,22 +17,42 @@
 
 import argparse
 import json
+import os
 import socket
 import sys
 import time
+import urllib.error
 import urllib.request
 
 BOUNDARY = "remote-control-frame"
 
+# 访问令牌。交付镜像默认开鉴权，不带令牌只会拿到 401。
+#
+# ⚠️ 以前这里既没有令牌、也没有区分 401 和"连不上"：`params()` 把异常吞成 {}，
+#    调用方就报"服务不可达" —— 而服务明明在跑，只是要令牌。按那句话去查
+#    （看进程、看端口、看日志）全是对的，因为问题不在这儿。
+TOKEN = os.environ.get("RC_TOKEN", "")
+
 
 def http_get(url: str, timeout: float = 5.0) -> bytes:
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    req = urllib.request.Request(
+        url, headers={"Authorization": "Bearer " + TOKEN} if TOKEN else {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
 def params(base: str) -> dict:
     try:
         return json.loads(http_get(base + "/api/v1/params"))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print("服务要访问令牌：设 RC_TOKEN=<令牌> 或 --token=<令牌> 再跑"
+                  "（令牌在设备上的 /data/misc/remote-control/remote-control.conf，"
+                  "或在宿主 .run/instances/<名字>.token）", file=sys.stderr)
+            raise SystemExit(2)
+        return {}
+    except SystemExit:
+        raise
     except Exception:
         return {}
 
@@ -46,8 +66,10 @@ def measure_once(host: str, port: int, path: str, secs: float):
     """
     s = socket.create_connection((host, port), timeout=10)
     s.settimeout(10)
+    auth = f"Authorization: Bearer {TOKEN}\r\n" if TOKEN else ""
     s.sendall(
         f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+        f"{auth}"
         f"Connection: close\r\n\r\n".encode()
     )
 
@@ -127,9 +149,14 @@ def main():
     ap.add_argument("--skip-unchanged", dest="skip", action="store_true",
                     default=False,
                     help="按服务端默认行为测（画面不动就不出帧）")
+    ap.add_argument("--token", default="",
+                    help="访问令牌（默认取 RC_TOKEN）")
     ap.add_argument("--compare", action="store_true",
                     help="jpeg / webp / png 各跑一遍")
     a = ap.parse_args()
+
+    global TOKEN
+    TOKEN = a.token or TOKEN
 
     base = f"http://{a.host}:{a.port}"
     p = params(base)

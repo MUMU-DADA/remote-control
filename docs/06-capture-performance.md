@@ -51,9 +51,16 @@ webp **20.5**。根因是走了较慢的 Skia 参数路径，详见第七节。
 
 ```bash
 # 720p，jpeg/webp/png 各跑 8 秒对比
-python3 dev/02-native-daemon/tools/bench/stream_fps.py \
+# 交付镜像默认开鉴权 —— 令牌用 RC_TOKEN 传（也可以 --token=xxx）
+RC_TOKEN=<令牌> python3 dev/02-native-daemon/tools/bench/stream_fps.py \
     --host <设备IP> --port 8088 --fps 30 --secs 8 --compare
 ```
+
+> 令牌取自设备上的 `/data/misc/remote-control/remote-control.conf`（需 root），
+> 或用宿主机脚本跑模拟器时那个 `.run/instances/<名字>.token`。
+> 不给令牌时这两个工具会**明确报"需要访问令牌"并退出**，不会打出一张全 0 的表
+> 让人误读成"性能很差"（以前 `stream_fps.py` 会把它报成"服务不可达"，
+> 而服务其实好好的）。
 
 它同时报三组数，**缺一不可**：
 
@@ -599,7 +606,10 @@ fps 测量之后、保持流连接时取得；滚动场景取截图时已停止�
 可用 Node 22+ 内置 WebSocket 客户端复测：
 
 ```bash
-node dev/02-native-daemon/tools/bench/stream_latency.mjs \
+# 交付镜像默认开鉴权：令牌走 RC_TOKEN（或 --token=xxx）。
+# 这里用**查询参数**传令牌而不是 Authorization 头 —— WebSocket 那条路没法
+# 自己加头（浏览器的 WebSocket 构造函数不接受 headers），服务端两种都收。
+RC_TOKEN=<令牌> node dev/02-native-daemon/tools/bench/stream_latency.mjs \
   --base http://<设备IP>:8088 --format png --clients 4 \
   --fps 60 --width 0 --seconds 5
 ```

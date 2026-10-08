@@ -11,13 +11,29 @@ const { values } = parseArgs({ options: {
   fps: { type: 'string', default: '60' },
   width: { type: 'string', default: '0' },
   skip: { type: 'boolean', default: false },
+  token: { type: 'string', default: process.env.RC_TOKEN ?? '' },
 } });
 const clients = Number(values.clients), seconds = Number(values.seconds);
 if (!Number.isInteger(clients) || clients < 1 || clients > 16 || !(seconds > 0)) {
   throw new Error('clients must be 1..16 and seconds must be positive');
 }
+// 访问令牌。交付镜像默认开鉴权。
+//
+// ⚠️ 这里走**查询参数**而不是 Authorization 头：WebSocket 那条（下面）
+//    没法自己加头 —— 浏览器的 WebSocket 构造函数根本不接受 headers。
+//    服务端两种都收（见 docs/api/01-http.md），所以统一用 ?token= 最省事。
+const tokenQuery = values.token ? { token: values.token } : {};
+const withToken = path => {
+  const q = new URLSearchParams(tokenQuery).toString();
+  return values.base + path + (q ? (path.includes('?') ? '&' : '?') + q : '');
+};
 const getJson = async path => {
-  const response = await fetch(values.base + path, { signal: AbortSignal.timeout(5000) });
+  const response = await fetch(withToken(path), { signal: AbortSignal.timeout(5000) });
+  if (response.status === 401) {
+    throw new Error(`${path}: 需要访问令牌 —— 用 --token=<令牌> 或 RC_TOKEN=<令牌>；`
+      + ` 令牌在设备上的 /data/misc/remote-control/remote-control.conf，`
+      + `或宿主 .run/instances/<名字>.token`);
+  }
   if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
   return response.json();
 };
@@ -26,7 +42,8 @@ const config = await getJson('/api/v1/config');
 const url = new URL(values.base + '/api/v1/stream');
 url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 url.search = new URLSearchParams({ format: values.format, fps: values.fps,
-  maxWidth: values.width, skipUnchanged: values.skip ? '1' : '0' }).toString();
+  maxWidth: values.width, skipUnchanged: values.skip ? '1' : '0',
+  ...tokenQuery }).toString();
 const sockets = [], measurements = [], pings = new Map(), rtts = [];
 let pingTimer;
 const percentile = (samples, fraction) => {
@@ -78,8 +95,8 @@ try {
   const screenshotTimes = [];
   for (let i = 0; i < 8; ++i) {
     const start = performance.now();
-    const response = await fetch(values.base + '/api/v1/capture?format=' +
-      (values.format === 'h264' ? 'jpeg' : values.format), { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(withToken('/api/v1/capture?format=' +
+      (values.format === 'h264' ? 'jpeg' : values.format)), { signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error(`capture: HTTP ${response.status}`);
     await response.arrayBuffer();
     screenshotTimes.push(performance.now() - start);
