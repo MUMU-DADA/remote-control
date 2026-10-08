@@ -469,11 +469,28 @@ int main(int argc, char** argv) {
     // ⚠️ 必须保留这**四层**。只留前两层的话，"当前版坏 + 上一版也坏"就直接
     //    放弃了，而镜像里那份明明还能跑 —— 全新设备或 /data 被清过之后
     //    正是这个组合。按顺序去重，最多试三次。
+    //
+    // ⚠️ 但 `current` 为空（跑的就是镜像自带那份）时**只留这一个候选**。
+    //
+    //    否则会出现"跑了却不记账"的状态：镜像版被信号打死 → 试 previous
+    //    （槽里某个旧版本）→ 它起得来、壳也换过去了，可 current 仍是空
+    //    （`ResetCurrentAfterFailure` 在 current 为空时直接 return）——
+    //    于是**下次重启又弹回镜像版**，来回跳。
+    //
+    //    实测：kill -9 之后跑的是槽里的 3a80cfa6…、而 `current` 是空的，
+    //    再 `ctl.restart` 一次就回到镜像版 6047e93f…。
+    //
+    //    previous/last-good 的用武之地是"**升级**到了坏版本"，那时 want 非空、
+    //    回退会被 `ResetCurrentAfterFailure` 正确记账。没有升级就没有"回退"；
+    //    镜像版起不来说明基线就有问题，该让 init 按老办法重拉，
+    //    而不是悄悄换成一个没记在指针里的旧版本。
     std::vector<std::string> candidates;
     candidates.push_back(want);
-    if (!previous.empty()) candidates.push_back(previous);
-    if (!lastGood.empty()) candidates.push_back(lastGood);
-    candidates.push_back("");   // "" = /system/bin/remote-control
+    if (!want.empty()) {
+        if (!previous.empty()) candidates.push_back(previous);
+        if (!lastGood.empty()) candidates.push_back(lastGood);
+        candidates.push_back("");   // "" = /system/bin/remote-control
+    }
     {
         std::vector<std::string> uniq;
         for (const auto& c : candidates) {
