@@ -289,17 +289,36 @@ ReplyPacket Dispatcher::HandleCapture(const Request& req) {
     ReplyPacket packet;
     packet.reply = MakeReply(kOk, req.cmd);
 
-    // req.x 复用成"目标抓帧宽度"（Capture 用不到 x 字段）。
+    // 抓帧选项（目标宽度 + 裁剪区域）借用 Request 的几个字段传进来，
+    // 编解码只在 Capture::EncodeOptions/DecodeOptions 一处，
+    // 这里不直接读 req.x/y/x2/y2 —— 见 capture.h 的说明。
     //
-    // 让 SurfaceFlinger **在合成阶段就按这个尺寸渲染**，而不是全分辨率
-    // 抓下来再软件缩放 —— 后者在 1440x2960 上是 4.3M 像素，白干 4 倍。
-    // 详见 capture.h 的 SetTargetWidth。
-    //
-    // 0 = 原始分辨率。screencap 后端会忽略它。
+    // 两者都要在**源头**生效：SurfaceFlinger 按这个尺寸与区域去合成，
+    // 而不是全分辨率抓下来再软件裁/缩 —— 后者在 1440x2960 上取 720x720
+    // 会白干 88% 的像素，还要多一次内存拷贝。
+    const CaptureOptions opt = Capture::DecodeOptions(req);
+
+    // 只有带裁剪时才去问屏幕尺寸：查一次要过 binder，而画面流这条路上
+    // HandleCapture 是**每帧**都被调用的（而流不设裁剪）。
+    if (opt.hasCrop()) {
+        uint32_t sw = 0, sh = 0;
+        std::vector<DisplayInfo> displays;
+        std::string derr;
+        if (capture_->ListDisplays(&displays, &derr) && !displays.empty()) {
+            sw = displays[0].width;
+            sh = displays[0].height;
+        }
+        std::string why;
+        if (!CaptureOptions::ValidateOptions(opt, sw, sh, &why)) {
+            // 越界是调用方写错了 —— 给 400 并说清楚屏幕多大，
+            // 而不是让它对着一个 500 猜
+            return MakeJsonError(req.cmd, kErrBadArg, why);
+        }
+    }
+
     Frame frame;
     std::string error;
-    if (!capture_->Grab(&frame, &error,
-                        req.x > 0 ? static_cast<uint32_t>(req.x) : 0)) {
+    if (!capture_->Grab(&frame, &error, opt)) {
         packet.reply.status = kErrCaptured;
         ALOGE("截图失败: %s", error.c_str());
         return packet;

@@ -112,6 +112,149 @@ Request MakeRequest(Cmd cmd) {
 // 测试
 // ---------------------------------------------------------------------------
 
+// ── [2b] 区域抓帧 ───────────────────────────────────────────────────────────
+//
+// stub 后端画的是"像素值能反推坐标"的渐变图：
+//     R = 源x * 255 / (宽-1)      G = 源y * 255 / (高-1)
+// 所以裁剪对不对**可以从像素值直接验**，而不是只能看尺寸 ——
+// 尺寸对但裁错了位置（差一行一列、或者把输出坐标当源坐标画）是很常见的错。
+void TestRegionCapture(int cfd) {
+    printf("\n\033[1;34m[2b] 区域抓帧\033[0m  源头裁剪 + 选项编解码\n");
+
+    constexpr uint32_t kStubW = 1080;
+    constexpr uint32_t kStubH = 1920;
+
+    // 抓一帧，返回像素（已 mmap 的指针 + 尺寸）
+    auto grab = [&](const CaptureOptions& opt, Reply* reply, int* fd,
+                    void** base) -> bool {
+        Request r = MakeRequest(Cmd::Capture);
+        Capture::EncodeOptions(opt, &r);
+        *fd = -1;
+        *base = nullptr;
+        if (!Transact(cfd, r, reply, fd)) return false;
+        if (reply->status != kOk || *fd < 0 || reply->dataSize == 0) return false;
+        *base = mmap(nullptr, reply->dataSize, PROT_READ, MAP_SHARED, *fd, 0);
+        return *base != MAP_FAILED;
+    };
+
+    // ── 编解码往返 ──
+    {
+        CaptureOptions in;
+        in.targetWidth = 540;
+        in.cropX = 12; in.cropY = 34; in.cropW = 56; in.cropH = 78;
+        Request r{};
+        Capture::EncodeOptions(in, &r);
+        const CaptureOptions out = Capture::DecodeOptions(r);
+        Check(out == in, "选项编解码往返一致（宽 %u 区域 %d,%d %ux%u）",
+              out.targetWidth, out.cropX, out.cropY, out.cropW, out.cropH);
+    }
+
+    // ── 整屏 ──
+    {
+        CaptureOptions opt;
+        Reply reply{}; int fd = -1; void* base = nullptr;
+        if (!grab(opt, &reply, &fd, &base)) {
+            Check(false, "整屏抓帧失败");
+            return;
+        }
+        Check(reply.width == kStubW && reply.height == kStubH,
+              "整屏尺寸 %ux%u", reply.width, reply.height);
+        const auto* px = static_cast<const uint8_t*>(base);
+        Check(px[0] == 0 && px[1] == 0, "整屏左上角像素为 (0,0) 渐变起点");
+        munmap(base, reply.dataSize);
+        close(fd);
+    }
+
+    // ── 裁剪：位置与尺寸都要对 ──
+    {
+        const uint32_t cx = 100, cy = 200, cw = 300, ch = 400;
+        CaptureOptions opt;
+        opt.cropX = static_cast<int32_t>(cx);
+        opt.cropY = static_cast<int32_t>(cy);
+        opt.cropW = cw;
+        opt.cropH = ch;
+
+        Reply reply{}; int fd = -1; void* base = nullptr;
+        if (!grab(opt, &reply, &fd, &base)) {
+            Check(false, "区域抓帧失败");
+            return;
+        }
+        Check(reply.width == cw && reply.height == ch,
+              "裁剪尺寸 = %ux%u（期望 %ux%u）", reply.width, reply.height, cw, ch);
+
+        const auto* px = static_cast<const uint8_t*>(base);
+        // ⚠️ 这里验的是**偏移**：裁出来的第一行第一列必须对应源图的
+        //    (cx, cy)，而不是 (0,0)。只验尺寸的话，把裁剪实现成
+        //    "从左上角开始少画一块"也能过。
+        const uint8_t wantR = static_cast<uint8_t>(cx * 255 / (kStubW - 1));
+        const uint8_t wantG = static_cast<uint8_t>(cy * 255 / (kStubH - 1));
+        Check(px[0] == wantR && px[1] == wantG,
+              "裁剪块左上角对应源坐标 (%u,%u)：R=%u G=%u（期望 %u,%u）",
+              cx, cy, px[0], px[1], wantR, wantG);
+
+        // 最后一行最后一列 → 源图 (cx+cw-1, cy+ch-1)
+        const uint64_t last = (static_cast<uint64_t>(ch - 1) * cw + (cw - 1)) * 4;
+        const uint8_t wantR2 =
+                static_cast<uint8_t>((cx + cw - 1) * 255 / (kStubW - 1));
+        const uint8_t wantG2 =
+                static_cast<uint8_t>((cy + ch - 1) * 255 / (kStubH - 1));
+        Check(px[last] == wantR2 && px[last + 1] == wantG2,
+              "裁剪块右下角对应源坐标 (%u,%u)", cx + cw - 1, cy + ch - 1);
+
+        // 数据量确实小了
+        Check(reply.dataSize == static_cast<uint64_t>(cw) * ch * 4,
+              "字节数 = %llu（期望 %u）",
+              static_cast<unsigned long long>(reply.dataSize), cw * ch * 4);
+
+        munmap(base, reply.dataSize);
+        close(fd);
+    }
+
+    // ── 越界：要**明确报错**，不能静默钳到边界 ──
+    {
+        CaptureOptions opt;
+        opt.cropX = kStubW - 10;
+        opt.cropY = 0;
+        opt.cropW = 100;      // 越界 90 像素
+        opt.cropH = 100;
+        Request r = MakeRequest(Cmd::Capture);
+        Capture::EncodeOptions(opt, &r);
+        Reply reply{}; int fd = -1;
+        Transact(cfd, r, &reply, &fd);
+        Check(reply.status == kErrBadArg,
+              "越界的裁剪区域 → kErrBadArg（得到 %u）", reply.status);
+        if (fd >= 0) close(fd);
+    }
+
+    // ── 语法校验：尺寸非正、原点为负 ──
+    {
+        std::string why;
+        CaptureOptions neg;
+        neg.cropX = -1; neg.cropY = 0; neg.cropW = 10; neg.cropH = 10;
+        // ⚠️ 先调用、再断言。写成
+        //     Check(!ValidateOptions(..., &why), "...%s", why.c_str())
+        // 会打印出上一次的内容 —— C++ 实参求值顺序未指定，why.c_str()
+        // 可能在校验之前就取好了。test_util.h 顶上专门警告过这件事，
+        // 这里第一版就是这么写错的（打印出来是 ">"）。
+        const bool negOk = CaptureOptions::ValidateOptions(neg, 1080, 1920, &why);
+        const std::string negWhy = why;
+        Check(!negOk, "负原点被拒：%s", negWhy.c_str());
+
+        CaptureOptions ok;
+        ok.cropX = 0; ok.cropY = 0; ok.cropW = 1080; ok.cropH = 1920;
+        Check(CaptureOptions::ValidateOptions(ok, 1080, 1920, &why),
+              "整屏大小的裁剪是合法的");
+
+        // 屏幕尺寸未知时只做语法校验（screencap 后端要抓一次才知道尺寸）
+        CaptureOptions big;
+        big.cropX = 5000; big.cropY = 5000; big.cropW = 10; big.cropH = 10;
+        Check(CaptureOptions::ValidateOptions(big, 0, 0, &why),
+              "屏幕尺寸未知时不做越界判断（交给后端）");
+        Check(!CaptureOptions::ValidateOptions(big, 1080, 1920, &why),
+              "已知屏幕尺寸时越界被拒");
+    }
+}
+
 void TestInfo(int cfd) {
     printf("\n\033[1;34m[1] Info 请求\033[0m\n");
 
@@ -628,6 +771,7 @@ int main() {
 
     TestInfo(cfd);
     TestCaptureFrame(cfd);
+    TestRegionCapture(cfd);
     TestFrameHubStopRestart(dispatcher, readFd);
     TestFrameHubCaptureIntervals();
     TestTapRoundTrip(cfd, readFd);

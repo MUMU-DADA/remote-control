@@ -23,6 +23,8 @@
 
 #include "frame_hub.h"
 
+#include "capture.h"
+
 #include <errno.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -537,10 +539,13 @@ FramePtr FrameHub::CaptureOnce(Dispatcher* dispatcher, uint64_t seq,
     Request r{};
     r.magic = kMagic;
     r.cmd   = static_cast<uint32_t>(Cmd::Capture);
-    // req.x 复用成目标抓帧宽度（见 capture.h 的 SetTargetWidth）：
-    // 让 SurfaceFlinger 在**合成阶段**就按这个尺寸渲染，
-    // 而不是全分辨率抓下来再软件缩放。
-    r.x     = static_cast<int32_t>(targetWidth);
+    // 抓帧选项通过 Request 的字段传递，编解码只在 Capture 那一处
+    // （见 capture.h 的 EncodeOptions）。
+    {
+        CaptureOptions opt;
+        opt.targetWidth = targetWidth;
+        Capture::EncodeOptions(opt, &r);
+    }
 
     ReplyPacket rp = dispatcher->Handle(r, "", -1, 0);
     if (rp.reply.status != kOk || rp.fd < 0) {

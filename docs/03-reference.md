@@ -586,6 +586,7 @@ ALOGI("capture: 合成=%lldus 拷贝=%lldus",
 | 按键注入 | ✅ `KeyEvent` 已实现（uinput 虚拟键盘） |
 | 文本输入 | ✅ `Text` 两条路：`paste`（剪贴板 + `KEY_PASTE`，**支持中文/emoji 等任意 Unicode**，用完恢复剪贴板）与 `type`（逐字符按键，仅可打印 ASCII）。**没有自建输入法** —— `type` 打不出中文是按键注入的上限（Linux 键码里没有"中"这个字），Android 自带 `input text` 同样打不出 |
 | 鼠标 / 滚轮 | ✅ `Mouse`（`uinput` 虚拟鼠标）：相对移动 / 左中右键 / 垂直与水平滚轮。**只有相对移动**，没有绝对定位 —— Android 的鼠标设备本身就只有 `REL_*` |
+| 区域抓帧 | ✅ `GET /capture?x=&y=&w=&h=`，**源头裁剪**（SurfaceFlinger 的 `sourceCrop`）：SF 只合成这一块，1440x2960 取 720x720 是 0.5M 像素而不是 4.3M。⚠️ `screencap` 后端只能"整屏抓完再裁"（那个命令没有裁剪参数）；⚠️ **画面流暂不支持区域**（多个订阅者各要一块需要协商，属另一件事） |
 
 **多点触控（Binder 路径）要做什么**：
 

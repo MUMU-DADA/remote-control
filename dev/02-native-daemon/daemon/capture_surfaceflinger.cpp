@@ -202,7 +202,7 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
     return true;
 }
 
-bool Capture::Grab(Frame* out, std::string* error) {
+bool Capture::Grab(Frame* out, std::string* error, const CaptureOptions& opt) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!resolved_ && !ResolveDisplay(error)) return false;
 
@@ -242,15 +242,33 @@ bool Capture::Grab(Frame* out, std::string* error) {
         }
     }
 
-    // 宽度给了就按宽高比算高度（不能只给一个 —— SF 只在两个都为 0 时
-    // 才用原始分辨率，否则按给的来，只给 width 会让高度为 0）。
-    if (targetWidth_ > 0 && srcW > 0 && targetWidth_ < srcW) {
-        args.width  = targetWidth_;
+    // 裁剪区域：让 SF **只合成这一块**，而不是全屏合成完再软件裁 ——
+    // 后者在 1440x2960 上取 720x720 会白抓 88% 的像素，还要多一次拷贝。
+    uint32_t outW = srcW, outH = srcH;
+    if (opt.hasCrop()) {
+        args.sourceCrop = Rect(opt.cropX, opt.cropY,
+                               opt.cropX + static_cast<int32_t>(opt.cropW),
+                               opt.cropY + static_cast<int32_t>(opt.cropH));
+        // 缩放要相对**裁剪后**的尺寸算，不是整屏
+        outW = opt.cropW;
+        outH = opt.cropH;
+    }
+
+    // ⚠️ width/height 必须**显式**给全，不能留 0：
+    //    SF 在 `args.width == 0 || args.height == 0` 时会退回"整个 layer stack
+    //    的尺寸"（SurfaceFlinger.cpp:5992），于是裁剪出来的那一小块会被
+    //    拉伸回整屏大小 —— 画面糊掉、尺寸也不是要的那个。
+    //    非裁剪路径下显式给 srcW/srcH 与留 0 等价（SF 算的就是这个值）。
+    if (opt.targetWidth > 0 && outW > 0 && opt.targetWidth < outW) {
+        args.width  = opt.targetWidth;
         args.height = static_cast<uint32_t>(
-                static_cast<uint64_t>(srcH) * targetWidth_ / srcW);
+                static_cast<uint64_t>(outH) * opt.targetWidth / outW);
         if (args.height == 0) args.height = 1;
+    } else if (outW > 0 && outH > 0) {
+        args.width  = outW;
+        args.height = outH;
     } else {
-        args.width  = 0;      // 0 = 用显示原始分辨率
+        args.width  = 0;      // 拿不到显示尺寸时的退路
         args.height = 0;
     }
     args.pixelFormat      = ui::PixelFormat::RGBA_8888;
@@ -352,13 +370,10 @@ bool Capture::Grab(Frame* out, std::string* error) {
     return true;
 }
 
-bool Capture::Grab(Frame* out, std::string* error, uint32_t targetWidth) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const uint32_t previous = targetWidth_;
-    targetWidth_ = targetWidth;
-    const bool ok = Grab(out, error);
-    targetWidth_ = previous;
-    return ok;
+bool Capture::Grab(Frame* out, std::string* error) {
+    CaptureOptions opt;
+    opt.targetWidth = targetWidth_;   // 持久设置（SetTargetWidth）
+    return Grab(out, error, opt);
 }
 
 // ---------------------------------------------------------------------------

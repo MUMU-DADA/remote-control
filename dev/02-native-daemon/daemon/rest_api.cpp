@@ -29,6 +29,7 @@
 
 #include "remote_control_log.h"
 #include "dispatch.h"
+#include "capture.h"      // CaptureOptions：区域抓帧的 x/y/w/h 与 width
 #include "json_parser.h"
 #include "json_writer.h"
 #include "encode_pool.h"
@@ -549,6 +550,29 @@ bool IsRegularFile(const std::string& path, struct stat* st = nullptr) {
 }  // namespace
 
 // ── 通用转发 ────────────────────────────────────────────────────────────────
+// Dispatcher 的 status → HTTP 状态码。
+//
+// 抽出来是因为斜杠不止一处：Call() 用它，而 /capture 是手写调用
+// Dispatcher 的（要拿 fd 里的像素）。原来 /capture 的失败分支写死
+// `HttpResponse::Error(500, StatusName(status))`，于是：
+//   · 参数写错（该 400）也回 500
+//   · **服务端那句能读懂的话被丢掉**，客户端只看到 "bad argument"
+// 实测就是这么暴露的：越界的裁剪区域本该说"超出屏幕 1280x720"。
+int HttpStatusFor(uint32_t dispatcherStatus) {
+    switch (dispatcherStatus) {
+        case kOk:            return 200;
+        case kErrBadMagic:
+        case kErrBadCmd:
+        case kErrBadArg:
+        case kErrPayload:    return 400;
+        case kErrNotFound:   return 404;
+        case kErrPermission: return 403;
+        case kErrUnsupported:return 501;
+        case kErrTimeout:    return 504;
+        default:             return 500;
+    }
+}
+
 HttpResponse RestApi::Call(Cmd cmd, const std::string& payload, uint32_t flags,
                            int reqFd, bool binaryReply,
                            const char* binaryContentType) {
@@ -567,19 +591,7 @@ HttpResponse RestApi::Call(Cmd cmd, const std::string& payload, uint32_t flags,
         // 非二进制命令的应答体一律是 JSON。
         // 服务端已经把错误原因写在 JSON 里了，所以即使 status != OK
         // 也原样返回，让调用方看到的是**服务端的原话**而不是一个码。
-        int httpStatus = 200;
-        switch (packet.reply.status) {
-            case kOk:           httpStatus = 200; break;
-            case kErrBadMagic:
-            case kErrBadCmd:
-            case kErrBadArg:
-            case kErrPayload:   httpStatus = 400; break;
-            case kErrNotFound:  httpStatus = 404; break;
-            case kErrPermission:httpStatus = 403; break;
-            case kErrUnsupported: httpStatus = 501; break;
-            case kErrTimeout:   httpStatus = 504; break;
-            default:            httpStatus = 500; break;
-        }
+        const int httpStatus = HttpStatusFor(packet.reply.status);
         if (body.empty()) {
             // 理论上不会发生（失败也带 JSON），兜底别返回空体
             json::Writer w;
@@ -642,18 +654,87 @@ HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
                 : (codec == ImageFormat::kWebp) ? 90 : 90;
     }
 
+    // ── 区域抓帧：?x=&y=&w=&h= ──
+    //
+    // 只抓屏幕的一块。四个参数必须**一起**给：少给一个就说不清"想抓哪块"，
+    // 这时候默认整屏比猜一个更安全（猜错的话调用方拿到的是别的区域，
+    // 却以为是自己要的那块）。
+    CaptureOptions opt;
+    {
+        const char* names[4] = {"x", "y", "w", "h"};
+        std::string vals[4];
+        int given = 0;
+        for (int i = 0; i < 4; ++i) {
+            vals[i] = req.queryParam(names[i], "");
+            if (!vals[i].empty()) ++given;
+        }
+        if (given != 0 && given != 4) {
+            return HttpResponse::Error(
+                    400, "区域抓帧要同时给 x/y/w/h 四个参数（当前给了 " +
+                                 std::to_string(given) + " 个）");
+        }
+        if (given == 4) {
+            long v[4] = {0, 0, 0, 0};
+            for (int i = 0; i < 4; ++i) {
+                char* end = nullptr;
+                errno = 0;
+                v[i] = strtol(vals[i].c_str(), &end, 10);
+                if (errno != 0 || end == vals[i].c_str() || *end != '\0') {
+                    return HttpResponse::Error(
+                            400, std::string(names[i]) + " 必须是整数（收到: " +
+                                         vals[i] + "）");
+                }
+            }
+            if (v[2] <= 0 || v[3] <= 0) {
+                return HttpResponse::Error(
+                        400, "w/h 必须为正（收到 " + vals[2] + "x" + vals[3] + "）");
+            }
+            opt.cropX = static_cast<int32_t>(v[0]);
+            opt.cropY = static_cast<int32_t>(v[1]);
+            opt.cropW = static_cast<uint32_t>(v[2]);
+            opt.cropH = static_cast<uint32_t>(v[3]);
+        }
+    }
+
+    // ── 目标宽度：?width= ──
+    //
+    // 与裁剪同样是**源头**生效：SurfaceFlinger 按这个尺寸合成，
+    // 而不是抓完再缩放。和区域一起用时是"先裁后缩"。
+    {
+        const std::string qw = req.queryParam("width", "");
+        if (!qw.empty()) {
+            char* end = nullptr;
+            errno = 0;
+            const long v = strtol(qw.c_str(), &end, 10);
+            if (errno != 0 || end == qw.c_str() || *end != '\0' || v <= 0) {
+                return HttpResponse::Error(
+                        400, "width 必须是正整数（收到: " + qw + "）");
+            }
+            opt.targetWidth = static_cast<uint32_t>(v);
+        }
+    }
+
     Request request{};
     request.magic = kMagic;
     request.cmd   = static_cast<uint32_t>(Cmd::Capture);
     request.flags = 0;
+    Capture::EncodeOptions(opt, &request);
 
     ReplyPacket packet = dispatcher_->Handle(request, "", -1, 0);
     ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Capture),
                                           packet.reply.status);
 
     if (packet.reply.status != kOk) {
+        // ⚠️ 把**服务端那句原话**带回去，而不是一个状态码名。
+        //    参数错（该 400）与真失败（该 500）在这里分开，
+        //    客户端才知道该改请求还是该重试。
+        const std::string errBody = ReadFd(packet.fd, packet.reply.dataSize);
         if (packet.fd >= 0) close(packet.fd);
-        return HttpResponse::Error(500, StatusName(packet.reply.status));
+        if (!errBody.empty()) {
+            return HttpResponse::Json(HttpStatusFor(packet.reply.status), errBody);
+        }
+        return HttpResponse::Error(HttpStatusFor(packet.reply.status),
+                                   StatusName(packet.reply.status));
     }
 
     const uint32_t w = packet.reply.width;

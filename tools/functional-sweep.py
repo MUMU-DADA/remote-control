@@ -169,6 +169,44 @@ if st == 200 and jpg[:2] == b"\xff\xd8":
 else:
     check("JPEG 截图", False, f"HTTP {st}")
 
+# ── 区域抓帧（源头裁剪）──
+#
+# 判据：返回图的**尺寸**必须等于请求的区域，而不是整屏 ——
+# 只验"HTTP 200"的话，一个把 x/y/w/h 全忽略掉的实现照样能绿。
+PW, PH = info.get("primaryWidth", 0), info.get("primaryHeight", 0)
+if PW > 200 and PH > 200:
+    cx, cy, cw, ch = PW // 4, PH // 4, PW // 2, PH // 2
+    st, region = req(f"/api/v1/capture?format=jpeg&x={cx}&y={cy}&w={cw}&h={ch}",
+                     raw=True, timeout=30)
+    if st == 200 and region[:2] == b"\xff\xd8":
+        rw_, rh_ = jpeg_size(region)
+        check("区域抓帧尺寸 = 请求的区域（不是整屏）",
+              rw_ == cw and rh_ == ch,
+              f"请求 {cw}x{ch}，得到 {rw_}x{rh_}（整屏是 {PW}x{PH}）")
+        check("区域抓帧确实更小", len(region) < len(jpg),
+              f"区域 {len(region)} 字节 vs 整屏 {len(jpg)} 字节")
+    else:
+        check("区域抓帧", False, f"HTTP {st}")
+
+    # 少给参数必须被拒 —— 默认整屏比猜一个安全
+    st, _ = req(f"/api/v1/capture?x={cx}&y={cy}&w={cw}", raw=True, timeout=20)
+    check("只给三个区域参数 → 400", st == 400, f"HTTP {st}")
+
+    # 越界必须明确报错，不能静默钳到边界
+    st, _ = req(f"/api/v1/capture?x={PW - 10}&y=0&w=100&h=100",
+                raw=True, timeout=20)
+    check("越界的裁剪区域 → 400", st == 400, f"HTTP {st}")
+
+    # 源头降采样
+    st, small = req(f"/api/v1/capture?format=jpeg&width={PW // 4}",
+                    raw=True, timeout=30)
+    if st == 200 and small[:2] == b"\xff\xd8":
+        sw, sh = jpeg_size(small)
+        check("width 参数在源头降采样", sw == PW // 4,
+              f"要 {PW // 4} 宽，得到 {sw}x{sh}")
+    else:
+        check("width 降采样", False, f"HTTP {st}")
+
 # ── 触控 ──
 print("\n\033[1;34m[3] 触控\033[0m")
 # ⚠️ 触控是**分开的接口**（/tap、/swipe…），不是 /touch + action。

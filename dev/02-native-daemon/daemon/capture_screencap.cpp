@@ -267,7 +267,90 @@ bool Capture::ListDisplays(std::vector<DisplayInfo>* out,
     return true;
 }
 
-bool Capture::Grab(Frame* out, std::string* error) {
+// 把整屏帧裁成请求的那一块，产出**新的** memfd 帧。
+//
+// ⚠️ 这是"事后裁"，与 SurfaceFlinger 后端的 sourceCrop 差在源头：
+//    那边 SF 只合成这一块，管道里根本没有多余的像素；这边整屏已经
+//    通过管道传过来了。这是 screencap(exec) 后端的固有代价 ——
+//    它的定位就是"没有 AOSP 树时也能跑"，而 screencap 没有裁剪参数。
+//
+//    值不值得做：还是值得。裁剪之后 memfd 变小、mmap 变小、编码与网络
+//    传输全都跟着变小，省的是后面每一环；前面那一次管道传输省不掉而已。
+bool CropFrame(Frame* frame, const CaptureOptions& opt, std::string* error) {
+    const uint32_t bpp = BytesPerPixel(frame->format);
+    if (bpp == 0) {
+        if (error) *error = "不支持的像素格式，无法裁剪: " +
+                            std::to_string(frame->format);
+        return false;
+    }
+
+    const int64_t x = opt.cropX, y = opt.cropY;
+    const int64_t w = opt.cropW, h = opt.cropH;
+
+    // 越界就**明确报错**，不静默钳到边界 —— 钳过之后返回的是另一块区域，
+    // 调用方却以为拿到的是自己请求的那块。宁可让它失败。
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 ||
+        x + w > frame->width || y + h > frame->height) {
+        if (error) {
+            *error = "裁剪区域 " + std::to_string(x) + "," + std::to_string(y) +
+                     " " + std::to_string(w) + "x" + std::to_string(h) +
+                     " 超出屏幕 " + std::to_string(frame->width) + "x" +
+                     std::to_string(frame->height);
+        }
+        return false;
+    }
+
+    const uint64_t srcStrideBytes = static_cast<uint64_t>(frame->stride) * bpp;
+    const uint64_t dstStrideBytes = static_cast<uint64_t>(w) * bpp;
+    const uint64_t dstSize        = dstStrideBytes * h;
+
+    Frame cropped;
+    cropped.fd = MakeMemfd("remote-control-frame");
+    if (cropped.fd < 0) {
+        if (error) *error = ErrnoString("memfd 创建");
+        return false;
+    }
+    if (ftruncate(cropped.fd, static_cast<off_t>(dstSize)) != 0) {
+        if (error) *error = ErrnoString("ftruncate");
+        return false;
+    }
+
+    void* src = mmap(nullptr, frame->size, PROT_READ, MAP_SHARED, frame->fd, 0);
+    if (src == MAP_FAILED) {
+        if (error) *error = ErrnoString("mmap(源帧)");
+        return false;
+    }
+    void* dst = mmap(nullptr, dstSize, PROT_READ | PROT_WRITE, MAP_SHARED,
+                     cropped.fd, 0);
+    if (dst == MAP_FAILED) {
+        if (error) *error = ErrnoString("mmap(裁剪帧)");
+        munmap(src, frame->size);
+        return false;
+    }
+
+    // 按行拷：源帧的行有 stride（可能 > width），不能整块 memcpy
+    const auto* sp = static_cast<const uint8_t*>(src);
+    auto* dp = static_cast<uint8_t*>(dst);
+    for (uint32_t r = 0; r < static_cast<uint32_t>(h); ++r) {
+        memcpy(dp + r * dstStrideBytes,
+               sp + (y + r) * srcStrideBytes + x * bpp,
+               dstStrideBytes);
+    }
+
+    munmap(src, frame->size);
+    munmap(dst, dstSize);
+
+    close(frame->fd);
+    cropped.width  = static_cast<uint32_t>(w);
+    cropped.height = static_cast<uint32_t>(h);
+    cropped.stride = static_cast<uint32_t>(w);
+    cropped.format = frame->format;
+    cropped.size   = dstSize;
+    *frame = std::move(cropped);
+    return true;
+}
+
+bool Capture::Grab(Frame* out, std::string* error, const CaptureOptions& opt) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const char* path = ScreencapPath();
 
@@ -442,18 +525,23 @@ bool Capture::Grab(Frame* out, std::string* error) {
     lastWidth_  = width;
     lastHeight_ = height;
 
+    // screencap 没有裁剪参数，只能事后裁。见 CropFrame 的说明。
+    if (opt.hasCrop() && !CropFrame(&frame, opt, error)) {
+        return false;
+    }
+
     *out = std::move(frame);
     ok = true;
     return ok;
 }
 
-bool Capture::Grab(Frame* out, std::string* error, uint32_t targetWidth) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const uint32_t previous = targetWidth_;
-    targetWidth_ = targetWidth;
-    const bool ok = Grab(out, error);
-    targetWidth_ = previous;
-    return ok;
+bool Capture::Grab(Frame* out, std::string* error) {
+    CaptureOptions opt;
+    // ⚠️ targetWidth 在这个后端里**被忽略**：screencap 没有尺寸参数，
+    //    而软件缩放需要重采样器（不属于"能跑起来"这个后端的目标）。
+    //    裁剪不受影响 —— 那个是逐行拷贝，不需要重采样。
+    opt.targetWidth = 0;
+    return Grab(out, error, opt);
 }
 
 // ---------------------------------------------------------------------------

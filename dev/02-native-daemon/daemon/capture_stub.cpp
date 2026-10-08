@@ -110,13 +110,36 @@ bool Capture::ResolveDisplay(std::string* error) {
     return true;
 }
 
-bool Capture::Grab(Frame* out, std::string* error) {
+bool Capture::Grab(Frame* out, std::string* error, const CaptureOptions& opt) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!resolved_ && !ResolveDisplay(error)) return false;
 
-    const uint32_t width  = kStubWidth;
-    const uint32_t height = kStubHeight;
-    const uint64_t size   = static_cast<uint64_t>(width) * height * 4;
+    // 裁剪区域。stub 里就用"少画一块"，而像素值仍然按**源坐标**算 ——
+    // 于是测试可以直接从裁剪结果的像素值反推出偏移对不对，
+    // 而不是只能验尺寸。这是 stub 存在的意义。
+    uint32_t width  = kStubWidth;
+    uint32_t height = kStubHeight;
+    int32_t  offX   = 0;
+    int32_t  offY   = 0;
+
+    if (opt.hasCrop()) {
+        // 越界明确报错，不静默钳 —— 与 screencap 后端保持同一套语义
+        if (opt.cropX < 0 || opt.cropY < 0 ||
+            static_cast<uint64_t>(opt.cropX) + opt.cropW > kStubWidth ||
+            static_cast<uint64_t>(opt.cropY) + opt.cropH > kStubHeight) {
+            if (error) {
+                *error = "裁剪区域超出屏幕 " + std::to_string(kStubWidth) + "x" +
+                         std::to_string(kStubHeight);
+            }
+            return false;
+        }
+        width  = opt.cropW;
+        height = opt.cropH;
+        offX   = opt.cropX;
+        offY   = opt.cropY;
+    }
+
+    const uint64_t size = static_cast<uint64_t>(width) * height * 4;
 
     Frame frame;
     frame.fd = MakeMemfd("remote-control-stub-frame");
@@ -143,14 +166,19 @@ bool Capture::Grab(Frame* out, std::string* error) {
     // 画一张可识别的合成图：
     //   R 通道 = x 方向渐变，G 通道 = y 方向渐变，B 固定
     // 这样测试可以从像素值反推坐标，验证数据没被破坏。
+    // ⚠️ 渐变按**源坐标**（offX + x）算，不是按输出坐标 ——
+    //    按输出坐标画的话，裁剪出来的图会与整屏同一位置的图**不一样**，
+    //    测试就没法验"裁的是不是那一块"了。
     auto* px = static_cast<uint8_t*>(base);
     const uint8_t blue = static_cast<uint8_t>(0x40 +
             gFrameVariant.load(std::memory_order_relaxed));
     for (uint32_t y = 0; y < height; ++y) {
         for (uint32_t x = 0; x < width; ++x) {
             const uint64_t o = (static_cast<uint64_t>(y) * width + x) * 4;
-            px[o + 0] = static_cast<uint8_t>(x * 255 / (width  - 1));
-            px[o + 1] = static_cast<uint8_t>(y * 255 / (height - 1));
+            px[o + 0] = static_cast<uint8_t>(
+                    (offX + x) * 255 / (kStubWidth  - 1));
+            px[o + 1] = static_cast<uint8_t>(
+                    (offY + y) * 255 / (kStubHeight - 1));
             px[o + 2] = blue;
             px[o + 3] = 0xFF;
         }
@@ -167,13 +195,10 @@ bool Capture::Grab(Frame* out, std::string* error) {
     return true;
 }
 
-bool Capture::Grab(Frame* out, std::string* error, uint32_t targetWidth) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const uint32_t previous = targetWidth_;
-    targetWidth_ = targetWidth;
-    const bool ok = Grab(out, error);
-    targetWidth_ = previous;
-    return ok;
+bool Capture::Grab(Frame* out, std::string* error) {
+    CaptureOptions opt;
+    opt.targetWidth = targetWidth_;
+    return Grab(out, error, opt);
 }
 
 // ---------------------------------------------------------------------------
