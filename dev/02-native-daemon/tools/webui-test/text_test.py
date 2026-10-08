@@ -78,8 +78,24 @@ with sync_playwright() as p:
                 return new
         return []
 
+    # ⚠️ 控制卡片在**右侧面板**里，而面板在横屏流下默认是收起的
+    #    （见 webui.cpp 的 setPanel：横屏让宽度给画面，竖屏才默认展开）。
+    #    不先展开就会拿到一个 0x0 的元素 —— Playwright 报 "element is not
+    #    visible"，看起来像"页面上没有这个框"。
+    #
+    #    这个坑第一次没暴露：当时测的是 NDK 那个抓帧后端，它一帧都抓不到，
+    #    于是页面从没收到 size 消息、也就没触发"横屏收起面板"的逻辑，
+    #    元素恰好是可见的 —— **测试因为错误的原因通过了**。
+    #    换到能正常出帧的 ROM 上，立刻就红了。
+    if pg.evaluate("()=>document.body.classList.contains('nopanel')"):
+        pg.click("#panelsw")
+        pg.wait_for_timeout(400)
+    chk("右侧面板已展开", not pg.evaluate(
+        "()=>document.body.classList.contains('nopanel')"), "面板没能展开")
+
     box = pg.locator("#textin").bounding_box()
-    chk("文字输入框可见", bool(box), "页面上没有 #textin" if not box else "")
+    chk("文字输入框可见", bool(box) and box["width"] > 10,
+        "页面上没有 #textin" if not box else f"{box['width']:.0f}x{box['height']:.0f}")
 
     # ── 粘贴（默认模式，支持中文）──
     pg.fill("#textin", CJK)
