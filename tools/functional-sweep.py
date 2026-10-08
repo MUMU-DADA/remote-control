@@ -20,6 +20,7 @@
 """
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
@@ -223,6 +224,96 @@ if launch_ok:
     check("Settings 真的起来了", "settings" in fg2.lower(), (fg2 or "(取不到)")[:70])
     st, d = req(f"/api/v1/apps/{TEST_PKG}/kill", "POST", {})
     check("结束 Settings（am force-stop）", st == 200 and d.get("ok") is not False, str(d)[:60])
+
+# ── 应用生命周期：装 / 卸 / 清数据 / 启停 / 权限（v8）──
+#
+# ⚠️ 这一节是**补出来**的，原因值得写下来：原来的体检完全没有覆盖 install，
+#    于是「APK 安装在这套 ROM 上根本装不上」这件事活了很久没被发现 ——
+#    暂存目录 /data/misc/remote-control 的 SELinux 标签是
+#    remote_control_data_file，而策略没给 system_server 读它的权限，
+#    `pm install` 必然失败。接口确实如实回了 500，但**没有任何一条检查去看它**。
+#
+#    所以这里判据一律取设备侧证据（`pm list packages` / `dumpsys package`），
+#    不信接口返回 —— 这正是本脚本开头那条原则。
+print("\n\033[1;34m[5b] 应用生命周期（装/卸/清数据/启停/权限）\033[0m")
+
+PROBE = "org.autosnap.arm64probe"
+
+
+def upload(path, blob, timeout=180):
+    """二进制上传（APK）。req() 会把 body 当 JSON 编码，这里不能复用它。"""
+    r = urllib.request.Request(BASE + path, data=blob,
+                               headers={"Content-Type": "application/octet-stream"},
+                               method="POST")
+    try:
+        with urllib.request.urlopen(r, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw or b"{}")
+        except Exception:
+            return e.code, {"error": raw[:200].decode(errors="replace")}
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
+_apk = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..",
+    "dev", "04-android-rom", "artifacts", "arm64-probe.apk"))
+
+if not os.path.exists(_apk):
+    check("安装用例的探针 APK 存在", False, f"缺 {_apk}")
+else:
+    # 先清干净：上一轮的残留会让「安装成功」变成假绿
+    sh(f"pm uninstall {PROBE}")
+    st, d = upload("/api/v1/install", open(_apk, "rb").read())
+    listed = PROBE in sh("pm list packages")
+    check("安装 APK（判据：设备上真的出现了该包）", st == 200 and listed,
+          f"HTTP {st}；pm list 命中={listed}；{str(d)[:80]}")
+
+    if listed:
+        st, d = req(f"/api/v1/apps/{PROBE}/clear", "POST", {})
+        check("清除应用数据", st == 200 and d.get("ok") is not False, str(d)[:70])
+
+        st, d = req(f"/api/v1/apps/{PROBE}/enabled", "POST", {"enabled": False})
+        disabled = PROBE in sh(f"pm list packages -d | grep -F {PROBE}")
+        check("停用应用（判据：pm list -d 里出现）", st == 200 and disabled,
+              f"停用列表命中={disabled}；{str(d)[:60]}")
+
+        st, d = req(f"/api/v1/apps/{PROBE}/enabled", "POST", {"enabled": True})
+        back = PROBE not in sh(f"pm list packages -d | grep -F {PROBE}")
+        check("重新启用应用（判据：已不在停用列表）", st == 200 and back,
+              f"已恢复={back}；{str(d)[:60]}")
+
+        # 权限：探针 APK 没申请权限，用系统里确实申请了的那条来验；
+        # 判据是 `dumpsys package` 里的 granted= 真的翻转。
+        PERM_PKG = "com.android.contacts"
+        PERM = "android.permission.READ_CONTACTS"
+
+        def _granted():
+            out = sh(f"dumpsys package {PERM_PKG} | grep -F '{PERM}:'")
+            return "granted=true" in out
+
+        st, d = req(f"/api/v1/apps/{PERM_PKG}/permission", "POST",
+                    {"permission": PERM, "grant": True})
+        g1 = _granted()
+        st2, d2 = req(f"/api/v1/apps/{PERM_PKG}/permission", "POST",
+                      {"permission": PERM, "grant": False})
+        g0 = _granted()
+        check("授予/撤销运行时权限（判据：dumpsys 里 granted 真的翻转）",
+              st == 200 and st2 == 200 and g1 and not g0,
+              f"grant→{g1}，revoke→{g0}")
+
+        # 不存在的包必须 404 —— 而不是一句误导性的「系统应用通常卸不掉」
+        st, d = req("/api/v1/apps/com.nope.nope/uninstall", "POST", {})
+        check("卸载不存在的包 → 404", st == 404 and d.get("status") == 4105,
+              f"HTTP {st} status={d.get('status')}")
+
+        st, d = req(f"/api/v1/apps/{PROBE}/uninstall", "POST", {})
+        gone = PROBE not in sh("pm list packages")
+        check("卸载 APK（判据：设备上真的没了）", st == 200 and gone,
+              f"HTTP {st}；已消失={gone}")
 
 # ── 文件 ──
 print("\n\033[1;34m[6] 文件管理\033[0m")

@@ -225,6 +225,52 @@ allow system_server remote_control:fd use;
 # 实测：补了 fd use 之后退出码仍是 2，denial 换成
 #     avc: denied { write } ... tclass=fifo_file scontext=system_server
 allow system_server remote_control:fifo_file { write read getattr open };
+
+# ⚠️ `pm install <路径>` 要 system_server **自己打开**那个 APK 文件。
+#
+#    我们的安装暂存目录是 /data/misc/remote-control（`TempDir()` 的首选），
+#    该路径在 file_contexts 里是 remote_control_data_file —— 而这份策略
+#    **从来没给 system_server 读过它**。实测症状很有误导性：
+#        avc: denied { read } for scontext=u:r:system_server:s0
+#             tcontext=u:object_r:remote_control_data_file:s0 tclass=file
+#        System server has no access to read file context ...
+#             Consider using a file under /data/local/tmp/
+#    也就是说 **APK 安装这条命令在 ROM 上一直是坏的**；而手工部署
+#    （root 跑、暂存落到 /data/local/tmp）时它又能用 —— 于是本地测着是好的。
+#    复现与定位记录见提交信息。
+#
+#    为什么不干脆把暂存目录换到 /data/local/tmp：那个目录 shell 可写，
+#    等于让任何拿到 shell 的东西能在校验与安装之间把 APK 掉包。
+#    保留私有暂存目录 + 让受信任的 system_server 只读，是更小的一张口子。
+#
+#    只给 read/open/getattr/map：读得到就够，它不需要写我们的目录
+#    （public/domain.te 另有一条 neverallow 禁止 system_server 执行 /data 下的文件）。
+allow system_server remote_control_data_file:file { open read getattr map };
+
+# ── 让 `cmd` 能**查询** SELinux 策略（APK 安装失败的真因）──────────────────
+#
+# ⚠️ 报错信息把人指向了完全错误的方向，值得写下来。
+#
+# `pm install <路径>` 走 `/system/bin/pm` → `cmd package install`，
+# 而 `cmd` 在 openFile() 里会先做一次策略查询：
+#     selinux_check_access(caller_context, file_context, "file", "read", ...)
+# 这次查询**在 `cmd` 进程里执行**（也就是我们的 remote_control 域），
+# libselinux 要读 selinuxfs、要 `kernel:security compute_av`、还要一个
+# SELinux netlink socket 才能算。没有这些权限时，命令行工具一路打出：
+#
+#     avc: could not determine enforcing mode: Permission denied
+#     avc: can't open netlink socket: 13 (Permission denied)
+#     cmd.cpp: "System server has no access to read file context ..."
+#
+# 最后那句是 cmd.cpp 里写死的文案 —— 它说的是"system_server 读不了"，
+# 实际发生的是"**我们查不动**"。照着它去改 system_server 的规则会白费功夫：
+# 实测从 shell 域对**同一个文件**跑 `pm install` 是 Success 的
+# （adb install 能成功正是因为 shell 域有这套权限）。
+#
+# AOSP 为这件事准备了现成的宏（public/te_macros 的 selinux_check_access），
+# shell / system_server / zygote 用的都是它 —— 别手写权限位。
+selinux_check_access(remote_control)
+
 # ⚠️ 不要写 `allow ... servicemanager:service_manager find;` ——
 #    public/service.te:280 有 neverallow 专门挡它（servicemanager 本身不该被
 #    普通域直接 find）。按**服务**授权才对，app_api_service 是 AOSP 给

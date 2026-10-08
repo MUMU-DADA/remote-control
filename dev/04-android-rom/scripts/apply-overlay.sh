@@ -128,16 +128,25 @@ mkdir -p "$DEVICE_DST"
 cp -a "$DEVICE_SRC"/. "$DEVICE_DST"/
 
 # 2b) daemon 源码也有项目真源。AOSP/frameworks/native/cmds/remote-control
-#    位于被 git 忽略的构建树中，设备树同步不会覆盖它；热更新相关改动
-#    必须在构建前同步，否则会编译到旧的 REST/HTTP 实现。
-DAEMON_SRC="$PROJECT_ROOT/dev/02-native-daemon/daemon"
+#     位于被 git 忽略的构建树中，设备树同步不会覆盖它。
+#
+# ⚠️ 这里原来是**写死的 10 个文件白名单**，于是 dev/ 里改的其它文件
+#    （dispatch.cpp / appops.cpp / keyboard.cpp / inject_*.cpp …）根本不会进
+#    AOSP 树 —— 构建照样 0 error，产物里的 daemon 却是旧的。
+#    实测踩到：protocol.h 加了 v8 命令、dispatch.cpp 也实现了，
+#    ROM 里跑的还是老二进制，查了很久才定位到这里。
+#    教训与 README 那句一样：**"命令没报错"不等于"事情做成了"**。
+#
+#    现在直接调用 tools/integrate-aosp.sh —— 同步只有那一处实现
+#    （rsync -a --delete），不再在这里维护第二份"哪些文件要同步"的清单。
 DAEMON_DST="$AOSP_DIR/frameworks/native/cmds/remote-control/daemon"
-for rel in http_server.cpp http_server.h launcher.cpp main.cpp memfd_util.h protocol.h \
-           remote-control.rc rest_api.cpp rest_api.h sha256.cpp; do
-    [ -f "$DAEMON_SRC/$rel" ] || die "daemon 源文件不存在：$DAEMON_SRC/$rel"
-    cp -a "$DAEMON_SRC/$rel" "$DAEMON_DST/$rel"
-done
-log "同步 daemon 源码 → ${DAEMON_DST#"$PROJECT_ROOT"/}"
+INTEGRATE="$PROJECT_ROOT/tools/integrate-aosp.sh"
+[ -f "$INTEGRATE" ] || die "找不到 tools/integrate-aosp.sh —— daemon 源码无法同步，构建会用到旧的树内副本"
+if ! _out="$(bash "$INTEGRATE" 2>&1)"; then
+    printf '%s\n' "$_out" | tail -20 >&2
+    die "同步 daemon 源码失败（tools/integrate-aosp.sh）"
+fi
+log "同步 daemon 源码 → ${DAEMON_DST#"$PROJECT_ROOT"/}（经 tools/integrate-aosp.sh）"
 
 if [ "$HAS_BRIDGE" = 1 ]; then
     # 3) 同步载荷

@@ -179,6 +179,25 @@ rsync -a --exclude='test_inject_uinput' --exclude='test_integration' \
 ok "tests/"
 
 # -----------------------------------------------------------------------------
+step "把同步进来的源文件 touch 一遍"
+# -----------------------------------------------------------------------------
+# ⚠️ 这一步不能省，否则会出现「构建 0 error、产物却是旧的」。
+#
+# rsync -a 保留源文件的 mtime。而 AOSP 树里已有的 .o / 生成物可能是**上一轮
+# 刚编出来的**（比源文件新），ninja 只比 mtime，于是判定"不用重编" ——
+# 源文件确实换成了新的，编译却根本没发生。实测踩到：protocol.h 加了 v8 命令、
+# dispatch.cpp 也实现了，ROM 里跑的还是老二进制，查了很久。
+#
+# 同步后统一 touch，保证树内副本比任何既有产物新。用 mtime 做新鲜度判断的
+# 地方（build-remote-control.sh）不受影响：副本变新只会让检查更容易通过，
+# 而"同步之后 dev/ 又改了"仍然能被检出（那时 dev 的文件比副本新）。
+find "$DST" -type f \
+     \( -name '*.cpp' -o -name '*.h' -o -name '*.bp' -o -name '*.rc' \
+        -o -name '*.te' -o -name 'file_contexts' -o -name '*.java' \) \
+     -exec touch {} + 2>/dev/null || true
+ok "已刷新源文件时间戳"
+
+# -----------------------------------------------------------------------------
 step "校验布局"
 # -----------------------------------------------------------------------------
 [ -f "$DST/daemon/Android.bp" ]        && ok "daemon/Android.bp"        || { bad "缺 daemon/Android.bp"; exit 1; }
