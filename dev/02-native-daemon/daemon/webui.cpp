@@ -1391,6 +1391,37 @@ cvs.addEventListener('pointerleave', (ev) => {
   if (ev.buttons === 0) endPointer(ev);
 });
 
+// ── 鼠标：滚轮与右键 ────────────────────────────────────────────────────────
+//
+// 画布上的手势默认全部当触控（那是主要用途），但有两件事触控做不到：
+//   · 滚轮 —— 连续滚动列表时用手指"划"会带惯性、还可能误触
+//   · 右键 —— 上下文菜单
+// 所以只把这两个事件转给鼠标接口，其余手势一律不动。
+function mousePost(body, okText) {
+  api('/mouse', { method:'POST', headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify(body) })
+    .then(() => setStatus(okText))
+    .catch(e => setStatus('鼠标操作失败：' + e, true));
+}
+
+cvs.addEventListener('wheel', (ev) => {
+  ev.preventDefault();
+  // WheelEvent.deltaY 向下为正，而接口里 delta 正 = 滚轮**向上**，所以要取反。
+  // 触控板一次滑动常常是几十像素，接口的单位是"格"（一格 = 真实滚轮咔一下），
+  // 按 100px 折一格；不足一格也至少发一格，否则轻微滑动会毫无反应。
+  let clicks = Math.trunc(-ev.deltaY / 100);
+  if (clicks === 0) clicks = ev.deltaY > 0 ? -1 : 1;
+  // 上限与接口一致（接口对超过 64 格的请求直接 400，这里先夹住）
+  clicks = Math.max(-64, Math.min(64, clicks));
+  mousePost({ action:'wheel', delta: clicks, axis: ev.shiftKey ? 'h' : 'v' },
+            '滚轮 ' + (clicks > 0 ? '↑' : '↓') + Math.abs(clicks) + ' 格');
+}, { passive: false });
+
+cvs.addEventListener('contextmenu', (ev) => {
+  ev.preventDefault();          // 别弹浏览器自己的菜单
+  mousePost({ action:'click', button:'right' }, '右键');
+});
+
 // 长按不需要专门的命令：流式模型里"按下 → 手指不动 → 延迟抬起"
 // 本来就是长按，系统会自己识别（Android 的 longPressTimeout 约 500ms）。
 // 一次性手势（下面这个）只在触控流断开时兜底。
