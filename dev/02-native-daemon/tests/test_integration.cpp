@@ -255,6 +255,84 @@ void TestRegionCapture(int cfd) {
     }
 }
 
+// ── [4b] 压力 / 接触面积曲线 ────────────────────────────────────────────────
+//
+// 纯函数，所以可以逐点验形状 —— 而不是"发一次看看有没有崩"。
+// 这一层最容易出的错是**形状反了**（ease-in 写成 ease-out）或
+// updown 的端点取错，两者都不会报错，只会让压力曲线看起来"没生效"。
+void TestCurve() {
+    printf("\n\033[1;34m[4b] 压力/面积曲线\033[0m  形状与端点\n");
+
+    auto val = [](CurveShape s, float tt, float p0, float p1) {
+        float pr = 0, sz = 0;
+        ApplyCurve(s, tt, p0, p1, p0, p1, &pr, &sz);
+        return pr;
+    };
+    auto near = [](float a, float b) { return (a - b) < 0.001f && (b - a) < 0.001f; };
+
+    // 线性：两端等于给定值，中点是中点
+    Check(near(val(CurveShape::kLinear, 0.0f, 0.2f, 1.0f), 0.2f), "linear t=0 → P0");
+    Check(near(val(CurveShape::kLinear, 1.0f, 0.2f, 1.0f), 1.0f), "linear t=1 → P1");
+    Check(near(val(CurveShape::kLinear, 0.5f, 0.2f, 1.0f), 0.6f), "linear t=0.5 → 中点");
+
+    // ⚠️ ease-in / ease-out 是**最容易写反**的一对：
+    //    名字说的是"起步慢"还是"起步快"，而代码里只差一个平方的方向。
+    //    t=0.5 时 ease-in 只走完 25%，ease-out 走完 75%。
+    Check(near(val(CurveShape::kEaseIn, 0.5f, 0.0f, 1.0f), 0.25f),
+          "ease-in t=0.5 → 25%%（起步慢）");
+    Check(near(val(CurveShape::kEaseOut, 0.5f, 0.0f, 1.0f), 0.75f),
+          "ease-out t=0.5 → 75%%（起步快）");
+    Check(near(val(CurveShape::kEaseIn, 0.0f, 0.2f, 0.9f), 0.2f), "ease-in 两端仍是 P0");
+    Check(near(val(CurveShape::kEaseOut, 1.0f, 0.2f, 0.9f), 0.9f), "ease-out 两端仍是 P1");
+
+    // updown（笔画）：两头轻、中间重。
+    // 端值取 min(P0,P1)，峰值取 max(P0,P1) —— 与另外三个**语义不同**。
+    Check(near(val(CurveShape::kUpDown, 0.0f, 0.2f, 0.9f), 0.2f),
+          "updown t=0 → min(P0,P1) = 0.2");
+    Check(near(val(CurveShape::kUpDown, 1.0f, 0.2f, 0.9f), 0.2f),
+          "updown t=1 → min(P0,P1) = 0.2（两头一样轻）");
+    Check(near(val(CurveShape::kUpDown, 0.5f, 0.2f, 0.9f), 0.9f),
+          "updown t=0.5 → max(P0,P1) = 0.9（中间重）");
+    // 反过来给也一样：笔画形状与"哪个是起点"无关
+    Check(near(val(CurveShape::kUpDown, 0.5f, 0.9f, 0.2f), 0.9f),
+          "updown 起点终点互换，峰值不变");
+
+    // t 越界要夹住，不能外推（外推会给出 >1 或 <0 的压力）
+    Check(near(val(CurveShape::kLinear, -0.5f, 0.3f, 0.8f), 0.3f), "t<0 被夹到 0");
+    Check(near(val(CurveShape::kLinear, 1.5f, 0.3f, 0.8f), 0.8f), "t>1 被夹到 1");
+    Check(near(val(CurveShape::kEaseOut, 1.5f, 0.3f, 0.8f), 0.8f),
+          "ease-out 超界也被夹住（u=1-t 会变成负数，不夹就是错的）");
+
+    // size 走同一条曲线
+    {
+        float pr = 0, sz = 0;
+        ApplyCurve(CurveShape::kLinear, 0.5f, 0.1f, 0.1f, 0.02f, 0.10f, &pr, &sz);
+        Check(near(sz, 0.06f), "size 与 pressure 共用曲线（t=0.5 → 0.06）");
+        Check(near(pr, 0.1f), "pressure 不变时线性也不变");
+    }
+
+    // 解析
+    struct C { const char* s; CurveShape want; bool ok; };
+    const C cases[] = {
+        {"linear",   CurveShape::kLinear,  true},
+        {"",         CurveShape::kLinear,  true},   // 空 = 默认
+        {"ease-in",  CurveShape::kEaseIn,  true},
+        {"ease_in",  CurveShape::kEaseIn,  true},   // 下划线也认
+        {"EASE-IN",  CurveShape::kEaseIn,  true},   // 大小写不敏感
+        {"ease-out", CurveShape::kEaseOut, true},
+        {"updown",   CurveShape::kUpDown,  true},
+        {"taper",    CurveShape::kUpDown,  true},   // 别名
+        {"up-down",  CurveShape::kUpDown,  true},
+        {"bogus",    CurveShape::kLinear,  false},
+    };
+    for (const auto& c : cases) {
+        CurveShape got = CurveShape::kLinear;
+        const bool ok = ParseCurve(c.s, &got);
+        Check(ok == c.ok && (!ok || got == c.want), "ParseCurve(%-9s) → %s",
+              c.s[0] ? c.s : "(空)", ok ? CurveName(got) : "拒绝");
+    }
+}
+
 void TestInfo(int cfd) {
     printf("\n\033[1;34m[1] Info 请求\033[0m\n");
 
@@ -772,6 +850,7 @@ int main() {
     TestInfo(cfd);
     TestCaptureFrame(cfd);
     TestRegionCapture(cfd);
+    TestCurve();
     TestFrameHubStopRestart(dispatcher, readFd);
     TestFrameHubCaptureIntervals();
     TestTapRoundTrip(cfd, readFd);

@@ -581,7 +581,7 @@ ALOGI("capture: 合成=%lldus 拷贝=%lldus",
 | 双击 | ✅ 两次单击，间隔默认 120ms（系统阈值约 300ms） |
 | 拖拽 | ✅ 起点先停顿 120ms 再移动，否则被判成滑动（fling） |
 | 滑动 | ✅ 直线插值，可配时长和步数 |
-| 压感 / 接触面积 | ⚠️ 每个手势可设常量值，尚不支持逐点曲线 |
+| 压感 / 接触面积 | ✅ 起点/终点分别可设（`pressure`/`pressure2`、`size`/`size2`），中间按 `curve` 过渡：`linear`/`ease-in`/`ease-out`/`updown`（笔画形状）。⚠️ `updown` 是"两头轻中间重"，不是端点插值 |
 | **真多点触控** | ✅ **uinput 后端最多 10 个指针**（`kMaxSlots = 10`，`pointerId` → slot 映射）；⚠️ Binder 后端固定 `pointerCount = 1`；⚠️ 官方 `virtual_touchpad` 后端只有 2 槽位 |
 | 按键注入 | ✅ `KeyEvent` 已实现（uinput 虚拟键盘） |
 | 文本输入 | ✅ `Text` 两条路：`paste`（剪贴板 + `KEY_PASTE`，**支持中文/emoji 等任意 Unicode**，用完恢复剪贴板）与 `type`（逐字符按键，仅可打印 ASCII）。**没有自建输入法** —— `type` 打不出中文是按键注入的上限（Linux 键码里没有"中"这个字），Android 自带 `input text` 同样打不出 |

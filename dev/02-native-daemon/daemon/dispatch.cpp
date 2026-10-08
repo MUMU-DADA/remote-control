@@ -54,6 +54,36 @@ Reply MakeReply(uint32_t status, uint32_t cmd) {
     return r;
 }
 
+// flags 里的 2 位曲线形状 → CurveShape。
+//
+// 未知取值一律当 kLinear（而不是报错）：老客户端根本不设这两位，
+// 而它们是 0 —— 正好就是 linear，所以"不认识"与"默认"是同一个行为。
+CurveShape CurveFromFlags(uint32_t flags) {
+    const uint32_t v = (flags & kFlagCurveMask) >> kFlagCurveShift;
+    switch (v) {
+        case 1: return CurveShape::kEaseIn;
+        case 2: return CurveShape::kEaseOut;
+        case 3: return CurveShape::kUpDown;
+        default: return CurveShape::kLinear;
+    }
+}
+
+// 手势 payload 里可选的终点压力/面积： "<pressure2>\0<size2>"
+//
+// 为什么走 payload 而不是 Request 字段：Request 里只有**一个** pressure
+// 与一个 size（起点用），要表达"从 0.3 到 0.9"必须有第二个值。
+// 加字段就是改线格式；NUL 分隔的 payload 本来就是这些命令自由发挥的地方。
+void ApplyEndValues(const std::vector<std::string>& args, TouchPoint* to) {
+    if (args.size() > 0 && !args[0].empty()) {
+        const float v = strtof(args[0].c_str(), nullptr);
+        if (v > 0.0f) to->pressure = v > 1.0f ? 1.0f : v;
+    }
+    if (args.size() > 1 && !args[1].empty()) {
+        const float v = strtof(args[1].c_str(), nullptr);
+        if (v > 0.0f) to->size = v;
+    }
+}
+
 // 从请求里提取一个触控点，缺省值填上
 TouchPoint PointFromRequest(const Request& req) {
     TouchPoint p;
@@ -346,7 +376,8 @@ ReplyPacket Dispatcher::HandleCapture(const Request& req) {
     return packet;
 }
 
-ReplyPacket Dispatcher::HandleTouch(const Request& req) {
+ReplyPacket Dispatcher::HandleTouch(const Request& req,
+                                    const std::vector<std::string>& args) {
     ReplyPacket packet;
     packet.reply = MakeReply(kOk, req.cmd);
 
@@ -375,9 +406,13 @@ ReplyPacket Dispatcher::HandleTouch(const Request& req) {
             TouchPoint to   = from;
             to.x = req.x2;
             to.y = req.y2;
+            // 终点压力/面积可以单独给（payload），不给就与起点相同 ——
+            // 那样线性曲线退化成常量，与老行为完全一致。
+            ApplyEndValues(args, &to);
             const uint32_t ms =
                     req.durationMs > 0 ? req.durationMs : kDefaultSwipeMs;
-            ok = injector_->Swipe(from, to, ms, /*steps=*/0, async, &error);
+            ok = injector_->Swipe(from, to, ms, /*steps=*/0, async, &error,
+                                  CurveFromFlags(req.flags));
             break;
         }
         case Cmd::TouchDown:
@@ -433,7 +468,7 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
         case Cmd::TouchDown:
         case Cmd::TouchMove:
         case Cmd::TouchUp:
-            return HandleTouch(req);
+            return HandleTouch(req, args);
 
         case Cmd::ListApps:
             return HandleListApps(req);
@@ -463,7 +498,7 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
         case Cmd::LongPress:
         case Cmd::Drag:
         case Cmd::DoubleTap:
-            return HandleGesture(req);
+            return HandleGesture(req, args);
         case Cmd::KeyEvent:
             return HandleKeyEvent(req, args);
         case Cmd::Mouse:
@@ -1398,7 +1433,8 @@ ReplyPacket Dispatcher::HandleShutdown(const Request& req, bool restart) {
 
 // ── v4：手势 / 按键 / 剪贴板 ─────────────────────────────────────────────────
 
-ReplyPacket Dispatcher::HandleGesture(const Request& req) {
+ReplyPacket Dispatcher::HandleGesture(const Request& req,
+                                      const std::vector<std::string>& args) {
     ReplyPacket packet;
     packet.reply = MakeReply(kOk, req.cmd);
 
@@ -1424,7 +1460,9 @@ ReplyPacket Dispatcher::HandleGesture(const Request& req) {
             TouchPoint to   = from;
             to.x = req.x2;
             to.y = req.y2;
-            ok = injector_->Drag(from, to, req.durationMs, async, &error);
+            ApplyEndValues(args, &to);
+            ok = injector_->Drag(from, to, req.durationMs, async, &error,
+                                 CurveFromFlags(req.flags));
             break;
         }
         case Cmd::DoubleTap: {

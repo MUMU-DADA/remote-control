@@ -15,6 +15,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <cctype>   // tolower（ParseCurve 用）
+#include <string>
+
 #include "remote_control_log.h"
 #include "inject_backend.h"
 
@@ -120,9 +123,64 @@ bool Injector::Tap(const TouchPoint& point, uint32_t durationMs, bool async,
     return SendSingle(kActionUp, point, NowNs(), async, error);
 }
 
+// ── 曲线 ────────────────────────────────────────────────────────────────────
+
+void ApplyCurve(CurveShape shape, float t, float p0, float p1, float s0, float s1,
+                float* outPressure, float* outSize) {
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    if (shape == CurveShape::kUpDown) {
+        // 笔画形状：两头轻、中间重。端值取两头里较小的那个，峰值取较大的。
+        // 4t(1-t) 在 t=0/0.5/1 处正好是 0/1/0。
+        const float pLo = p0 < p1 ? p0 : p1;
+        const float pHi = p0 < p1 ? p1 : p0;
+        const float sLo = s0 < s1 ? s0 : s1;
+        const float sHi = s0 < s1 ? s1 : s0;
+        const float f = 4.0f * t * (1.0f - t);
+        if (outPressure) *outPressure = pLo + (pHi - pLo) * f;
+        if (outSize)     *outSize     = sLo + (sHi - sLo) * f;
+        return;
+    }
+
+    float f = t;
+    if (shape == CurveShape::kEaseIn) {
+        f = t * t;
+    } else if (shape == CurveShape::kEaseOut) {
+        const float u = 1.0f - t;
+        f = 1.0f - u * u;
+    }
+    if (outPressure) *outPressure = p0 + (p1 - p0) * f;
+    if (outSize)     *outSize     = s0 + (s1 - s0) * f;
+}
+
+bool ParseCurve(const std::string& name, CurveShape* out) {
+    if (out == nullptr) return false;
+    std::string k;
+    for (char c : name) {
+        if (c == '_' || c == '-') continue;   // 允许 ease_in / ease-in 两种写法
+        k.push_back(static_cast<char>(tolower(static_cast<unsigned char>(c))));
+    }
+    if (k.empty()   || k == "linear")  { *out = CurveShape::kLinear;  return true; }
+    if (k == "easein")                 { *out = CurveShape::kEaseIn;  return true; }
+    if (k == "easeout")                { *out = CurveShape::kEaseOut; return true; }
+    if (k == "updown" || k == "taper") { *out = CurveShape::kUpDown;  return true; }
+    return false;
+}
+
+const char* CurveName(CurveShape shape) {
+    switch (shape) {
+        case CurveShape::kEaseIn:  return "ease-in";
+        case CurveShape::kEaseOut: return "ease-out";
+        case CurveShape::kUpDown:  return "updown";
+        case CurveShape::kLinear:
+        default:                   return "linear";
+    }
+}
+
 bool Injector::Swipe(const TouchPoint& from, const TouchPoint& to,
                      uint32_t durationMs, uint32_t steps, bool async,
-                     std::string* error) {
+                     std::string* error, CurveShape curve) {
     if (durationMs == 0) durationMs = 300;
 
     // 按 ~60Hz 估算步数；步数太少会让滑动看起来是「跳」过去的
@@ -152,8 +210,10 @@ bool Injector::Swipe(const TouchPoint& from, const TouchPoint& to,
         mid.y = static_cast<int32_t>(
                 static_cast<float>(from.y) +
                 static_cast<float>(to.y - from.y) * t + 0.5f);
-        mid.pressure = from.pressure + (to.pressure - from.pressure) * t;
-        mid.size     = from.size + (to.size - from.size) * t;
+        // 压力与接触面积沿路径变化。默认线性（等价于原来的写法），
+        // 其它形状见 ApplyCurve。
+        ApplyCurve(curve, t, from.pressure, to.pressure,
+                   from.size, to.size, &mid.pressure, &mid.size);
 
         const int64_t when = t0 + perStepNs * i;
         if (!SendSingle(kActionMove, mid, when, async, error)) {
@@ -195,7 +255,8 @@ bool Injector::LongPress(const TouchPoint& point, uint32_t durationMs,
 }
 
 bool Injector::Drag(const TouchPoint& from, const TouchPoint& to,
-                    uint32_t durationMs, bool async, std::string* error) {
+                    uint32_t durationMs, bool async, std::string* error,
+                    CurveShape curve) {
     if (durationMs == 0) durationMs = 600;
 
     const int64_t t0 = NowNs();
@@ -220,8 +281,10 @@ bool Injector::Drag(const TouchPoint& from, const TouchPoint& to,
                                      static_cast<float>(to.x - from.x) * t + 0.5f);
         mid.y = static_cast<int32_t>(static_cast<float>(from.y) +
                                      static_cast<float>(to.y - from.y) * t + 0.5f);
-        mid.pressure = from.pressure;
-        mid.size     = from.size;
+        // 原来拖拽全程用起点的常量压力。既然 Swipe 支持沿路径变化，
+        // 拖拽没理由不支持 —— 有些应用（画板）恰恰在拖拽时才看压力。
+        ApplyCurve(curve, t, from.pressure, to.pressure,
+                   from.size, to.size, &mid.pressure, &mid.size);
 
         const int64_t when = moveStart + perStepNs * i;
         if (!SendSingle(kActionMove, mid, when, async, error)) return false;

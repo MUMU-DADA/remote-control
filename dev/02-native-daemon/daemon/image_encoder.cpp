@@ -66,6 +66,26 @@ namespace {
 //
 // 选 2 是因为它只比最强的差 3.6% 体积，却快一倍。
 // Skia 选 3 是为了跟 Chrome 对齐，不是因为它最优。
+//
+// ── 1280x720 真机复测（模拟器，真实抓帧，q90，各 5 次取中位数）──────
+//
+//   method      平面界面(启动器)          文字界面(设置搜索)
+//             字节    耗时 ms           字节    耗时 ms
+//     0      31496    28.3    +48.9%   27464    29.4    +23.6%
+//     1      28980    34.0    +37.0%   25384    35.2    +14.2%
+//     2      22082    28.9     +4.4%   23278    35.8     +4.8%
+//     3      21030    56.1     -0.6%   22032    49.5     -0.9%
+//     4      21148    56.1      基准    22222    50.5      基准
+//     5      20840    59.3     -1.5%   22134    55.2     -0.4%
+//     6      20818    79.9     -1.6%   21664    69.1     -2.5%
+//
+// 两次测下来结论一致，而且**推翻了"6 一定值得"的直觉**：
+//   · 真正有意义的档位差别是 **2 与 4+ 之间**，不是高位那几档。
+//     2 快一倍，体积只大 4~5% —— 所以画面流用 2 是对的。
+//   · 3 以上每一档只换来 2% 上下的体积，而耗时一路涨到 1.4 倍。
+//     单次截图选 6 是因为"时间不要钱"（多十几毫秒，人感觉不到），
+//     不是因为 6 比 4 好多少 —— 这个区别得说清楚，否则下次有人
+//     以为改 method 是优化大头。
 constexpr int kDefaultWebpMethod = 2;
 
 // 环境变量：强制走回退路径。
@@ -382,8 +402,9 @@ std::string ImageEncoder::BackendSummary() const {
 }
 
 std::string ImageEncoder::Encode(const uint8_t* rgba, uint32_t width,
-                                 uint32_t height, ImageFormat format,
-                                 int quality, std::string* error) {
+                                  uint32_t height, ImageFormat format,
+                                  int quality, std::string* error,
+                                  int webpMethod) {
     if (rgba == nullptr || width == 0 || height == 0) {
         if (error) *error = "空图像";
         return {};
@@ -442,9 +463,9 @@ std::string ImageEncoder::Encode(const uint8_t* rgba, uint32_t width,
     // 以前这里直接报错（"WebP 只有 AndroidBitmap 能出"），
     // 因为设备上没有 libwebp.so。现在源码内置了，任何版本都能编。
     if (format == ImageFormat::kWebp) {
-        return WebpEncoder::Instance().EncodeRgba(rgba, width, height,
-                                                  quality > 0 ? quality : 75,
-                                                  kDefaultWebpMethod, error);
+        return WebpEncoder::Instance().EncodeRgba(
+                rgba, width, height, quality > 0 ? quality : 75,
+                webpMethod >= 0 ? webpMethod : kDefaultWebpMethod, error);
     }
 
     // ── 回退：PNG 走 zlib ──

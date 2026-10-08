@@ -252,6 +252,16 @@ enum Flags : uint32_t {
     // AppUninstall：保留应用数据（`pm uninstall -k`）。
     // 位 10 —— 位 8/9 已经分别给了 kFlagAsync 和 kFlagForce。
     kFlagKeepData      = 1u << 10,
+    // 手势的压力/接触面积曲线（2 位，值见 inject.h 的 CurveShape）。
+    //
+    // 为什么不给 Request 加字段：那是改**线格式**（Request 是定长结构，
+    // 加字段要动版本号与所有客户端）。曲线只有 4 种取值，2 个空闲位
+    // 就够，而且 flags 本来就是"修饰本次请求"的地方。
+    //
+    //   0 = linear（默认，与老客户端不设时的行为一致）
+    //   1 = ease-in   2 = ease-out   3 = updown
+    kFlagCurveShift    = 11,
+    kFlagCurveMask     = 0x3u << kFlagCurveShift,
 };
 
 struct Request {

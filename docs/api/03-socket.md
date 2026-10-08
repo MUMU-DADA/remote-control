@@ -201,6 +201,20 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 | 41 | `AppEnabled` | 8 | `<包名>\0<on\|off>` | 启用 / 停用应用 |
 | 42 | `AppPermission` | 8 | `<包名>\0<权限名>\0<grant\|revoke>` | 授予 / 撤销运行时权限 |
 | 43 | `Mouse` | 9 | `<动作>[\0<参数>…]`：`move\0<dx>\0<dy>` \| `button\0<按钮>\0<down\|up>` \| `click\0<按钮>` \| `wheel\0<格数>[\0<v\|h>]` | 鼠标：相对移动 / 按键 / 滚轮 |
+
+**v10 起，`Swipe` / `Drag` 的两个可选扩展**：
+
+- `payload`（NUL 分隔，可空）`<pressure2>\0<size2>`：终点的压力/接触面积。
+  不给就是与起点相同（全程常量，与老客户端一致）。
+  终点值走 payload 而不是 Request 字段，是因为结构体里只放得下一个
+  `pressure` 与一个 `size`（起点用）。
+- `flags` 位 11-12（`kFlagCurveMask`）：过渡曲线，0=linear（默认，
+  与老客户端不设时一致）、1=ease-in、2=ease-out、3=updown。
+  曲线只有 4 种取值，用两个空闲位比给定长 Request 加字段代价小得多
+  （加字段要动版本号与所有客户端）。
+
+参考实现见 `capture.h` 之外的 `dispatch.cpp`（`CurveFromFlags` /
+`ApplyEndValues`），曲线数学在 `inject.h` 的 `ApplyCurve`。
 | 44 | `Text` | 10 | `<文本>[\0<paste\|type>]` | 整串文本输入（paste 支持任意 Unicode） |
 
 > 编号 9、18、19、28、29 是预留的（历史遗留的间隔），不要复用。

@@ -38,6 +38,34 @@ struct TouchPoint {
     float   size     = 0.02f;  // 相对屏幕短边的接触面积
 };
 
+// ── 压力 / 接触面积在滑动过程中的变化形状 ──────────────────────────────────
+//
+// 起点与终点的值由两个 TouchPoint 给出（Swipe/Drag 一直支持线性插值），
+// 这里定义的是**中间怎么过渡**。
+//
+// 已经能用线性表达"从轻到重"，所以真正需要这个枚举的是另外两种情况：
+//   · kUpDown —— 笔画：两头轻、中间重（画板、手写）
+//   · kEaseIn / kEaseOut —— 起手或收手更陡，模拟真实按压的物理感
+enum class CurveShape {
+    kLinear  = 0,   // P(t) = P0 + (P1-P0)·t
+    kEaseIn  = 1,   // 慢起：因子 t²
+    kEaseOut = 2,   // 快起：因子 1-(1-t)²
+    kUpDown  = 3,   // 中间重：两头取 min(P0,P1)，中间到 max(P0,P1)
+};
+
+// 按曲线算 t 时刻的 pressure / size。
+//
+// ⚠️ kUpDown 的语义与另外三个**不一样**：它不是"在 P0 与 P1 之间插值"，
+//    而是"两头一样轻、中间重"—— 端值取 min(P0,P1)，峰值取 max(P0,P1)。
+//    笔画本来就是这个形状；想表达"越来越重"请用 kLinear。
+//    这一点写进文档了，因为猜错的代价是"压力曲线看起来没生效"。
+void ApplyCurve(CurveShape shape, float t, float p0, float p1, float s0, float s1,
+                float* outPressure, float* outSize);
+
+// 解析 "linear" / "ease-in" / "ease-out" / "updown"，并回写规范名。
+bool ParseCurve(const std::string& name, CurveShape* out);
+const char* CurveName(CurveShape shape);
+
 // 后端初始化参数
 struct InjectorConfig {
     // 触控坐标范围。uinput 后端用它设置 ABS 轴范围；
@@ -72,7 +100,7 @@ class Injector {
     // steps 为 0 时按 durationMs 自动计算（约 60Hz）。
     bool Swipe(const TouchPoint& from, const TouchPoint& to,
                uint32_t durationMs, uint32_t steps, bool async,
-               std::string* error);
+               std::string* error, CurveShape curve = CurveShape::kLinear);
 
     // 手动多点触控序列。调用方负责配对 down/move/up。
     // ── 常见手势 ────────────────────────────────────────────────────────────
@@ -90,7 +118,8 @@ class Injector {
     // 拖拽。与 Swipe 的区别是**起点有停顿、移动更慢**，
     // 这样才会被识别成"按住拖动"而不是"甩一下"。
     bool Drag(const TouchPoint& from, const TouchPoint& to, uint32_t durationMs,
-              bool async, std::string* error);
+              bool async, std::string* error,
+              CurveShape curve = CurveShape::kLinear);
 
     // 双击。intervalMs 是两次点击之间的间隔，默认 120ms
     // （系统双击阈值约 300ms，留足余量但也不能太慢）。

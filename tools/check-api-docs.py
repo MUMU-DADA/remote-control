@@ -101,6 +101,12 @@ chk("### POST /mouse" in t, "01-http.md 写了 POST /mouse", "文档里没找到
 # 整串文本输入同理：它是"中文怎么打进去"的唯一入口，
 # 只在命令表里出现而正文没写的话，没人知道该用 paste 还是 type。
 chk("### POST /text" in t, "01-http.md 写了 POST /text", "文档里没找到这个小节")
+# WebP 的 method 与压力曲线都是"参数级"的能力，没有独立端点 ——
+# 端点在文档里，但参数表里漏掉的话调用方根本不知道有这回事。
+chk("WebP 编码档位" in t and "method" in t,
+    "01-http.md 写了 WebP method 档位", "文档里没找到这一节")
+chk("压力 / 接触面积 / 变化曲线" in t,
+    "01-http.md 写了压力/曲线参数", "文档里没找到这一节")
 
 print("\n[4] capabilities 字段（README）")
 t = open(os.path.join(DOCS,"README.md"),encoding='utf-8').read()

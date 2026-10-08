@@ -573,6 +573,28 @@ int HttpStatusFor(uint32_t dispatcherStatus) {
     }
 }
 
+// 把 Dispatcher 的**失败**应答转成 HTTP 应答（成功的情况不要走这里）。
+//
+// ⚠️ 手写 `Error(500, StatusName(status))` 会同时丢掉两件事：
+//     该 400 的变成 500，以及**服务端那句能读懂的话**变成 "bad argument"。
+//     实测踩过：/capture 的越界裁剪区域本该说"超出屏幕 1280x720"。
+//     凡是手写调用 Dispatcher 的地方都要走这里。
+//
+// 内部负责读 body 与 close(fd)，调用方**不要再 close 一次**。
+HttpResponse DispatcherError(ReplyPacket& packet) {
+    std::string body;
+    if (packet.fd >= 0) {
+        body = ReadFd(packet.fd, packet.reply.dataSize);
+        close(packet.fd);
+        packet.fd = -1;
+    }
+    if (!body.empty()) {
+        return HttpResponse::Json(HttpStatusFor(packet.reply.status), body);
+    }
+    return HttpResponse::Error(HttpStatusFor(packet.reply.status),
+                               StatusName(packet.reply.status));
+}
+
 HttpResponse RestApi::Call(Cmd cmd, const std::string& payload, uint32_t flags,
                            int reqFd, bool binaryReply,
                            const char* binaryContentType) {
@@ -654,6 +676,29 @@ HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
                 : (codec == ImageFormat::kWebp) ? 90 : 90;
     }
 
+    // ── WebP method（0=最快 … 6=最小）──
+    //
+    // 单次截图与画面流的取舍**不一样**，所以默认值也不一样：
+    //   单次截图：只编一张，多花几十毫秒换更小的文件是划算的
+    //   画面流  ：每帧都要编，快慢直接决定帧率，用省时的档
+    // 见 image_encoder.cpp 里那张实测表。
+    int webpMethod = kWebpMethodAuto;
+    {
+        const std::string m = req.queryParam("method", "");
+        if (!m.empty()) {
+            char* end = nullptr;
+            errno = 0;
+            const long v = strtol(m.c_str(), &end, 10);
+            if (errno != 0 || end == m.c_str() || *end != '\0' || v < 0 || v > 6) {
+                return HttpResponse::Error(
+                        400, "method 必须是 0..6 的整数（收到: " + m + "）");
+            }
+            webpMethod = static_cast<int>(v);
+        } else if (codec == ImageFormat::kWebp) {
+            webpMethod = kWebpMethodOneShot;   // 见 image_encoder.cpp 的实测
+        }
+    }
+
     // ── 区域抓帧：?x=&y=&w=&h= ──
     //
     // 只抓屏幕的一块。四个参数必须**一起**给：少给一个就说不清"想抓哪块"，
@@ -724,18 +769,7 @@ HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
     ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Capture),
                                           packet.reply.status);
 
-    if (packet.reply.status != kOk) {
-        // ⚠️ 把**服务端那句原话**带回去，而不是一个状态码名。
-        //    参数错（该 400）与真失败（该 500）在这里分开，
-        //    客户端才知道该改请求还是该重试。
-        const std::string errBody = ReadFd(packet.fd, packet.reply.dataSize);
-        if (packet.fd >= 0) close(packet.fd);
-        if (!errBody.empty()) {
-            return HttpResponse::Json(HttpStatusFor(packet.reply.status), errBody);
-        }
-        return HttpResponse::Error(HttpStatusFor(packet.reply.status),
-                                   StatusName(packet.reply.status));
-    }
+    if (packet.reply.status != kOk) return DispatcherError(packet);
 
     const uint32_t w = packet.reply.width;
     const uint32_t h = packet.reply.height;
@@ -806,7 +840,7 @@ HttpResponse RestApi::HandleCapture(const HttpRequest& req) {
         return HttpResponse::Error(500, perr);
     }
     std::string out = ImageEncoder::Instance().Encode(src, w, h, codec,
-                                                      quality, &perr);
+                                                      quality, &perr, webpMethod);
     if (out.empty()) {
         return HttpResponse::Error(500, perr.empty() ? "编码失败" : perr);
     }
@@ -1449,12 +1483,70 @@ HttpResponse RestApi::HandleGesture(const HttpRequest& req, Cmd cmd,
     if (!ParseGestureMs(b, "ms", 0, &r.durationMs, &err)) return err;
     if (b.flag("long")) r.flags |= kFlagKeyLongPress;
 
-    ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
-    ServiceState::Instance().CountRequest(r.cmd, p.reply.status);
-    if (p.fd >= 0) close(p.fd);
-    if (p.reply.status != kOk) {
-        return HttpResponse::Error(500, StatusName(p.reply.status));
+    // ── 压力 / 接触面积 / 变化曲线 ──
+    //
+    // pressure / size   = **起点**的值（老字段，语义不变）
+    // pressure2 / size2 = 终点的值（可选）。给了就沿路径过渡，
+    //                     不给就等于起点值 —— 那样退化成常量，与老行为一致。
+    // curve             = 过渡形状（linear|ease-in|ease-out|updown），可选
+    //
+    // ⚠️ pressure 合法范围是 0..1。0 在这里是**"没给"**的哨兵（Request 的
+    //    默认值就是 0），所以显式传 0 表达不了"压力为 0" —— 这是既有的
+    //    线格式约定，不在这里偷偷改。真要近乎为零用 0.01。
+    float p0 = 0.0f, s0 = 0.0f;
+    {
+        const double pv = b.has("pressure") ? b["pressure"].asDouble(0) : 0.0;
+        const double sv = b.has("size") ? b["size"].asDouble(0) : 0.0;
+        if (pv < 0 || pv > 1) {
+            return HttpResponse::Error(400, "pressure 必须在 0..1 之间");
+        }
+        if (sv < 0 || sv > 1) {
+            return HttpResponse::Error(400, "size 必须在 0..1 之间");
+        }
+        p0 = static_cast<float>(pv);
+        s0 = static_cast<float>(sv);
+        if (p0 > 0) r.pressure = p0;
+        if (s0 > 0) r.size     = s0;
     }
+
+    std::string endArgs;
+    if (needsEnd) {
+        // 终点值走 payload（Request 里只放得下一个 pressure/size）
+        std::string p2, s2;
+        if (b.has("pressure2")) {
+            const double v = b["pressure2"].asDouble(0);
+            if (v <= 0 || v > 1) {
+                return HttpResponse::Error(400, "pressure2 必须在 0..1 之间（且不为 0）");
+            }
+            p2 = std::to_string(v);
+        }
+        if (b.has("size2")) {
+            const double v = b["size2"].asDouble(0);
+            if (v <= 0 || v > 1) {
+                return HttpResponse::Error(400, "size2 必须在 0..1 之间（且不为 0）");
+            }
+            s2 = std::to_string(v);
+        }
+        // PackArgs 只裁**尾部**空参数，所以"给了 pressure2 没给 size2"
+        // 这种中间空位会被保留 —— 正是这里需要的。
+        endArgs = PackArgs({p2, s2});
+    }
+
+    if (b.has("curve")) {
+        const std::string cn = b.str("curve");
+        CurveShape shape = CurveShape::kLinear;
+        if (!ParseCurve(cn, &shape)) {
+            return HttpResponse::Error(
+                    400, "未知曲线: " + cn + "（可用 linear|ease-in|ease-out|updown）");
+        }
+        r.flags |= (static_cast<uint32_t>(shape) << kFlagCurveShift) & kFlagCurveMask;
+    }
+
+    ReplyPacket p = dispatcher_->Handle(r, endArgs, -1, 0);
+    ServiceState::Instance().CountRequest(r.cmd, p.reply.status);
+    if (p.reply.status != kOk) return DispatcherError(p);
+
+    if (p.fd >= 0) close(p.fd);
     json::Writer w;
     w.Obj().Field("ok", true).Field("x", r.x).Field("y", r.y);
     if (needsEnd) w.Field("x2", r.x2).Field("y2", r.y2);
@@ -1486,9 +1578,17 @@ HttpResponse RestApi::HandleClipboard(const HttpRequest& req) {
     HttpResponse err;
     if (!ParseJsonBody(req, &b, &err)) return err;
 
-    const std::string op = b.str("op", "get");
+    // ⚠️ 给了 text 就是"要写"，即使没写 op。
+    //
+    // 原来 op 缺省是 "get"，于是 `POST {"text":"..."}` 会**静默地做一次读**：
+    // 返回 {"ok":true}（读成功了），剪贴板纹丝不动，调用方以为写进去了。
+    // 这个坑实实在在骗过人 —— 体检脚本因此把"写剪贴板"当成平台限制写进了
+    // 文档（"Android 10+ 后台写被静默丢弃"），而真相是那次请求压根没在写。
+    const std::string rawOp = b.str("op");
+    const std::string t     = b.str("text");
+    const std::string op    = rawOp.empty() ? (t.empty() ? "get" : "set") : rawOp;
+
     if (op == "set") {
-        const std::string t = b.str("text");
         if (t.empty()) return HttpResponse::Error(400, "set 需要 text");
         return Call(Cmd::Clipboard, PackArgs({"set", t}), 0, -1);
     }
@@ -2267,8 +2367,9 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
         std::vector<uint8_t> rgba;
         const uint8_t* enc = preparePixels(&rgba);
         std::string perr;
-        std::string out = ImageEncoder::Instance().Encode(enc, dw, dh, format,
-                                                          p.level, &perr);
+        // 流用 kWebpMethodStream：每帧都要编，快慢直接决定帧率
+        std::string out = ImageEncoder::Instance().Encode(
+                enc, dw, dh, format, p.level, &perr, kWebpMethodStream);
         if (out.empty()) {
             ALOGW("流编码失败: %s", perr.c_str());
             return nullptr;
@@ -2983,10 +3084,9 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         r.magic = kMagic;
         r.cmd   = static_cast<uint32_t>(Cmd::Info);
         ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
+        if (p.reply.status != kOk) return DispatcherError(p);
+
         if (p.fd >= 0) close(p.fd);
-        if (p.reply.status != kOk) {
-            return HttpResponse::Error(500, StatusName(p.reply.status));
-        }
 
         Request c{};
         c.magic = kMagic;
@@ -2994,10 +3094,9 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         ReplyPacket cp = dispatcher_->Handle(c, "", -1, 0);
         ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Capture),
                                               cp.reply.status);
+        if (cp.reply.status != kOk) return DispatcherError(cp);
+
         if (cp.fd >= 0) close(cp.fd);
-        if (cp.reply.status != kOk) {
-            return HttpResponse::Error(500, StatusName(cp.reply.status));
-        }
 
         // 注入器的实际坐标范围。配置里为 0 表示"跟随显示"，那就用抓帧尺寸。
         const InjectorConfig& inj =
@@ -3046,36 +3145,21 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         if (!ParseGestureMs(b, "ms", kDefaultTapMs, &r.durationMs, &err)) return err;
         ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
         ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Tap), p.reply.status);
+        if (p.reply.status != kOk) return DispatcherError(p);
+
         if (p.fd >= 0) close(p.fd);
-        if (p.reply.status != kOk) {
-            return HttpResponse::Error(500, StatusName(p.reply.status));
-        }
         json::Writer w;
         w.Obj().Field("ok", true).Field("x", r.x).Field("y", r.y).EndObj();
         return HttpResponse::Json(200, w.str());
     }
+    // ⚠️ /swipe 以前在这里**另写了一遍**，与 /drag、/longpress 那一套
+    //    （HandleGesture）并列存在。后果是同一个概念有两套参数名与两套能力：
+    //      · 这里只认 x1/y1/x2/y2，HandleGesture 认 x/y 也认 x1/y1
+    //      · 这里没有 pressure/size/curve，于是"给滑动加压力曲线"这件事
+    //        在 /swipe 上根本不生效，而在 /drag 上生效 —— 很难查
+    //    统一走 HandleGesture：参数更宽松，能力一致，也少一份要同步维护的代码。
     if (res == "swipe" && method == "POST") {
-        json::Value b; HttpResponse err;
-        if (!ParseJsonBody(req, &b, &err)) return err;
-        for (const char* k : {"x1", "y1", "x2", "y2"}) {
-            if (!b.has(k)) return HttpResponse::Error(400, std::string("swipe 需要 ") + k);
-        }
-        Request r{};
-        r.magic = kMagic; r.cmd = static_cast<uint32_t>(Cmd::Swipe);
-        if (!ParseInt32Value(b["x1"], "x1", &r.x, &err) ||
-            !ParseInt32Value(b["y1"], "y1", &r.y, &err) ||
-            !ParseInt32Value(b["x2"], "x2", &r.x2, &err) ||
-            !ParseInt32Value(b["y2"], "y2", &r.y2, &err)) return err;
-        if (!ParseGestureMs(b, "ms", kDefaultSwipeMs, &r.durationMs, &err)) return err;
-        ReplyPacket p = dispatcher_->Handle(r, "", -1, 0);
-        ServiceState::Instance().CountRequest(static_cast<uint32_t>(Cmd::Swipe), p.reply.status);
-        if (p.fd >= 0) close(p.fd);
-        if (p.reply.status != kOk) {
-            return HttpResponse::Error(500, StatusName(p.reply.status));
-        }
-        json::Writer w;
-        w.Obj().Field("ok", true).EndObj();
-        return HttpResponse::Json(200, w.str());
+        return HandleGesture(req, Cmd::Swipe, /*needsEnd=*/true);
     }
 
     // ── 应用 ──

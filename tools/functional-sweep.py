@@ -12,11 +12,16 @@
     python3 tools/functional-sweep.py                      # 默认 127.0.0.1:8088
     python3 tools/functional-sweep.py host:port
 
-关于「已知平台限制」：有少数项在平台上确实做不到（例如 Android 10+ 只允许
-前台应用写剪贴板，守护进程永远不在前台）。这类项若一律算失败，脚本就恒退出 1，
+关于「已知平台限制」：有少数项在平台上确实做不到。这类项若一律算失败，
+脚本就恒退出 1，
 而一个永远红的灯等于没有灯 —— 当不了回归闸门。所以它们单独记账（⊘），
 不计入失败。但**不是永久豁免**：一旦它意外通过了，脚本会打印提示要求复核，
 避免限制解除后标注还赖着不走。
+
+⚠️ 这条机制要慎用 —— 实测栽过：原来"写剪贴板"被标成平台限制，理由是
+"Android 10+ 只允许前台应用写"。真相是那次请求没带 op，缺省值 get 让它
+变成了一次**读**，压根没写。**一个错误的豁免比一条失败的检查更危险**：
+它把真问题锁进了"已知、不用管"。标注之前先确认那个"限制"本身是真的。
 """
 import base64
 import json
@@ -142,7 +147,16 @@ print("\033[1;34m[1] 元信息\033[0m")
 st, d = req("/api/v1/describe")
 check("GET /describe", st == 200 and d.get("service") == "remote-control",
       f"service={d.get('service')} 协议 v{d.get('protocolVersion')} 命令 {len(d.get('commands', []))} 条")
-check("命令数 = 33", len(d.get("commands", [])) == 33, f"实际 {len(d.get('commands', []))}")
+# ⚠️ 这里原来写死 "命令数 = 33"，协议涨到 39 之后它一直是红的 ——
+#    而"文档里的命令数与实际是否一致"是 check-api-docs.py 的职责
+#    （它拿 docs/api/03-socket.md 对服务端，改了文档不改进代码会红）。
+#    体检脚本再写死一个数字，只会多一处要同步维护、且一定会烂的地方。
+#    这里改成查**自洽性**：编号不重复、名字不空。
+_cmds = d.get("commands", [])
+_nums = [c.get("cmd") for c in _cmds]
+check("命令表自洽（编号不重复、名字非空）",
+      len(_nums) == len(set(_nums)) and all(c.get("name") for c in _cmds),
+      f"{len(_cmds)} 条命令")
 check("buildId 存在", bool(d.get("buildId")), str(d.get("buildId"))[:16])
 
 st, info = req("/api/v1/info")
@@ -197,13 +211,37 @@ if PW > 200 and PH > 200:
                 raw=True, timeout=20)
     check("越界的裁剪区域 → 400", st == 400, f"HTTP {st}")
 
+    # WebP method：单次截图的默认应当偏"小体积"，而不是流那档
+    st, webp_default = req("/api/v1/capture?format=webp&quality=90", raw=True, timeout=30)
+    st2, webp_m2 = req("/api/v1/capture?format=webp&quality=90&method=2",
+                       raw=True, timeout=30)
+    st3, webp_m6 = req("/api/v1/capture?format=webp&quality=90&method=6",
+                       raw=True, timeout=30)
+    if st == 200 and st2 == 200 and st3 == 200:
+        check("WebP 单次截图默认 = 方法 6（体积优先）",
+              len(webp_default) == len(webp_m6),
+              f"默认 {len(webp_default)} 字节，method=6 {len(webp_m6)} 字节")
+        check("默认比画面流那档（method=2）更小",
+              len(webp_default) < len(webp_m2),
+              f"{len(webp_default)} vs {len(webp_m2)} 字节")
+    else:
+        check("WebP method 参数", False, f"HTTP {st}/{st2}/{st3}")
+
+    st, _ = req("/api/v1/capture?format=webp&method=9", raw=True, timeout=20)
+    check("method 越界 → 400", st == 400, f"HTTP {st}")
+
     # 源头降采样
     st, small = req(f"/api/v1/capture?format=jpeg&width={PW // 4}",
                     raw=True, timeout=30)
     if st == 200 and small[:2] == b"\xff\xd8":
-        sw, sh = jpeg_size(small)
-        check("width 参数在源头降采样", sw == PW // 4,
-              f"要 {PW // 4} 宽，得到 {sw}x{sh}")
+        # ⚠️ 这两个变量**不能**叫 sh —— 上面有个同名的辅助函数
+        #    sh(命令)，用它跑 adb。第一版写成 `sw, sh = ...` 把函数
+        #    覆盖成了 int，于是后面 [5] 节调 sh(...) 直接
+        #    "'int' object is not callable" —— 报错位置离真正的原因
+        #    隔了一百多行。
+        dw_, dh_ = jpeg_size(small)
+        check("width 参数在源头降采样", dw_ == PW // 4,
+              f"要 {PW // 4} 宽，得到 {dw_}x{dh_}")
     else:
         check("width 降采样", False, f"HTTP {st}")
 
@@ -213,7 +251,28 @@ print("\n\033[1;34m[3] 触控\033[0m")
 st, d = req("/api/v1/tap", "POST", {"x": 640, "y": 360})
 check("点击屏幕中心", st == 200 and d.get("ok"), str(d)[:70])
 st, d = req("/api/v1/swipe", "POST", {"x1": 200, "y1": 500, "x2": 800, "y2": 500, "ms": 300})
-check("滑动", st == 200 and d.get("ok"), str(d)[:70])
+check("滑动（x1/y1/x2/y2）", st == 200 and d.get("ok"), str(d)[:70])
+
+# ⚠️ /swipe 以前**另写了一遍**，只认 x1/y1 且不支持 pressure/curve；
+#    而 /drag 认 x/y 也认 x1/y1、还支持压力曲线。同一个概念两套行为。
+#    现在统一走一套，所以这两条都该成立。
+st, d = req("/api/v1/swipe", "POST", {"x": 200, "y": 500, "x2": 800, "y2": 500, "ms": 300})
+check("滑动也接受 x/y 写法（与 /drag 一致）", st == 200 and d.get("ok"), str(d)[:70])
+
+st, d = req("/api/v1/swipe", "POST",
+            {"x1": 200, "y1": 500, "x2": 800, "y2": 500, "ms": 300,
+             "pressure": 0.2, "pressure2": 0.9, "curve": "updown"})
+check("滑动带压力曲线（updown）", st == 200 and d.get("ok"), str(d)[:70])
+
+st, d = req("/api/v1/swipe", "POST",
+            {"x1": 200, "y1": 500, "x2": 800, "y2": 500, "ms": 300,
+             "curve": "nosuchcurve"})
+check("未知曲线 → 400", st == 400, f"HTTP {st}；{str(d)[:60]}")
+
+st, d = req("/api/v1/swipe", "POST",
+            {"x1": 200, "y1": 500, "x2": 800, "y2": 500, "ms": 300,
+             "pressure": 1.5})
+check("pressure 超出 0..1 → 400", st == 400, f"HTTP {st}；{str(d)[:60]}")
 st, d = req("/api/v1/longpress", "POST", {"x": 640, "y": 360, "ms": 800})
 check("长按", st == 200 and d.get("ok"), str(d)[:70])
 st, d = req("/api/v1/doubletap", "POST", {"x": 640, "y": 360})
@@ -388,11 +447,28 @@ check("粘贴中文（判据：输入框里读回来的就是那串字）",
       st == 200 and readback == CJK,
       f"HTTP {st}；期望 {CJK!r}，读回 {readback!r}")
 
-# 剪贴板必须还回去 —— 不还的话一次远程输入就把用户复制的密码顶掉了
+# 剪贴板必须还回去 —— 不还的话一次远程输入就把用户复制的密码顶掉了。
+#
+# ⚠️ 必须先放一个**已知值**再测。原来是直接读剪贴板看有没有我们的内容，
+#    但刚开机时剪贴板本来就是空的：那种情况下"恢复成空"做不到（没法
+#    把剪贴板清空），服务端会如实回 clipboardRestored=false —— 于是这条
+#    检查在空剪贴板的设备上**必然误报**。实测就是这样红的。
+SENTINEL = "sweep-sentinel-请勿改动"
+req("/api/v1/clipboard", "POST", {"op": "set", "text": SENTINEL})
+st, d = req("/api/v1/clipboard?op=get")
+check("测试前剪贴板已被设为哨兵值",
+      d.get("text") == SENTINEL, f"现在是 {d.get('text', '')[:40]!r}")
+
+clear_focused_field()
+st, d = req("/api/v1/text", "POST", {"text": CJK})
+readback = uiautomator_field_text()
+check("再次粘贴中文仍然正确", st == 200 and readback == CJK,
+      f"读回 {readback!r}")
+
 st, d = req("/api/v1/clipboard?op=get")
 clip = d.get("text", "")
-check("文本输入后剪贴板没有被留下我们的内容",
-      CJK not in clip, f"剪贴板现在是 {clip[:40]!r}")
+check("文本输入后剪贴板被恢复成原值（哨兵还在）",
+      clip == SENTINEL, f"剪贴板现在是 {clip[:40]!r}")
 
 # type 模式：逐字符按键（走 uinput 键盘），顺便验大小写
 clear_focused_field()
@@ -433,17 +509,16 @@ check("列出 /sdcard", st == 200 and d.get("ok", True) is not False,
 # ── 剪贴板 ──
 print("\n\033[1;34m[7] 剪贴板\033[0m")
 mark = f"rc-sweep-{int(time.time())}"
-st, d = req("/api/v1/clipboard", "POST", {"text": mark})
+st, d = req("/api/v1/clipboard", "POST", {"op": "set", "text": mark})
 set_ok = st == 200 and d.get("ok") is not False
 check("写入剪贴板", set_ok, str(d)[:60])
 if set_ok:
-    st, d = req("/api/v1/clipboard")
-    check("读回剪贴板且内容一致", d.get("text") == mark, f"读到 {str(d.get('text'))[:40]}",
-          # 实测：POST 回 {"ok":true}、binder 不抛异常、无 SELinux 拒绝，但剪贴板里
-          # 什么都没有。Android 10 起只允许**前台应用**（或默认输入法）写入，后台
-          # 进程的写入被静默丢弃。守护进程永远不在前台 → 这是平台规则。
-          # 详见 docs/api/01-http.md 第五节。
-          known_limitation="Android 10+ 只允许前台应用写剪贴板（见 docs/api/01-http.md §五）")
+    st, d = req("/api/v1/clipboard?op=get")
+    # ⚠️ 这条曾经带着一条"已知平台限制：Android 10+ 后台写剪贴板被静默丢弃"。
+    #    那是**误判**：当时的请求是 POST {"text": ...} 而没给 op，而 op 缺省是
+    #    "get" —— 它根本没在写，返回的 ok 是"读成功"。实测（本 ROM，连做三次
+    #    往返，含中文）写读完全正常。现在请求里显式给 op，判据才立得住。
+    check("读回剪贴板且内容一致", d.get("text") == mark, f"读到 {str(d.get('text'))[:40]}")
 
 # ── 旋转 ──
 print("\n\033[1;34m[8] 屏幕方向\033[0m")

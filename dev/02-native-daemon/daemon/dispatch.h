@@ -49,7 +49,8 @@ class Dispatcher {
   private:
     ReplyPacket HandleInfo(const Request& req);
     ReplyPacket HandleCapture(const Request& req);
-    ReplyPacket HandleTouch(const Request& req);
+    ReplyPacket HandleTouch(const Request& req,
+                            const std::vector<std::string>& args);
 
     // ── v2：应用与文件管理 ──
     ReplyPacket HandleListApps(const Request& req);
@@ -76,7 +77,8 @@ class Dispatcher {
     ReplyPacket HandleShutdown(const Request& req, bool restart);
 
     // ── v4：手势 / 按键 / 剪贴板 ──
-    ReplyPacket HandleGesture(const Request& req);
+    ReplyPacket HandleGesture(const Request& req,
+                              const std::vector<std::string>& args);
     ReplyPacket HandleKeyEvent(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandleClipboard(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandlePower(const Request& req, const std::vector<std::string>& args);

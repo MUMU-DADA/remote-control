@@ -58,6 +58,21 @@ enum class ImageFormat {
 //
 // 量纲本来就不同：PNG 是 zlib 压缩级别（1-9），JPEG/WebP 是图像质量
 // （1-100），H.264 会被换算成码率（也是 1-100 的量纲）。
+// WebP 的 method（0=最快 … 6=最小）。
+//
+// 为什么用 **-1 表示"自动"**而不是让调用方传 0：0 是合法的"最快"档，
+// 拿它当默认值的话，"没指定"和"明确要最快"就分不开了 —— 而这两件事
+// 在调优时是要区分的。
+constexpr int kWebpMethodAuto = -1;
+
+// 两档默认值。数值由本机实测决定 —— 见 image_encoder.cpp 里那张表的说明。
+constexpr int kWebpMethodStream  = 2;   // 每帧都编：快一倍，体积只大 4.8%
+constexpr int kWebpMethodOneShot = 6;   // 只编一张：时间不要钱，取最小体积
+//
+// ⚠️ 一次性**轮询** /capture 的客户端（比如自己按 5fps 拉图而不是用
+//    /stream）应该显式传 ?method=2 —— 6 是为"人就点一下"那种用法定的。
+
+
 struct QualityRange {
     int min = 1;
     int max = 100;
@@ -99,8 +114,12 @@ class ImageEncoder {
     // quality 含义随格式变：JPEG/WebP 是 0-100（默认 75/80），
     // PNG 是 zlib 级别 1-9（默认 1，快优先）。
     // 失败返回空字符串，原因写进 error。
+    //
+    // webpMethod 只在 format == kWebp 时有意义（0=最快 … 6=最小），
+    // 其它格式忽略。传 kWebpMethodAuto 表示"按默认来"。
     std::string Encode(const uint8_t* rgba, uint32_t width, uint32_t height,
-                       ImageFormat format, int quality, std::string* error);
+                       ImageFormat format, int quality, std::string* error,
+                       int webpMethod = kWebpMethodAuto);
 
     // 解析 "jpeg" / "jpg" / "webp" / "png" / "auto"
     static bool ParseFormat(const std::string& name, ImageFormat* out);
