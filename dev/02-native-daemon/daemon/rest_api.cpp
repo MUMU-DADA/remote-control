@@ -2293,6 +2293,23 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
             if (br > 40000000) br = 40000000;      // 40Mbps，再高没意义
             cfg.bitrate = static_cast<uint32_t>(br);
 
+            // 虚拟显示输入（A7/A8）：让 SurfaceFlinger 直接合成进编码器，
+            // 省掉每帧的整帧 RGBA 拷贝 + libyuv 颜色转换 + 入队拷贝。
+            //
+            // 自检的 [3] 画面通路 已经证明这条路在本平台成立；真起不来
+            // 时 Start 会失败，下面会退回 ByteBuffer 那条路（见 catch）。
+            cfg.useSurface = st->useSurface;
+
+            if (!st->h264->Start(cfg, &herr) && cfg.useSurface) {
+                // Surface 模式起不来（平台不支持 / 事务失败）时**退回**
+                // ByteBuffer 模式，而不是让这个流没画面 —— 慢一点但能用，
+                // 比黑屏好。退回是一次性的：成功后 st->useSurface 关掉。
+                ALOGW("虚拟显示模式启动失败，退回抓帧模式: %s", herr.c_str());
+                st->useSurface = false;
+                cfg.useSurface = false;
+                st->h264.reset();
+                st->h264 = std::make_unique<H264Encoder>();
+            }
             if (!st->h264->Start(cfg, &herr)) {
                 ALOGW("H.264 启动失败，这个流没有画面: %s", herr.c_str());
                 st->streamError = herr;
@@ -2322,28 +2339,49 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
         EncodePool::Guard guard(5);
         if (!guard.acquired()) return {};
 
-        std::vector<uint8_t> rgba;
-        const uint8_t* enc = preparePixels(&rgba);
         std::vector<uint8_t> nal;
-        const uint64_t framesIn = st->h264->GetStats().framesIn;
-        if (!st->h264->EncodeRgba(enc, dw, dh, &nal, &herr)) {
-            ALOGW("H.264 编码失败: %s", herr.c_str());
-            st->streamError = herr;
-            st->h264.reset();
-            st->h264W = st->h264H = 0;
-            return {};
-        }
-        if (st->h264->GetStats().framesIn > framesIn) {
-            st->lastChangeGen = f->changeGen;
-            st->haveChangeGen = true;
-        }
-        if (nal.empty() && !st->h264->PollOutput(&nal, &herr, 5)) {
-            ALOGW("H.264 输出轮询失败: %s", herr.c_str());
-            st->streamError = herr;
-            st->h264.reset();
-            st->h264W = st->h264H = 0;
-            st->h264Fps = st->h264Quality = 0;
-            return {};
+
+        if (st->h264->SurfaceInput()) {
+            // ── 虚拟显示模式（A7/A8）──
+            //
+            // 画面由 SurfaceFlinger 直接合成进编码器的输入 Surface：
+            // **不要**再 preparePixels / EncodeRgba —— 喂了会把表面上的
+            // 画面顶掉（症状是"流里偶尔闪一下静止画面"）。
+            // 这里只把编码器产出的 NAL 收回来。
+            //
+            // 省掉的是每帧最贵的三步：整帧 RGBA 行拷贝/BGRA 换序、
+            // libyuv 的 ABGR→NV12 全帧转换、以及再往输入缓冲拷一次。
+            if (!st->h264->PollOutput(&nal, &herr, 5)) {
+                ALOGW("H.264 输出轮询失败: %s", herr.c_str());
+                st->streamError = herr;
+                st->h264.reset();
+                st->h264W = st->h264H = 0;
+                st->h264Fps = st->h264Quality = 0;
+                return {};
+            }
+        } else {
+            std::vector<uint8_t> rgba;
+            const uint8_t* enc = preparePixels(&rgba);
+            const uint64_t framesIn = st->h264->GetStats().framesIn;
+            if (!st->h264->EncodeRgba(enc, dw, dh, &nal, &herr)) {
+                ALOGW("H.264 编码失败: %s", herr.c_str());
+                st->streamError = herr;
+                st->h264.reset();
+                st->h264W = st->h264H = 0;
+                return {};
+            }
+            if (st->h264->GetStats().framesIn > framesIn) {
+                st->lastChangeGen = f->changeGen;
+                st->haveChangeGen = true;
+            }
+            if (nal.empty() && !st->h264->PollOutput(&nal, &herr, 5)) {
+                ALOGW("H.264 输出轮询失败: %s", herr.c_str());
+                st->streamError = herr;
+                st->h264.reset();
+                st->h264W = st->h264H = 0;
+                st->h264Fps = st->h264Quality = 0;
+                return {};
+            }
         }
         // 编码器有内部缓冲，不是每送一帧就出一帧 —— 空是正常的
         if (nal.empty()) {

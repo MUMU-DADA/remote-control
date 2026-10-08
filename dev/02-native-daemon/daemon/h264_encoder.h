@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -24,7 +25,12 @@ class H264Encoder {
   public:
     // **不是单例** —— H.264 编码器是有状态的（SPS/PPS 只发一次、帧间
     // 参考），不同的尺寸必须用不同的实例。每个流一个。
-    H264Encoder() = default;
+    // ⚠️ 构造与析构都必须**声明在头里、定义在 .cpp 里**：
+    //    surface_ 是 unique_ptr<SurfaceDisplay>，而 SurfaceDisplay 是
+    //    只在前向声明里的不完全类型。写成 `H264Encoder() = default;` 的话
+    //    编译器要在这行就生成清理代码，于是报
+    //      "invalid application of sizeof to incomplete type"。
+    H264Encoder();
     ~H264Encoder();
     H264Encoder(const H264Encoder&) = delete;
     H264Encoder& operator=(const H264Encoder&) = delete;
@@ -63,6 +69,20 @@ class H264Encoder {
         uint32_t bitrate = 2'000'000;   // bps
         uint32_t fps     = 30;
         uint32_t iFrameIntervalSec = 2;
+
+        // 用虚拟显示直接把画面合成进编码器的输入 Surface（A7/A8）。
+        //
+        // true 时：**不要调 EncodeRgba** —— 画面由 SurfaceFlinger 送进来，
+        // 调用方只要按帧率轮询 PollOutput 收 NAL。
+        //
+        // 省掉的是每帧最贵的那三件事：
+        //   1. preparePixels 的整帧 RGBA 行拷贝/BGRA 换序 + 降采样
+        //   2. libyuv 的 ABGR→NV12 全帧颜色转换（纯 CPU）
+        //   3. 再往输入缓冲拷一次
+        // 代价是画面尺寸/裁剪跟着虚拟显示走，不能再按订阅者各自降采样。
+        //
+        // 平台不支持时 Start 会失败并在 error 里说明，调用方退回 false。
+        bool useSurface = false;
     };
 
     // 创建并启动编码器。尺寸变了要 Stop 再 Start。
@@ -72,6 +92,10 @@ class H264Encoder {
 
     // 当前配置（Running() 为假时无意义）
     const Config& CurrentConfig() const { return cfg_; }
+
+    // 这个实例是不是 Surface 输入模式（虚拟显示在喂它）。
+    // 为真时调用方**不该**调 EncodeRgba，只轮询 PollOutput。
+    bool SurfaceInput() const { return surface_ != nullptr; }
 
     // SPS 里的 profile/level，拼成 WebCodecs 要的 codec 串。
     //
@@ -117,6 +141,14 @@ class H264Encoder {
   private:
     bool DrainOutput(std::vector<uint8_t>* out, int64_t timeoutUs,
                      std::string* error);
+
+    // 虚拟显示的生命周期。定义在 .cpp 里 —— 头文件不能碰
+    // SurfaceComposerClient / ANativeWindow 那些平台类型
+    // （NDK 构建根本没有它们）。
+    struct SurfaceDisplay;
+    std::unique_ptr<SurfaceDisplay> surface_;
+    bool StartSurfaceDisplay(std::string* error);
+    void StopSurfaceDisplay();
 
     void*  codec_ = nullptr;          // AMediaCodec*
     Config cfg_;

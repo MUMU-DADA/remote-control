@@ -69,6 +69,11 @@ struct StreamState {
     int h264Fps = 0, h264Quality = 0;
     uint64_t h264ConfigGeneration = 0;
     bool     needKeyFrame = false;   // 下一个输出要是关键帧
+
+    // 这个流用虚拟显示直接喂编码器（A7/A8）吗。构造时为 true，
+    // 若 Start 失败会自动降为 false 并退回抓帧模式（一次性的：
+    // 降下去就不会再试，免得每帧都白折腾一遍）。
+    bool     useSurface = true;
     std::string streamError;
     uint64_t hubSeq = 0;          // 本连接已经消费到哪一帧
     uint64_t hubTimeouts = 0;     // 等新帧超时的次数（诊断用）

@@ -43,6 +43,18 @@ using namespace android;
 
 namespace remote_control {
 
+// 虚拟显示 + 编码器输入 Surface 的生命周期。
+//
+// 定义在 .cpp 里而不是头文件：这些类型（sp<IBinder>、ANativeWindow*）
+// 只有完整平台构建才有，而 h264_encoder.h 是 NDK 构建也要编译的。
+struct H264Encoder::SurfaceDisplay {
+#if defined(REMOTE_CONTROL_HAS_VIRTUAL_DISPLAY)
+    android::sp<android::IBinder> display;   // 虚拟显示 token
+    ANativeWindow* window = nullptr;         // 编码器给的输入 Surface
+    uint32_t width = 0, height = 0;
+#endif
+};
+
 namespace {
 
 #ifdef REMOTE_CONTROL_HAS_MEDIANDK
@@ -53,6 +65,8 @@ namespace {
 //   19 = COLOR_FormatYUV420Planar     (I420)
 //   21 = COLOR_FormatYUV420SemiPlanar (NV12)
 constexpr int32_t kColorFormatYuv420SemiPlanar = 21;
+// 0x7F000789 = COLOR_FormatSurface：数据来自 Surface 而不是 ByteBuffer
+constexpr int32_t kColorFormatSurface = 0x7F000789;
 
 int64_t NowUs() {
     timespec ts{};
@@ -114,11 +128,90 @@ bool H264Encoder::Supported() {
 #endif
 }
 
+H264Encoder::H264Encoder() = default;   // 见头文件里为什么不能 inline
+
 H264Encoder::~H264Encoder() { Stop(); }
 
 bool H264Encoder::Running() const { return running_; }
 
+// 建虚拟显示并把它的输出接到编码器的输入 Surface 上。
+//
+// 与自检里的探针是同一套步骤（那边证明过这条路在本平台上成立），
+// 区别只在这里是长期存在的，而且尺寸跟着 Config 走。
+bool H264Encoder::StartSurfaceDisplay(std::string* error) {
+#if !defined(REMOTE_CONTROL_HAS_VIRTUAL_DISPLAY)
+    if (error) *error = "这个构建没有虚拟显示支持";
+    return false;
+#else
+    if (surface_ == nullptr || surface_->window == nullptr) {
+        if (error) *error = "输入 Surface 还没建（Start 的顺序错了）";
+        return false;
+    }
+    using namespace android;
+
+    // 主屏的 layer stack：虚拟显示要镜像它，否则是一块黑屏
+    sp<IBinder> primary = SurfaceComposerClient::getPhysicalDisplayToken(
+            PhysicalDisplayId::fromPort(0));
+    if (primary == nullptr) primary = SurfaceComposerClient::getInternalDisplayToken();
+    if (primary == nullptr) {
+        if (error) *error = "取不到主显示 token";
+        return false;
+    }
+    ui::DisplayState dstate;
+    if (SurfaceComposerClient::getDisplayState(primary, &dstate) != NO_ERROR) {
+        if (error) *error = "getDisplayState 失败";
+        return false;
+    }
+
+    sp<IBinder> vd = SurfaceComposerClient::createDisplay(
+            String8("remote-control-stream"), /*secure=*/false);
+    if (vd == nullptr) {
+        if (error) *error = "createDisplay 失败（权限或 SF 不支持）";
+        return false;
+    }
+
+    sp<Surface> surf = sp<Surface>::fromExisting(
+            static_cast<Surface*>(surface_->window));
+    const int32_t w = static_cast<int32_t>(surface_->width);
+    const int32_t h = static_cast<int32_t>(surface_->height);
+
+    SurfaceComposerClient::Transaction txn;
+    txn.setDisplaySurface(vd, surf->getIGraphicBufferProducer());
+    txn.setDisplayLayerStack(vd, static_cast<uint32_t>(dstate.layerStack));
+    txn.setDisplayProjection(vd, ui::ROTATION_0, Rect(0, 0, w, h), Rect(0, 0, w, h));
+    txn.setDisplaySize(vd, static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+
+    const status_t applied = txn.apply();
+    if (applied != NO_ERROR) {
+        SurfaceComposerClient::destroyDisplay(vd);
+        if (error) {
+            *error = "虚拟显示事务提交失败: " +
+                     std::to_string(static_cast<int>(applied));
+        }
+        return false;
+    }
+
+    surface_->display = vd;
+    ALOGI("H.264 走虚拟显示输入：%dx%d 镜像主屏 layer stack %u", w, h,
+          static_cast<unsigned>(dstate.layerStack));
+    return true;
+#endif
+}
+
+void H264Encoder::StopSurfaceDisplay() {
+#if defined(REMOTE_CONTROL_HAS_VIRTUAL_DISPLAY)
+    if (surface_ != nullptr && surface_->display != nullptr) {
+        android::SurfaceComposerClient::destroyDisplay(surface_->display);
+        surface_->display.clear();
+    }
+#endif
+    surface_.reset();
+}
+
 void H264Encoder::Stop() {
+    // 先拆虚拟显示：它持有 Surface，而 Surface 属于 codec。
+    // 顺序反了会往一个已经删掉的 codec 里合成。
+    StopSurfaceDisplay();
 #ifdef REMOTE_CONTROL_HAS_MEDIANDK
     if (codec_ != nullptr) {
         auto* c = static_cast<AMediaCodec*>(codec_);
@@ -197,8 +290,11 @@ bool H264Encoder::Start(const Config& cfg, std::string* error) {
     // NV12（Y 平面 + 交错的 UV）。用**明确的**格式而不是 Flexible：
     // Flexible 的实际布局要另外查 codec 的 format，多一处失败点，
     // 而我们只需要一种。
+    // Surface 模式用 COLOR_FormatSurface（0x7F000789）：告诉编码器
+    // "数据不从 ByteBuffer 来，从 Surface 来"。非 Surface 模式仍是 NV12。
     AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT,
-                          kColorFormatYuv420SemiPlanar);
+                          cfg.useSurface ? kColorFormatSurface
+                                         : kColorFormatYuv420SemiPlanar);
     // 字符串键兼容旧 NDK API；不支持这些提示的编码器会忽略它们。
     AMediaFormat_setInt32(f, "max-bframes", 0);
     AMediaFormat_setInt32(f, "latency", 0);
@@ -220,10 +316,47 @@ bool H264Encoder::Start(const Config& cfg, std::string* error) {
         return false;
     }
 
+    // ⚠️ createInputSurface 必须在 configure **之后**、start **之前**调
+    //    （NDK 文档明确要求这个顺序）。
+    if (cfg.useSurface) {
+#if defined(REMOTE_CONTROL_HAS_VIRTUAL_DISPLAY)
+        ANativeWindow* win = nullptr;
+        const media_status_t ws = AMediaCodec_createInputSurface(c, &win);
+        if (ws != AMEDIA_OK || win == nullptr) {
+            AMediaCodec_delete(c);
+            g_activeEncoders.fetch_sub(1);
+            if (error) {
+                *error = "createInputSurface 失败: " +
+                         std::to_string(static_cast<int>(ws));
+            }
+            return false;
+        }
+        surface_.reset(new SurfaceDisplay());
+        surface_->window = win;
+        surface_->width  = cfg.width;
+        surface_->height = cfg.height;
+#else
+        AMediaCodec_delete(c);
+        g_activeEncoders.fetch_sub(1);
+        if (error) *error = "这个构建没有虚拟显示支持（NDK 构建）";
+        return false;
+#endif
+    }
+
     st = AMediaCodec_start(c);
     if (st != AMEDIA_OK) {
         if (error) *error = "AMediaCodec_start 失败: " + std::to_string((int)st);
         AMediaCodec_delete(c);
+        g_activeEncoders.fetch_sub(1);
+        return false;
+    }
+
+    // 虚拟显示接在编码器的输入 Surface 上。放在 start 之后：
+    // 编码器没跑起来之前就开始往 Surface 里合成没有意义。
+    if (cfg.useSurface && !StartSurfaceDisplay(error)) {
+        AMediaCodec_stop(c);
+        AMediaCodec_delete(c);
+        surface_.reset();
         g_activeEncoders.fetch_sub(1);
         return false;
     }
@@ -467,6 +600,15 @@ bool H264Encoder::EncodeRgba(const uint8_t* rgba, uint32_t width, uint32_t heigh
     }
     if (rgba == nullptr || width == 0 || height == 0) {
         if (error) *error = "空图像";
+        return false;
+    }
+    // Surface 模式下画面由 SurfaceFlinger 直接送进来，**不该**再喂 ByteBuffer：
+    // 喂了要么被忽略、要么把画面顶掉，症状是"流里偶尔闪一下静止画面"。
+    if (surface_ != nullptr) {
+        if (error) {
+            *error = "这个编码器是 Surface 输入模式（虚拟显示在喂），"
+                     "不要调 EncodeRgba —— 只轮询 PollOutput";
+        }
         return false;
     }
     // 尺寸变了必须重建 —— 编码器一旦 configure 就不能改尺寸
