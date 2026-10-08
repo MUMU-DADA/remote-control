@@ -72,20 +72,23 @@ fi
 # 平台构建才需要的文件，NDK 构建**必须排除**：
 #   capture_surfaceflinger.cpp  依赖 libgui
 #   inject_binder.cpp           依赖 libbinder + AIDL 生成的 C++ 头（且故意 #error）
-for f in main.cpp socket_server.cpp dispatch.cpp selftest.cpp \
-         capture_screencap.cpp inject.cpp inject_uinput.cpp \
-         appops.cpp subprocess.cpp fileops.cpp http_client.cpp \
-         service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp \
-         json_parser.cpp png_encoder.cpp keyboard.cpp clipops.cpp \
-         webui.cpp image_encoder.cpp frame_hub.cpp h264_encoder.cpp \
-         encode_pool.cpp \
-         jpeg_encoder.cpp \
-         webp_encoder.cpp \
-         websocket.cpp \
-         config_file.cpp; do
+NDK_SRCS=(main.cpp socket_server.cpp dispatch.cpp selftest.cpp
+         capture_screencap.cpp inject.cpp inject_uinput.cpp
+         appops.cpp subprocess.cpp fileops.cpp http_client.cpp
+         service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp
+         json_parser.cpp png_encoder.cpp keyboard.cpp mouse.cpp clipops.cpp
+         webui.cpp image_encoder.cpp frame_hub.cpp h264_encoder.cpp
+         encode_pool.cpp
+         jpeg_encoder.cpp
+         webp_encoder.cpp
+         websocket.cpp
+         config_file.cpp)
+for f in "${NDK_SRCS[@]}"; do
     [ -f "$DAEMON/$f" ] || { bad "缺源文件: daemon/$f"; exit 1; }
 done
-ok "28 个源文件齐备"
+# 数字由数组长度算出来，不写死 —— 上一版写的是"28 个"，
+# 加了源文件却忘了改，于是这句话变成了一句假断言。
+ok "${#NDK_SRCS[@]} 个源文件齐备"
 
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
@@ -169,6 +172,7 @@ COMMON_FLAGS=(
     "$DAEMON/json_parser.cpp" \
     "$DAEMON/png_encoder.cpp" \
     "$DAEMON/keyboard.cpp" \
+    "$DAEMON/mouse.cpp" \
     "$DAEMON/clipops.cpp" \
     "$DAEMON/webui.cpp" \
     "$DAEMON/image_encoder.cpp" \

@@ -36,6 +36,7 @@ cc_defaults {
         "json_parser.cpp",
         "png_encoder.cpp",
         "keyboard.cpp",
+        "mouse.cpp",
         "clipops.cpp",
         "webui.cpp",
         "image_encoder.cpp",

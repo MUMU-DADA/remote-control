@@ -159,7 +159,7 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 
 ## 命令表
 
-37 条命令。`since` 是它从哪个协议版本开始存在。
+38 条命令。`since` 是它从哪个协议版本开始存在。
 
 | cmd | 名称 | since | payload | 说明 |
 |---|---|---|---|---|
@@ -200,6 +200,7 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 | 40 | `AppClearData` | 8 | `<包名>` | 清除应用数据 |
 | 41 | `AppEnabled` | 8 | `<包名>\0<on\|off>` | 启用 / 停用应用 |
 | 42 | `AppPermission` | 8 | `<包名>\0<权限名>\0<grant\|revoke>` | 授予 / 撤销运行时权限 |
+| 43 | `Mouse` | 9 | `<动作>[\0<参数>…]`：`move\0<dx>\0<dy>` \| `button\0<按钮>\0<down\|up>` \| `click\0<按钮>` \| `wheel\0<格数>[\0<v\|h>]` | 鼠标：相对移动 / 按键 / 滚轮 |
 
 > 编号 9、18、19、28、29 是预留的（历史遗留的间隔），不要复用。
 

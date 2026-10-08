@@ -77,6 +77,7 @@ INTEG_SRCS = test_integration.cpp $(COMMON_SRCS) \
              $(DAEMON)/service_state.cpp \
              $(DAEMON)/selftest.cpp \
              $(DAEMON)/keyboard.cpp \
+             $(DAEMON)/mouse.cpp \
              $(DAEMON)/clipops.cpp \
              $(DAEMON)/png_encoder.cpp \
              $(DAEMON)/json_parser.cpp \
@@ -97,7 +98,7 @@ SCREENCAP_SRCS = test_capture_screencap.cpp $(DAEMON)/capture_screencap.cpp \
 APPOPS_SRCS    = test_appops.cpp $(DAEMON)/appops.cpp $(DAEMON)/subprocess.cpp \
                  $(DAEMON)/log_buffer.cpp
 
-BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_websocket test_transport test_update test_core_lifetime test_encoded_frame_cache test_h264_encoder test_fileops test_sha256
+BINS = test_inject_uinput test_integration test_capture_screencap test_appops test_json test_keyboard test_mouse test_websocket test_transport test_update test_core_lifetime test_encoded_frame_cache test_h264_encoder test_fileops test_sha256
 
 all: $(BINS) fake_screencap
 
@@ -141,7 +142,7 @@ UPDATE_SRCS = test_update.cpp \
               $(DAEMON)/service_state.cpp $(DAEMON)/log_buffer.cpp \
               $(DAEMON)/http_server.cpp $(DAEMON)/rest_api.cpp \
               $(DAEMON)/json_parser.cpp $(DAEMON)/png_encoder.cpp \
-              $(DAEMON)/keyboard.cpp $(DAEMON)/clipops.cpp \
+              $(DAEMON)/keyboard.cpp $(DAEMON)/mouse.cpp $(DAEMON)/clipops.cpp \
               $(DAEMON)/webui.cpp $(DAEMON)/image_encoder.cpp \
               $(DAEMON)/websocket.cpp $(DAEMON)/config_file.cpp \
               $(DAEMON)/frame_hub.cpp $(DAEMON)/encode_pool.cpp \
@@ -186,9 +187,14 @@ test_fileops: $(FO_SRCS) test_util.h $(DAEMON)/fileops.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(FO_SRCS) -o $@ $(LDFLAGS)
 
 KB_SRCS = test_keyboard.cpp $(DAEMON)/keyboard.cpp $(DAEMON)/log_buffer.cpp
+# 鼠标与键盘同构：都是独立的 uinput 设备 + 自己的事件位图
+MOUSE_SRCS = test_mouse.cpp $(DAEMON)/mouse.cpp $(DAEMON)/log_buffer.cpp
 
 test_keyboard: $(KB_SRCS) test_util.h $(DAEMON)/keyboard.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(KB_SRCS)
+
+test_mouse: $(MOUSE_SRCS) test_util.h $(DAEMON)/mouse.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(MOUSE_SRCS)
 
 # SHA-256：纯算法，无外部依赖。单独测它是因为它是**载荷校验**的依据 ——
 # 算错了要么把好版本判成坏的（服务一直回退），要么把没核对过的文件当好的执行。
@@ -227,6 +233,7 @@ _run: all
 	 ./test_appops;                              a=$$?; echo; \
 	 ./test_json;                                j=$$?; echo; \
 	 ./test_keyboard;                            k=$$?; echo; \
+	 ./test_mouse;                               mo=$$?; echo; \
 	 ./test_websocket;                           w=$$?; echo; \
 	 ./test_transport;                           t=$$?; echo; \
 	 ./test_update;                              u2=$$?; echo; \
@@ -242,6 +249,7 @@ _run: all
 	 printf "  %-34s %s\n" "应用管理后端"       "$$([ $$a -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "JSON 解析/输出"      "$$([ $$j -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "按键注入"            "$$([ $$k -eq 0 ] && echo 通过 || echo 失败)"; \
+	 printf "  %-34s %s\n" "鼠标注入"            "$$([ $$mo -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "WebSocket 握手"       "$$([ $$w -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "传输层生命周期"       "$$([ $$t -eq 0 ] && echo 通过 || echo 失败)"; \
 	 printf "  %-34s %s\n" "REST 更新"             "$$([ $$u2 -eq 0 ] && echo 通过 || echo 失败)"; \
@@ -261,7 +269,7 @@ _run: all
 	     printf "  %-34s %s\n" "检查数与 README 一致" \
 	         "✗ 实际 $$total，README 写 $$want —— 改了测试就要同步改 README"; r=1; \
 	 fi; \
-	 exit $$(( u + i + c + a + j + k + w + t + u2 + q + e + h + f + s + r ))
+	 exit $$(( u + i + c + a + j + k + mo + w + t + u2 + q + e + h + f + s + r ))
 
 clean:
 	rm -rf $(WEBP_OBJ)

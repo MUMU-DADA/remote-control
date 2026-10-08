@@ -29,7 +29,7 @@
 | [api/README.md](api/README.md) | **API 总览 + 快速上手**（权威入口） |
 | [api/01-http.md](api/01-http.md) | **HTTP/JSON API 完整参考**（权威） |
 | [api/02-websocket.md](api/02-websocket.md) | WebSocket 流（画面/触控/日志） |
-| [api/03-socket.md](api/03-socket.md) | Unix socket 二进制协议（37 条命令，权威清单） |
+| [api/03-socket.md](api/03-socket.md) | Unix socket 二进制协议（38 条命令，权威清单） |
 | [api/04-config.md](api/04-config.md) | 配置与部署 |
 | [api/05-errors.md](api/05-errors.md) | 状态码与错误处理 |
 | [api/06-debugging.md](api/06-debugging.md) | 调试与验证 |

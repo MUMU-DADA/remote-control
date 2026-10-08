@@ -27,6 +27,7 @@ class AppOps;
 class FileOps;
 class Keyboard;
 class ClipOps;
+class Mouse;
 
 class Dispatcher {
   public:
@@ -82,11 +83,14 @@ class Dispatcher {
     // v7：屏幕方向。args[0] = "0"|"90"|"180"|"270"|"free"|"status"
     ReplyPacket HandleRotate(const Request& req, const std::vector<std::string>& args);
 
-    // ── v6 ──
+    // v6 ──
     ReplyPacket HandleServiceSwitch(const Request& req,
                                     const std::vector<std::string>& args);
     ReplyPacket HandleRunningApps(const Request& req);
     ReplyPacket HandleLogFile(const Request& req);
+
+    // v9：鼠标 / 滚轮。args[0] = move|button|click|wheel
+    ReplyPacket HandleMouse(const Request& req, const std::vector<std::string>& args);
 
     Capture*  capture_;
     Injector* injector_;
@@ -109,6 +113,10 @@ class Dispatcher {
     // 键盘是延迟创建的：建了就会在系统里多一个输入设备，
     // 没用到按键功能的部署不该平白多出它。
     std::unique_ptr<Keyboard> keyboard_;
+
+    // 鼠标同理，而且更明显 —— 它会多出一个光标，
+    // 没用过的部署不该看见一个凭空出现的指针。
+    std::unique_ptr<Mouse> mouse_;
 };
 
 }  // namespace remote_control

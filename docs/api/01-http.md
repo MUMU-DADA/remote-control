@@ -133,7 +133,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```json
 {
   "service": "remote-control",
-  "protocolVersion": 8,
+  "protocolVersion": 9,
   "pid": 21266,
   "capabilities": {
     "screenshot": true, "touch": true, "multiTouch": true,
@@ -159,7 +159,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```json
 {
   "ok": true,
-  "protocolVersion": 8,
+  "protocolVersion": 9,
   "config": {
     "socketPath": "/data/local/tmp/remote-control.sock",
     "usingInitSocket": false,
@@ -175,7 +175,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
   "runtime": {
     "pid": 6595, "uid": 0, "gid": 0,
     "uptimeMs": 752080,
-    "protocolVersion": 8,
+    "protocolVersion": 9,
     "verbose": false,
     "capture": {
       "backend": "surfaceflinger",
@@ -797,6 +797,62 @@ curl -X POST http://host:8088/api/v1/key \
 
 可用键名列表以服务端实测为准：`GET /info` 看 `keyboard` 后端是否为
 `uinput(虚拟键盘)`。
+
+### POST /mouse
+
+鼠标注入。与触控并列，因为它能做的三件事触控**表达不出来**：
+
+| 能力 | 触控能不能做 |
+|---|---|
+| **滚轮**连续滚动 | 只能"划一下"，带惯性还可能误触；文档里要滚十屏就得划十次 |
+| **右键**上下文菜单 | 长按≈右键，但语义与位置都不等价 |
+| **悬停**（不按下移动指针） | 做不到 —— 手指必须先落下 |
+
+```json
+{"action": "move",  "dx": 100, "dy": -50}
+{"action": "wheel", "delta": -3}                  // 负 = 向下滚
+{"action": "wheel", "delta": 3, "axis": "h"}      // 横向
+{"action": "click", "button": "right"}            // 默认 left
+{"action": "button","button": "left", "down": true}
+```
+
+```json
+{"ok":true,"action":"move","dx":100,"dy":-50}
+{"ok":true,"action":"wheel","delta":-3,"axis":"v"}
+{"ok":true,"action":"click","button":"right"}
+```
+
+**方向约定 —— 与真实鼠标完全一致，不做任何取反**：
+
+| 字段 | 正值方向 |
+|---|---|
+| `dx` | 光标**右**移 |
+| `dy` | 光标**下**移 |
+| `delta`（`axis:"v"`） | 滚轮**向上**（远离使用者） |
+| `delta`（`axis:"h"`） | 滚轮**向右** |
+
+依据是本机 InputReader 的源码：`CursorMotionAccumulator::process()` 与
+`CursorScrollAccumulator::process()` 都是直接取 `rawEvent->value`，不取反；
+`CursorInputMapper::sync()` 在 `MODE_POINTER` 下 `mYScale = 1.0`，
+随后交给 `PointerController::move()`（屏幕坐标系，+y 向下）。
+
+**限制**：
+
+- **只有相对移动，没有绝对定位。** Android 的鼠标设备本身就只有 `REL_*`，
+  要"移到 (x,y)"得先知道光标当前在哪，而接口没有这个信息 —— 不假装有。
+  需要精确落点时用 `POST /tap`。
+- 单次 `dx`/`dy` 上限 4096 像素、`delta` 上限 64 格。超了返回 400：
+  一次几千像素多半是调用方算错了，而且指针加速曲线会把光标甩到屏幕另一头。
+- 鼠标设备是**延迟创建**的：第一次调用 `/mouse` 才在系统里多出一个指针设备
+  （没用到鼠标的部署不该平白看见一个光标）。
+- `/dev/uinput` 权限与按键注入是同一套要求（root 或 `uhid` 组）。
+
+设备侧核对：
+
+```bash
+adb shell dumpsys input | grep -A3 remote-control-mouse   # Classes: CURSOR
+adb shell getevent -lt /dev/input/eventN                  # 逐条看真实事件
+```
 
 ---
 

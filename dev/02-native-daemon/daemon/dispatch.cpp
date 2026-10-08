@@ -27,6 +27,7 @@
 #include "image_encoder.h"
 #include "png_encoder.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "log_buffer.h"
 #include "selftest.h"
 #include "service_state.h"
@@ -443,6 +444,8 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleGesture(req);
         case Cmd::KeyEvent:
             return HandleKeyEvent(req, args);
+        case Cmd::Mouse:
+            return HandleMouse(req, args);
         case Cmd::Clipboard:
             return HandleClipboard(req, args);
         case Cmd::Rotate:
@@ -1063,6 +1066,7 @@ const CommandSpec kCommands[] = {
     {"AppClearData", 40,  8, "<package>",               "清除应用数据（= 设置里的清除数据）"},
     {"AppEnabled",   41,  8, "<package>\\0<on|off>",     "启用 / 停用应用"},
     {"AppPermission",42,  8, "<package>\\0<权限名>\\0<grant|revoke>", "授予 / 撤销运行时权限"},
+    {"Mouse",        43,  9, "move|button|click|wheel …",  "鼠标：相对移动 / 按键 / 滚轮"},
     {"Describe",     20,  3, "无",                      "本清单：有哪些命令、哪些可用"},
     {"GetConfig",    21,  3, "无",                      "当前配置与运行时状态"},
     {"SetConfig",    22,  3, "<key>\0<value>...",       "热改配置"},
@@ -1153,6 +1157,14 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
                 available = access("/dev/uinput", W_OK) == 0;
                 if (!available) {
                     reason = "/dev/uinput 不可写，无法创建虚拟键盘";
+                }
+                break;
+            case Cmd::Mouse:
+                // 与 KeyEvent 同理：鼠标设备也是延迟创建的，
+                // Describe 不能为了判定可用性就把光标建出来。
+                available = access("/dev/uinput", W_OK) == 0;
+                if (!available) {
+                    reason = "/dev/uinput 不可写，无法创建虚拟鼠标";
                 }
                 break;
             case Cmd::ListApps:
@@ -1433,6 +1445,136 @@ ReplyPacket Dispatcher::HandleKeyEvent(const Request& req,
            .Field("keyCode", code).Field("longPress", longPress)
      .EndObj();
     return MakeJsonReply(req.cmd, w.str());
+}
+
+// ── v9：鼠标 / 滚轮 ─────────────────────────────────────────────────────────
+//
+// 四种动作共用一个命令（与 Clipboard / FileOp 同一个风格）：参数少而固定，
+// 一种动作给一条命令会让命令表迅速膨胀，而它们的语义是同一件事的不同侧面。
+ReplyPacket Dispatcher::HandleMouse(const Request& req,
+                                    const std::vector<std::string>& args) {
+    if (args.empty() || args[0].empty()) {
+        return MakeJsonError(req.cmd, kErrPayload,
+                             "缺少动作（move|button|click|wheel）");
+    }
+    const std::string& action = args[0];
+
+    // 延迟初始化，理由与键盘相同 —— 而且鼠标更明显：它会在屏幕上
+    // 多出一个光标，没用过的部署不该看见它。
+    if (mouse_ == nullptr) {
+        mouse_ = std::make_unique<Mouse>();
+    }
+    if (!mouse_->ready()) {
+        std::string err;
+        if (!mouse_->Init(&err)) {
+            return MakeJsonError(req.cmd, kErrUnsupported, err);
+        }
+    }
+
+    // 把参数解析成整数：客户端可能给 "-3"，也可能是垃圾。
+    // 不自己解析而用 atoi 的话，"abc" 会静默变成 0（= 什么都不做），
+    // 于是调用方以为成功、设备却纹丝不动 —— 这类"静默无效"最难查。
+    auto parseInt = [](const std::string& s, long* out) -> bool {
+        if (s.empty()) return false;
+        char* end = nullptr;
+        errno = 0;
+        const long v = strtol(s.c_str(), &end, 10);
+        if (errno != 0 || end == s.c_str() || *end != '\0') return false;
+        *out = v;
+        return true;
+    };
+
+    std::string error;
+
+    if (action == "move") {
+        if (args.size() < 3) {
+            return MakeJsonError(req.cmd, kErrPayload, "move 需要 <dx>\\0<dy>");
+        }
+        long dx = 0, dy = 0;
+        if (!parseInt(args[1], &dx) || !parseInt(args[2], &dy)) {
+            return MakeJsonError(req.cmd, kErrBadArg,
+                                 "dx/dy 必须是整数（收到: " + args[1] + ", " + args[2] + "）");
+        }
+        // 上限保护：一次几千像素多半是调用方算错了，而且会让指针加速
+        // 曲线把光标甩到屏幕另一头，看起来像"完全不受控"。
+        constexpr long kMaxDelta = 4096;
+        if (std::abs(dx) > kMaxDelta || std::abs(dy) > kMaxDelta) {
+            return MakeJsonError(req.cmd, kErrBadArg,
+                                 "单次位移过大（上限 " + std::to_string(kMaxDelta) + " 像素）");
+        }
+        if (!mouse_->Move(static_cast<int>(dx), static_cast<int>(dy), &error)) {
+            return MakeJsonError(req.cmd, kErrInjected, error);
+        }
+        json::Writer w;
+        w.Obj().Field("ok", true).Field("action", "move")
+               .Field("dx", dx).Field("dy", dy)
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    if (action == "button") {
+        if (args.size() < 3) {
+            return MakeJsonError(req.cmd, kErrPayload,
+                                 "button 需要 <按钮>\\0<down|up>");
+        }
+        bool down = false;
+        if (args[2] == "down" || args[2] == "1" || args[2] == "true") {
+            down = true;
+        } else if (args[2] == "up" || args[2] == "0" || args[2] == "false") {
+            down = false;
+        } else {
+            return MakeJsonError(req.cmd, kErrBadArg,
+                                 "状态只能是 down|up（收到: " + args[2] + "）");
+        }
+        if (!mouse_->Button(args[1], down, &error)) {
+            return MakeJsonError(req.cmd, kErrBadArg, error);
+        }
+        json::Writer w;
+        w.Obj().Field("ok", true).Field("action", "button")
+               .Field("button", args[1]).Field("down", down)
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    if (action == "click") {
+        const std::string button = args.size() > 1 && !args[1].empty() ? args[1] : "left";
+        if (!mouse_->Click(button, &error)) {
+            return MakeJsonError(req.cmd, kErrBadArg, error);
+        }
+        json::Writer w;
+        w.Obj().Field("ok", true).Field("action", "click").Field("button", button)
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    if (action == "wheel") {
+        if (args.size() < 2) {
+            return MakeJsonError(req.cmd, kErrPayload, "wheel 需要 <格数>");
+        }
+        long delta = 0;
+        if (!parseInt(args[1], &delta)) {
+            return MakeJsonError(req.cmd, kErrBadArg,
+                                 "格数必须是整数（收到: " + args[1] + "）");
+        }
+        const bool horizontal = (args.size() > 2 && (args[2] == "h" || args[2] == "horizontal"));
+        // 上限保护：一次几十格会让列表直接滚到底，几乎总是调用方算错了。
+        constexpr long kMaxClicks = 64;
+        if (std::abs(delta) > kMaxClicks) {
+            return MakeJsonError(req.cmd, kErrBadArg,
+                                 "单次滚动格数过大（上限 " + std::to_string(kMaxClicks) + "）");
+        }
+        if (!mouse_->Wheel(static_cast<int>(delta), horizontal, &error)) {
+            return MakeJsonError(req.cmd, kErrInjected, error);
+        }
+        json::Writer w;
+        w.Obj().Field("ok", true).Field("action", "wheel")
+               .Field("delta", delta).Field("axis", horizontal ? "h" : "v")
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    return MakeJsonError(req.cmd, kErrBadArg,
+                         "未知动作: " + action + "（可用: move|button|click|wheel）");
 }
 
 ReplyPacket Dispatcher::HandleClipboard(const Request& req,

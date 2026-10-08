@@ -28,7 +28,8 @@ constexpr uint32_t kMagic = 0x44545541;
 //   6 = 服务对外开关、运行中应用、历史日志、日志流
 //   7 = 屏幕方向（0/90/180/270/free）
 //   8 = 应用生命周期补全（卸载 / 清数据 / 启用停用 / 权限授予撤销）
-constexpr uint32_t kProtocolVersion = 8;
+//   9 = 鼠标（相对移动 / 按键 / 滚轮）
+constexpr uint32_t kProtocolVersion = 9;
 
 // 单次上传的字节上限（HTTP 请求体 / APK / 普通文件）。
 //
@@ -146,6 +147,24 @@ enum class Cmd : uint32_t {
                          // ⚠️ 只对**可运行时变更**的权限有效。安装期权限
                          //    （如 MANAGE_EXTERNAL_STORAGE）会报
                          //    "not a changeable permission type"。
+
+    // ── 鼠标 / 滚轮（v9）─────────────────────────────────────────────────
+    //
+    // 为什么触控之外还要有鼠标：它是**另一类输入设备**，能做的事触控做不到 ——
+    //   · 滚轮：列表/文档连续滚动，不用在屏幕上划（划会带动惯性、还可能误触）
+    //   · 右键：上下文菜单
+    //   · 悬停：不按下也能移动指针
+    // 触控注入只能模拟手指，这三样都表达不出来。
+    //
+    // payload: "<action>[\0<arg>...]"，四种动作：
+    //   move\0<dx>\0<dy>              相对移动（正 = 右 / 下）
+    //   button\0<按钮>\0<down|up>     按下 / 抬起（left|right|middle|back|forward）
+    //   click\0<按钮>                 点一下（按下 → 保持 30ms → 抬起）
+    //   wheel\0<格数>[\0<v|h>]        滚轮，正 = 向上（h 时正 = 向右）
+    //
+    // ⚠️ 只有相对移动。Android 的鼠标设备本身就只有 REL_*，要"移到 (x,y)"
+    //    得先知道光标在哪，而接口没有这个信息 —— 需要精确落点时用 Tap。
+    Mouse         = 43,
 
     Power         = 34,  // payload: "reboot" | "shutdown" | "reboot-recovery"
                          //          | "reboot-bootloader" | "reboot-sideload"

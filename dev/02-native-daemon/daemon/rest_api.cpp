@@ -2752,6 +2752,57 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
     if (res == "key" && method == "POST") {
         return HandleKey(req);
     }
+    // ── v9：鼠标 / 滚轮 ──
+    //
+    // 一个端点、四种动作，与 socket 命令一一对应（同一个 Dispatcher）。
+    // body 形如 {"action":"move","dx":10,"dy":-5} /
+    //           {"action":"wheel","delta":-3} / {"action":"click","button":"right"}
+    if (res == "mouse" && method == "POST") {
+        json::Value b; HttpResponse err;
+        if (!ParseJsonBody(req, &b, &err)) return err;
+        const std::string action = b.str("action");
+        if (action.empty()) {
+            return HttpResponse::Error(
+                    400, "mouse 需要 action（move|button|click|wheel）");
+        }
+        if (action == "move") {
+            // 缺省 0 是合理的（只横向或只纵向移动），但两个都缺就没意义了
+            const int64_t dx = b.num("dx", 0);
+            const int64_t dy = b.num("dy", 0);
+            if (dx == 0 && dy == 0) {
+                return HttpResponse::Error(400, "move 需要 dx 或 dy");
+            }
+            return Call(Cmd::Mouse,
+                        PackArgs({"move", std::to_string(dx), std::to_string(dy)}),
+                        0, -1);
+        }
+        if (action == "wheel") {
+            const int64_t delta = b.num("delta", 0);
+            if (delta == 0) {
+                return HttpResponse::Error(400, "wheel 需要非零的 delta");
+            }
+            const std::string axis = b.str("axis");
+            return Call(Cmd::Mouse,
+                        PackArgs({"wheel", std::to_string(delta),
+                                  (axis == "h" || axis == "horizontal") ? "h" : "v"}),
+                        0, -1);
+        }
+        if (action == "click") {
+            std::string button = b.str("button");
+            if (button.empty()) button = "left";
+            return Call(Cmd::Mouse, PackArgs({"click", button}), 0, -1);
+        }
+        if (action == "button") {
+            const std::string button = b.str("button");
+            if (button.empty()) {
+                return HttpResponse::Error(400, "button 需要 button 字段");
+            }
+            const std::string state = b.flag("down") ? "down" : "up";
+            return Call(Cmd::Mouse, PackArgs({"button", button, state}), 0, -1);
+        }
+        return HttpResponse::Error(
+                400, "未知 action: " + action + "（可用: move|button|click|wheel）");
+    }
     if (res == "clipboard" && (method == "GET" || method == "POST")) {
         return HandleClipboard(req);
     }
