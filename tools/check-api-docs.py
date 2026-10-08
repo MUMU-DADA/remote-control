@@ -43,7 +43,7 @@ if "__err" in d:
     sys.exit(2)
 cmds = d.get("commands", [])
 print("\n[1] 命令数 / 版本")
-chk(d.get("protocolVersion") == 10, "protocolVersion = 10", f"实际 {d.get('protocolVersion')}")
+chk(d.get("protocolVersion") == 11, "protocolVersion = 11", f"实际 {d.get('protocolVersion')}")
 
 # ⚠️ 再核对**文档示例里**写的版本号 —— 上面那条只验活服务。
 #    实测踩过：docs/api/01-http.md 的示例里写着 protocolVersion: 6，
@@ -54,13 +54,13 @@ _doc_pv = re.findall(r'"protocolVersion"\s*:\s*(\d+)', open(
 chk(all(int(v) == d.get("protocolVersion") for v in _doc_pv),
     "文档示例里的 protocolVersion 与实际一致",
     f"文档里出现 {sorted(set(_doc_pv))}，实际 {d.get('protocolVersion')}")
-chk(len(cmds) == 39, "命令 39 条", f"实际 {len(cmds)}")
+chk(len(cmds) == 40, "命令 40 条", f"实际 {len(cmds)}")
 # 文档中提到的命令总数应与服务一致。
 for f in ("README.md","03-socket.md","01-http.md"):
     t = open(os.path.join(DOCS,f),encoding='utf-8').read()
     nums = set(re.findall(r'(\d+)\s*条命令', t))
     if nums:
-        chk(nums == {"39"}, f"{f} 里写的命令数与实际一致", f"文档写 {nums}")
+        chk(nums == {"40"}, f"{f} 里写的命令数与实际一致", f"文档写 {nums}")
 
 print("\n[2] 命令号表（03-socket.md）")
 t = open(os.path.join(DOCS,"03-socket.md"),encoding='utf-8').read()

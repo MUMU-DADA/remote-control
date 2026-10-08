@@ -133,7 +133,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```json
 {
   "service": "remote-control",
-  "protocolVersion": 10,
+  "protocolVersion": 11,
   "pid": 21266,
   "capabilities": {
     "screenshot": true, "touch": true, "multiTouch": true,
@@ -159,7 +159,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```json
 {
   "ok": true,
-  "protocolVersion": 10,
+  "protocolVersion": 11,
   "config": {
     "socketPath": "/data/local/tmp/remote-control.sock",
     "usingInitSocket": false,
@@ -175,7 +175,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
   "runtime": {
     "pid": 6595, "uid": 0, "gid": 0,
     "uptimeMs": 752080,
-    "protocolVersion": 10,
+    "protocolVersion": 11,
     "verbose": false,
     "capture": {
       "backend": "surfaceflinger",

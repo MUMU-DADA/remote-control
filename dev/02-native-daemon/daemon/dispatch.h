@@ -40,7 +40,14 @@ class Dispatcher {
     // reqFd   : 客户端传来的 fd（InstallApp 的 APK），没有则 -1。
     //           所有权仍属调用方，本函数不关闭它。
     ReplyPacket Handle(const Request& req, const std::string& payload, int reqFd,
-                       int peerUid);
+                       int peerUid,
+                       // 这条请求是不是从**本地 Unix socket** 来的。
+                       //
+                       // ⚠️ 不能用 peerUid 代替：HTTP 那条路传的是 0，
+                       //    而 0 正是 root 的 uid —— 拿它当"本地"判据，
+                       //    等于把只看本地 socket 的命令（如令牌恢复）
+                       //    在对外接口上敞开。所以单独一个显式开关。
+                       bool overLocalSocket = false);
 
     // 把 NUL 分隔的 payload 拆成参数列表。
     // 空 payload 返回空 vector（不是含一个空串的 vector）。
@@ -86,6 +93,11 @@ class Dispatcher {
     ReplyPacket HandleRotate(const Request& req, const std::vector<std::string>& args);
 
     // v6 ──
+    // 令牌恢复。**只处理本地 socket 来的**（overLocalSocket 为假就直接拒）
+    ReplyPacket HandleToken(const Request& req,
+                            const std::vector<std::string>& args,
+                            bool overLocalSocket);
+
     ReplyPacket HandleServiceSwitch(const Request& req,
                                     const std::vector<std::string>& args);
     ReplyPacket HandleRunningApps(const Request& req);

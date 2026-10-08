@@ -32,6 +32,7 @@
 #include "../daemon/frame_hub.h"
 #include "../daemon/inject.h"
 #include "../daemon/protocol.h"
+#include "../daemon/service_state.h"
 #include "../daemon/socket_server.h"
 #include "test_util.h"
 
@@ -393,6 +394,53 @@ void TestCaptureFrame(int cfd) {
 
     munmap(base, size);
     close(frameFd);
+}
+
+// ---------------------------------------------------------------------------
+// [12] 令牌恢复：只走本地 socket
+// ---------------------------------------------------------------------------
+//
+// 这条命令是给"令牌丢了、上位应用连不上"准备的救援通道 —— 而令牌是访问
+// 这个服务的唯一凭据。它**必须**只在本地 socket 上可用：对外接口一旦也提供，
+// "读到令牌"就退化成一次普通的 HTTP 请求，整个鉴权就白做了。
+//
+// 判据落在 Dispatcher 这一层最直接：**同一个命令、同一份 payload**，
+// 只有 overLocalSocket 不同，结果必须一个放行一个拒绝 ——
+// 这样测的是那条分界线本身，而不是"某个调用点有没有记得加参数"。
+//
+// ⚠️ 不能用 peerUid 当判据：HTTP 那条路传的就是 0，而 0 正是 root 的 uid。
+//    这个测试当初就是为了钉死这件事。
+void TestTokenRecoveryGating(Dispatcher& dispatcher) {
+    printf("\n\033[1;34m[12] 令牌恢复只走本地 socket\033[0m\n");
+
+    Request req = MakeRequest(Cmd::Token);
+
+    ReplyPacket viaHttp = dispatcher.Handle(req, "get", -1, /*peerUid=*/0,
+                                            /*overLocalSocket=*/false);
+    Check(viaHttp.reply.status == kErrPermission,
+          "对外接口拒绝令牌恢复（status=%u）", viaHttp.reply.status);
+
+    ReplyPacket viaSock = dispatcher.Handle(req, "get", -1, /*peerUid=*/0,
+                                            /*overLocalSocket=*/true);
+    Check(viaSock.reply.status == kOk,
+          "本地 socket 放行（status=%u）", viaSock.reply.status);
+
+    // 轮换之后内存里必须**已经**是新令牌 —— 只写盘不换内存的话，
+    // 运行中的服务还在认旧的，重启才生效，症状是"轮换了但没生效"。
+    ServiceState& st = ServiceState::Instance();
+    const std::string before = st.AuthToken();
+    ReplyPacket rot = dispatcher.Handle(MakeRequest(Cmd::Token), "rotate", -1, 0,
+                                        /*overLocalSocket=*/true);
+    const std::string after = st.AuthToken();
+    Check(rot.reply.status == kOk && !after.empty() && after != before,
+          "轮换后内存里的令牌立刻就是新的（%zu → %zu 字节）",
+          before.size(), after.size());
+
+    // 未知操作要明确报参数错，而不是当成 get 静默处理
+    ReplyPacket bad = dispatcher.Handle(MakeRequest(Cmd::Token), "nonsense", -1, 0,
+                                        /*overLocalSocket=*/true);
+    Check(bad.reply.status == kErrBadArg,
+          "未知操作报参数错（status=%u）", bad.reply.status);
 }
 
 void TestTapRoundTrip(int cfd, int readFd) {
@@ -853,6 +901,7 @@ int main() {
     TestCurve();
     TestFrameHubStopRestart(dispatcher, readFd);
     TestFrameHubCaptureIntervals();
+    TestTokenRecoveryGating(dispatcher);
     TestTapRoundTrip(cfd, readFd);
     TestSwipeRoundTrip(cfd, readFd);
     TestProtocolRobustness(cfd);

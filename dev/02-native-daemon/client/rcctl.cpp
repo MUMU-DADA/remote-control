@@ -332,6 +332,8 @@ void Usage(const char* argv0) {
   service on|off|status           服务对外开关（不真停进程）
   running                         正在运行的应用与进程状态
   logfile                         落盘的历史日志（最近 10KB）
+  token get|rotate                读回/轮换访问令牌（**只走本地 socket**）
+
   shutdown                                  优雅退出
   restart                                   退出并由 init 重启（退出码 1）
 
@@ -723,6 +725,13 @@ int main(int argc, char** argv) {
     } else if (cmd == "power") {
         if (remaining < 2) { Usage(argv[0]); close(sockFd); return 1; }
         rc = CmdV2(sockFd, Cmd::Power, BuildPayload({args[0]}), 0);
+    } else if (cmd == "token") {
+        // 令牌恢复（协议 v11）：读回 / 轮换访问令牌。
+        //
+        // **只走本地 socket** —— 走 HTTP 会被明确拒绝。这条命令存在的意义
+        // 就是"客户端把令牌弄丢了、连不上了"，所以它必须是**另一条路**。
+        const char* op = remaining >= 2 ? args[0] : "get";
+        rc = CmdV2(sockFd, Cmd::Token, BuildPayload({op}), 0);
     } else if (cmd == "service") {
         const char* op = remaining >= 2 ? args[0] : "status";
         // kFlagForce：服务关闭时这条仍然要放行，否则就开不回来了

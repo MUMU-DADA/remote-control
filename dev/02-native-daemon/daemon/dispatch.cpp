@@ -439,7 +439,7 @@ ReplyPacket Dispatcher::HandleTouch(const Request& req,
 // ---------------------------------------------------------------------------
 
 ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
-                               int reqFd, int peerUid) {
+                               int reqFd, int peerUid, bool overLocalSocket) {
     if (req.magic != kMagic) {
         ALOGE("magic 不匹配 (收到 0x%x), uid=%d", req.magic, peerUid);
         return ReplyPacket{MakeReply(kErrBadMagic, req.cmd), -1};
@@ -509,6 +509,8 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleClipboard(req, args);
         case Cmd::Rotate:
             return HandleRotate(req, args);
+        case Cmd::Token:
+            return HandleToken(req, args, overLocalSocket);
 
         case Cmd::Power:
             return HandlePower(req, args);
@@ -1121,6 +1123,7 @@ const CommandSpec kCommands[] = {
     {"RunningApps",  36,  6, "无",                      "正在运行的应用与进程状态"},
     {"LogFile",      37,  6, "无",                      "落盘的历史日志（最近 10KB）"},
     {"Rotate",       38,  7, "0|90|180|270|free|status","屏幕方向（有退路，见应答的 method）"},
+    {"Token",        45, 11, "get|rotate",              "读回/轮换访问令牌（**仅本地 socket**）"},
     {"AppUninstall", 39,  8, "<package>",               "卸载应用（kFlagKeepData 保留数据）"},
     {"AppClearData", 40,  8, "<package>",               "清除应用数据（= 设置里的清除数据）"},
     {"AppEnabled",   41,  8, "<package>\\0<on|off>",     "启用 / 停用应用"},
@@ -2366,6 +2369,64 @@ ReplyPacket Dispatcher::HandleRotate(const Request& req,
 }
 
 // ── v6：服务开关 / 运行状态 / 历史日志 ─────────────────────────────────────
+
+// 令牌恢复：读回 / 轮换访问令牌。
+//
+// 见 protocol.h 里 Cmd::Token 那段 —— 只走本地 socket 的理由写在那里。
+ReplyPacket Dispatcher::HandleToken(const Request& req,
+                                    const std::vector<std::string>& args,
+                                    bool overLocalSocket) {
+    if (!overLocalSocket) {
+        // 对外的 HTTP 接口不提供这个能力。这里**明确**报错，
+        // 而不是装作命令不存在 —— 客户端要知道"这条路不对"，
+        // 而不是去猜是不是自己拼错了命令号。
+        return MakeJsonError(
+                req.cmd, kErrPermission,
+                "令牌恢复只允许通过本地 Unix socket（HTTP 接口不提供）。"
+                "用 rcctl 或直接连 socket；需要放行别的 uid 时用 --socket-peer-uid");
+    }
+
+    ServiceState& st = ServiceState::Instance();
+    const std::string op = args.empty() ? "get" : args[0];
+
+    if (op == "get") {
+        const std::string tok = st.AuthToken();
+        json::Writer w;
+        w.Obj()
+            // 空令牌 = 这台设备**没开鉴权**。这一点必须如实报出来，
+            // 否则调用方会把空串当成"拿到了一个空令牌"。
+            .Field("ok", true)
+            .Field("auth", !tok.empty())
+            .Field("token", tok)
+            .Field("note", tok.empty()
+                               ? "本服务未开启鉴权（auth=0），没有令牌可给"
+                               : "本地 socket 专用；请勿把它写进日志或工单")
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    if (op == "rotate") {
+        const std::string fresh = st.RotateAuthToken();
+        if (fresh.empty()) {
+            return MakeJsonError(req.cmd, kErrInternal,
+                                 "拿不到安全的随机数，拒绝轮换（宁可不动）");
+        }
+        // 轮换意味着**所有**已配好旧令牌的客户端立刻失效 —— 这是这个操作的
+        // 本意，但必须说出来，免得调用方以为它只是个"刷新"。
+        json::Writer w;
+        w.Obj()
+            .Field("ok", true)
+            .Field("auth", true)
+            .Field("token", fresh)
+            .Field("note", "令牌已轮换并写盘：用旧令牌的客户端（含网页）"
+                           "需要重新填入")
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    return MakeJsonError(req.cmd, kErrBadArg,
+                         "未知操作: " + op + "（可用 get|rotate）");
+}
 
 ReplyPacket Dispatcher::HandleServiceSwitch(
         const Request& req, const std::vector<std::string>& args) {

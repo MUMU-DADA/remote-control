@@ -284,6 +284,14 @@ std::string ServiceState::AuthToken() const {
     return authToken_;
 }
 
+std::string ServiceState::RotateAuthToken() {
+    const std::string fresh = ConfigFile::GenerateToken();
+    if (fresh.empty()) return "";      // 拿不到安全随机数就什么都别动
+    SetAuthToken(fresh);
+    PersistAuthToken(fresh);
+    return fresh;
+}
+
 void ServiceState::SetAuthToken(const std::string& token) {
     std::lock_guard<std::mutex> lock(mutex_);
     authToken_ = token;

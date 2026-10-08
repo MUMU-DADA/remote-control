@@ -684,8 +684,26 @@ int main(int argc, char** argv) {
         opts.port     = httpPort;
         opts.token    = httpToken;
         if (!httpServer.Start(opts, &error)) {
-            fprintf(stderr, "remote-control: HTTP API 启动失败: %s\n", error.c_str());
-            return 1;
+            // ⚠️ **不退出**。HTTP 只是两条传输里的一条，而 socket 那条
+            //    （上位应用走的就是它）此时**已经起来了**。
+            //
+            //    原来这里是 `return 1`：端口被别人占着就整个进程退出，
+            //    而 init 会每 5 秒拉一次 —— 于是变成一个**崩不完的循环**，
+            //    连本来能用的 socket 一起没了。这个失败形状在这个仓库里
+            //    已经踩过一次（日志路径那节写的就是"写不出去 → 退出 →
+            //    init 反复拉"，见上面 logPath 那段）。
+            //
+            //    紧跟着的 HTTP 线程启动失败也是这么处理的（只警告、继续），
+            //    这里跟它保持一致。真正"两条路都没了"的情况由上面
+            //    socket 启动失败那处兜住（那里 return 1 是对的）。
+            ALOGE("HTTP API 启动失败（仅 HTTP 不可用，socket 仍可服务）: %s",
+                  error.c_str());
+            fprintf(stderr,
+                    "remote-control: HTTP API 启动失败: %s\n"
+                    "  → 只有 HTTP 不可用；Unix socket 照常服务。"
+                    "（端口被占？换 --http-port，或关掉占用的那个进程）\n",
+                    error.c_str());
+            error.clear();
         }
     }
 
@@ -751,8 +769,14 @@ int main(int argc, char** argv) {
         //
         // 只放行 ServiceSwitch 本身（带 kFlagForce），否则关掉之后
         // 就没有任何入口能开回来了。
+        // 关掉对外能力时，只放行"能把它开回来的"和"能救回访问凭据的"。
+        //
+        // ⚠️ 令牌恢复（Cmd::Token）必须在这里 —— 它**恰恰**是在
+        //    "客户端对不上令牌、于是也关不掉/开不了服务"那种局面下要用的。
+        //    它只走本地 socket，能连上的人本来就有这个 uid 的全部权限。
         if (!ServiceState::Instance().Serving() &&
-            req.cmd != static_cast<uint32_t>(Cmd::ServiceSwitch)) {
+            req.cmd != static_cast<uint32_t>(Cmd::ServiceSwitch) &&
+            req.cmd != static_cast<uint32_t>(Cmd::Token)) {
             ALOGW("socket 拒绝（服务已关闭对外能力）cmd=%u", req.cmd);
             ReplyPacket denied;
             denied.reply.magic  = kMagic;
@@ -765,7 +789,10 @@ int main(int argc, char** argv) {
         // 不加锁 —— 串行化在 Dispatcher::Handle 里做。
         // 放这里对流式响应无效（回调在处理器返回之后才跑），
         // 而且两处都加会直接死锁。
-        ReplyPacket packet = dispatcher.Handle(req, payload, reqFd, peerUid);
+        // overLocalSocket=true：这是本地 Unix socket 那条路。
+        // 只看本地的能力（令牌恢复）靠这个开关把关。
+        ReplyPacket packet = dispatcher.Handle(req, payload, reqFd, peerUid,
+                                               /*overLocalSocket=*/true);
         ServiceState::Instance().CountRequest(req.cmd, packet.reply.status);
 
         // Shutdown / Restart 命令只是设了个标志（应答要先发出去），

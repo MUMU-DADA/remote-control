@@ -129,6 +129,14 @@ class ServiceState {
     // 这样改令牌不用重建服务器。
     // 空串 = 无鉴权。
     std::string AuthToken() const;
+
+    // 轮换访问令牌：生成新的、换进内存、写盘。返回新令牌；失败返回空串。
+    //
+    // 封装在这里而不是让调用方自己 SetAuthToken + PersistAuthToken：
+    // 两步分开做，中间失败会留下"内存里是新令牌、盘上还是旧的"，
+    // 重启之后就对不上了 —— 而令牌对不上的症状是"怎么都连不上"，
+    // 很难查回这里。
+    std::string RotateAuthToken();
     void SetAuthToken(const std::string& token);
 
   private:

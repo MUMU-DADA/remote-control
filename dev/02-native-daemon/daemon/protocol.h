@@ -30,7 +30,8 @@ constexpr uint32_t kMagic = 0x44545541;
 //   8 = 应用生命周期补全（卸载 / 清数据 / 启用停用 / 权限授予撤销）
 //   9 = 鼠标（相对移动 / 按键 / 滚轮）
 //  10 = 整串文本输入（剪贴板粘贴 / 逐字符键入）
-constexpr uint32_t kProtocolVersion = 10;
+//  11 = 令牌恢复（**仅本地 socket**：读回 / 轮换访问令牌）
+constexpr uint32_t kProtocolVersion = 11;
 
 // 单次上传的字节上限（HTTP 请求体 / APK / 普通文件）。
 //
@@ -185,6 +186,25 @@ enum class Cmd : uint32_t {
     //    所以中文只能走 paste。type 模式下遇到打不出的字符会**明确报错**
     //    （指出是第几个字符），而不是静默丢字。
     Text          = 44,
+
+    // 令牌恢复：payload "get" | "rotate"
+    //
+    // ⚠️ **只允许走本地 Unix socket**，不允许走 HTTP。
+    //
+    //    为什么需要它：令牌是访问这个服务的唯一凭据，丢了就只能 adb/root
+    //    去读配置文件（或者重装 ROM）。对着一台装在墙上的设备，
+    //    那不是一个用户能自己完成的动作 —— 上位应用一旦对不上令牌，
+    //    整个界面就废了，而恢复手段在"另一个世界"。
+    //
+    //    为什么这样是安全的：Unix socket 那条路**已经**按 SO_PEERCRED
+    //    做 uid 精确校验（默认只认守护进程自己的 euid）；能通过它的进程
+    //    本来就有这个 uid 的全部权限 —— 而令牌就躺在同一个 uid 可读的
+    //    文件里。所以这条命令**没有扩大任何攻击面**，它只是把
+    //    "能读那个文件"变成"能通过已有通道拿到"。
+    //
+    //    需要给别的 uid（比如上位应用）用时，本来就有的
+    //    `--socket-peer-uid` 就是那个口子，不必再开新的。
+    Token         = 45,
 
     Power         = 34,  // payload: "reboot" | "shutdown" | "reboot-recovery"
                          //          | "reboot-bootloader" | "reboot-sideload"
