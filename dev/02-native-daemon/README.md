@@ -22,7 +22,7 @@
 | 按键注入（`keyboard.cpp`） | ✅ 虚拟键盘（`/dev/uinput`），真机验证通过 |
 | 屏幕方向（0/90/180/270） | ✅ 真机验证通过；设备转不动时退到改显示尺寸，并**如实回报** |
 | 应用管理（`appops.cpp`） | ✅ 列表 / 启动 / 停止 / 装 APK（走 `pm`/`am`/`cmd` 子进程） |
-| 文件管理（`fileops.cpp`） | ✅ 共享存储根下读写；越界与软链接逃逸都被拒 |
+| 文件管理（`fileops.cpp`） | ✅ 共享存储根下读写；越界被拒（`webui-test/fileops_boundary.sh` 21 项）。软链接逃逸那条**走不通**：共享存储（FUSE）上根本建不了软链接，攻击者也造不出来；真正挡住越界的是逐级 `O_NOFOLLOW` 打开父目录 |
 | 画面流（WebSocket + MJPEG） | ✅ jpeg/webp/png/h264，可中途改帧率/画质/分辨率 |
 | Web 控制台（`webui.cpp`） | ✅ 内置单页，不用在设备上装任何东西 |
 | 鉴权 / 服务开关 | ✅ 令牌鉴权；`enabled=0` 是**软开关**（不真停进程） |
@@ -384,14 +384,16 @@ python3 rc_client.py --socket /tmp/remote-control.sock swipe 540 1600 540 400
 ## 下一步
 
 原先列在这里的五项（SurfaceFlinger 编译验证、真机跑起来、SELinux 调通、
-真机端到端、`KeyEvent`）**都已完成**，见上面的「现状」表。真正剩下的：
+真机端到端、`KeyEvent`）**都已完成**，见上面的「现状」表。
+
+下表是**逐行对着代码和设备核过的**（最近一次：2026-10-09）。那次核出来两行已经过时——“整串文本输入”和“剪贴板写入”都**已经能用了**，而表里还写着“未做 / 平台做不到”：
 
 | 项 | 状态 | 说明 |
 |---|---|---|
 | 帧通道零拷贝优化（直接导出 dmabuf） | ⏳ **未做** | 现在仍是 `memcpy` 进 memfd。全仓库没有 dmabuf 相关代码 |
 | 请求处理并发 | 🤔 **刻意限制** | `Dispatcher::Handle()` 用共享的 `opMutex_` 串行化触控等有状态操作及其它非 `Info`/`Capture` 命令，HTTP 与 Unix socket 共用此锁。`Info`/`Capture` 在前置分支绕过它；抓帧由 Capture 后端自己的锁保护，不会因触控排队，但同一后端的抓帧仍串行。编码侧另由 `encode_pool` 限流 |
-| 文本输入（`input text` 那类） | ⏳ **未做** | 按键注入（`keyboard.cpp`）已有；整串文本输入没有 |
-| 剪贴板写入 | ⛔ **平台做不到** | Android 10+ 只允许前台应用写。**不是本项目的缺陷**，见 [`docs/api/01-http.md`](../../docs/api/01-http.md) 第五节 |
+| 整串文本输入 | ✅ **已完成** | 协议 v10 的 `Text`：`paste`（任意 Unicode，走剪贴板再发粘贴）与 `type`（逐字符按键，仅 ASCII）。`webui-test/text_test.py` 12 项。⚠️ 这一行原来写的是“⏳ 未做”—— `Text` 上了 v10 之后**没同步改这里**，一直错到 2026-10-09 才发现 |
+| 剪贴板写入 | ✅ **已完成** | 辅助工具以 shell UID 跑，`com.android.shell` 持有后台剪贴板权限。实测 set→get 往返（中文 + emoji）一字不差。⚠️ 这一行原来写的是“⛔ 平台做不到”—— 那是**误判**，[`docs/api/01-http.md`](../../docs/api/01-http.md) 里早已订正，只是这里没跟上 |
 | 热替换（启动后换二进制） | ✅ **API 与当前 ROM 启动链已实现** | `POST /api/v1/update` 暂存，`/update/apply` 原子切换并重启，`/update/rollback` 回滚；sealed memfd 与 SELinux 接入见 [`docs/09`](../../docs/09-deployment-and-update.md) |
 
 ---
