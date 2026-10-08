@@ -68,6 +68,27 @@ timeout "$TMO" "$ADB" -s "$SERIAL" push "$BIN/rcctl" /data/local/tmp/rcctl >/dev
 sh_ "chmod 755 /data/local/tmp/remote-control /data/local/tmp/rcctl" >/dev/null 2>&1
 ok "已推送"
 
+# ⚠️ init 管的那个服务正在跑的时候，再起一个手工实例会**抢走 8088**。
+#
+#    实测踩过：deploy 之后去做 HTTP 热更新，apply 返回 202、壳日志也已经在跑新槽，
+#    可 /api/v1/info 一直报**旧** buildId —— 查下来 8088 被 /data/local/tmp 这个
+#    手工实例占着，而 init 那个（自从"绑定失败不再退出、改为重试"之后）活着但
+#    **没有 HTTP**。于是所有 HTTP 查询问的都是**另一个进程、另一个版本**。
+#
+#    这种"两个实例各说各话"没有任何报错，只有对着 pid 才看得出来。
+if [ "${ALLOW_SECOND:-0}" != "1" ] &&
+   [ "$(sh_ "getprop init.svc.remote-control" 2>/dev/null | tr -d '\r')" = "running" ]; then
+    warn "init 管的 remote-control 正在跑 —— 再起一个手工实例会抢走 8088"
+    echo "  init 那个会活着但**没有 HTTP**，于是 /api/v1/info 报的是手工实例的版本，"
+    echo "  看起来像"更新没生效"。"
+    echo
+    echo "  两条路，选一条："
+    echo "    · 要手工实例： adb -s $SERIAL shell setprop ctl.stop remote-control"
+    echo "    · 就用现成的： 别跑本脚本（run-linux.sh --from-product-out 起的就是 init 那个）"
+    echo "  确实知道自己在干什么： ALLOW_SECOND=1 bash $0 $SERIAL"
+    exit 1
+fi
+
 step "启动"
 # ⚠️ 按**参数形状**杀，不要按二进制名杀。
 #
