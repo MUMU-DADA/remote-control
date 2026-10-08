@@ -38,6 +38,11 @@ import urllib.request
 
 from playwright.sync_api import sync_playwright
 
+import wctest_token
+
+# 交付镜像默认开鉴权：没令牌页面会 401，而多数检查照样"通过"。
+_TOKEN = wctest_token.resolve_token()
+
 CHROME = os.environ.get(
     "CHROME", "/root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome")
 
@@ -175,7 +180,7 @@ def main():
             f"红起 {pr['red']['first']}，蓝止 {pr['blue']['last']}，盒高 {pr['h']}")
 
         # ── 场景 A：原尺寸流塞进比它小的显示区 ──
-        pg = b.new_page(viewport={"width": 900, "height": 1000})
+        pg = wctest_token.new_page(b, _TOKEN, viewport={"width": 900, "height": 1000})
         errs = []
         pg.on("pageerror", lambda e: errs.append(str(e)))
         pg.goto(f"{origin}/?format=jpeg&fps=10&maxWidth=0&skipUnchanged=0",
@@ -303,7 +308,7 @@ def main():
         pg.close()
 
         # ── 场景 B：小流放进大显示区（两种模式**真正不同**的场景）──
-        pg2 = b.new_page(viewport={"width": 900, "height": 1000})
+        pg2 = wctest_token.new_page(b, _TOKEN, viewport={"width": 900, "height": 1000})
         errs2 = []
         pg2.on("pageerror", lambda e: errs2.append(str(e)))
         pg2.goto(f"{origin}/?format=jpeg&fps=10&maxWidth=360&skipUnchanged=0",

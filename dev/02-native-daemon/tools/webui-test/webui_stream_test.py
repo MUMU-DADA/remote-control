@@ -8,6 +8,11 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+import wctest_token
+
+# 交付镜像默认开鉴权：没令牌页面会 401，而多数检查照样"通过"。
+_TOKEN = wctest_token.resolve_token()
+
 
 CHROME = os.environ.get(
     "CHROME", "/root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
@@ -54,7 +59,7 @@ def main():
             ("desktop", {"width": 1366, "height": 900}),
             ("mobile", {"width": 390, "height": 844}),
         ):
-            page = browser.new_page(viewport=viewport)
+            page = wctest_token.new_page(browser, _TOKEN, viewport=viewport)
             page.on("pageerror", lambda error: errors.append(str(error)))
             if html is not None:
                 page.route(re.compile(re.escape(args.base) + r"/(?:\?.*)?$"),
@@ -200,7 +205,7 @@ def main():
             page.evaluate("fps = 0; stopStream()")
             page.close()
         if args.h264:
-            page = browser.new_page(viewport={"width": 1366, "height": 900})
+            page = wctest_token.new_page(browser, _TOKEN, viewport={"width": 1366, "height": 900})
             page.on("pageerror", lambda error: errors.append(str(error)))
             frames = []
 

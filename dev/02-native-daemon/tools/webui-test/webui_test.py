@@ -16,6 +16,11 @@ import time
 
 from playwright.sync_api import sync_playwright
 
+import wctest_token
+
+# 交付镜像默认开鉴权：没令牌页面会 401，而多数检查照样"通过"。
+_TOKEN = wctest_token.resolve_token()
+
 CHROME = os.environ.get(
     "CHROME", "/root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
 )
@@ -46,7 +51,7 @@ def main():
                 f"--unsafely-treat-insecure-origin-as-secure={origin}",
             ],
         )
-        pg = b.new_page(viewport={"width": 900, "height": 1000})
+        pg = wctest_token.new_page(b, _TOKEN, viewport={"width": 900, "height": 1000})
         # 页面里的 JS 报错必须让测试失败 —— 否则"拖动条坏了"可能只是个
         # 静默异常，界面上看起来一切正常
         pg.on("pageerror", lambda e: errors.append(str(e)))
@@ -110,8 +115,15 @@ def main():
         }""")
         print(f"    抓帧行    : {cad!r}")
         check("#cadence 元素存在", cad is not None)
+        # ⚠️ 这里原来断言的是文本里有"服务端"三个字 —— 而这三个字**只出现在
+        #    #cadence 上面那行 HTML 注释里**，渲染出来的串里从来没有过：
+        #        抓帧  上限 10fps · 1 个订阅 · 16ms · 探测 100ms · 宽 720
+        #    所以这条**任何情况下都不可能通过**，跟令牌、跟服务端都没关系。
+        #    改成断言真正要看的东西：这一行报出了活的节奏（帧率上限 + 周期），
+        #    而不是"空闲"那句占位话。
         check("抓帧行报出了服务端节奏（不是空闲）",
-              cad is not None and "空闲" not in cad and "服务端" in cad)
+              cad is not None and "空闲" not in cad
+              and "上限" in cad and "fps" in cad)
         check("抓帧行带上了本页需求的对照或订阅数",
               cad is not None and ("订阅" in cad))
 
