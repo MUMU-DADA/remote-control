@@ -17,7 +17,8 @@
 # 用法:
 #   bash tools/rc-update.sh push  <二进制>       校验 → 入槽（**不动指针**，安全）
 #   bash tools/rc-update.sh switch [<sha>|latest] 原子切指针 + 重启服务
-#   bash tools/rc-update.sh rollback             切回 last-good + 重启服务
+#   bash tools/rc-update.sh rollback             切回**上一版**（previous）+ 重启服务
+#   bash tools/rc-update.sh clear [--purge]      清指针，回到镜像自带的版本
 #   bash tools/rc-update.sh list                 列出所有版本与当前指针
 #   bash tools/rc-update.sh verify [<二进制>]    比对 buildId 与本地二进制
 #   bash tools/rc-update.sh status               设备侧槽目录一览
@@ -232,6 +233,60 @@ restart_service() {
     fi
 }
 
+# 清掉指针，回到**镜像自带**的版本。
+#
+# 为什么必须有这个命令：热替换槽在 /data 里，而 `/data` 不随重装 ROM 重置 ——
+# 于是"用过一次 rc-update 之后，再重编重装 ROM 却发现什么都没变"。
+# 壳是按 `current` 优先选的，这是设计如此（你切过去就是要它跑），
+# 但**没有一条路能明确地说"我不要槽了，回去跑镜像那份"**：
+# rollback 只会退到 previous/last-good，两者都可能是槽里的版本。
+#
+#   用法:  rc-update.sh clear            # 只清指针（槽留着，随时能再切回来）
+#          rc-update.sh clear --purge    # 连槽里的载荷一起删
+cmd_clear() {
+    need_device
+    local purge=0
+    [ "${1:-}" = "--purge" ] && purge=1
+
+    step "清指针"
+    local cur; cur=$(sh_ "cat $DROOT/current 2>/dev/null" | tr -d '\r')
+    if [ -z "$cur" ]; then
+        printf '    current 本来就是空的（跑的就是镜像自带的版本）\n' 
+    else
+        printf '    清掉 current=%s\n' "$cur"
+    fi
+    for f in current previous last-good; do
+        sh_ "printf '' > $DROOT/$f" >/dev/null 2>&1 || true
+    done
+    ok "指针已清空 —— 下次拉起会用镜像自带的那份"
+
+    if [ "$purge" = 1 ]; then
+        step "清槽"
+        sh_ "rm -rf $DROOT/releases" >/dev/null 2>&1 || true
+        ok "槽已清空"
+    else
+        printf '    （槽还留着；要一起删： %s clear --purge）\n' "$0"
+    fi
+
+    step "重启服务"
+    sh_ "setprop ctl.restart $SVC" >/dev/null 2>&1 || true
+    # 这里**不能**像 switch 那样"等 buildId 变" —— 回到镜像版时 buildId
+    # 本来就该和之前一样（可能还是同一个 sha）。等的是"服务重新能应答"。
+    local live=""
+    for i in $(seq 1 15); do
+        live=$(device_build_id)
+        [ -n "$live" ] && break
+        sleep 1
+    done
+    if [ -n "$live" ]; then
+        ok "服务已回来（buildId ${live:0:12}…）"
+    else
+        warn "没能确认服务状态（HTTP 连不上就查启动日志： $0 status）"
+    fi
+    printf '    壳日志里应当写着"镜像自带，不做哈希校验"：\n'
+    printf '      adb -s %s shell tail -2 %s/launcher.log\n' "$SERIAL" "$DROOT"
+}
+
 cmd_list() {
     need_device
     step "设备上的版本槽"
@@ -281,6 +336,7 @@ case "${1:-}" in
     push)     shift; cmd_push "$@" ;;
     switch)   shift; cmd_switch "$@" ;;
     rollback) cmd_rollback ;;
+    clear)    shift; cmd_clear "$@" ;;
     list)     cmd_list ;;
     verify)   shift; cmd_verify "$@" ;;
     status)   cmd_status ;;

@@ -39,14 +39,31 @@ init 服务接到 `remote-control-launch`，并部署 sealed memfd 所需的 SEL
 会执行版本槽中的新载荷。未接入该启动链的旧 ROM 仍只能暂存和校验文件。完整请求示例和
 策略约束见 [`docs/api/01-http.md`](../../docs/api/01-http.md) 及 [`docs/09`](../../docs/09-deployment-and-update.md)。
 
-**设备侧功能冒烟检查**：`python3 tools/functional-sweep.py [host:port]` —— 核对
-`/describe` 声明的命令清单仍有 33 条，并对部分 HTTP 功能做设备侧检查（截图、输入、
-应用管理、文件列表、剪贴板、旋转、服务配置/日志和重启等），并检查 `/stream` 能完成
-基本握手并收到二进制帧。它不逐条执行全部 40 条命令，也不验证完整 WebSocket 协议、
-下载、APK 安装和完整文件操作；不能把它当作全接口回归。
+同一条通道还有个**命令行**入口 [`tools/rc-update.sh`](../../tools/rc-update.sh)：
+`push` / `switch` / `rollback` / `clear` / `list` / `verify` / `status`。
+`switch`/`rollback` 的判据是**服务自报的 buildId 变了**，不是"进程还在" ——
+"推上去了但跑的还是旧进程"是这个项目反复踩过的坑。
 
-运行前提：该脚本不发送令牌，测试服务需关闭鉴权；ADB 需能连接脚本里固定的
-`emulator-5580`。从仓库根目录测试默认本机端口时，先建立端口转发：
+> ⚠️ **用过热替换之后，重装 ROM 不会自动回到镜像自带的版本。**
+> 槽在 `/data` 里（`/data/misc/remote-control/releases/<sha>/`），而 `/data`
+> 不随重装重置；壳按 `current` 指针优先选，这是设计如此。所以"重编 + 重装 ROM
+> 却发现什么都没变"就是在这一步踩的。要回到镜像那份：
+> `bash tools/rc-update.sh clear`（`--purge` 连槽一起删）。
+> 壳每次拉起都会在自己的日志里写清跑的是哪一个 —— 先看
+> `launcher.log` 里是"槽 <sha>"还是"镜像自带"。
+
+**设备侧功能冒烟检查**：`python3 tools/functional-sweep.py [host:port]` —— 核对
+`/describe` 声明的命令清单仍有 **40** 条（协议 v11），并对部分 HTTP 功能做设备侧检查
+（截图、输入、应用管理、文件列表、剪贴板、旋转、服务配置/日志和重启等），并检查
+`/stream` 能完成基本握手并收到二进制帧。它不逐条执行全部 40 条命令，也不验证完整
+WebSocket 协议、下载、APK 安装和完整文件操作；不能把它当作全接口回归。
+
+运行前提：**鉴权开着也能跑**。令牌按 命令行 `--token=xxx` → 环境变量 `RC_TOKEN`
+→ 设备上的 `/data/misc/remote-control/remote-control.conf`（需 `adb root`）的顺序取。
+⚠️ 拿不到令牌时它**不会静默降级**：会明确报错，因为不带令牌跑出来的是
+"每条越界检查都被 401 挡下、于是全部记成 ✓"的假绿。
+ADB 需能连接脚本里固定的 `emulator-5580`。从仓库根目录测试默认本机端口时，
+先建立端口转发：
 
 ```bash
 adb -s emulator-5580 forward tcp:8088 tcp:8088
