@@ -77,6 +77,27 @@ else
     fail=$((fail + 1)); failed="$failed $f"
 fi
 
+# 文件管理的边界（越界必须被拒）。
+#
+# ⚠️ 它以前不在这个 runner 里，而且**没有令牌** —— 于是每一条"越界被拒"
+#    都拿到 401 被记成 ✓：13 个 ✓ 里没有一条真验过边界。
+#    补上令牌之后它才第一次真正跑起来，顺带暴露出 /sdcard（FUSE）上
+#    重命名**一直失败**（renameat2 的 RENAME_NOREPLACE 在 FUSE 上返回 EINVAL）。
+if [ -f fileops_boundary.sh ]; then
+    printf '%-24s ' "fileops_boundary.sh"
+    out="$(timeout 120 env REMOTE_CONTROL_BASE="$BASE" REMOTE_CONTROL_TOKEN="$TOKEN" \
+           REMOTE_CONTROL_SERIAL="${RC_SERIAL:-}" bash fileops_boundary.sh 2>&1)"; rc=$?
+    summary="$(printf '%s' "$out" | grep -E '通过 [0-9]+ 项' | tail -1)"
+    if [ "$rc" -eq 0 ]; then
+        printf '✓ exit=0  %s\n' "$summary"
+        pass=$((pass + 1))
+    else
+        printf '✗ exit=%s  %s\n' "$rc" "$summary"
+        printf '%s' "$out" | grep -E '✗' | head -6
+        fail=$((fail + 1)); failed="$failed fileops_boundary.sh"
+    fi
+fi
+
 echo
 echo "  通过 $pass / $((pass + fail))"
 [ -n "$failed" ] && echo "  失败：$failed"

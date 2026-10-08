@@ -1,8 +1,30 @@
 #!/bin/bash
 # 文件管理的边界验证：放宽到存储根之后，越界必须仍然被拒
 B=${REMOTE_CONTROL_BASE:-http://127.0.0.1:8088}/api/v1
+TOKEN=${REMOTE_CONTROL_TOKEN:-${RC_TOKEN:-}}
 pass=0; fail=0
-j() { curl -s --max-time 10 "$@"; }
+
+# 所有请求都带上令牌。
+#
+# ⚠️ 以前这里**没有**令牌，而交付镜像默认开鉴权 —— 后果不是"测试失败"，
+#    而是**大面积假通过**：每一条"越界必须被拒"都拿到了 401，被当成
+#    "拒绝成功"记成 ✓，13 个 ✓ 里没有一条真的验过边界。
+#    这正是浏览器套件踩过的同一个坑（见 wctest_token.py）。
+j() {
+  if [ -n "$TOKEN" ]; then
+    curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$@"
+  else
+    curl -s --max-time 10 "$@"
+  fi
+}
+
+# 没有令牌就别往下跑 —— 见上面那段。宁可红，不要绿得没有意义。
+_probe=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' "${B}/info")
+if [ "$_probe" = "401" ] && [ -z "$TOKEN" ]; then
+  echo "✗ 服务开了鉴权，但没给令牌：越界检查会全部假通过。"
+  echo "  请设 REMOTE_CONTROL_TOKEN（或 RC_TOKEN）后重跑。"
+  exit 2
+fi
 ok()  { echo "  ✓ $1"; pass=$((pass+1)); }
 bad() { echo "  ✗ $1  ← $2"; fail=$((fail+1)); }
 
@@ -57,10 +79,18 @@ if echo "$LINK" | grep -q "rc=0"; then
   should_fail "穿过指向 /data 的软链接" "$B/files?path=/sdcard/remote-control-linktest/escape"
   adb ${REMOTE_CONTROL_SERIAL:+-s $REMOTE_CONTROL_SERIAL} shell "rm -f /sdcard/remote-control-linktest/escape" >/dev/null 2>&1
 else
-  echo "  （设备上建不了软链接，跳过：$LINK）"
+  # 共享存储（/sdcard 是 FUSE）**根本建不了软链接** —— 报的是
+  # "Function not implemented"。所以这条不是"没验到"，而是**这条路走不通**：
+  # 攻击者也没法在允许的根里造出软链接来穿。真正的越界靠 O_NOFOLLOW
+  # 逐级打开父目录挡着，那部分由上面那批 .. 逃逸用例覆盖。
+  echo "  ⊘ 共享存储上建不了软链接（FUSE 不支持），这条路走不通："
+  echo "     $(echo "$LINK" | head -1)"
 fi
 j -X POST "$B/files" -H 'Content-Type: application/json' -d '{"op":"delete","path":"/sdcard/remote-control-linktest","recursive":true}' >/dev/null
 
 echo
 echo "  通过 $pass 项，失败 $fail 项"
+if [ -z "$TOKEN" ]; then
+  echo "  （未鉴权模式：此时'被拒'是权限模型本身给的，不是边界检查给的）"
+fi
 exit $(( fail > 0 ))

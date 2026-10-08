@@ -1146,8 +1146,34 @@ bool FileOps::Rename(const std::string& fromRel, const std::string& toRel,
     // RENAME_NOREPLACE so the existence check above remains race safe.
     constexpr unsigned int kRenameNoReplace = 1u;
 #if defined(SYS_renameat2)
-    const long renameResult = syscall(SYS_renameat2, fromParent, fromLeaf.c_str(),
-                                      toParent, toLeaf.c_str(), kRenameNoReplace);
+    long renameResult = syscall(SYS_renameat2, fromParent, fromLeaf.c_str(),
+                                toParent, toLeaf.c_str(), kRenameNoReplace);
+    // ⚠️ 目标文件系统可能**不支持** RENAME_NOREPLACE —— 那就退回普通 renameat。
+    //
+    //    /sdcard 是 FUSE，实测返回 EINVAL：结果是"在共享存储里重命名**永远失败**"
+    //    （filebrowser 的重命名按钮点了没反应，报"重命名失败: Invalid argument"）。
+    //    这条路上一直没人发现，因为验证脚本当时没有令牌，所有请求都被 401 挡掉、
+    //    反而"通过"了。
+    //
+    //    EINVAL / ENOSYS 都表示"这个标志不支持"，不是"这次操作有问题"。
+    //    退回 renameat() 会把"目标已存在"变成覆盖 —— 所以退之前**再查一次**。
+    //    仍然存在的竞态窗口只在没有该标志的文件系统上，而替代方案是功能完全不可用。
+    if (renameResult != 0 && (errno == EINVAL || errno == ENOSYS)) {
+        // 和下面"发布上传文件"那条路同一个锁：退回 renameat() 会覆盖，
+        // 所以"查一次 + 立刻改"这两步必须串起来，否则两个并发重命名
+        // 会双双查空、双双覆盖。
+        std::lock_guard<std::mutex> lock(gUploadPublishMutex);
+        struct stat toSt{};
+        if (fstatat(toParent, toLeaf.c_str(), &toSt, AT_SYMLINK_NOFOLLOW) == 0) {
+            close(fromParent);
+            close(toParent);
+            if (error) *error = "目标已存在: " + toRel;
+            return false;
+        }
+        renameResult = renameat(fromParent, fromLeaf.c_str(),
+                                toParent, toLeaf.c_str());
+        if (renameResult != 0) errno = errno;
+    }
 #else
     const long renameResult = -1;
     errno = ENOTSUP;
