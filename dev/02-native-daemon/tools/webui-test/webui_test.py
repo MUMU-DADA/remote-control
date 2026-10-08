@@ -135,6 +135,31 @@ def main():
     print()
     for e in errors:
         print(f"  [页面 JS 错误] {e}", file=sys.stderr)
+    # ── 无令牌时：认证条必须告诉用户**去哪拿**令牌 ──
+    #
+    # 交付镜像的令牌是首启**随机生成**的，走到这一步的人手上没有。
+    # 以前那一条只写"此服务需要访问令牌 / 粘贴令牌"—— 等于让人干瞪眼，
+    # 而文档里其实早写了位置（docs/api/04-config.md「令牌从哪来」）。
+    # 这里钉住"界面上必须给出真实位置"，免得以后被"简化"回一句话。
+    with sync_playwright() as p2:
+        b2 = p2.chromium.launch(headless=True, executable_path=CHROME,
+                                args=["--no-sandbox", "--disable-gpu"])
+        ctx2 = b2.new_context(viewport={"width": 900, "height": 1000})
+        pg2 = ctx2.new_page()
+        pg2.goto(origin + "/", wait_until="domcontentloaded", timeout=30000)
+        time.sleep(1.5)
+        bar = pg2.evaluate("""() => {
+            const el = document.getElementById('authbar');
+            if (!el) return null;
+            return {visible: getComputedStyle(el).display !== 'none',
+                    text: el.textContent.replace(/\s+/g, ' ').trim()};
+        }""")
+        check("无令牌时认证条可见", bar is not None and bar["visible"])
+        check("认证条说了令牌在哪（不是只说'需要令牌'）",
+              bar is not None and "remote-control.conf" in bar["text"])
+        print("    认证条:", (bar or {}).get("text", "?")[:120])
+        b2.close()
+
     check("页面没有 JS 报错", not errors)
 
     passed = sum(1 for _, ok in checks if ok)

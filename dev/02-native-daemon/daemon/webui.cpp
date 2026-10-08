@@ -148,7 +148,18 @@ const std::string& WebUiHtml() {
      平时摆一个用不上的输入框只会让人以为哪里要授权。 -->
 <div id="authbar" style="display:none; padding:6px 12px; background:#3a2a12;
      border-bottom:1px solid #553; align-items:center; gap:6px;">
-  <span style="font-size:12px; color:#dda">此服务需要访问令牌</span>
+  <!-- ⚠️ 光说"需要令牌"是在让人干瞪眼：交付镜像的令牌是首启**随机生成**的，
+       用户此刻手上没有，也不知道去哪找。这里把两个真实位置写出来 ——
+       文档里本来就有（docs/api/04-config.md「令牌从哪来」），
+       但卡在这一步的人不会先去翻文档。 -->
+  <span style="font-size:12px; color:#dda"
+        title="令牌在两处之一：
+· 设备上 /data/misc/remote-control/remote-control.conf（auth=1 且 token 为空时首启生成，读它需要 root）
+· 用宿主脚本跑模拟器的话，在 .run/instances/&lt;名字&gt;.token，启动那行日志也会写出路径">
+    此服务需要访问令牌 —— 在设备上读
+    <code>/data/misc/remote-control/remote-control.conf</code>（需 root）；
+    宿主脚本跑的看启动日志
+  </span>
   <input type="text" id="tokeninput" placeholder="粘贴令牌" style="flex:1; min-width:0">
   <button onclick="saveToken()">保存</button>
 </div>
