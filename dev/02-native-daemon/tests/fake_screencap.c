@@ -13,17 +13,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 int main(int argc, char** argv) {
     uint32_t w = 64, h = 48, format = 1;   // RGBA_8888
 
-    // 支持 fake_screencap [W H] [--bad-format] [--truncate] 用于异常路径测试
-    int truncateOutput = 0;
+    // 支持 fake_screencap [W H] [--bad-format] [--truncate] [--hang] 用于异常路径测试
+    int truncateOutput = 0, hang = 0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--bad-format") == 0) {
             format = 0xDEAD;
         } else if (strcmp(argv[i], "--truncate") == 0) {
             truncateOutput = 1;
+        } else if (strcmp(argv[i], "--hang") == 0) {
+            hang = 1;   // 一个字节都不写，就那么挂着
         } else if (strcmp(argv[i], "--fail") == 0) {
             fprintf(stderr, "fake screencap: 故意失败\n");
             return 3;
@@ -39,9 +42,16 @@ int main(int argc, char** argv) {
     }
     if (getenv("FAKE_SCREENCAP_BAD_FORMAT")) format = 0xDEAD;
     if (getenv("FAKE_SCREENCAP_TRUNCATE")) truncateOutput = 1;
+    if (getenv("FAKE_SCREENCAP_HANG")) hang = 1;
     if (getenv("FAKE_SCREENCAP_FAIL")) {
         fprintf(stderr, "fake screencap: 故意失败\n");
         return 3;
+    }
+
+    // 挂住：连头部都不写，模拟"screencap 卡在 SurfaceFlinger 上"。
+    // 没有超时保护的实现会在这里**永久**阻塞 —— 那正是这条用例要钉住的。
+    if (hang) {
+        for (;;) sleep(60);
     }
 
     uint32_t header[4] = {w, h, format, 0};

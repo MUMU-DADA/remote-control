@@ -17,8 +17,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include <string>
 #include <atomic>
+#include <chrono>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -42,6 +43,11 @@ void ResetEnv() {
     unsetenv("FAKE_SCREENCAP_BAD_FORMAT");
     unsetenv("FAKE_SCREENCAP_TRUNCATE");
     unsetenv("FAKE_SCREENCAP_FAIL");
+    // v9 新增的两个也必须清 —— 这一条正是上面那句警告的现场复现：
+    // 加了 FAKE_SCREENCAP_HANG 却忘了在这里清，后面的用例全部撞超时，
+    // 表现是"到处都是 SIGKILL"而不是"某条断言失败"。
+    unsetenv("FAKE_SCREENCAP_HANG");
+    unsetenv("REMOTE_CONTROL_SCREENCAP_TIMEOUT_MS");
     setenv("REMOTE_CONTROL_SCREENCAP_PATH", gFakePath, 1);
 }
 
@@ -277,6 +283,38 @@ int main(int argc, char** argv) {
         Check(err.find("头部失败") != std::string::npos ||
                       err.find("不可执行") != std::string::npos,
               "错误信息可读: %s", err.c_str());
+    }
+
+    // -----------------------------------------------------------------------
+    printf("\n\033[1;34m[9b] 子进程挂住时必须超时返回，而不是永久阻塞\033[0m\n");
+    // -----------------------------------------------------------------------
+    // 这是本项目**实测踩到**的一种僵死：/system/bin/screencap 卡住时，
+    // 原来的实现裸 read() + 裸 waitpid()，于是 Grab 永久阻塞；而它持有
+    // mutex_，整个抓帧路径跟着冻住 —— 端口还在 LISTEN，请求全部超时，
+    // 进程还活着，看起来像"服务没起来"。
+    {
+        ResetEnv();
+        setenv("REMOTE_CONTROL_SCREENCAP_PATH", "./fake_screencap", 1);
+        setenv("FAKE_SCREENCAP_HANG", "1", 1);
+        setenv("REMOTE_CONTROL_SCREENCAP_TIMEOUT_MS", "700", 1);
+
+        Capture cap;
+        std::string err;
+        cap.Init(&err);            // 启动探针也会撞上同一个超时，这里不计时
+        // ⚠️ 只给 Grab 计时：Init 的探针是另一次抓帧，把它算进来
+        //    量到的是"两次超时之和"，阈值就没法定得有意义（第一版就是这么
+        //    写出一个 5000ms 阈值、实测 5405ms 的假失败）。
+        const auto t0 = std::chrono::steady_clock::now();
+        Frame f;
+        const bool ok = cap.Grab(&f, &err);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - t0).count();
+
+        Check(!ok, "挂住的 screencap → Grab 返回失败（不是永久阻塞）");
+        Check(ms < 5000, "在 %lld ms 内返回（截止时间生效）", (long long)ms);
+        Check(err.find("超时") != std::string::npos ||
+                      err.find("不完整") != std::string::npos,
+              "错误信息点明超时: %s", err.c_str());
     }
 
     printf("\n[10] Per-request width restoration\n");

@@ -23,9 +23,12 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "remote_control_log.h"
@@ -35,6 +38,25 @@ namespace {
 
 // 测试用：可以让它指向一个假的 screencap 脚本，在开发机上验证解析逻辑
 constexpr const char* kDefaultScreencapPath = "/system/bin/screencap";
+
+// 一帧的总时限。
+//
+// 正常一次抓帧 100–300 ms（本机实测）；15 秒是"显然出事了"的量级 ——
+// 定得太短会在慢设备/大分辨率上误杀正常的抓帧，太长则服务会僵住很久。
+// 关键不是数值本身，而是**必须有个上限**：没有它，一次挂住就是永久僵死。
+//
+// 可用 REMOTE_CONTROL_SCREENCAP_TIMEOUT_MS 覆盖：测试要验"挂住的子进程
+// 会被超时打断"，而为此真等 15 秒既慢又没必要。
+constexpr int kDefaultFrameTimeoutMs = 15000;
+
+int FrameTimeoutMs() {
+    const char* env = getenv("REMOTE_CONTROL_SCREENCAP_TIMEOUT_MS");
+    if (env && *env) {
+        const long v = strtol(env, nullptr, 10);
+        if (v > 0 && v < 600000) return static_cast<int>(v);
+    }
+    return kDefaultFrameTimeoutMs;
+}
 
 const char* ScreencapPath() {
     const char* env = getenv("REMOTE_CONTROL_SCREENCAP_PATH");
@@ -54,11 +76,44 @@ uint32_t BytesPerPixel(uint32_t format) {
     }
 }
 
-// read() 可能被信号打断或只返回一部分，必须循环读满
-bool ReadFull(int fd, void* buf, size_t len) {
+// ── 带截止时间的读满 ────────────────────────────────────────────────────────
+//
+// ⚠️ 为什么不能直接用 read()：`/system/bin/screencap` 是**会挂住**的 ——
+//    SurfaceFlinger 卡住、或它在等一个永远不来的 fence 时，read() 会无限期
+//    阻塞。而 Grab() 全程持有 mutex_，于是整个抓帧路径一起冻住：
+//    /info、/capture、画面流全部不再应答，**而且没有任何恢复途径**。
+//
+//    实测症状（NDK/screencap 后端在权限不足的环境里）：
+//    `netstat` 显示端口仍在 LISTEN，但连接全卡在 CLOSE_WAIT，
+//    所有请求超时，进程还活着 —— 看起来像"服务没起来"，很难查。
+//
+//    所以每次读都要有截止时间；超时由调用方杀子进程。
+//    这里**故意不提供**不带截止时间的版本 —— 留着一个"方便"的裸 read，
+//    早晚会有人顺手用回去，而那正是这次要根除的东西。
+int64_t NowMs() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
+
+bool ReadFullUntil(int fd, void* buf, size_t len, int64_t deadlineMs) {
     auto* p = static_cast<uint8_t*>(buf);
     size_t got = 0;
     while (got < len) {
+        const int64_t left = deadlineMs - NowMs();
+        if (left <= 0) return false;   // 超时
+        pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        // 每次最多等 200ms：这样 deadline 的判断能及时生效，
+        // 也不会因为一次 poll 睡太久而拖慢正常路径。
+        const int slice = static_cast<int>(left < 200 ? left : 200);
+        const int pr = poll(&pfd, 1, slice > 0 ? slice : 1);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (pr == 0) continue;   // 本轮没数据，回到循环顶部判截止时间
         const ssize_t n = read(fd, p + got, len - got);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -68,6 +123,35 @@ bool ReadFull(int fd, void* buf, size_t len) {
         got += static_cast<size_t>(n);
     }
     return true;
+}
+
+// 等子进程退出，最多等 timeoutMs；超时就 SIGKILL。
+//
+// 为什么连收尾也要限时：子进程可能已经把整帧写完、却卡在退出路径上
+// （比如它自己的 atexit 里等什么东西）。那种情况下裸 waitpid 一样会挂住。
+//
+// 返回 true 表示取到了退出状态（statusOut 有效）；false 表示超时被杀。
+bool ReapWithTimeout(pid_t pid, int timeoutMs, int* statusOut) {
+    const int64_t deadline = NowMs() + timeoutMs;
+    for (;;) {
+        int status = 0;
+        const pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            if (statusOut) *statusOut = status;
+            return true;
+        }
+        if (r < 0 && errno != EINTR) return false;   // 已经被收过了
+        if (NowMs() >= deadline) break;
+        usleep(5000);
+    }
+    ALOGW("screencap: 子进程 %d 未在 %d ms 内退出，SIGKILL", static_cast<int>(pid),
+          timeoutMs);
+    kill(pid, SIGKILL);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (statusOut) *statusOut = status;
+    return false;
 }
 
 std::string ErrnoString(const char* what) {
@@ -223,19 +307,27 @@ bool Capture::Grab(Frame* out, std::string* error) {
     void* mapBase = nullptr;
     uint64_t mapSize = 0;
 
+    // 整帧的截止时间：从 fork 之后开始算。
+    const int64_t deadline = NowMs() + FrameTimeoutMs();
+
     auto cleanup = [&]() {
         if (mapBase && mapSize) munmap(mapBase, mapSize);
         close(pipeFd[0]);
-        int status = 0;
-        waitpid(pid, &status, 0);
+        // 子进程还没退就杀掉 —— 详情见 ReapWithTimeout 的注释。
+        //
+        // ⚠️ 这里给的时间**要短**：走到 cleanup 说明读已经失败或超时了，
+        //    再优雅地等它两秒毫无意义，只会让调用方多等两秒。
+        //    （实测：0.7 秒的读超时 + 2 秒的收尾等待 = 一次失败要 2.7 秒。）
+        ReapWithTimeout(pid, 200, nullptr);
     };
 
     // --- 1. 读 16 字节头 ---
     uint32_t header[4] = {0, 0, 0, 0};
-    if (!ReadFull(pipeFd[0], header, sizeof(header))) {
+    if (!ReadFullUntil(pipeFd[0], header, sizeof(header), deadline)) {
         if (error) {
-            *error = std::string("读 screencap 头部失败，可能 ")
-                     + path + " 执行出错（需要 shell 或 root 权限）";
+            *error = std::string("读 screencap 头部失败或超时（")
+                     + std::to_string(FrameTimeoutMs()) + " ms），可能 "
+                     + path + " 执行出错（需要 shell 或 root 权限）或已挂住";
         }
         cleanup();
         return false;
@@ -318,9 +410,9 @@ bool Capture::Grab(Frame* out, std::string* error) {
         return false;
     }
 
-    if (!ReadFull(pipeFd[0], mapBase, totalSize)) {
+    if (!ReadFullUntil(pipeFd[0], mapBase, totalSize, deadline)) {
         if (error) {
-            *error = "读像素数据不完整（期望 " + std::to_string(totalSize) +
+            *error = "读像素数据不完整或超时（期望 " + std::to_string(totalSize) +
                      " 字节）";
         }
         cleanup();
@@ -329,14 +421,11 @@ bool Capture::Grab(Frame* out, std::string* error) {
 
     // --- 3. 收尾 ---
     int status = 0;
-    waitpid(pid, &status, 0);
+    const bool reaped = ReapWithTimeout(pid, 2000, &status);
     close(pipeFd[0]);
 
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        if (error) {
-            *error = std::string(path) + " 退出码 " +
-                     std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1);
-        }
+    if (!reaped) {
+        if (error) *error = std::string(path) + " 抓帧超时未退出（已强杀）";
         munmap(mapBase, mapSize);
         return false;
     }
