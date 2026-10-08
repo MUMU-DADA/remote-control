@@ -34,6 +34,13 @@ param(
 
     [int]$Port      = 0,        # 0 = 自动分配
     [string]$Gpu    = "",       # "" = 按 config.ini 自适应
+    # 硬件加速：on（默认，走 WHPX）/ off（纯软件 TCG）/ auto。
+    #
+    # 原来这里**写死 "-accel on"**，于是没装 WHPX 的机器只会在启动失败后
+    # 看到一句"emulation currently requires hardware acceleration"，
+    # 而 README 里给出的补救办法正是"改用 -accel off" —— 却根本没有口子传进去。
+    # off 会很慢（x86_64 走 TCG），但至少能起来做功能验证。
+    [string]$Accel  = "on",
     [int]$Memory    = 0,        # MB；0 = 按 config.ini
     [int]$Cores     = 0,        # 0 = 按 config.ini
     [switch]$NoWait,
@@ -467,7 +474,7 @@ function Start-Emu {
     #    路径里有空格（"C:\Program Files\..."、用户名带空格）就会散架，
     #    所以这里自己给路径参数套引号。
     $a = @("-sysdir", "`"$sysdir`"", "-datadir", "`"$datadir`"", "-port", $p,
-           "-gpu", $GpuMode, "-accel", "on",
+           "-gpu", $GpuMode, "-accel", $Accel,
            "-memory", "$script:MemMB", "-cores", "$script:CoreN",
            "-no-boot-anim", "-no-audio", "-no-snapshot")
     if ($script:Service) { $a += $script:Service.Properties }

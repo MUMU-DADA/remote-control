@@ -21,6 +21,7 @@ param(
     [int]$MemoryMB       = 0,
     [int]$Cores          = 0,
     [string]$Gpu         = "",
+    [string]$Accel       = "on",   # on=WHPX；off=纯软件（没装 WHPX 时用，很慢）
     [string]$Apk         = "",
     [switch]$Headless,
     [switch]$NoSnapshot,
@@ -74,6 +75,7 @@ try {
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
         & $manager start $instance -Port $Port -Memory $MemoryMB -Cores $Cores -Gpu $Gpu `
+            -Accel $Accel `
             -Gui:(-not $Headless) -NoWait:$NoWait -TestInstance:$TestInstance
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
