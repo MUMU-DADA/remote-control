@@ -32,6 +32,10 @@
 
 namespace remote_control {
 
+// 上传前要求磁盘至少还能空出这么多（spool + 目标双份之外的安全垫）。
+// 定义在这里而不是 .cpp：Options 的默认值和使用处都取它，只写一个数。
+constexpr uint64_t kUploadSpaceReserveBytes = 64ull << 20;
+
 struct HttpRequest {
     std::string method;                       // GET / POST / ...
     std::string path;                         // 已去掉 query，已 URL 解码
@@ -138,6 +142,14 @@ class HttpServer {
         // 上传正文 spool 与目标临时文件同时存在，故为两者预留空间。
         size_t      maxFileUploadBytes = kMaxHttpUploadBytes;
         uint64_t    maxInFlightFileUploadDiskBytes = 2 * kMaxUploadBytes;
+
+        // 上传前要求磁盘**至少**还能空出这么多（spool + 目标双份之外的安全垫）。
+        //
+        // 做成可配的，一是小盘设备可以调大，二是**不然这条保护根本没法验**：
+        // 默认值只有 64 MiB，而测试机的 /data 有 62 GiB 空着 ——
+        // 想触发 507 就得先把盘灌满。把它临时调成一个巨大的值，
+        // 507 分支立刻可测，而不用真去写 62 GiB。
+        uint64_t    spaceReserveBytes = kUploadSpaceReserveBytes;
 
         // 落盘目录。空 = 优先 /data/misc/remote-control，不可用时回退到
         // /data/local/tmp 等开发环境目录。
@@ -255,6 +267,7 @@ class HttpServer {
     std::string spoolDir_;                     // 空 = 选择服务目录或开发回退目录
     size_t      maxFileUploadBytes_ = kMaxHttpUploadBytes;
     uint64_t    maxInFlightFileUploadDiskBytes_ = 2 * kMaxUploadBytes;
+    uint64_t    spaceReserveBytes_ = kUploadSpaceReserveBytes;
     std::mutex  uploadBudgetMutex_;
     uint64_t    uploadDiskBytesInFlight_ = 0;
     std::atomic<bool> stop_{false};

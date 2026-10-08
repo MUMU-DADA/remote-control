@@ -701,6 +701,31 @@ int main(int argc, char** argv) {
         opts.bindAddr = httpBind;
         opts.port     = httpPort;
         opts.token    = httpToken;
+
+        // 上传配额的两个旋钮。默认可配的理由有两条：
+        //   · 小盘设备可以把安全垫调大；
+        //   · **不然这两条保护根本没法验** —— 默认在途配额 8 GiB、安全垫
+        //     64 MiB，而测试机的 /data 有 62 GiB 空着，想触发 429/507
+        //     就得先真灌 8 GiB 或灌满整块盘。
+        // 解析失败就当没设（宁可用默认值，也不要因为一个笔误把配额设成 0）。
+        auto envBytes = [](const char* name, uint64_t* out) {
+            const char* v = getenv(name);
+            if (v == nullptr || *v == '\0') return;
+            char* end = nullptr;
+            const unsigned long long n = strtoull(v, &end, 10);
+            if (end != nullptr && *end == '\0' && n > 0) {
+                *out = static_cast<uint64_t>(n);
+                fprintf(stderr, "remote-control: %s=%llu（测试/调优用）\n",
+                        name, n);
+                ALOGI("%s=%llu", name, n);
+            } else {
+                fprintf(stderr, "remote-control: %s=%s 不是正整数，忽略\n",
+                        name, v);
+            }
+        };
+        envBytes("REMOTE_CONTROL_MAX_INFLIGHT_UPLOAD_DISK",
+                 &opts.maxInFlightFileUploadDiskBytes);
+        envBytes("REMOTE_CONTROL_UPLOAD_SPACE_RESERVE", &opts.spaceReserveBytes);
         if (!httpServer.Start(opts, &error)) {
             // ⚠️ **不退出**。HTTP 只是两条传输里的一条，而 socket 那条
             //    （上位应用走的就是它）此时**已经起来了**。

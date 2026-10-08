@@ -39,7 +39,8 @@ constexpr int kReadTimeoutSec = 30;
 // a declared request body instead of applying the small-request timeout to
 // the entire upload.
 constexpr size_t kMinBodyRateBytesPerSec = 1u << 20;
-constexpr uint64_t kUploadSpaceReserveBytes = 64ull << 20;
+// kUploadSpaceReserveBytes 的默认值现在定义在 http_server.h 里 ——
+// 它同时是 Options 的默认值和使用处的兜底，两处写同一个数迟早会写岔。
 
 // 流式响应的**发送**超时。
 //
@@ -387,6 +388,7 @@ bool HttpServer::Start(const Options& opts, std::string* error) {
     }
     maxFileUploadBytes_ = std::min(opts.maxFileUploadBytes, maxBody_);
     maxInFlightFileUploadDiskBytes_ = opts.maxInFlightFileUploadDiskBytes;
+    spaceReserveBytes_ = opts.spaceReserveBytes;
     uploadDiskBytesInFlight_ = 0;
 
     const bool loopbackOnly = (opts.bindAddr == "127.0.0.1" ||
@@ -1020,12 +1022,12 @@ bool HttpServer::ReserveFileUploadDisk(size_t bytes, uint64_t* reservedBytes,
                                   static_cast<uint64_t>(projectedBytes) ||
         currentReserved + static_cast<uint64_t>(projectedBytes) >
                 std::numeric_limits<uint64_t>::max() -
-                        kUploadSpaceReserveBytes) {
+                        spaceReserveBytes_) {
         *error = HttpResponse::Error(507, "上传空间预留值超出可表示范围");
         return false;
     }
     const uint64_t reserved = currentReserved + projectedBytes;
-    const uint64_t needed = reserved + kUploadSpaceReserveBytes;
+    const uint64_t needed = reserved + spaceReserveBytes_;
     if (available < needed) {
         *error = HttpResponse::Error(
                 507, "上传需要 spool 与目标文件的双份空间，当前可用空间不足");
