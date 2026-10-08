@@ -282,10 +282,66 @@ for f in files:
                 "%s:%d %s" % (rel(f), line_no, st[:70]))
 
 # --------------------------------------------------------------------------
+# 文档里引用的**工具/脚本路径**是否存在
+# --------------------------------------------------------------------------
+#
+# 为什么单列一条：这些路径在正文里是 `code span`，**不是 Markdown 链接** ——
+# 上面那套相对链接检查看不见它们。而这个仓库改过名（autod → remote-control），
+# 一次改名就能让几十处说明指向一个不存在的文件，而且不会有任何检查响。
+#
+# 解析：先按仓库根，再**逐个祖先目录**试 —— 文档常按各自的项目根写路径
+# （dev/04-android-rom/docs/ 下写 scripts/xxx.sh，指的是
+# dev/04-android-rom/scripts/xxx.sh）。都不在才算缺。
+TOOL_REF = re.compile(
+    r'(?:\.\./)*(?:tools|scripts|dev)/[A-Za-z0-9._/-]+\.(?:py|sh|mjs|ps1)')
+
+# 例外：路径本身没错，只是不相对任何祖先目录。**每条都要写清为什么** ——
+# 不写理由的名单迟早会变成"把告警全塞进去"的地方。
+TOOL_REF_OK = {
+    # docs/09 是先 `cd dev/04-android-rom` 再写的 ./scripts/…，工作目录在上下文里
+    "scripts/apply-overlay.sh", "scripts/build-rom.sh", "scripts/emulator.sh",
+    "scripts/package-rom.sh", "tools/verify-rom.sh",
+    # docs/README.md 那张表在**描述**另一篇文档的内容，路径以那篇的项目根为准
+    "scripts/release.sh",
+}
+
+
+def _resolves(md_path, ref):
+    if os.path.exists(os.path.join(ROOT, ref)):
+        return True
+    d = os.path.dirname(md_path)
+    while True:
+        if os.path.exists(os.path.join(d, ref)):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d or not d.startswith(ROOT):
+            return False
+        d = parent
+
+
+def check_tool_refs(files):
+    checked = 0
+    for md in files:
+        with open(md, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        for m in TOOL_REF.finditer(text):
+            ref = m.group(0)
+            checked += 1
+            if ref in TOOL_REF_OK or _resolves(md, ref):
+                continue
+            problems["文档引用的工具路径不存在"].append(
+                "%s：%s" % (os.path.relpath(md, ROOT), ref))
+    return checked
+
+
+stats["tool_refs"] = check_tool_refs(files)
+
+# --------------------------------------------------------------------------
 # 报告
 # --------------------------------------------------------------------------
-print("文档体检：%d 个 .md，%d 条相对链接，其中 %d 条指不到" % (
-    stats["files"], stats["links"], stats["broken"]))
+print("文档体检：%d 个 .md，%d 条相对链接（%d 条指不到），"
+      "%d 处工具路径引用" % (
+          stats["files"], stats["links"], stats["broken"], stats["tool_refs"]))
 print()
 
 total = 0
