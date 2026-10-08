@@ -101,12 +101,22 @@ def main():
                 check(name + " switches to " + fmt + " without blanking",
                       state["format"] == fmt and state["nonblack"] > 0)
 
-            replaced = page.evaluate("""() => {
+            # ⚠️ 这里原来是把令牌输入框**清空**再 saveToken()。
+            #    那是在"服务没开鉴权"的年代写的：清空无所谓，页面照样连得上，
+            #    于是这条只验了"保存令牌会重建流"。
+            #
+            #    交付镜像默认**开鉴权**，清空令牌 = 新流必然 401 →
+            #    下面那句 wait_for_function("streamReady && shownFps > 0")
+            #    永远等不到，30 秒后超时。**产品的行为是对的，是测试的动作错了。**
+            #
+            #    改成填**正确的令牌**再保存：要验的"保存后立即重建流"没变，
+            #    而且在开鉴权与不开鉴权两种配置下都成立。
+            replaced = page.evaluate("""(tok) => {
               const previous = streamWs;
-              document.getElementById('tokeninput').value = '';
+              document.getElementById('tokeninput').value = tok;
               saveToken();
               return streamWs && streamWs !== previous;
-            }""")
+            }""", _TOKEN)
             check(name + " saving the token immediately creates a new stream",
                   replaced)
             page.wait_for_function("streamReady && shownFps > 0")

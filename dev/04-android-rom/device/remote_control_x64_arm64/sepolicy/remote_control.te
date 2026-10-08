@@ -712,3 +712,33 @@ allow remote_control self:process signal;
 #
 # 不要把这条留成"以后再说" —— 它决定了整个服务能不能用，
 # 而且是 30 秒就能测出来的事。
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 共享存储（/sdcard）：文件管理要往里面写
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ⚠️ 这一节是**实测补的**，不是照抄模板。症状：文件管理接口能**列** /sdcard
+#    但建不了目录 —— 页面点"新建目录"报
+#
+#        {"ok":false,"status":4109,"error":"mkdir ... 失败: Permission denied"}
+#
+#    而服务本身跑在 shell(2000) 身份下，DAC 那一关是过的
+#    （shell 在 sdcard_rw 组里，同样身份用 adb shell 建目录没问题）。
+#    **卡在 SELinux**：
+#
+#        avc: denied { create } for comm="remote-control" name="rc-probe"
+#             scontext=u:r:remote_control:s0 tcontext=u:object_r:fuse:s0
+#             tclass=dir permissive=0
+#
+#    注意 tcontext 是 `fuse` 而不是某个 media_rw 类型：这个 ROM 上
+#    /sdcard 整棵树都挂在 FUSE 上、统一标成 u:object_r:fuse:s0，
+#    所以"只放行某几个子目录"是没用的，也解释了为什么**读**一直正常
+#    （read/search 在别处已经给了）而**写**从来不行。
+#
+#    范围就是共享存储这一个挂载点。服务不是 root，写操作照样受 DAC 约束；
+#    这里给的只是"允许走到 DAC 那一关"。
+allow remote_control fuse:dir create_dir_perms;
+allow remote_control fuse:file create_file_perms;
+allow remote_control fuse:lnk_file { create read getattr unlink };
+allow remote_control fuse:filesystem getattr;
