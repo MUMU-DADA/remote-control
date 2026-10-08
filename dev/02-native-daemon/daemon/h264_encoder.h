@@ -43,6 +43,20 @@ class H264Encoder {
     // 这个构建/这台设备支持 H.264 吗
     static bool Supported();
 
+    // ── A7/A8 可行性探针：虚拟显示 + 编码器输入 Surface ──────────────────
+    //
+    // 现在这条路是"抓帧 → memfd → CPU 转 YUV → 喂 ByteBuffer"，每帧过一次内存。
+    // 另一条路是让 SurfaceFlinger **直接合成进编码器的输入 Surface**：
+    // 省掉抓帧拷贝与颜色转换（scrcpy 那一类就是这么做的）。
+    //
+    // 但它串起一串平台能力：AMediaCodec_createInputSurface、创建虚拟显示、
+    // 把虚拟显示镜像到主屏的 layer stack、事务提交。**任何一环不可用，
+    // 这条路就不成立** —— 所以在自检里先探一下，而不是等整套实现写完
+    // 才发现跑不起来（那时候时间已经花掉了）。
+    //
+    // 只读探针：建起来、确认每一步的返回值、然后**原样拆掉**，不留痕迹。
+    static bool ProbeSurfaceInput(std::string* error);
+
     struct Config {
         uint32_t width  = 0;
         uint32_t height = 0;

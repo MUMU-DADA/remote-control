@@ -25,6 +25,22 @@
 #include <dlfcn.h>
 #endif
 
+// 虚拟显示那套 API 只有完整平台构建才有（NDK 构建不含 SurfaceFlinger 后端，
+// 也不链接 libgui）。
+#if defined(REMOTE_CONTROL_FULL_PLATFORM) && REMOTE_CONTROL_FULL_PLATFORM
+#define REMOTE_CONTROL_HAS_VIRTUAL_DISPLAY 1
+#include <android/native_window.h>
+#include <gui/Surface.h>
+#include <gui/SurfaceComposerClient.h>
+#include <ui/DisplayState.h>
+#include <ui/Rect.h>
+#include <ui/Rotation.h>
+
+// SurfaceComposerClient / ui:: 这些都在 android 命名空间里。
+// 与 capture_surfaceflinger.cpp 同一套做法（那边也是文件顶部 using）。
+using namespace android;
+#endif
+
 namespace remote_control {
 
 namespace {
@@ -565,5 +581,116 @@ bool H264Encoder::DrainOutput(std::vector<uint8_t>*, int64_t, std::string*) {
 }
 
 #endif  // REMOTE_CONTROL_HAS_MEDIANDK
+
+
+// ── A7/A8 可行性探针 ────────────────────────────────────────────────────────
+//
+// 见头文件里的说明。这里按**顺序**把每一环都试一遍，失败时明确说是哪一环 ——
+// "虚拟显示这条路能不能走"是个一次性结论，值得报得具体一点。
+bool H264Encoder::ProbeSurfaceInput(std::string* error) {
+#if !defined(REMOTE_CONTROL_HAS_VIRTUAL_DISPLAY)
+    if (error) {
+        *error = "这个构建没有 SurfaceFlinger 后端（NDK 构建 / 缺 "
+                 "REMOTE_CONTROL_FULL_PLATFORM）";
+    }
+    return false;
+#else
+    auto fail = [&](const char* step, const std::string& why) {
+        if (error) *error = std::string(step) + ": " + why;
+        return false;
+    };
+
+    // 探针分辨率取小一点：只验"这条路通不通"，不测性能。
+    constexpr uint32_t kW = 640, kH = 360;
+
+    // ── 1. 编码器 + 输入 Surface ──
+    AMediaCodec* c = AMediaCodec_createEncoderByType("video/avc");
+    if (c == nullptr) return fail("创建 AVC 编码器", "createEncoderByType 返回 NULL");
+
+    AMediaFormat* f = AMediaFormat_new();
+    AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, "video/avc");
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH,  static_cast<int32_t>(kW));
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, static_cast<int32_t>(kH));
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_BIT_RATE, 2000000);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_FRAME_RATE, 30);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1);
+    // 0x7F000789 = COLOR_FormatSurface：告诉编码器"数据从 Surface 来"
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F000789);
+
+    media_status_t st = AMediaCodec_configure(c, f, nullptr, nullptr,
+                                              AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+    AMediaFormat_delete(f);
+    if (st != AMEDIA_OK) {
+        AMediaCodec_delete(c);
+        return fail("AMediaCodec_configure(COLOR_FormatSurface)",
+                    "status=" + std::to_string(static_cast<int>(st)) +
+                    "（设备可能不支持 Surface 输入）");
+    }
+
+    ANativeWindow* window = nullptr;
+    st = AMediaCodec_createInputSurface(c, &window);
+    if (st != AMEDIA_OK || window == nullptr) {
+        AMediaCodec_delete(c);
+        return fail("AMediaCodec_createInputSurface",
+                    "status=" + std::to_string(static_cast<int>(st)));
+    }
+
+    // ── 2. 主屏的 layer stack（虚拟显示要镜像它才看得到内容）──
+    sp<IBinder> primary = SurfaceComposerClient::getPhysicalDisplayToken(
+            PhysicalDisplayId::fromPort(0));
+    if (primary == nullptr) {
+        // 拿不到具体的物理显示 token 时退回"主显示"这个通用入口
+        primary = SurfaceComposerClient::getInternalDisplayToken();
+    }
+    if (primary == nullptr) {
+        AMediaCodec_delete(c);
+        return fail("取主显示 token", "getPhysicalDisplayToken/getInternalDisplayToken 都为 null");
+    }
+
+    ui::DisplayState dstate;
+    if (SurfaceComposerClient::getDisplayState(primary, &dstate) != NO_ERROR) {
+        AMediaCodec_delete(c);
+        return fail("getDisplayState", "拿不到主屏状态");
+    }
+
+    // ── 3. 建虚拟显示 ──
+    sp<IBinder> vd = SurfaceComposerClient::createDisplay(
+            String8("remote-control-vd-probe"), /*secure=*/false);
+    if (vd == nullptr) {
+        AMediaCodec_delete(c);
+        return fail("createDisplay", "返回 null（权限或 SF 不支持？）");
+    }
+
+    // ⚠️ 用 static_cast 而不是 reinterpret_cast：ANativeWindow 是 Surface 的
+    //    **基类**且在非零偏移处，reinterpret 出来的指针是错的（clang 直接报
+    //    -Werror,-Wreinterpret-base-class）。
+    sp<Surface> surf = sp<Surface>::fromExisting(static_cast<Surface*>(window));
+
+    SurfaceComposerClient::Transaction txn;
+    // setDisplaySurface 要的是 IGraphicBufferProducer，不是 Surface 本身
+    txn.setDisplaySurface(vd, surf->getIGraphicBufferProducer());
+    // 镜像主屏：layer stack 相同，内容才一样
+    // dstate.layerStack 本身就是 ui::LayerStack（uint32_t 的强类型别名），
+    // 没有 .id 可取
+    txn.setDisplayLayerStack(vd, static_cast<uint32_t>(dstate.layerStack));
+    txn.setDisplayProjection(vd, ui::ROTATION_0,
+                             Rect(0, 0, static_cast<int32_t>(kW), static_cast<int32_t>(kH)),
+                             Rect(0, 0, static_cast<int32_t>(kW), static_cast<int32_t>(kH)));
+    txn.setDisplaySize(vd, kW, kH);
+
+    const status_t applied = txn.apply();
+    const bool ok = (applied == NO_ERROR);
+
+    // ── 4. 原样拆掉（探针不留痕迹）──
+    SurfaceComposerClient::destroyDisplay(vd);
+    AMediaCodec_delete(c);   // input surface 随 codec 一起释放
+
+    if (!ok) {
+        return fail("Transaction.apply（虚拟显示）",
+                    "status=" + std::to_string(static_cast<int>(applied)));
+    }
+    return true;
+#endif
+}
 
 }  // namespace remote_control

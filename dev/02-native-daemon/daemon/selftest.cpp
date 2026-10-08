@@ -11,6 +11,8 @@
 
 #include "selftest.h"
 
+#include "h264_encoder.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -233,8 +235,34 @@ void CheckCapture(bool verbose) {
 // ---------------------------------------------------------------------------
 // 3. 触控
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 3. 画面通路：能不能让 SurfaceFlinger 直接合成进编码器
+// ---------------------------------------------------------------------------
+//
+// 现在流媒体这条路是"抓帧 → memfd → CPU 转 NV12 → 喂 ByteBuffer"，
+// 每帧过一次内存。另一条路（虚拟显示 + 编码器输入 Surface）能省掉
+// 抓帧拷贝与颜色转换，但它串起一串平台能力，任何一环不可用就不成立。
+//
+// **这一步只探路，不改行为** —— 建起来、确认每一步、原样拆掉。
+// 之所以放进自检而不是"写完整套再说"：这套东西值不值得写，
+// 取决于平台上到底通不通；先花 100 行问清楚，比写完 1000 行才发现
+// 跑不起来划算。
+void CheckSurfacePath(bool verbose) {
+    Section("[3] 画面通路（虚拟显示 + 编码器 Surface 可行性）");
+
+    std::string err;
+    if (H264Encoder::ProbeSurfaceInput(&err)) {
+        Pass("虚拟显示 + 编码器输入 Surface 可用（A7/A8 这条路成立）");
+    } else {
+        // 不算失败：这条是**优化路径**，走不了还有抓帧那条在跑。
+        // 但要把原因报出来 —— "能不能走"本身是有价值的结论。
+        Info("虚拟显示这条路暂不可用：%s", err.c_str());
+    }
+    (void)verbose;
+}
+
 void CheckInject(bool verbose, uint32_t cliW, uint32_t cliH) {
-    Section("[3] 触控");
+    Section("[4] 触控");
 
     // 确定坐标范围：命令行优先，其次问截图后端，最后才回退
     uint32_t w = cliW;
@@ -322,6 +350,7 @@ void ResetResults(bool print) {
 void RunChecks(bool verbose, uint32_t touchWidth, uint32_t touchHeight) {
     CheckRunEnvironment(verbose);
     CheckCapture(verbose);
+    CheckSurfacePath(verbose);
     CheckInject(verbose, touchWidth, touchHeight);
 }
 
