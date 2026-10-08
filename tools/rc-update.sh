@@ -32,6 +32,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERIAL=${SERIAL:-emulator-5580}
 RC_HOST=${RC_HOST:-192.168.0.110}
 RC_PORT=${RC_PORT:-8088}
+
+# 访问令牌。交付镜像**默认开鉴权**，而不带令牌的 /api/v1/info 只会拿到 401
+# —— buildId 取不到，等待循环就永远判"没换过来"（实测：switch 明明成功了，
+# 壳日志已经在跑新槽，脚本却报"buildId 还是 …"）。
+# 优先用环境变量，其次从设备上的配置读（需要 adb root）。
+RC_TOKEN=${RC_TOKEN:-}
 ADB=${ADB:-adb}
 TMO=${TMO:-30}
 
@@ -83,6 +89,28 @@ cmd_push() {
 
     sh_ "mkdir -p $DROOT/releases/$sha && mv $tmp $DROOT/releases/$sha/remote-control && chmod 755 $DROOT/releases/$sha/remote-control && chown shell:shell $DROOT/releases/$sha/remote-control" \
         || die "入槽失败"
+
+    # ⚠️ **必须重新打标签**，否则这一版根本跑不起来。
+    #
+    #    rename 只换目录项，**标签跟着 inode 走** —— 从 /data/local/tmp 搬过来的
+    #    文件带的是 shell_data_file，而壳跑在 remote_control_loader 域，
+    #    连 getattr 都不允许：
+    #        avc: denied { getattr } … scontext=u:r:remote_control_loader:s0
+    #                                     tcontext=u:object_r:shell_data_file:s0
+    #    壳的做法是"读不到就判这份载荷不可用 → current 回退到镜像自带版本 → 试下一个
+    #    候选"，于是 switch 看起来"成功"（指针确实切了、服务确实重启了），
+    #    实际跑的**还是旧的镜像版本** —— 只有翻 launcher.log 才看得到。
+    #    实测就是这么卡住的。
+    #
+    #    用 restorecon（按 file_contexts 走）而不是 chcon 写死标签：
+    #    标签属于策略，不该在脚本里抄一份。
+    sh_ "restorecon $DROOT/releases/$sha/remote-control" >/dev/null 2>&1 || true
+    # 注意别按列号取：ls -laZ 的列会随实现/有无 ACL 变，取到时间戳就闹笑话。
+    local lbl; lbl=$(sh_ "ls -laZ $DROOT/releases/$sha/remote-control 2>/dev/null | grep -o 'u:object_r:[^ ]*' | head -1" | tr -d '\r')
+    case "$lbl" in
+        *remote_control_data_file*) : ;;
+        *) die "载荷标签不对（$lbl）—— 壳会读不到它并回退到镜像版本；检查 file_contexts 里 $DROOT 的条目" ;;
+    esac
     ok "已入槽：releases/$sha/remote-control"
     printf '    下一步   bash tools/rc-update.sh switch %s\n' "$sha"
 }
@@ -117,10 +145,28 @@ cmd_switch() {
 
 cmd_rollback() {
     need_device
-    local good; good=$(sh_ "cat $DROOT/last-good 2>/dev/null" | tr -d '\r')
-    [ -n "$good" ] || die "没有 last-good —— 服务还没成功跑起来过，没有可回退的版本"
+    # ⚠️ 取 **previous**，不是 last-good。
+    #
+    #    launcher 自己那段注释说得最清楚（launcher.cpp:466）：
+    #      "启动新提交版本时 last-good 会先被更新，只有 previous 才能保留
+    #       紧邻的上一版"
+    #    所以"刚 switch 过去、发现新版不对、想退回上一版"这个最常见的用法，
+    #    用 last-good 会**退回到刚切过去的那一版**，等于什么都没干 ——
+    #    实测：switch 到 3a80cfa6… 之后 rollback，又回到了 3a80cfa6…。
+    #    launcher 自己的回退顺序就是 previous → last-good → 镜像原版，
+    #    这里跟它保持一致。
+    local cur good
+    cur=$(sh_ "cat $DROOT/current 2>/dev/null" | tr -d '\r')
+    good=$(sh_ "cat $DROOT/previous 2>/dev/null" | tr -d '\r')
+    if [ -z "$good" ] || [ "$good" = "$cur" ]; then
+        good=$(sh_ "cat $DROOT/last-good 2>/dev/null" | tr -d '\r')
+    fi
+    [ -n "$good" ] || die "没有 previous / last-good —— 服务还没成功跑起来过，没有可回退的版本"
+    if [ "$good" = "$cur" ]; then
+        die "可回退的版本就是当前这一版（$good）—— 没有更早的版本可退"
+    fi
     [ "$(sh_ "test -x $DROOT/$good && echo yes" | tr -d '\r')" = "yes" ] \
-        || die "last-good 指向的版本不在了：$good"
+        || die "要回退的版本不在了：$good"
 
     step "回退"
     printf '    → %s\n' "$good"
@@ -134,6 +180,21 @@ cmd_rollback() {
 # ⚠️ 判据是 **buildId 变了**，不是"进程还在"。
 #    "推上去了但跑的还是旧进程"是这个项目反复踩过的坑
 #    （integrate-aosp.sh / build-remote-control.sh 的新鲜度检查是同一个道理）。
+# 取设备上正在跑的 buildId。
+#
+# 交付镜像默认开鉴权，不带令牌只会拿到 401 —— 于是"等待换版本"永远判失败
+# （实测：switch 明明成功了，壳日志已经在跑新槽，脚本却报"buildId 还是 …"）。
+# 令牌优先取环境变量，其次从设备配置里读（需要 adb root）。
+device_build_id() {
+    local tok="$RC_TOKEN"
+    if [ -z "$tok" ]; then
+        tok=$(sh_ "grep -m1 '^token=' $DROOT/remote-control.conf 2>/dev/null | cut -d= -f2-" | tr -d '\r')
+    fi
+    curl -s --max-time 5 ${tok:+-H "Authorization: Bearer $tok"} \
+        "http://$RC_HOST:$RC_PORT/api/v1/info" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("buildId",""))' 2>/dev/null
+}
+
 restart_service() {
     local want_sha="$1"
     step "重启服务"
@@ -144,18 +205,27 @@ restart_service() {
     sh_ "setprop ctl.restart $SVC" >/dev/null 2>&1 || true
 
     step "等服务换过来"
-    local got=""
+    local got="" http_ok=0
     for i in $(seq 1 20); do
-        got=$(curl -s --max-time 3 "http://$RC_HOST:$RC_PORT/api/v1/info" 2>/dev/null \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin).get("buildId",""))' 2>/dev/null)
+        got=$(device_build_id)
+        [ -n "$got" ] && http_ok=1
         [ "$got" = "$want_sha" ] && break
         sleep 1
     done
 
     if [ "$got" = "$want_sha" ]; then
         ok "已在跑新版本（buildId ${got:0:12}…，约 $((i)) 秒）"
-    else
-        bad "buildId 还是 ${got:0:12}…（期望 ${want_sha:0:12}…）"
+    elif [ "$http_ok" = 0 ]; then
+        # ⚠️ 区分"连不上"和"版本不对"。以前两种情况都只报
+        #    "buildId 还是 …（期望 …）"，看起来像版本没换上去 ——
+        #    而实际常常是**根本没连上**（RC_HOST 默认是文档示例里的
+        #    192.168.0.110，模拟器走 adb forward 时是 127.0.0.1）。
+        #    实测：switch 明明成功了（壳日志已经在跑新槽、/info 的
+        #    buildId 就是新 sha），脚本却报"buildId 还是 …"。
+        bad "HTTP 连不上 http://$RC_HOST:$RC_PORT —— 无法确认版本，但**不代表没换成功**"
+        echo "  用对的地址再确认： RC_HOST=<主机> RC_PORT=<端口> $0 verify"
+        echo "  （模拟器经 adb forward 时一般是 RC_HOST=127.0.0.1 RC_PORT=18088）"
+        echo "  看壳日志：   adb -s $SERIAL shell cat $DROOT/launcher.log"
         echo "  看服务日志： adb -s $SERIAL shell tail -20 $DROOT/remote-control.log"
         echo "  看壳日志：   adb -s $SERIAL shell cat $DROOT/launcher.log"
         return 1
@@ -178,8 +248,7 @@ cmd_list() {
 cmd_verify() {
     local src="${1:-}"
     echo "服务自报 buildId:"
-    local live; live=$(curl -s --max-time 5 "http://$RC_HOST:$RC_PORT/api/v1/info" 2>/dev/null \
-        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("buildId",""))' 2>/dev/null)
+    local live; live=$(device_build_id)
     printf '    %s\n' "${live:-（拿不到 —— 服务没在跑？）}"
 
     if [ -n "$src" ]; then

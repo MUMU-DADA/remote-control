@@ -550,7 +550,21 @@ int main(int argc, char** argv) {
         Log("就绪（pid %d）", static_cast<int>(pid));
 
         // 记下"这一版是好的"。下次坏版本回退时就退到这里。
+        //
+        // ⚠️ previous 要**先**记，再更新 last-good —— 顺序反了 previous
+        //    就永远是空的。上面回退顺序那段注释写着"只有 previous 才能保留
+        //    紧邻的上一版"，但这个文件以前**只清空 previous、从来没写过它**：
+        //    于是那个"previous 排在 last-good 前面"的回退分支永远走不到，
+        //    而 rc-update.sh rollback（当时读的是 last-good）也就永远退回到
+        //    **刚切过去的那一版** —— 实测：switch 到新版再 rollback，
+        //    又回到了同一版，等于什么都没干。
         if (!v.fromSystem && !v.rel.empty()) {
+            const std::string prevGood = ReadFileTrim(kLastGood);
+            if (!prevGood.empty() && prevGood != v.rel) {
+                if (!WriteFileAtomic(kPrevious, prevGood)) {
+                    Log("记 previous 失败: %s", strerror(errno));
+                }
+            }
             WriteFileAtomic(kLastGood, v.rel);
         }
 
