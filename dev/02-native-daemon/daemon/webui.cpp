@@ -258,6 +258,24 @@ const std::string& WebUiHtml() {
     </div>
 
     <div class="card">
+      <h2>文字输入</h2>
+      <div class="row">
+        <input type="text" id="textin" style="flex:1"
+               placeholder="要输入的文字（支持中文 / emoji），回车粘贴"
+               onkeydown="if(event.key==='Enter'){sendText('paste');}">
+        <button onclick="sendText('paste')">粘贴</button>
+        <button onclick="sendText('type')">逐字键入</button>
+      </div>
+      <div class="dim" style="margin-top:6px;font-size:11px">
+        <b>粘贴</b>（默认）能输入任意字符，包括中文与 emoji ——
+        它走剪贴板，用完会把剪贴板恢复原样。<br>
+        <b>逐字键入</b>像真人打字（会触发逐字符的输入监听与自动补全），
+        但<b>只能打 ASCII</b>：Linux 键码是物理按键编号，里面没有"中"这个字。
+        <br>两种方式都要求输入框<b>已经有焦点</b> —— 先在上面点一下要输入的框。
+      </div>
+    </div>
+
+    <div class="card">
       <h2>剪贴板</h2>
       <div id="clip" class="dim">（点「读剪贴板」查看）</div>
       <div class="row" style="margin-top:8px">
@@ -1443,6 +1461,24 @@ function key(name, longPress) {
     .then(d => setStatus('按键 ' + d.key + '（键码 ' + d.keyCode + '）')
         )
     .catch(e => setStatus('按键失败：' + e, true));
+}
+
+// ── 文字输入 ────────────────────────────────────────────────────────────────
+//
+// 两种模式的区别见页面上那段说明。这里只强调一点：
+// **不回显输入内容** —— 服务端也刻意不回显（典型用途含密码），
+// 页面上同理只报字数，免得刚敲的密码明晃晃留在状态栏里。
+function sendText(mode) {
+  const el = $('textin');
+  const v = el.value;
+  if (!v) { setStatus('先输入要发送的文字'); return; }
+  api('/text', { method:'POST', headers:{'Content-Type':'application/json'},
+                 body: JSON.stringify({ text: v, mode: mode }) })
+    .then(d => setStatus('已' + (d.mode === 'type' ? '逐字键入' : '粘贴') +
+                         ' ' + d.chars + ' 个字符' +
+                         (d.mode === 'paste' && d.clipboardRestored === false
+                          ? '（剪贴板原内容为空或非文本，未能恢复）' : '')))
+    .catch(e => setStatus('文字输入失败：' + e, true));
 }
 function keyLong() {
   const v = $('keytext').value.trim();
