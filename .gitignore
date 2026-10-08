@@ -23,6 +23,13 @@
 /dev/**/tests/test_*
 !/dev/**/tests/test_*.cpp
 !/dev/**/tests/test_*.h
+# 基准程序本体和它用的真实抓帧。
+#
+# tools/bench/README.md 让人自己编 `bench_encoder`、自己从设备抓 `real.raw` ——
+# 那是**每台机器各自的产物**，不该进仓库（一个 raw 就是 3.6 MB）。
+# 目录里的 build/ 已经被上面的 *.o 覆盖，不用再列。
+/dev/02-native-daemon/tools/bench/bench_encoder
+/dev/02-native-daemon/tools/bench/*.raw
 !/dev/**/tests/test_*.md
 *.o
 *.a

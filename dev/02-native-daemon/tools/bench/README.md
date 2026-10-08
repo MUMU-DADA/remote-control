@@ -49,6 +49,18 @@ adb shell "/data/local/tmp/bench_encoder 1280 720 40 /data/local/tmp/real.raw"
 
 如果测试服务在隔离环境中关闭了鉴权，可以省略 `curl` 的 `Authorization` 请求头。
 
+### ⚠️ 表里那几行"Skia"要小心（2026-10-09 补）
+
+`ImageEncoder::Encode()` 会按 `PreferBuiltin()` **按格式选** —— webp / png 默认走
+**内置**编码器。所以直接拿它充当"Skia 那一行"，测出来的其实是内置的：
+两行输出会**逐字节相同**（旧版就是 52824 vs 52824、313035 vs 313035），
+而这个"看起来合理"的结果足以让人得出"Skia 和内置一样快"的相反结论。
+
+现在标着 Skia 的三行会先 `setenv("REMOTE_CONTROL_PREFER_NATIVE", "1")` 再量
+（该开关每次调用重新 getenv，进程内现设现用有效），并且**补上了
+"内置 libwebp q75 (m2)" 一行** —— 那是服务端实际走的实现
+（`image_encoder.cpp` 的 `WebpEncoder::Instance()`），以前表里没有它。
+
 ## ⚠️ 一定要传真实抓帧
 
 第一版用合成的"像屏幕"图（渐变 + 细线 + 色块），测出来

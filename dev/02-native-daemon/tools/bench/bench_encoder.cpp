@@ -31,6 +31,7 @@
 
 #include "image_encoder.h"
 #include "png_encoder.h"
+#include "webp_encoder.h"
 
 using namespace remote_control;
 
@@ -160,23 +161,43 @@ int main(int argc, char** argv) {
         }));
     }
 
+    // ── 内置 libwebp：**服务端实际用的就是这条** ──
+    //
+    // ⚠️ 这一行以前**没有**。于是这张表只测了 "Skia WebP" ——
+    //    而 daemon 走的是 `WebpEncoder::Instance()`（见 image_encoder.cpp:466，
+    //    "webp=libwebp（内置）"）。也就是说文档里"Skia 在 WebP/PNG 上比内置
+    //    慢一倍，所以按格式选"这个结论，**用这份基准是复现不出来的**：
+    //    被比较的那一方根本没在表里。
+    //
+    //    method=2 和服务端一致（webp_encoder.h 里记了 method 的实测差异）。
+    names.push_back("内置 libwebp q75 (m2)");
+    rs.push_back(Bench(names.back().c_str(), rounds, [&](std::string* e) {
+        return WebpEncoder::Instance().EncodeRgba(rgba.data(), w, h, 75, 2, e);
+    }));
+
     // ── Skia 的（Android 11+ 走这条）──
+    //
+    // ⚠️ 测 PNG / WebP 之前**必须先设 REMOTE_CONTROL_PREFER_NATIVE=1**。
+    //
+    //    否则 `ImageEncoder::Encode()` 按 `PreferBuiltin()` 直接转给内置编码器
+    //    （image_encoder.cpp:419）—— 于是标着"Skia"的那两行**测的还是内置的**。
+    //    症状很好认：两行输出**逐字节相同**（实测 52824 vs 52824、313035 vs
+    //    313035），而正常的两种实现不可能一模一样。
+    //
+    //    这个开关每次调用都重新 getenv，所以在进程里现设现用是有效的。
+    //    JPEG 不受影响（PreferBuiltin 只对 WebP/PNG 返回 true），但一起设更省心。
+    auto benchNative = [&](const char* nm, ImageFormat f, int q) {
+        names.push_back(nm);
+        setenv("REMOTE_CONTROL_PREFER_NATIVE", "1", 1);
+        rs.push_back(Bench(names.back().c_str(), rounds, [&](std::string* e) {
+            return ImageEncoder::Instance().Encode(rgba.data(), w, h, f, q, e);
+        }));
+        unsetenv("REMOTE_CONTROL_PREFER_NATIVE");
+    };
     if (ImageEncoder::Instance().hasNativeCodecs()) {
-        names.push_back("Skia PNG (默认级)");
-        rs.push_back(Bench(names.back().c_str(), rounds, [&](std::string* e) {
-            return ImageEncoder::Instance().Encode(rgba.data(), w, h,
-                                                   ImageFormat::kPng, 6, e);
-        }));
-        names.push_back("Skia JPEG q75");
-        rs.push_back(Bench(names.back().c_str(), rounds, [&](std::string* e) {
-            return ImageEncoder::Instance().Encode(rgba.data(), w, h,
-                                                   ImageFormat::kJpeg, 75, e);
-        }));
-        names.push_back("Skia WebP q75");
-        rs.push_back(Bench(names.back().c_str(), rounds, [&](std::string* e) {
-            return ImageEncoder::Instance().Encode(rgba.data(), w, h,
-                                                   ImageFormat::kWebp, 75, e);
-        }));
+        benchNative("Skia PNG (默认级)", ImageFormat::kPng, 6);
+        benchNative("Skia JPEG q75", ImageFormat::kJpeg, 75);
+        benchNative("Skia WebP q75", ImageFormat::kWebp, 75);
     }
 
     printf("\n  %-22s %10s %10s %10s\n", "编码器", "ms/次", "字节", "相对");
