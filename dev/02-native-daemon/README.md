@@ -44,13 +44,18 @@ init 服务接到 `remote-control-launch`，并部署 sealed memfd 所需的 SEL
 `switch`/`rollback` 的判据是**服务自报的 buildId 变了**，不是"进程还在" ——
 "推上去了但跑的还是旧进程"是这个项目反复踩过的坑。
 
-> ⚠️ **用过热替换之后，重装 ROM 不会自动回到镜像自带的版本。**
-> 槽在 `/data` 里（`/data/misc/remote-control/releases/<sha>/`），而 `/data`
-> 不随重装重置；壳按 `current` 指针优先选，这是设计如此。所以"重编 + 重装 ROM
-> 却发现什么都没变"就是在这一步踩的。要回到镜像那份：
-> `bash tools/rc-update.sh clear`（`--purge` 连槽一起删）。
+> ⚠️ **用过热替换之后，只要 `/data` 是持久的，重装 ROM 就不会自动回到
+> 镜像自带的版本。**
+> 槽在 `/data/misc/remote-control/releases/<sha>/`，壳按 `current` 指针优先选，
+> 这是设计如此；于是"重编 + 重装 ROM 却发现什么都没变"就是这么来的。
+> 要回到镜像那份：`bash tools/rc-update.sh clear`（`--purge` 连槽一起删）。
 > 壳每次拉起都会在自己的日志里写清跑的是哪一个 —— 先看
 > `launcher.log` 里是"槽 <sha>"还是"镜像自带"。
+>
+> ⚠️ "持久的 `/data`"这个限定不能省：`run-linux.sh` **不带 `--reuse` 时
+> 每次都会 `rm -rf` 工作目录**（"每次都是一台全新机器"），那种情况下槽本来就
+> 没了、不存在遮蔽。会碰上这条的是**真机部署**，或带 `--reuse` / `--snapshot`
+> 起的实例。
 
 **设备侧功能冒烟检查**：`python3 tools/functional-sweep.py [host:port]` —— 核对
 `/describe` 声明的命令清单仍有 **40** 条（协议 v11），并对部分 HTTP 功能做设备侧检查

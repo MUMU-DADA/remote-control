@@ -14,7 +14,15 @@ set -uo pipefail
 
 SERIAL=${1:-emulator-5580}
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/aosp/out/target/product/emulator64_x86_64/system/bin"
+# 产品目录。默认用本仓库当前的产品名，可用 PRODUCT 覆盖。
+#
+# ⚠️ 这里原来**写死**成 `emulator64_x86_64` —— 那个产品在本仓库里已经不存在
+#    （现在是 remote_control_x64_arm64），于是脚本一跑就是
+#    "找不到 …/remote-control，先跑 tools/build-remote-control.sh"，
+#    而 build-remote-control.sh 编的根本不是那个目录 —— 提示把人支到错的地方。
+#    后来实测：照它说的去编也永远编不出那个路径。
+PRODUCT=${PRODUCT:-remote_control_x64_arm64}
+BIN="$ROOT/aosp/out/target/product/$PRODUCT/system/bin"
 ADB=${ADB:-/usr/bin/adb}
 TMO=${TMO:-25}
 
@@ -111,21 +119,51 @@ ok "进程在跑（pid $pid）"
 
 ip=$(sh_ "ip -4 addr show eth0 2>/dev/null | grep -oE 'inet [0-9.]+' | cut -d' ' -f2" 2>/dev/null | tr -d '\r')
 ip=${ip:-127.0.0.1}
-info=$(curl -s --max-time 8 "http://$ip:8088/api/v1/info" 2>/dev/null || true)
-if [ -n "$info" ]; then
-    echo "$info" | python3 -c "
+# ⚠️ 交付镜像默认**开鉴权**，而这里以前不带令牌 —— 401 的响应体是**非空**的
+#    （{"ok":false,"status":401,...}），于是 `[ -n "$info" ]` 成立、往下走，
+#    在 `d['touchWidth']` 上抛 KeyError，打印一段 Python traceback；
+#    而脚本**照样**接着打"✓ 服务就绪"。也就是说：部署明明没验成，输出看着是成功的。
+#    令牌优先取环境变量，其次从设备配置读（这一路本来就要 adb root）。
+tok=${RC_TOKEN:-}
+if [ -z "$tok" ]; then
+    tok=$(sh_ "grep -m1 '^token=' /data/misc/remote-control/remote-control.conf 2>/dev/null | cut -d= -f2-" 2>/dev/null | tr -d '\r')
+fi
+# ⚠️ 模拟器是 **NAT**：宿主够不着 guest 的 eth0 地址（实测直连 10.0.2.15:8088
+#    是 HTTP 000），只有 adb forward 那条路通。而这个脚本**默认目标就是
+#    emulator-5580** —— 也就是说它默认的验证步骤和它默认的目标互相矛盾：
+#    提示里让人打开的控制台地址在自己这台机器上根本打不开。
+#    所以：先试直连（真机在局域网上时可用），不通就建 adb forward 再试。
+PORT=${PORT:-18088}
+console_url="http://$ip:8088/"
+info=$(curl -s --max-time 8 ${tok:+-H "Authorization: Bearer $tok"} "http://$ip:8088/api/v1/info" 2>/dev/null || true)
+if ! printf '%s' "$info" | grep -q '"ok":true'; then
+    # ⚠️ **不能**把 adb forward 的退出码当条件：已经存在的那条再建一次会报
+    #    "cannot bind listener: Address already in use" 并以非零退出 ——
+    #    于是"本来就通"反而被当成"建不起来"，回退整段被跳过。
+    #    实测就是这么卡住的（bash -x 里看得清清楚楚：forward 之后直接跳到 warn）。
+    "$ADB" -s "$SERIAL" forward "tcp:$PORT" tcp:8088 >/dev/null 2>&1 || true
+    info=$(curl -s --max-time 8 ${tok:+-H "Authorization: Bearer $tok"} \
+           "http://127.0.0.1:$PORT/api/v1/info" 2>/dev/null || true)
+    console_url="http://127.0.0.1:$PORT/  （经 adb forward —— 模拟器是 NAT，直连 $ip 够不着）"
+fi
+if [ -n "$info" ] && echo "$info" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
+if not d.get('ok'):
+    print('  ! /api/v1/info 没给出可用信息：' + str(d.get('error',''))[:90])
+    raise SystemExit(1)
 tw, th = d['touchWidth'], d['touchHeight']
 pw, ph = d['primaryWidth'], d['primaryHeight']
 print(f'  显示 {pw}x{ph}   触控 {tw}x{th}')
 print('  ✓ 显示尺寸和触控范围一致' if (tw,th)==(pw,ph)
-      else f'  ! 两者不一致 —— 触控会偏（见 docs/05-design-notes.md）')"
+      else f'  ! 两者不一致 —— 触控会偏（见 docs/05-design-notes.md）')"; then
     ok "服务就绪"
-    printf '\n\033[1;32m  控制台: http://%s:8088/\033[0m\n' "$ip"
+    printf '\n\033[1;32m  控制台: %s\033[0m\n' "$console_url"
 else
-    warn "拿不到 /api/v1/info"
+    warn "拿不到可用的 /api/v1/info"
     echo "  设备 IP: $ip"
+    echo "  要令牌的话： RC_TOKEN=<令牌> $0   （令牌在设备上的"
+    echo "  /data/misc/remote-control/remote-control.conf）"
     echo "  手动看一下: adb -s $SERIAL shell logcat -d -s remote-control | tail"
 fi
 
