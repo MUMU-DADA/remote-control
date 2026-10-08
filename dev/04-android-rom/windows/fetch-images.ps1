@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   从 Linux 构建机把自编 ROM 的镜像拉到 Windows，并校验完整性。
 
@@ -34,8 +34,36 @@ $optional = @("system_ext-qemu.img", "initrd", "system.img", "vendor.img", "prod
               "ramdisk.img", "build.prop", "source.properties",
               "dtb.img", "vbmeta.img", "SHA256SUMS", "MANIFEST.txt")
 
+# 跑一条远端命令，把 stdout 当字符串返回。
+#
+# ⚠️ **不要**写成 `(ssh $Remote "...") -join ""` —— 在 Windows 上那条路会**挂住**。
+#    实测（Windows 10 + OpenSSH for Windows + PowerShell 5.1）：
+#        ssh host echo hi                   → 0.33 秒返回
+#        $r = (ssh host echo hi) -join ""   → **永远不返回**
+#        $r = (cmd /c echo hi) -join ""     → 正常（所以不是"捕获"本身的问题）
+#    `ssh -n`（不读 stdin）也照样挂。换成 Start-Process + 重定向到文件就正常。
+#
+#    这个坑特别隐蔽：脚本打印完第一行"==> 远端：…"之后再也不动，
+#    看起来像"网络慢"或"在拉大文件"，实际上是卡在第一个 stat 上。
+function Invoke-Remote([string]$cmdline) {
+    $tmp = Join-Path $env:TEMP ("rc-remote-" + [guid]::NewGuid().ToString("N") + ".txt")
+    $err = "$tmp.err"
+    try {
+        Start-Process -FilePath "ssh" -ArgumentList @($Remote, $cmdline) `
+            -NoNewWindow -Wait -RedirectStandardOutput $tmp `
+            -RedirectStandardError $err | Out-Null
+        if (Test-Path $tmp) {
+            $s = Get-Content $tmp -Raw -ErrorAction SilentlyContinue
+            if ($null -ne $s) { return $s }
+        }
+        return ""
+    } finally {
+        Remove-Item $tmp, $err -ErrorAction SilentlyContinue
+    }
+}
+
 function Remote-Size([string]$rel) {
-    (ssh $Remote "stat -c %s '$RemoteDir/$rel' 2>/dev/null") -join ""
+    return (Invoke-Remote "stat -c %s '$RemoteDir/$rel' 2>/dev/null").Trim()
 }
 
 Write-Host "==> 远端：$Remote`:$RemoteDir" -ForegroundColor Cyan
@@ -51,7 +79,11 @@ foreach ($f in ($required + $optional)) {
         Write-Host ("    skip {0} ({1:N0} bytes)" -f $f, (Get-Item $local).Length)
         continue
     }
-    $todo += "$RemoteDir/$f"
+    # ⚠️ 必须带 **$Remote`:** 前缀。原来只写 "$RemoteDir/$f"，于是 scp 拿到的是
+    #    "/root/.../system-qemu.img" 这种**本地**路径 —— 每个文件报一次
+    #    "The system cannot find the path specified."，然后整体退出码 1。
+    #    也就是说这个脚本在任何机器上都拉不到东西（2026-10-08 在 Windows 上实测）。
+    $todo += "$Remote`:$RemoteDir/$f"
 }
 if ($missingRequired.Count -gt 0) {
     throw ("远端缺必需镜像：{0}（先跑构建与打包： scripts/build-rom.sh; scripts/package-rom.sh）" -f ($missingRequired -join ', '))
@@ -78,8 +110,12 @@ if ((-not (Test-Path "$Dest\initrd")) -and (Test-Path "$Dest\ramdisk.img")) {
 # 自建 arm64 探针 APK（Linux 侧 tools/build-probe-apk.sh 产出）
 $probeRemote = "/root/AutoSnapshotAndroid/dev/04-android-rom/artifacts/arm64-probe.apk"
 $probeLocal  = Join-Path $Dest "arm64-probe.apk"
-if ((Remote-Size "arm64-probe.apk") -or ((ssh $Remote "stat -c %s '$probeRemote' 2>/dev/null") -join "").Trim()) {
-    $src = if ((Remote-Size "arm64-probe.apk").Trim()) { "$RemoteDir/arm64-probe.apk" } else { $probeRemote }
+# ⚠️ 原来这里把 Remote-Size 调了两遍、还内联了一次 ssh 捕获 ——
+#    同一个值问两遍既慢又容易两次得到不同结果，内联那次还会挂住。
+$probeInDir = (Remote-Size "arm64-probe.apk")
+$probeAlt   = (Invoke-Remote "stat -c %s '$probeRemote' 2>/dev/null").Trim()
+if ($probeInDir -or $probeAlt) {
+    $src = if ($probeInDir) { "$RemoteDir/arm64-probe.apk" } else { $probeRemote }
     if ((-not (Test-Path $probeLocal)) -or $Force) {
         Write-Host "==> 拉取自建 arm64 探针 APK"
         & scp "$Remote`:$src" "$Dest"

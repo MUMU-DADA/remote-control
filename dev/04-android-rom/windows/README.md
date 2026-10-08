@@ -88,9 +88,44 @@ cd windows
 
 ---
 
-## ⚠️ 未在本机验证
+## 前置：Windows → Linux 构建机的免密 SSH
 
-本机是 Linux（无 Windows），因此：
+`fetch-images.ps1` 是**从 Windows 拉**镜像的，所以 Windows 必须能免密登录构建机。
+这一步以前没写在这里 —— 实测第一次跑就卡在这儿（`Permission denied (publickey)`）。
+
+```powershell
+# 1. Windows 侧生成密钥（已有就跳过）
+ssh-keygen -t ed25519
+
+# 2. 把公钥追加到构建机的 root 的 authorized_keys
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh root@192.168.0.108 "cat >> ~/.ssh/authorized_keys"
+
+# 3. 验证
+ssh root@192.168.0.108 echo OK
+```
+
+---
+
+## ✅ 2026-10-08 在真 Windows 上跑过一遍（Windows 10 19044 + PowerShell 5.1）
+
+第一次在真机上验证，**前三次都跑不通**，都是脚本自身的缺陷（已修）：
+
+| # | 症状 | 根因 |
+|---|---|---|
+| 1 | `preflight.ps1` 直接报语法错误，指着一个完全正确的大括号 | `.ps1` 是 **UTF-8 无 BOM**，而 PowerShell 5.1 无 BOM 时按**系统 ANSI（GBK）**解码 —— 中文注释被解坏，撞坏了语法。**14 个 .ps1 全中**，整条 Windows 路线都跑不起来 |
+| 2 | 打印完 `==> 远端：…` 之后再也不动 | `(ssh $Remote "…") -join ""` 这种**捕获 ssh 输出**的写法在 Windows 上会**永远挂住**（`ssh host echo hi` 正常、`cmd /c echo hi` 捕获也正常，只有 ssh 例外；`ssh -n` 也救不了）。改用 `Start-Process -RedirectStandardOutput` |
+| 3 | scp 对每个文件报一次 `The system cannot find the path specified.` | `$todo` 里存的是 `"$RemoteDir/$f"`，**少了 `$Remote:` 前缀** —— scp 把它当成本地路径。这个脚本在任何机器上都拉不到东西 |
+
+修完之后：前置检查 11 项如实报出（WHPX 未启用是唯一硬项），
+镜像按 SHA256SUMS 校验通过。
+
+`tools/check-scripts.py` 是给第 1 条加的回归闸门：**所有 .ps1 必须带 UTF-8 BOM**。
+
+---
+
+## ⚠️ 仍未验证的部分
+
+WHPX 未启用（见下），所以 `run-windows.ps1` 的**启动与验收**这一段还没跑过：
 
 - `run-windows.ps1` 的**参数与流程**在 Linux 上用**同源代码的 SDK emulator 37.2.11** 验证过
   （同一份 `google_apis;x86_64` 镜像 29.0 秒开机、属性一致，见评估文档 §2.2）；

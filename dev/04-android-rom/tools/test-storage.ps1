@@ -1,4 +1,4 @@
-# Runs native sparse recovery on Windows; compiles the native helper elsewhere.
+﻿# Runs native sparse recovery on Windows; compiles the native helper elsewhere.
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "../packaging/bin/windows/storage.ps1")
 Initialize-SparseFileApi

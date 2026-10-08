@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   无头启动这台虚拟机（Windows / WHPX 侧）。
 

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   在 x64 Windows 上启动自编 ROM（WHPX 加速）并做 arm64 应用验收。
 

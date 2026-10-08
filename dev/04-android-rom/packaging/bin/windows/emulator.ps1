@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Unified command line for managing the Windows release package emulator.
 

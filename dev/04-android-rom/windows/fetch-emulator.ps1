@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   拿到 Windows 版 emulator.exe（SDK）+ adb（platform-tools）。
 

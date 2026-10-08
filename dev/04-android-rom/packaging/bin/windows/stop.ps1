@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   停掉这台虚拟机（Windows 侧）。
 
