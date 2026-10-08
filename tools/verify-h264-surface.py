@@ -22,13 +22,20 @@ import urllib.request
 
 BASE = "http://127.0.0.1:18099"
 
+# 访问令牌。交付镜像默认开鉴权 —— **握手那处最容易漏**：
+# 它是自己拼的原始 HTTP 请求，不走 urllib，所以 header 得自己加。
+# （这个坑在 functional-sweep 里踩过一次，这里是同一个。）
+TOKEN = os.environ.get("RC_TOKEN", "")
+
 
 def ws_h264_frames(port, seconds, path="/api/v1/stream?format=h264&fps=10"):
     """收 seconds 秒的 WebSocket 二进制帧，返回拼起来的载荷。"""
     s = sk.create_connection(("127.0.0.1", port), timeout=seconds + 4)
     key = base64.b64encode(b"0123456789abcdef").decode()
+    auth = f"Authorization: Bearer {TOKEN}\r\n" if TOKEN else ""
     s.sendall((f"GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+               f"{auth}"
                f"Sec-WebSocket-Version: 13\r\n\r\n").encode())
     buf = b""
     while b"\r\n\r\n" not in buf:
@@ -77,11 +84,17 @@ def ws_h264_frames(port, seconds, path="/api/v1/stream?format=h264&fps=10"):
 
 
 def main():
+    global BASE, TOKEN      # 命令行可覆盖（必须在函数里任何使用之前声明）
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=18099)
+    ap.add_argument("--token", default="", help="访问令牌（默认取 RC_TOKEN）")
     ap.add_argument("--seconds", type=float, default=8.0)
     ap.add_argument("--adb-serial", default="emulator-5580")
+    ap.add_argument("--base", default=BASE,
+                    help="HTTP 基地址（要和 --port 指同一个服务）")
     args = ap.parse_args()
+    BASE = args.base.rstrip("/")
+    TOKEN = args.token or TOKEN
 
     # 制造**持续**的画面变化。
     #
@@ -133,7 +146,10 @@ def main():
 
         # 与设备上直接抓的 JPEG 比"是不是全黑"
         jpg = os.path.join(d, "cap.jpg")
-        with urllib.request.urlopen(f"{BASE}/api/v1/capture", timeout=10) as resp:
+        _req = urllib.request.Request(
+            f"{BASE}/api/v1/capture",
+            headers={"Authorization": "Bearer " + TOKEN} if TOKEN else {})
+        with urllib.request.urlopen(_req, timeout=10) as resp:
             open(jpg, "wb").write(resp.read())
         for name, path in (("流里的帧", png), ("设备抓帧", jpg)):
             r = subprocess.run(

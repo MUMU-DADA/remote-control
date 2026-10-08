@@ -2143,6 +2143,28 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
                                           bool* unchanged) {
     *unchanged = false;
 
+    // ── H.264 + 虚拟显示：**完全不碰抓帧** ──
+    //
+    // 画面由虚拟显示直接合成进编码器（见 H264Encoder::StartSurfaceDisplay），
+    // 抓帧拿到的那些像素**一个都用不上**。
+    //
+    // ⚠️ 以前这条路照样订阅共享抓帧，于是整条链路白跑：
+    //    SF 合成 → memfd → 分发，然后全部丢掉 —— 而那正是 A7/A8 想省掉的东西。
+    //    实测（720x1280、画面在动）：H.264 流一开，capture.subscribers=1、
+    //    12 秒里抓了 **126 帧**，而收到的是 263 KB 的 NAL。
+    //
+    // 尺寸从编码器自己那份拿（第一帧建好之后就不需要再看了）；
+    // 节拍由调用方那条 `usleep(intervalMs - elapsed)` 兜着，这里不用自己计时。
+    const bool surfaceH264 =
+            static_cast<ImageFormat>(p.codec) == ImageFormat::kH264 &&
+            st->h264 != nullptr && st->h264->SurfaceInput();
+
+    uint32_t w = 0, h = 0, stride = 0;
+    FramePtr f;
+    if (surfaceH264) {
+        w = st->h264W ? st->h264W : 2;
+        h = st->h264H ? st->h264H : 2;
+    } else {
     // ── 订阅共享抓帧 ──
     //
     // 第一次调用时订阅，之后这个连接一直持有它。
@@ -2170,7 +2192,12 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
     const int waitMs = 20;
 
     uint64_t latestSeq = 0;
-    FramePtr f = st->hubSub->WaitNext(st->hubSeq, waitMs, &latestSeq);
+    // ⚠️ **赋值**给外层那个 f，不要在这里重新声明 —— 重新声明会把它遮蔽掉，
+    //    而下面非 Surface 的 H.264 分支还要用 f->changeGen。
+    //    实测踩过：遮蔽之后那里解引用的是外层的空指针，
+    //    tombstone 报 NextEncodedFrame+802 / fault addr 0x38
+    //    （0x38 正是 SharedFrame::changeGen 的偏移）。
+    f = st->hubSub->WaitNext(st->hubSeq, waitMs, &latestSeq);
     if (!f) {
         // 没等到新帧。两种可能：
         //   - 抓帧比帧间隔还慢（超时是正常的，不是错误）
@@ -2181,7 +2208,7 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
     }
     st->hubSeq = f->seq;
 
-    const uint32_t stride = f->stride ? f->stride : f->width;
+    stride = f->stride ? f->stride : f->width;
     if (f->width == 0 || f->height == 0 || stride < f->width ||
         static_cast<uint64_t>(stride) * f->height * 4 > f->size ||
         (f->pixelFormat != 1 && f->pixelFormat != 2 && f->pixelFormat != 5)) {
@@ -2203,7 +2230,10 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
         *unchanged = true;
         return {};
     }
-    const uint32_t w = f->width, h = f->height;
+    w = f->width;
+    h = f->height;
+    }   // ← if (!surfaceH264)
+
     uint32_t dw = w, dh = h;
     if (p.maxWidth > 0 && w > static_cast<uint32_t>(p.maxWidth)) {
         dw = static_cast<uint32_t>(p.maxWidth);
@@ -2324,6 +2354,15 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
             // 新实例：必须让下一个输出是关键帧，否则客户端开头是黑的
             // （要等到下一个 I 帧，默认 2 秒）
             st->needKeyFrame = true;
+
+            // 尺寸已经拿到了，从此这条路不需要抓帧。
+            // 释放订阅 —— 如果没有别的订阅者，抓帧线程会**停下来**，
+            // 这才是 A7/A8 真正省下来的那部分。
+            if (st->h264->SurfaceInput() && st->hubSub) {
+                st->hubSub.reset();
+                st->haveChangeGen = false;   // 变更代次对这条路没意义了
+                ALOGI("H.264 走虚拟显示：已释放共享抓帧订阅，之后不再抓帧");
+            }
             ALOGI("流 H.264 编码器: %ux%u @%u bps",
                   dw, dh, cfg.bitrate);
         }
