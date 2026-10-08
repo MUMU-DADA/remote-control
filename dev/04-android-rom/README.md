@@ -167,9 +167,11 @@ cd dev/04-android-rom
 ./scripts/status.sh                 #    随时看 载荷/注入/构建/产物/设备 五项状态
 ./tools/check-bridge-symbols.sh     #    （可选）翻译层依赖自检，启动前排雷
 
-./scripts/accept.sh                 # 5. 一条龙：自检 → 依赖检查 → 打包 → 启动验收
-                                    #    （等价于 verify-rom + check-bridge-symbols + package-rom + run-linux）
-./scripts/run-linux.sh              #    只做启动验收
+./scripts/accept.sh                 # 5. 一条龙：自检 → 依赖检查 → 打包 → 启动 → 验收
+                                    #    （等价于 verify-rom + check-bridge-symbols + package-rom
+                                    #      + run-linux 启动 + run-linux --verify 验收）
+./scripts/run-linux.sh              #    只做启动
+./scripts/run-linux.sh --verify     #    只做验收（镜像身份 / 翻译层 / aarch64 / arm64 APK）
 ./scripts/package-rom.sh            #    只做打包（含 sha256 清单）
 ```
 

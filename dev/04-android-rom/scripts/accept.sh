@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建完成后的一条龙：自检 → 依赖检查 → 打包 → 启动验收。
+# 构建完成后的一条龙：自检 → 依赖检查 → 打包 → 启动 → 验收。
 #
 #   ./accept.sh                 # 全套
 #   ./accept.sh --skip-boot     # 只做自检/依赖/打包，不启动模拟器
@@ -55,10 +55,21 @@ fi
 log "③ 打包可交付 ROM 目录"
 "$X64_DIR/scripts/package-rom.sh"
 
-# 4) 启动 + 验收
+# 4) 启动 / 5) 验收
 if [ "$SKIP_BOOT" = 1 ]; then
     log "已跳过启动验收（--skip-boot）。手动跑： ./scripts/run-linux.sh"
     exit 0
 fi
-log "④ Linux/KVM 启动 + 验收（端口 $EMULATOR_PORT）"
+log "④ Linux/KVM 启动（端口 $EMULATOR_PORT）"
 "$X64_DIR/scripts/run-linux.sh" --port "$EMULATOR_PORT"
+
+# ⑤ 真正的验收。
+#
+# ⚠️ 这一步以前**没有** —— `run-linux.sh --port` 只负责把模拟器拉起来、
+#    等服务就绪就返回，`--verify` 那一段（镜像身份与 ABI、翻译层接线、
+#    aarch64 机器码真的在跑、arm64 APK 能装能跑）是**显式**才跑的。
+#    于是上面那一步标题写着"启动 + 验收"，实际一次检查都没做，而它是
+#    交付流程的最后一道闸：跑了半小时构建、看到"一条龙"走完，其实
+#    第 ④ 步只证明了"HTTP 起来了"。
+log "⑤ 验收：镜像身份 / 翻译层 / aarch64 / arm64 APK"
+"$X64_DIR/scripts/run-linux.sh" --verify --port "$EMULATOR_PORT"
