@@ -45,7 +45,9 @@ for cand in ("/root/AutoSnapshotAndroid/aosp/out/host/linux-x86/bin/adb", "adb")
         break
     except Exception:
         continue
-SERIAL = "emulator-5580"
+# 设备序列号。可用 RC_SERIAL 覆盖 —— 多开一台（比如拿旧版 Android 镜像
+# 验证兼容性）时不必改代码。
+SERIAL = os.environ.get("RC_SERIAL", "emulator-5580")
 
 # 访问令牌。
 #

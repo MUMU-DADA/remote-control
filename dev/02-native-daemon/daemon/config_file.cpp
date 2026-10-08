@@ -123,8 +123,38 @@ std::string ConfigFile::Serialize(const PersistedConfig& cfg) {
     return s;
 }
 
+// 逐级建出目录。
+//
+// ⚠️ 这一步对**推送路径**是必需的：ROM 上 init 会先建好
+//    /data/misc/remote-control 并按策略打好标签；但把守护进程用
+//    `adb push` 推到一台普通 root 设备（NDK 构建那条路，文档里写明了
+//    是"让服务尽早在真机上跑起来"的路径）时，那个目录并不存在。
+//
+//    后果不是"配置存不下来"这么轻 —— 见 main.cpp：首启生成令牌后
+//    若保存失败，守护进程**直接拒绝启动**（退出码 1），
+//    连根本不需要配置文件的 Unix socket 一起没了。
+//    实测（Android 10 / API 29 的 AOSP 镜像）：进程静悄悄 exit 1，
+//    终端上只看到"就绪"两行，真正的原因只在 logcat 里的一行 E。
+static bool EnsureParentDir(const std::string& path, std::string* error) {
+    const size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos || slash == 0) return true;   // 没有父目录
+    const std::string dir = path.substr(0, slash);
+
+    for (size_t i = 1; i <= dir.size(); ++i) {
+        if (i != dir.size() && dir[i] != '/') continue;
+        const std::string part = dir.substr(0, i);
+        if (mkdir(part.c_str(), 0770) != 0 && errno != EEXIST) {
+            if (error) *error = "创建目录 " + part + " 失败: " + strerror(errno);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ConfigFile::Save(const std::string& path, const PersistedConfig& cfg,
                       std::string* error) {
+    if (!EnsureParentDir(path, error)) return false;
+
     // 原子替换：每次使用不可预测的临时名称，避免固定 .tmp 被符号链接
     // 劫持，也避免两个并发保存互相截断对方的内容。
     std::string tmp = path + ".tmp.XXXXXX";

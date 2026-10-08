@@ -481,6 +481,30 @@ ls $ANDROID_PRODUCT_OUT/system/bin/remote-control
 
 ---
 
+## 跨版本兼容性（实测）
+
+对接 NDK 推送路径（`tools/build-ndk.sh` + `adb push`）在
+**Android 10 / API 29** 的 AOSP x86_64 镜像上实测过一遍全功能扫查：
+
+    通过 55 项，失败 3 项
+
+三处失败**都不是守护进程的问题**，是环境差异：
+
+| 失败项 | 原因 |
+|---|---|
+| `width 参数在源头降采样` | screencap 后端没有这个能力（只有 SurfaceFlinger 直连那条有） |
+| `安装 APK` | `INSTALL_FAILED_NO_MATCHING_ABIS` —— 探针 APK 是 arm64，镜像是 x86_64 |
+| `重启后服务自动恢复` | 推送路径没有 init 服务，没人负责拉起来（ROM 上有） |
+
+顺带在这一版 Android 上第一次跑到了 **`AndroidBitmap_compress` 的回退路径**
+（API < 30 时改用 dlopen libjpeg + zlib），日志确认：
+`jpeg=libjpeg: 6b + webp=libwebp（内置） + png=zlib PNG（回退路径）`，
+扫查的截图/区域/WebP 档位各项都过。
+
+编译期也确认过：`API=26` / `29` / `30` / `31` 四档都能干净编译。
+
+---
+
 ## 相关文档
 
 - 方案选型 → `../../docs/01-selection.md`

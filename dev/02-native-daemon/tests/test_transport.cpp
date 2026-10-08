@@ -805,6 +805,25 @@ void TestConfigSaveTempFileSafety() {
     unlink(predictable.c_str());
     unlink(path.c_str());
     unlink(victim.c_str());
+
+    // ── 父目录不存在时要能建出来 ──
+    //
+    // 这条是**推送路径**上的硬需求：ROM 上 init 会先建好
+    // /data/misc/remote-control，但把守护进程 adb push 到一台普通 root
+    // 设备时那个目录不存在，于是保存令牌失败 —— 而 main 在"生成了令牌
+    // 却存不下来"时**拒绝启动**（退出码 1），连不需要配置文件的
+    // Unix socket 一起没了。
+    // 实测（Android 10 / API 29 AOSP 镜像）：进程静悄悄 exit 1。
+    const std::string nested = dir + "/a/b/config";
+    const bool nestedSaved = ConfigFile::Save(nested, cfg, &error);
+    PersistedConfig nestedLoaded;
+    Check(nestedSaved && ConfigFile::Load(nested, &nestedLoaded, &loadError) &&
+                  nestedLoaded.token == cfg.token,
+          "父目录不存在时 Save 会逐级建出来（推送路径的前提）");
+
+    unlink(nested.c_str());
+    rmdir((dir + "/a/b").c_str());
+    rmdir((dir + "/a").c_str());
     rmdir(dir.c_str());
 }
 

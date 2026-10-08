@@ -207,9 +207,37 @@ step "编译 rcctl"
 ok "rcctl → $OUT/$ABI/rcctl"
 
 # -----------------------------------------------------------------------------
+step "附带文件"
+# -----------------------------------------------------------------------------
+# 剪贴板要一个 helper：守护进程以 shell 身份通过 app_process 跑
+# cliptool.jar（为什么需要它见 daemon/clipops.h）。**它不是可选的** ——
+# 少了它 /clipboard 直接 501/找不到文件。
+#
+# 以前 build-ndk.sh 不产出它，而文档把这条路径写成"推到设备就能用"，
+# 于是推上去之后剪贴板是坏的（实测：Android 10 的 AOSP 镜像上，
+# 扫查 [7] 剪贴板报"找不到 cliptool.jar"）。
+CLIPTOOL="$SRC/tools/cliptool/build/cliptool.jar"
+if [ -s "$CLIPTOOL" ]; then
+    cp -f "$CLIPTOOL" "$OUT/$ABI/cliptool.jar"
+    ok "cliptool.jar → $OUT/$ABI/cliptool.jar"
+else
+    warn "没有 cliptool.jar（剪贴板会不可用）—— 先跑：bash $SRC/tools/cliptool/build.sh"
+fi
+
+# 改名遗留：`autod` / `autodctl` 是 rename 之前的名字。
+# 构建不会删旧文件，于是产物目录里会**同时**躺着新旧两套二进制 ——
+# 推哪一个是靠人记的，很容易推错。构建时顺手清掉。
+for stale in autod autodctl; do
+    if [ -e "$OUT/$ABI/$stale" ]; then
+        rm -f "$OUT/$ABI/$stale"
+        ok "清掉改名遗留：$stale"
+    fi
+done
+
+# -----------------------------------------------------------------------------
 step "产物"
 # -----------------------------------------------------------------------------
-for f in remote-control rcctl; do
+for f in remote-control rcctl cliptool.jar; do
     p="$OUT/$ABI/$f"
     printf "  %-10s %9s 字节  %s\n" "$f" "$(stat -c%s "$p")" \
         "$(file -b "$p" | cut -c1-60)"
@@ -223,6 +251,8 @@ cat <<EOF
 
   adb push $OUT/$ABI/remote-control    /data/local/tmp/
   adb push $OUT/$ABI/rcctl /data/local/tmp/
+  # 剪贴板要用它，少了 /clipboard 不可用
+  adb push $OUT/$ABI/cliptool.jar      /data/local/tmp/
   adb shell chmod 755 /data/local/tmp/remote-control /data/local/tmp/rcctl
 
   # 需要 root（/dev/uinput 默认 0600）
