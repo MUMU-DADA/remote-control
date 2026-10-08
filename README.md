@@ -167,6 +167,21 @@ Java-only AIDL。`remote-control` 用 `/dev/uinput` 绕开 —— 代价是会�
   SELinux domain 和 socket 标签都可枚举。
 - **非 root 真机上触控受限** —— `/dev/uinput` 通常只对 `system` / root 开放。
 
+**代码已完成、但没在真硬件上验证过**（本仓库只有模拟器）：
+
+- **Windows + WHPX 启动路径** —— 镜像拉取/校验、预检、
+  SDK 下载都已验过；“启动 + 验收”那一段停在预检（见
+  [`windows/README.md`](dev/04-android-rom/windows/README.md)）
+- **macOS（Apple Silicon）宿主** —— 代码已完成、离线 121 项全绿，
+  但**没在真 Mac 上跑过**（见 [`macos/README.md`](dev/04-android-rom/macos/README.md)）
+- 依赖**真机差异**的验证项（硬件编码器、GPU 合成路径、
+  真实触控硬件）在模拟器上只能做到“能跑、结果对”，
+  性能结论不能外推
+
+> ⚠️ 本仓库当前能拿到的“另一台设备”是**伪造指纹的云手机容器**
+> （`ro.hardware=OPPO`、`ro.boot.hardware` 为空、`abilist` 以 `x86_64` 开头，
+> 而不是真的 ARM 硬件），**不能当真硬件用**。
+
 **已知工程限制**：
 
 - 平台私有 API 跨版本不稳定，升级 Android 必须对着源码重新确认
