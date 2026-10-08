@@ -26,7 +26,9 @@ constexpr uint32_t kMagic = 0x44545541;
 //   4 = 手势（长按/拖拽/双击）、按键注入、剪贴板
 //   5 = 设备电源（关机 / 重启）
 //   6 = 服务对外开关、运行中应用、历史日志、日志流
-constexpr uint32_t kProtocolVersion = 7;
+//   7 = 屏幕方向（0/90/180/270/free）
+//   8 = 应用生命周期补全（卸载 / 清数据 / 启用停用 / 权限授予撤销）
+constexpr uint32_t kProtocolVersion = 8;
 
 // 单次上传的字节上限（HTTP 请求体 / APK / 普通文件）。
 //
@@ -123,6 +125,28 @@ enum class Cmd : uint32_t {
     //    "rotation":1,"free":false,"width":720,"height":1280,"note":".."}
     Rotate        = 38,
 
+    // ── 应用生命周期补全（v8）────────────────────────────────────────────
+    //
+    // 为什么要有这一组：v2 给了"装得上、起得来、停得掉"，却**卸不掉** ——
+    // 设备管理能力和 `adb shell` 对不齐，用户只能回去用 adb。
+    // 四条都是 exec `pm`，与 Install/Launch/Kill 同一层实现。
+    //
+    // 请求 payload 与 v2 一样是 NUL 分隔的 UTF-8；应答是 JSON。
+    AppUninstall  = 39,  // payload: "<package>"
+                         // flags & kFlagKeepData → `pm uninstall -k`（保留数据）
+                         // → {"ok":true,"package":..,"removed":true,"keptData":bool}
+    AppClearData  = 40,  // payload: "<package>"（等价于设置里的"清除数据"）
+                         // → {"ok":true,"package":..,"cleared":true}
+    AppEnabled    = 41,  // payload: "<package>\0<on|off>"
+                         // 走 `pm enable` / `pm disable-user`（= 设置里的"停用"）
+                         // → {"ok":true,"package":..,"enabled":bool}
+    AppPermission = 42,  // payload: "<package>\0<完整权限名>\0<grant|revoke>"
+                         // → {"ok":true,"package":..,"permission":..,"granted":bool}
+                         //
+                         // ⚠️ 只对**可运行时变更**的权限有效。安装期权限
+                         //    （如 MANAGE_EXTERNAL_STORAGE）会报
+                         //    "not a changeable permission type"。
+
     Power         = 34,  // payload: "reboot" | "shutdown" | "reboot-recovery"
                          //          | "reboot-bootloader" | "reboot-sideload"
                          // 走 `svc power reboot|shutdown`（= PowerManager.reboot/
@@ -185,6 +209,10 @@ enum Flags : uint32_t {
     //    后果是任何带 async 的手势都会被当成"强制放行"，
     //    而服务关了之后手势本来就该被拒。
     kFlagForce         = 1u << 9,
+
+    // AppUninstall：保留应用数据（`pm uninstall -k`）。
+    // 位 10 —— 位 8/9 已经分别给了 kFlagAsync 和 kFlagForce。
+    kFlagKeepData      = 1u << 10,
 };
 
 struct Request {

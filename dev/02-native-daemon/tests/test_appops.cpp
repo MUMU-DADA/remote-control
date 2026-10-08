@@ -65,6 +65,35 @@ void TestPackageName() {
     }
 }
 
+// ── 权限名合法性（v8 的 AppPermission 用）───────────────────────────────────
+//
+// 权限名和包名同构，所以规则直接复用。这里把两件事固定住：
+//   1. 真权限名全部通过（不然 AppPermission 会误拒）
+//   2. 带分隔符 / 元字符的输入全部拒绝（这是防注入的第一道，虽然真正
+//      的安全边界是"不走 shell"，但误放行等于把校验写成摆设）
+void TestPermissionName() {
+    printf("\n\033[1;34m[5] 权限名校验\033[0m\n");
+
+    struct Case { const char* p; bool ok; const char* why; };
+    const Case cases[] = {
+        {"android.permission.CAMERA",              true,  "标准运行时权限"},
+        {"android.permission.ACCESS_FINE_LOCATION", true, "长权限名"},
+        {"com.vendor.custom.PERM",                 true,  "厂商自有权限"},
+        {"",                                       false, "空"},
+        {".android.permission.CAMERA",             false, "以点开头"},
+        {"android.permission.CAMERA.",             false, "以点结尾"},
+        {"android..permission",                    false, "连续点"},
+        {"android/permission",                     false, "斜杠"},
+        {"android.permission.CAMERA;rm -rf /",     false, "shell 元字符"},
+        {"android.permission CAMERA",              false, "空格"},
+        {"android.permission.CAMERA\n-x",          false, "换行"},
+    };
+    for (const auto& c : cases) {
+        Check(AppOps::ValidPermissionName(c.p) == c.ok, "%-42s %s",
+              c.p[0] ? c.p : "(空)", c.why);
+    }
+}
+
 // ── dumpsys package 解析 ────────────────────────────────────────────────────
 void TestParseDetail() {
     printf("\n\033[1;34m[2] dumpsys package 解析\033[0m  （真实设备输出）\n");
@@ -248,6 +277,7 @@ int main() {
     TestParseDetail();
     TestParseForeground();
     TestParsePmList();
+    TestPermissionName();
 
     return Summary("应用管理后端");
 }

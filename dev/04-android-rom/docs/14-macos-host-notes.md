@@ -1,6 +1,6 @@
 # macOS 宿主移植调研：远程屏幕控制守护进程的 API 等价性与权限模型
 
-> 研究对象：一个 Linux/Android 上的 C++ 守护进程（屏幕截图 + 编码为 png/jpeg/webp + h264 流；触摸/鼠标/键盘注入；Unix socket + SCM_RIGHTS 传 memfd 零拷贝；HTTP/WebSocket；33 条命令含应用管理、文件读写、剪贴板、屏幕旋转、电源）。
+> 研究对象：一个 Linux/Android 上的 C++ 守护进程（屏幕截图 + 编码为 png/jpeg/webp + h264 流；触摸/鼠标/键盘注入；Unix socket + SCM_RIGHTS 传 memfd 零拷贝；HTTP/WebSocket；37 条命令含应用管理、文件读写、剪贴板、屏幕旋转、电源）。
 >
 > **版本基线（已核实）**：当前（2026 年）macOS 26 "Tahoe" 是出货主力（已见 26.1 / 26.2 / 26.4 / 26.5.2 / 26.6.1 / 26.6.2 等版本号），macOS 27 "Golden Gate" 已发布/在测，配套 Xcode 27。上一代 macOS 15 Sequoia / 14 Sonoma 仍在安全维护（2026-08-06 发布 15.7.9 / 14.8.9）。
 > - macOS 27 存在：[support.apple.com/zh-cn/127257](https://support.apple.com/zh-cn/127257)、[MacRumors macOS Golden Gate roundup](https://www.macrumors.com/roundup/macos-27/)、[MacRumors macOS Tahoe roundup](https://www.macrumors.com/roundup/macos-26/)

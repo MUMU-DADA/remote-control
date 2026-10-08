@@ -11,7 +11,7 @@
 |---|---|
 | [01-http.md](01-http.md) | **HTTP/JSON API** —— 全部端点，逐个的参数与响应 |
 | [02-websocket.md](02-websocket.md) | **WebSocket 流** —— 画面流、触控流、日志流 |
-| [03-socket.md](03-socket.md) | **Unix socket 二进制协议** —— 33 条命令的线格式 |
+| [03-socket.md](03-socket.md) | **Unix socket 二进制协议** —— 37 条命令的线格式 |
 | [04-config.md](04-config.md) | **配置与部署** —— 配置文件、命令行、supervisor、鉴权 |
 | [05-errors.md](05-errors.md) | **状态码与错误处理** |
 
@@ -48,7 +48,7 @@ TOKEN='<remote-control.conf 中的 token>'
 curl -H "Authorization: Bearer $TOKEN" http://<设备IP>:8088/api/v1/describe
 ```
 
-返回 33 条命令的清单、各自的可用性，以及整体 `capabilities`。
+返回 37 条命令的清单、各自的可用性，以及整体 `capabilities`。
 **这是"这台设备上到底能做什么"的唯一权威答案** —— 不要假设，问它。
 
 ### 2. 截图
@@ -169,14 +169,14 @@ API=26 ABI=arm64-v8a bash tools/build-ndk.sh   # ✓ 编译验证；不代表 An
 
 旧版曾因 API 30 才引入的 bionic 符号而无法用更低 API 编译；兼容改造已移除这些编译期依赖。构建与运行验证范围见 [`docs/03-reference.md`](../03-reference.md) 的「Android 版本与验证范围」。
 
-> 这与**协议版本**是两件事，别混：协议 v7 说的是接口形态，
+> 这与**协议版本**是两件事，别混：协议 v8 说的是接口形态，
 > API 级别说的是能跑在哪些设备上。
 
 ---
 
 ## 协议版本
 
-当前协议 **v7**，33 条命令。每条命令带 `since` 字段标明它从哪个版本开始存在：
+当前协议 **v8**，37 条命令。每条命令带 `since` 字段标明它从哪个版本开始存在：
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" \
@@ -192,6 +192,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | v5 | 设备电源（关机/重启） |
 | v6 | 服务软开关、运行中应用、历史日志、日志流 |
 | v7 | 屏幕方向 `Rotate`（`0/90/180/270/portrait/landscape/free/status`） |
+| v8 | 应用生命周期补全：卸载 `AppUninstall`、清数据 `AppClearData`、启用停用 `AppEnabled`、权限授予撤销 `AppPermission` |
 
 ---
 

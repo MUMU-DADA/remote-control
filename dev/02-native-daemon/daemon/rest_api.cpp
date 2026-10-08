@@ -2945,6 +2945,40 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
             if (action == "kill" && method == "POST") {
                 return Call(Cmd::KillApp, PackArgs({pkg}), 0, -1);
             }
+            // ── v8：生命周期补全 ──
+            //
+            // 用 POST 且动作放在路径尾 —— 与 launch/kill 同一个形状，
+            // 客户端不用为这组新命令学第二套路由风格。
+            if (action == "uninstall" && method == "POST") {
+                // ?keep=1 → `pm uninstall -k`，保留 /data 数据
+                uint32_t flags = 0;
+                if (req.queryParam("keep", "0") != "0") flags |= kFlagKeepData;
+                return Call(Cmd::AppUninstall, PackArgs({pkg}), flags, -1);
+            }
+            if (action == "clear" && method == "POST") {
+                return Call(Cmd::AppClearData, PackArgs({pkg}), 0, -1);
+            }
+            if (action == "enabled" && method == "POST") {
+                json::Value b; HttpResponse err;
+                if (!ParseJsonBody(req, &b, &err)) return err;
+                return Call(Cmd::AppEnabled,
+                            PackArgs({pkg, b.flag("enabled") ? "on" : "off"}),
+                            0, -1);
+            }
+            if (action == "permission" && method == "POST") {
+                json::Value b; HttpResponse err;
+                if (!ParseJsonBody(req, &b, &err)) return err;
+                const std::string perm = b.str("permission");
+                if (perm.empty()) {
+                    return HttpResponse::Error(
+                            400, "permission 需要 permission 字段"
+                                 "（完整权限名，如 android.permission.CAMERA）");
+                }
+                return Call(Cmd::AppPermission,
+                            PackArgs({pkg, perm,
+                                      b.flag("grant") ? "grant" : "revoke"}),
+                            0, -1);
+            }
         }
         return HttpResponse::Error(405, "apps 的路径或方法不对");
     }

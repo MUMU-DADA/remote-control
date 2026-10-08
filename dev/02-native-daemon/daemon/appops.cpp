@@ -127,6 +127,13 @@ bool AppOps::ValidPackageName(const std::string& p) {
     return !prevDot;   // 不能以点结尾
 }
 
+// 权限名：与包名同构（点分标识符），但**允许前导点之外**同样的字符集。
+// Android 的权限名一律是 android.permission.XXX 或厂商自有前缀，
+// 所以规则可以完全复用包名那套。
+bool AppOps::ValidPermissionName(const std::string& p) {
+    return ValidPackageName(p);
+}
+
 // ── Init ────────────────────────────────────────────────────────────────────
 bool AppOps::Init(std::string* error) {
     // pm / am 是 app_process 的脚本，Android 上一定有。
@@ -587,6 +594,222 @@ bool AppOps::Install(const std::string& apkPath, bool replace,
     // 这里的做法：解析 APK 的包名由调用方（dispatch）负责，它有 fd 可以读 manifest；
     // 拿不到就留空，客户端可以自己再列一次。
     if (installedPackage) installedPackage->clear();
+    return true;
+}
+
+// ── 生命周期补全（v8）───────────────────────────────────────────────────────
+//
+// 这四条的形状都一样：校验参数 → 不走 shell 地 exec `pm` → 判定成败。
+// 判定统一收敛到下面这个 helper，因为 `pm` 各子命令的"失败"表现不一致：
+//   · uninstall 打印 "Failure [reason]"，退出码 0
+//   · clear     打印 "Failed"
+//   · grant     成功时**什么都不打印**，失败时才吐异常
+// 只看退出码会漏掉前两种，只看文本会漏掉最后一种。两个都看。
+
+namespace {
+
+// pm 的失败标记。宁可把"其实成功了但输出里有这些词"误判成失败，
+// 也不要反过来 —— 管理类操作谎报成功比报错更难排查。
+bool LooksLikePmFailure(const std::string& text) {
+    static const char* kMarkers[] = {
+        "Failure", "Failed", "failed", "Error", "Exception",
+        "Unknown package", "not found", "SecurityException",
+        "Permission Denial", "java.lang.",
+    };
+    for (const char* m : kMarkers) {
+        if (text.find(m) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// 取最有诊断价值的一行输出，用于把 pm 的真实话带进错误信息。
+//
+// ⚠️ 不能直接取第一行：`pm grant` 失败时第一行永远是样板
+//    "Exception occurred while executing 'grant':"，真正的原因在**第二行**
+//    （实测：`java.lang.SecurityException: Permission ... is not a changeable
+//     permission type`）。只取第一行等于把可用信息丢掉，用户拿到的是一句
+//    等于没说的报错。栈帧（`at ...`）同样没有价值，一并跳过。
+std::string FirstMeaningfulLine(const std::string& text, size_t maxLen = 300) {
+    std::istringstream iss(text);
+    std::string line;
+    std::string first;
+    while (std::getline(iss, line)) {
+        const std::string t = Trim(line);
+        if (t.empty() || t == "}" || t == "{") continue;
+        if (t.rfind("Exception occurred while executing", 0) == 0) continue;
+        if (t.rfind("at ", 0) == 0) continue;   // 栈帧
+        if (first.empty()) first = t;
+        if (t.find("Exception") != std::string::npos ||
+            t.find("Error") != std::string::npos ||
+            t.find("Failure") != std::string::npos ||
+            t.find("not a changeable") != std::string::npos ||
+            t.find("Permission Denial") != std::string::npos) {
+            return t.substr(0, maxLen);
+        }
+    }
+    return first.substr(0, maxLen);
+}
+
+}  // namespace
+
+// ── Exists ──────────────────────────────────────────────────────────────────
+bool AppOps::Exists(const std::string& package) {
+    if (!ValidPackageName(package)) return false;
+    CommandResult r;
+    if (!RunCommand({"/system/bin/pm", "path", package}, 15000, 64u << 10, &r,
+                    nullptr)) {
+        return false;
+    }
+    // 实测：装了 → 退出码 0 + "package:/data/app/.../base.apk"
+    //       没装 → 退出码 1 + 无输出
+    return r.exitCode == 0 && r.out.find("package:") != std::string::npos;
+}
+
+// ── Uninstall ───────────────────────────────────────────────────────────────
+bool AppOps::Uninstall(const std::string& package, bool keepData,
+                       std::string* error) {
+    if (!ValidPackageName(package)) {
+        if (error) *error = "非法包名: " + package;
+        return false;
+    }
+    if (!Exists(package)) {
+        if (error) *error = "包不存在: " + package;
+        return false;
+    }
+
+    std::vector<std::string> argv = {"/system/bin/pm", "uninstall"};
+    if (keepData) argv.push_back("-k");
+    argv.push_back(package);
+
+    CommandResult r;
+    // 卸载要跑 dexopt/清理，给足超时（比 install 短，但别用默认值）
+    if (!RunCommand(argv, 120000, 1u << 20, &r, nullptr)) {
+        if (error) *error = "pm uninstall 执行失败";
+        return false;
+    }
+    const std::string combined = r.out + r.err;
+
+    if (r.exitCode != 0 || LooksLikePmFailure(combined) ||
+        combined.find("Success") == std::string::npos) {
+        if (error) {
+            const std::string detail = FirstMeaningfulLine(combined);
+            *error = "卸载失败" + (detail.empty() ? std::string() : ": " + detail);
+            if (combined.find("DELETE_FAILED_DEVICE_POLICY_MANAGER") !=
+                std::string::npos) {
+                *error += "\n【提示】该应用是设备管理员（DevicePolicyManager），"
+                          "要先在设置里解除设备管理才能卸载。";
+            } else if (combined.find("DELETE_FAILED_INTERNAL_ERROR") !=
+                       std::string::npos) {
+                *error += "\n【提示】系统应用通常卸不掉；"
+                          "要停用它请改用 POST /apps/{pkg}/enabled {\"enabled\":false}。";
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+// ── ClearData ───────────────────────────────────────────────────────────────
+bool AppOps::ClearData(const std::string& package, std::string* error) {
+    if (!ValidPackageName(package)) {
+        if (error) *error = "非法包名: " + package;
+        return false;
+    }
+    if (!Exists(package)) {
+        if (error) *error = "包不存在: " + package;
+        return false;
+    }
+    CommandResult r;
+    if (!RunCommand({"/system/bin/pm", "clear", package}, 60000, 1u << 20, &r,
+                    nullptr)) {
+        if (error) *error = "pm clear 执行失败";
+        return false;
+    }
+    const std::string combined = r.out + r.err;
+    if (r.exitCode != 0 || LooksLikePmFailure(combined) ||
+        combined.find("Success") == std::string::npos) {
+        if (error) {
+            const std::string detail = FirstMeaningfulLine(combined);
+            *error = "清除数据失败" +
+                     (detail.empty() ? std::string() : ": " + detail);
+        }
+        return false;
+    }
+    return true;
+}
+
+// ── SetEnabled ──────────────────────────────────────────────────────────────
+bool AppOps::SetEnabled(const std::string& package, bool enabled,
+                        std::string* error) {
+    if (!ValidPackageName(package)) {
+        if (error) *error = "非法包名: " + package;
+        return false;
+    }
+    if (!Exists(package)) {
+        if (error) *error = "包不存在: " + package;
+        return false;
+    }
+    // disable-user：设置里"停用"用的就是它。`pm disable` 对系统应用会被拒。
+    CommandResult r;
+    if (!RunCommand({"/system/bin/pm", enabled ? "enable" : "disable-user",
+                     package},
+                    30000, 1u << 20, &r, nullptr)) {
+        if (error) *error = "pm enable/disable-user 执行失败";
+        return false;
+    }
+    const std::string combined = r.out + r.err;
+    // 成功时输出 "Package <pkg> new state: enabled|disabled-user"
+    if (r.exitCode != 0 || LooksLikePmFailure(combined) ||
+        combined.find("new state") == std::string::npos) {
+        if (error) {
+            const std::string detail = FirstMeaningfulLine(combined);
+            *error = std::string(enabled ? "启用失败" : "停用失败") +
+                     (detail.empty() ? std::string() : ": " + detail);
+        }
+        return false;
+    }
+    return true;
+}
+
+// ── SetPermission ───────────────────────────────────────────────────────────
+bool AppOps::SetPermission(const std::string& package,
+                           const std::string& permission, bool grant,
+                           std::string* error) {
+    if (!ValidPackageName(package)) {
+        if (error) *error = "非法包名: " + package;
+        return false;
+    }
+    if (!ValidPermissionName(permission)) {
+        if (error) *error = "非法权限名: " + permission;
+        return false;
+    }
+    if (!Exists(package)) {
+        if (error) *error = "包不存在: " + package;
+        return false;
+    }
+    CommandResult r;
+    if (!RunCommand({"/system/bin/pm", grant ? "grant" : "revoke", package,
+                     permission},
+                    30000, 1u << 20, &r, nullptr)) {
+        if (error) *error = "pm grant/revoke 执行失败";
+        return false;
+    }
+    const std::string combined = r.out + r.err;
+    // ⚠️ 成功时 pm grant 是**静默**的：没有 "Success" 可匹配。
+    //    所以这里判的是"没有失败标记"，与上面三条相反。
+    if (r.exitCode != 0 || LooksLikePmFailure(combined)) {
+        if (error) {
+            const std::string detail = FirstMeaningfulLine(combined);
+            *error = std::string(grant ? "授予权限失败" : "撤销权限失败") +
+                     (detail.empty() ? std::string() : ": " + detail);
+            if (combined.find("not a changeable permission type") !=
+                std::string::npos) {
+                *error += "\n【提示】该权限不是可运行时变更的类型"
+                          "（安装期权限授予不了，只能在 manifest 里声明）。";
+            }
+        }
+        return false;
+    }
     return true;
 }
 

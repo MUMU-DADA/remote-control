@@ -95,8 +95,45 @@ public:
     bool Install(const std::string& apkPath, bool replace,
                  std::string* installedPackage, std::string* error);
 
+    // ── 生命周期补全（v8）────────────────────────────────────────────────
+    //
+    // 这四条与 Install/Launch/Kill 是同一层：都只是在 exec `pm`，
+    // 所以放在 AppOps 里而不是另开一个后端。
+    // 它们让 API 的管理能力和 `adb shell` 对齐 —— 以前装得上、起得来、
+    // 停得掉，却卸不掉。
+
+    // pm uninstall [-k] <pkg>
+    // keepData 为真时加 -k（保留 /data 数据与缓存目录）。
+    bool Uninstall(const std::string& package, bool keepData, std::string* error);
+
+    // pm clear <pkg> —— 清空应用数据（等价于设置里的"清除数据"）
+    bool ClearData(const std::string& package, std::string* error);
+
+    // pm enable <pkg> / pm disable-user <pkg>
+    //
+    // 用 disable-user 而不是 disable：后者要 CHANGE_COMPONENT_ENABLED_STATE
+    // 且会被系统应用拒绝，而 disable-user 正是设置里"停用"做的事。
+    bool SetEnabled(const std::string& package, bool enabled, std::string* error);
+
+    // pm grant|revoke <pkg> <permission>
+    // permission 是完整权限名，如 android.permission.CAMERA。
+    bool SetPermission(const std::string& package, const std::string& permission,
+                       bool grant, std::string* error);
+
     // 判断包名是否合法（防注入的第二道闸；第一道是不走 shell）
     static bool ValidPackageName(const std::string& p);
+
+    // 判断权限名是否合法。定位与 ValidPackageName 相同：
+    // 挡住明显的垃圾输入，让报错发生在调用前；安全边界仍是"不走 shell"。
+    static bool ValidPermissionName(const std::string& p);
+
+    // 包是否已安装（`pm path <pkg>`）。
+    //
+    // 为什么需要它：对不存在的包，`pm uninstall` 和"卸载失败"输出**一模一样**
+    // 的 `Failure [DELETE_FAILED_INTERNAL_ERROR]`、同样的退出码，
+    // 只看输出分不出来 —— 于是客户端拿到 500 + 一句"系统应用通常卸不掉"
+    // 的误导提示，而真实原因是根本没装。先问一次 `pm path` 就能分开。
+    bool Exists(const std::string& package);
 
     // 某个包当前是否在运行（pid 查询，用于 Kill 后确认）
     bool IsRunning(const std::string& package, int32_t* pid);

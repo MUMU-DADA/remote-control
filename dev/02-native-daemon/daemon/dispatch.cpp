@@ -424,6 +424,14 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleForegroundApp(req);
         case Cmd::InstallApp:
             return HandleInstallApp(req, reqFd);
+        case Cmd::AppUninstall:
+            return HandleUninstallApp(req, args);
+        case Cmd::AppClearData:
+            return HandleClearAppData(req, args);
+        case Cmd::AppEnabled:
+            return HandleSetAppEnabled(req, args);
+        case Cmd::AppPermission:
+            return HandleSetAppPermission(req, args);
         case Cmd::Download:
             return HandleDownload(req, args);
         case Cmd::FileOp:
@@ -709,6 +717,156 @@ ReplyPacket Dispatcher::HandleInstallApp(const Request& req, int reqFd) {
     return MakeJsonReply(req.cmd, w.str());
 }
 
+// ── v8：应用生命周期补全 ────────────────────────────────────────────────────
+//
+// 四条的形状一致：校验参数个数 → Init → 调用 AppOps → 组 JSON。
+// 失败时尽量把错误码分细（包不存在 → kErrNotFound），因为 HTTP 层
+// 用它决定 404 还是 500，客户端能据此区分"没这个包"和"操作失败"。
+
+namespace {
+
+// 把 AppOps 的文本错误映射成协议错误码。
+// pm 对"包不存在"没有专门的退出码，只能看文本 —— 这里集中判一次，
+// 免得四个 handler 各写一份还不一致。
+uint32_t ClassifyAppError(const std::string& error) {
+    if (error.find("非法包名") != std::string::npos ||
+        error.find("非法权限名") != std::string::npos) {
+        return kErrBadArg;
+    }
+    // 「这个权限本来就不能运行时改」是**请求**的问题（参数选错了），
+    // 不是调用方没有权限 —— 所以是 400 而不是 403。
+    // 放在 SecurityException 之前判，因为设备给的正是
+    // "java.lang.SecurityException: ... is not a changeable permission type"。
+    if (error.find("not a changeable permission type") != std::string::npos) {
+        return kErrBadArg;
+    }
+    if (error.find("包不存在") != std::string::npos ||
+        error.find("Unknown package") != std::string::npos ||
+        error.find("not found") != std::string::npos ||
+        error.find("does not exist") != std::string::npos) {
+        return kErrNotFound;
+    }
+    if (error.find("Permission Denial") != std::string::npos ||
+        error.find("SecurityException") != std::string::npos) {
+        return kErrPermission;
+    }
+    return kErrInternal;
+}
+
+}  // namespace
+
+ReplyPacket Dispatcher::HandleUninstallApp(
+        const Request& req, const std::vector<std::string>& args) {
+    if (args.empty() || args[0].empty()) {
+        return MakeJsonError(req.cmd, kErrPayload, "缺少包名参数");
+    }
+    std::string error;
+    if (!appOps_->Init(&error)) return MakeJsonError(req.cmd, kErrUnsupported, error);
+
+    const bool keepData = (req.flags & kFlagKeepData) != 0;
+    if (!appOps_->Uninstall(args[0], keepData, &error)) {
+        return MakeJsonError(req.cmd, ClassifyAppError(error), error);
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("package", args[0])
+                            .Field("removed", true)
+                            .Field("keptData", keepData)
+     .EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleClearAppData(
+        const Request& req, const std::vector<std::string>& args) {
+    if (args.empty() || args[0].empty()) {
+        return MakeJsonError(req.cmd, kErrPayload, "缺少包名参数");
+    }
+    std::string error;
+    if (!appOps_->Init(&error)) return MakeJsonError(req.cmd, kErrUnsupported, error);
+
+    if (!appOps_->ClearData(args[0], &error)) {
+        return MakeJsonError(req.cmd, ClassifyAppError(error), error);
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("package", args[0]).Field("cleared", true)
+     .EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleSetAppEnabled(
+        const Request& req, const std::vector<std::string>& args) {
+    if (args.empty() || args[0].empty()) {
+        return MakeJsonError(req.cmd, kErrPayload, "缺少包名参数");
+    }
+    if (args.size() < 2) {
+        return MakeJsonError(req.cmd, kErrPayload, "缺少状态参数（on|off）");
+    }
+    // 接受 on/off/true/false/1/0/enable/disable —— 客户端写法不统一，
+    // 与其让它们各自猜，不如这里都认。
+    const std::string& v = args[1];
+    bool enabled = false;
+    if (v == "on" || v == "true" || v == "1" || v == "enable" ||
+        v == "enabled") {
+        enabled = true;
+    } else if (v == "off" || v == "false" || v == "0" || v == "disable" ||
+               v == "disabled") {
+        enabled = false;
+    } else {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "状态参数只能是 on|off（收到: " + v + "）");
+    }
+
+    std::string error;
+    if (!appOps_->Init(&error)) return MakeJsonError(req.cmd, kErrUnsupported, error);
+
+    if (!appOps_->SetEnabled(args[0], enabled, &error)) {
+        return MakeJsonError(req.cmd, ClassifyAppError(error), error);
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("package", args[0]).Field("enabled", enabled)
+     .EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
+ReplyPacket Dispatcher::HandleSetAppPermission(
+        const Request& req, const std::vector<std::string>& args) {
+    if (args.empty() || args[0].empty()) {
+        return MakeJsonError(req.cmd, kErrPayload, "缺少包名参数");
+    }
+    if (args.size() < 2 || args[1].empty()) {
+        return MakeJsonError(req.cmd, kErrPayload, "缺少权限名参数");
+    }
+    if (args.size() < 3) {
+        return MakeJsonError(req.cmd, kErrPayload, "缺少动作参数（grant|revoke）");
+    }
+    const std::string& a = args[2];
+    bool grant = false;
+    if (a == "grant" || a == "allow" || a == "true" || a == "1") {
+        grant = true;
+    } else if (a == "revoke" || a == "deny" || a == "false" || a == "0") {
+        grant = false;
+    } else {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "动作参数只能是 grant|revoke（收到: " + a + "）");
+    }
+
+    std::string error;
+    if (!appOps_->Init(&error)) return MakeJsonError(req.cmd, kErrUnsupported, error);
+
+    if (!appOps_->SetPermission(args[0], args[1], grant, &error)) {
+        return MakeJsonError(req.cmd, ClassifyAppError(error), error);
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("package", args[0])
+                            .Field("permission", args[1])
+                            .Field("granted", grant)
+     .EndObj();
+    return MakeJsonReply(req.cmd, w.str());
+}
+
 // ── v2：下载与文件 ──────────────────────────────────────────────────────────
 
 ReplyPacket Dispatcher::HandleDownload(const Request& req,
@@ -901,6 +1059,10 @@ const CommandSpec kCommands[] = {
     {"RunningApps",  36,  6, "无",                      "正在运行的应用与进程状态"},
     {"LogFile",      37,  6, "无",                      "落盘的历史日志（最近 10KB）"},
     {"Rotate",       38,  7, "0|90|180|270|free|status","屏幕方向（有退路，见应答的 method）"},
+    {"AppUninstall", 39,  8, "<package>",               "卸载应用（kFlagKeepData 保留数据）"},
+    {"AppClearData", 40,  8, "<package>",               "清除应用数据（= 设置里的清除数据）"},
+    {"AppEnabled",   41,  8, "<package>\\0<on|off>",     "启用 / 停用应用"},
+    {"AppPermission",42,  8, "<package>\\0<权限名>\\0<grant|revoke>", "授予 / 撤销运行时权限"},
     {"Describe",     20,  3, "无",                      "本清单：有哪些命令、哪些可用"},
     {"GetConfig",    21,  3, "无",                      "当前配置与运行时状态"},
     {"SetConfig",    22,  3, "<key>\0<value>...",       "热改配置"},
@@ -998,7 +1160,11 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
             case Cmd::LaunchApp:
             case Cmd::KillApp:
             case Cmd::ForegroundApp:
-            case Cmd::InstallApp: {
+            case Cmd::InstallApp:
+            case Cmd::AppUninstall:
+            case Cmd::AppClearData:
+            case Cmd::AppEnabled:
+            case Cmd::AppPermission: {
                 std::string err;
                 available = appOps_ != nullptr && appOps_->Init(&err);
                 if (!available) reason = err;

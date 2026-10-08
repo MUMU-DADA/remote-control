@@ -57,6 +57,11 @@ class Dispatcher {
     ReplyPacket HandleKillApp(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandleForegroundApp(const Request& req);
     ReplyPacket HandleInstallApp(const Request& req, int reqFd);
+    // v8：应用生命周期补全
+    ReplyPacket HandleUninstallApp(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleClearAppData(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleSetAppEnabled(const Request& req, const std::vector<std::string>& args);
+    ReplyPacket HandleSetAppPermission(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandleDownload(const Request& req, const std::vector<std::string>& args);
     ReplyPacket HandleFileOp(const Request& req, const std::vector<std::string>& args);
 

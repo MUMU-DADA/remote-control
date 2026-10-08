@@ -235,7 +235,7 @@ AOSP 12 在 macOS 上编完整 ROM（含 Linux 内核、x86_64-only 的构建工
    而产物落在 `out/target/product/emulator64_arm64/`（跟 `PRODUCT_DEVICE` 走）。
    写错不会报错，只会静默回落到 `aosp_arm`。见 §7.0.1 的表。
 2. 加一个**最小** `remote_control_arm64` 产品：先不带 sepolicy、以 root 跑，只验"能开机 + `adb` 通 + `/dev/uinput` 存在 + `remote-control` 在 `/system/bin/`"。
-3. 搬 sepolicy 与 `remote-control.rc`，开机自启，跑 `tools/functional-sweep.py` 的 33 条命令体检。
+3. 搬 sepolicy 与 `remote-control.rc`，开机自启，跑 `tools/functional-sweep.py` 的 37 条命令体检。
 4. 再进方案 B。
 
 ---
@@ -1215,7 +1215,7 @@ linux          windows          darwin-aarch64          darwin-x86_64
 - [x] 6. `apply-overlay.sh` / `build-rom.sh` / `package-rom.sh` / `status.sh` 加产品分支 —— **已完成并回归**（§7.0.9；`release.sh` 未改，它属打包层，见 #16）
 - [x] 7. sepolicy 复用同一份（不复制，§2.5）
 - [ ] 7b. `remote-control.rc` 在 arm64 guest 中开机自启（§7.1 #5b）
-- [ ] 8. `tools/functional-sweep.py` 跑 33 条命令（含 uinput 触控）
+- [ ] 8. `tools/functional-sweep.py` 跑 37 条命令（含 uinput 触控）
 - [ ] 9. §2.6 的 6 处翻译层断言加闸门并如实打印 ⊘
 - [ ] 10. `dev/05-controller-app` 的 APK 确认有 `arm64-v8a` 库
 - [x] 10b. `m remote-control rcctl remote-control-launch` 在 arm64 产品下编出 —— **已完成**（§7.0.7）

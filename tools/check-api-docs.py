@@ -43,7 +43,7 @@ if "__err" in d:
     sys.exit(2)
 cmds = d.get("commands", [])
 print("\n[1] 命令数 / 版本")
-chk(d.get("protocolVersion") == 7, "protocolVersion = 7", f"实际 {d.get('protocolVersion')}")
+chk(d.get("protocolVersion") == 8, "protocolVersion = 8", f"实际 {d.get('protocolVersion')}")
 
 # ⚠️ 再核对**文档示例里**写的版本号 —— 上面那条只验活服务。
 #    实测踩过：docs/api/01-http.md 的示例里写着 protocolVersion: 6，
@@ -54,13 +54,13 @@ _doc_pv = re.findall(r'"protocolVersion"\s*:\s*(\d+)', open(
 chk(all(int(v) == d.get("protocolVersion") for v in _doc_pv),
     "文档示例里的 protocolVersion 与实际一致",
     f"文档里出现 {sorted(set(_doc_pv))}，实际 {d.get('protocolVersion')}")
-chk(len(cmds) == 33, "命令 33 条", f"实际 {len(cmds)}")
+chk(len(cmds) == 37, "命令 37 条", f"实际 {len(cmds)}")
 # 文档中提到的命令总数应与服务一致。
 for f in ("README.md","03-socket.md","01-http.md"):
     t = open(os.path.join(DOCS,f),encoding='utf-8').read()
     nums = set(re.findall(r'(\d+)\s*条命令', t))
     if nums:
-        chk(nums == {"33"}, f"{f} 里写的命令数与实际一致", f"文档写 {nums}")
+        chk(nums == {"37"}, f"{f} 里写的命令数与实际一致", f"文档写 {nums}")
 
 print("\n[2] 命令号表（03-socket.md）")
 t = open(os.path.join(DOCS,"03-socket.md"),encoding='utf-8').read()
@@ -84,6 +84,16 @@ for res in ["describe","config","selftest","stats","log","logfile","logstream","
     live.add(res)
 missing = sorted(live - doc_eps)
 chk(not missing, "活着的端点都写进了文档", f"缺 {missing}")
+
+# v8 新增的应用生命周期端点必须逐个写进文档。
+# 这四个补的是"装得上却卸不掉"那类缺口 —— 代码有了但文档没有，
+# 等于又回到"接口存在、没人知道"。实测就是这么漏掉 install 的。
+#
+# 两种占位符都认：文档既有小节写的是 `{包名}`（中文），
+# 命令表里写的是 `<包名>`；检查器不该反过来规定文档用哪种。
+for act in ("uninstall", "clear", "enabled", "permission"):
+    found = any(f"apps/{ph}/{act}" in t for ph in ("{包名}", "{pkg}", "{package}"))
+    chk(found, f"01-http.md 写了 apps/{{包名}}/{act}", "文档里没找到这个小节")
 
 print("\n[4] capabilities 字段（README）")
 t = open(os.path.join(DOCS,"README.md"),encoding='utf-8').read()

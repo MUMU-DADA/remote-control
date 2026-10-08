@@ -133,7 +133,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```json
 {
   "service": "remote-control",
-  "protocolVersion": 7,
+  "protocolVersion": 8,
   "pid": 21266,
   "capabilities": {
     "screenshot": true, "touch": true, "multiTouch": true,
@@ -159,7 +159,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```json
 {
   "ok": true,
-  "protocolVersion": 7,
+  "protocolVersion": 8,
   "config": {
     "socketPath": "/data/local/tmp/remote-control.sock",
     "usingInitSocket": false,
@@ -175,7 +175,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
   "runtime": {
     "pid": 6595, "uid": 0, "gid": 0,
     "uptimeMs": 752080,
-    "protocolVersion": 7,
+    "protocolVersion": 8,
     "verbose": false,
     "capture": {
       "backend": "surfaceflinger",
@@ -888,6 +888,75 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/apps/com.android.sett
 
 > ⚠️ 对**不存在**的包也返回 `ok:true`（幂等：它确实没在跑）。
 > `stillRunning` 才是真实结果。
+
+### POST /apps/{包名}/uninstall
+
+卸载应用，等价于 `pm uninstall`。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `keep`（query） | 0 | 1 = 保留应用数据与缓存目录（`pm uninstall -k`） |
+
+```bash
+curl -X POST -H "Authorization: Bearer $T" \
+     "http://host:8088/api/v1/apps/com.example.app/uninstall?keep=0"
+```
+
+```json
+{"ok":true,"package":"com.example.app","removed":true,"keptData":false}
+```
+
+- **包不存在 → 404**（`status:4105`）。服务端会先问一次 `pm path` 再动手：
+  对不存在的包，`pm uninstall` 与"卸载失败"的输出和退出码**完全一样**
+  （都是 `Failure [DELETE_FAILED_INTERNAL_ERROR]`、exit 1），不先问就分不出
+  该回 404 还是 500，只能给一句误导性的"系统应用通常卸不掉"。
+- 系统应用通常卸不掉 → 500，错误文本里附一句"要停用请改用 `/enabled`"。
+- 设备管理员应用要先解除设备管理，错误文本里同样有提示。
+
+### POST /apps/{包名}/clear
+
+清除应用数据，等价于设置里的「清除数据」（`pm clear`）。
+
+```json
+{"ok":true,"package":"com.example.app","cleared":true}
+```
+
+包不存在 → 404。
+
+### POST /apps/{包名}/enabled
+
+启用 / 停用应用。停用走 `pm disable-user` —— 也就是设置里「停用」做的事；
+`pm disable` 对系统应用会被拒，所以不用它。
+
+```json
+{"enabled": false}
+```
+
+```json
+{"ok":true,"package":"com.example.app","enabled":false}
+```
+
+设备侧核对：停用后 `pm list packages -d` 里能看到该包。
+
+### POST /apps/{包名}/permission
+
+授予 / 撤销**运行时**权限。
+
+```json
+{"permission": "android.permission.CAMERA", "grant": true}
+```
+
+```json
+{"ok":true,"package":"com.example.app",
+ "permission":"android.permission.CAMERA","granted":true}
+```
+
+- 权限名必须是完整名（`android.permission.XXX`）；只允许点分标识符，
+  带斜杠/空格/分号的输入在调用前就被拒（400）。
+- ⚠️ 只对**可运行时变更**的权限有效。安装期权限（`INTERNET`、
+  `MANAGE_EXTERNAL_STORAGE` 等）会失败 —— 错误文本里带设备给的**真实原因**
+  （`... is not a changeable permission type`），不是一句笼统的"失败"。
+- 设备侧核对：`dumpsys package <包名> | grep <权限名>` → `granted=true|false`。
 
 ### GET /foreground
 

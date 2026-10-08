@@ -159,7 +159,7 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 
 ## 命令表
 
-33 条命令。`since` 是它从哪个协议版本开始存在。
+37 条命令。`since` 是它从哪个协议版本开始存在。
 
 | cmd | 名称 | since | payload | 说明 |
 |---|---|---|---|---|
@@ -196,6 +196,10 @@ buf = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
 | 36 | `RunningApps` | 6 | 无 | 运行中的进程 |
 | 37 | `LogFile` | 6 | 无 | 落盘的历史日志 |
 | 38 | `Rotate` | 7 | `0` \| `90` \| `180` \| `270` \| `free` \| `status` | 屏幕方向（设备转不动时退到 wm size，见应答的 method） |
+| 39 | `AppUninstall` | 8 | `<包名>`（flags 位 10 = 保留数据） | 卸载应用 |
+| 40 | `AppClearData` | 8 | `<包名>` | 清除应用数据 |
+| 41 | `AppEnabled` | 8 | `<包名>\0<on\|off>` | 启用 / 停用应用 |
+| 42 | `AppPermission` | 8 | `<包名>\0<权限名>\0<grant\|revoke>` | 授予 / 撤销运行时权限 |
 
 > 编号 9、18、19、28、29 是预留的（历史遗留的间隔），不要复用。
 
