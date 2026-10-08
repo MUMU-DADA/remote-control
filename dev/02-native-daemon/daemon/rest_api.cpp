@@ -2162,8 +2162,31 @@ EncodedImagePtr RestApi::NextEncodedFrame(const StreamParams& p, StreamState* st
     uint32_t w = 0, h = 0, stride = 0;
     FramePtr f;
     if (surfaceH264) {
-        w = st->h264W ? st->h264W : 2;
-        h = st->h264H ? st->h264H : 2;
+        // ⚠️ 这里要的是**画面原始尺寸**，不是编码器尺寸。
+        //
+        //    下面 `w > maxWidth` 是拿原始宽去比：原始宽 1280、maxWidth 480
+        //    → 输出 480。若拿编码器当前尺寸（上一轮的输出，比如 360）去比，
+        //    就变成 360 > 480 为假 → 输出还是 360 —— **只能缩不能放**。
+        //    实测：h264 流从 maxWidth=360 改到 480 时服务端照旧发 360，
+        //    页面等到超时（webui_stream_test 的 --h264 段）。
+        // ⚠️ 原始尺寸**必须问显示**，不能拿抓来的帧量。
+        //
+        //    抓帧那条路给回来的帧是**已经按 maxWidth 降采样过**的
+        //    （FrameHub 就是按订阅者的 maxWidth 抓的），拿它当"原始宽"，
+        //    `maxWidth` 就只会缩不会放：360 改到 480 时算成
+        //    "360 不大于 480，不用变"，服务端照旧发 360。
+        //    实测就是这么卡住的（webui_stream_test 的 --h264 段超时）。
+        //
+        //    H.264 走虚拟显示之后连帧都没有了，更得直接问显示。
+        if (st->srcW == 0 && dispatcher_ != nullptr) {
+            uint32_t dw = 0, dh = 0;
+            if (dispatcher_->PrimaryDisplaySize(&dw, &dh)) {
+                st->srcW = dw;
+                st->srcH = dh;
+            }
+        }
+        w = st->srcW ? st->srcW : (st->h264W ? st->h264W : 2);
+        h = st->srcH ? st->srcH : (st->h264H ? st->h264H : 2);
     } else {
     // ── 订阅共享抓帧 ──
     //
@@ -2776,16 +2799,23 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                         ImageEncoder::Name(static_cast<ImageFormat>(p.codec)),
                         "ws");
             }
-            if (!img) continue;      // 没变或出错，下一轮再看
-
-            // 二进制帧。尺寸信息单独发一条文本消息 ——
-            // 不然客户端在"有图没尺寸"的窗口里没法画。
+            // ── 尺寸消息：**必须在"这一轮有没有图"之前发** ──
             //
-            // ⚠️ 不能只在第一帧发。尺寸是会**中途变**的：
-            //    · 客户端改 maxWidth
-            //    · 设备转屏 / 改分辨率
-            //    只发一次的话客户端画布会一直停在旧尺寸上。
-            if (st.outW != lastW || st.outH != lastH) {
+            // ⚠️ 这里原来排在 `if (!img) continue;` **后面**，也就是
+            //    "有图才发尺寸"。在抓帧驱动的那条路上这没问题：抓帧按
+            //    请求的帧率一直在出帧，尺寸一变很快就带上一条。
+            //
+            //    但 H.264 走虚拟显示之后（A7/A8），帧是**画面变化时才有** ——
+            //    静止画面上编码器不产出 NAL，于是 img 一直是空，
+            //    **尺寸消息就永远发不出去**。症状：静止画面上改 maxWidth
+            //    （或转屏），客户端画布一直停在旧尺寸上，
+            //    webui_stream_test 的 --h264 段就是等到超时才发现。
+            //
+            //    尺寸在 NextEncodedFrame 里已经算好了（st.outW/outH），
+            //    和这一轮有没有编码出图无关，所以提到前面发。
+            //    首轮 st.outW 还是 0，跳过 —— 发个 0x0 只会让客户端更糊涂。
+            if (st.outW > 0 && st.outH > 0 &&
+                (st.outW != lastW || st.outH != lastH)) {
                 json::Writer w;
                 w.Obj()
                     .Field("t", "size")
@@ -2796,6 +2826,8 @@ HttpResponse RestApi::HandleStreamWs(const HttpRequest& req,
                 lastW = st.outW;
                 lastH = st.outH;
             }
+
+            if (!img) continue;      // 没变或出错，下一轮再看
 
             // H.264 还要告诉客户端 **codec 串**（"avc1.42C029"）。
             //

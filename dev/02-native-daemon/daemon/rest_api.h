@@ -68,6 +68,15 @@ struct StreamState {
     uint32_t h264W = 0, h264H = 0;   // 当前编码器的尺寸
     int h264Fps = 0, h264Quality = 0;
     uint64_t h264ConfigGeneration = 0;
+
+    // 画面**原始**尺寸（显示尺寸），不是编码器尺寸。
+    //
+    // ⚠️ Surface 模式下必须留着它：`maxWidth` 是拿"原始宽"去比的
+    //    （见 NextEncodedFrame 里 `w > maxWidth` 那句）。
+    //    如果拿编码器当前尺寸当原始宽，就会出现"只能缩、不能放" ——
+    //    实测：H.264 流从 maxWidth=360 改到 480，服务端照旧发 360，
+    //    页面等到超时。见下面 surface 分支的注释。
+    uint32_t srcW = 0, srcH = 0;
     bool     needKeyFrame = false;   // 下一个输出要是关键帧
 
     // 这个流用虚拟显示直接喂编码器（A7/A8）吗。构造时为 true，

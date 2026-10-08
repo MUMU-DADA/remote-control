@@ -659,6 +659,21 @@ function renderCadence(c) {
   const el = $('cadence');
   if (!el) return;
   if (!c || !c.running) {
+    // ⚠️ "抓帧没在跑" **不等于** "没有画面"。
+    //
+    //    H.264 走虚拟显示之后（画面由 SurfaceFlinger 直接合成进编码器），
+    //    这条路**根本不订阅共享抓帧** —— 所以抓帧统计永远是空闲，
+    //    而流是活的。照原样写"空闲（没有订阅者，一次都没在抓）"会让人
+    //    以为流断了。实测就是这样：status 明明写着"画面流 H.264
+    //    （avc1.42C029）"，这一行却在报空闲。
+    //
+    //    这种情况报本页**自己**量到的节奏 —— 那才是用户能对上号的信息。
+    if (streamReady && streamFormat === 'h264') {
+      el.textContent = '画面  H.264 虚拟显示（不经抓帧，静止画面不产生新帧）'
+                       + ' · 本页 ' + shownFps + 'fps';
+      el.style.color = '';
+      return;
+    }
     el.textContent = '抓帧  空闲（没有订阅者，一次都没在抓）';
     el.style.color = '';
     return;

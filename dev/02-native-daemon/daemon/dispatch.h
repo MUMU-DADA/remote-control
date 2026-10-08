@@ -34,6 +34,14 @@ class Dispatcher {
     Dispatcher(Capture* capture, Injector* injector);
     ~Dispatcher();
 
+    // 主显示的**原始**尺寸（宽, 高）。拿不到时返回 false。
+    //
+    // 为什么需要它：抓帧那条路给回来的帧是**已经按 maxWidth 降采样过**的，
+    // 拿它当"原始宽"，`maxWidth` 就只会缩不会放 —— 从 360 改到 480 时
+    // 会被算成"360 不大于 480，不用变"。H.264 走虚拟显示之后更是连帧都
+    // 没有，必须直接问显示。
+    bool PrimaryDisplaySize(uint32_t* width, uint32_t* height);
+
     // 处理一个请求。不会抛异常；失败通过 reply.status 表达。
     //
     // payload : NUL 分隔的字符串参数（可为空）

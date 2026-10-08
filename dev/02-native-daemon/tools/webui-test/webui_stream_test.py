@@ -237,10 +237,19 @@ def main():
             page.wait_for_function("h264Ready && renderCount > 0", timeout=15000)
             check("H.264 decodes its first frame through WebCodecs",
                   pixels(page)["nonblack"] > 0 and pixels(page)["width"] == 360)
+            page.evaluate("window.beforeResize = renderCount")
             page.evaluate("setMaxWidth(480)")
             page.wait_for_function("h264Ready && cvs.width === 480", timeout=15000)
+            # ⚠️ 还要等**新尺寸下的第一帧画出来**。
+            #
+            #    尺寸消息现在发得更早了（服务端一算出来就发，不再等编码器出图 ——
+            #    见 rest_api.cpp 里那段），所以 cvs.width 变 480 的瞬间画布上
+            #    什么都还没有：改 canvas 尺寸会把内容清掉，而新尺寸的第一帧
+            #    还在路上。只等尺寸就断言像素，测的是"消息到没到"，不是
+            #    "画面回没回来"。
+            page.wait_for_function("renderCount > beforeResize", timeout=15000)
             check("H.264 reconfigures its decoder after a size change",
-                  pixels(page)["nonblack"] > 0)
+                  pixels(page)["nonblack"] > 0 and pixels(page)["width"] == 480)
             page.evaluate("window.beforeJpeg = renderCount; setCodec('jpeg',75)")
             page.wait_for_function("streamFormat === 'jpeg' && !h264Dec && renderCount > beforeJpeg",
                                    timeout=15000)
@@ -258,6 +267,15 @@ def main():
             check("H.264 refresh drains and displays an output while stop detection is enabled",
                   page.evaluate("h264Ready && skipUnchanged && renderCount > beforeRefresh"))
             print("H.264 frames received after refresh:", len(frames) - frames_before)
+            # 抓帧行**不能**报"空闲" —— H.264 走虚拟显示时不订阅共享抓帧，
+            # 抓帧统计必然是空闲的，而流是活的。以前这一行照搬抓帧统计，
+            # 于是"status 说画面流 H.264 / cadence 说一次都没在抓"，
+            # 看起来像流断了。
+            cad_h264 = page.evaluate(
+                "() => { const e=document.getElementById('cadence'); return e?e.textContent:null; }")
+            check("H.264 流下抓帧行不报'空闲'（那不是'没画面'）",
+                  cad_h264 is not None and "空闲" not in cad_h264)
+            print("H.264 时的抓帧行:", cad_h264)
             shot = Path(args.shots + "-h264.png").resolve()
             page.screenshot(path=str(shot))
             print("Screenshot:", shot)

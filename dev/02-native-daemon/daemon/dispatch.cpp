@@ -438,6 +438,17 @@ ReplyPacket Dispatcher::HandleTouch(const Request& req,
 
 // ---------------------------------------------------------------------------
 
+bool Dispatcher::PrimaryDisplaySize(uint32_t* width, uint32_t* height) {
+    if (capture_ == nullptr || width == nullptr || height == nullptr) return false;
+    std::vector<DisplayInfo> displays;
+    std::string err;
+    if (!capture_->ListDisplays(&displays, &err) || displays.empty()) return false;
+    if (displays.front().width == 0 || displays.front().height == 0) return false;
+    *width  = displays.front().width;
+    *height = displays.front().height;
+    return true;
+}
+
 ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
                                int reqFd, int peerUid, bool overLocalSocket) {
     if (req.magic != kMagic) {

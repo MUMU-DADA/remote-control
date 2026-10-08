@@ -63,7 +63,10 @@ done
 
 f="webui_stream_test.py"
 printf '%-24s ' "$f"
-out="$(timeout 300 python3 -u "$f" --base "$BASE" 2>&1)"; rc=$?
+# ⚠️ **带 --h264**。这一段默认是跳过的，而它恰恰逮到过一个真回归：
+#    H.264 流从 maxWidth=360 改到 480 时服务端照旧发 360（只能缩不能放），
+#    页面等到超时。不打开这一段，那次回归就会一路绿着过去。
+out="$(timeout 300 python3 -u "$f" --base "$BASE" --h264 2>&1)"; rc=$?
 summary="$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g' \
            | grep -E 'Passed [0-9]+/' | tail -1)"
 if [ "$rc" -eq 0 ]; then
