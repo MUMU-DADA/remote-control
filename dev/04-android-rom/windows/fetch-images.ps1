@@ -94,11 +94,32 @@ if ($todo.Count -gt 0) {
     if ($LASTEXITCODE -ne 0) { throw "scp 失败（$LASTEXITCODE）" }
 }
 
-# system\build.prop：模拟器靠它识别 guest 架构，缺了会退回宿主架构
-New-Item -ItemType Directory -Force -Path "$Dest\system" | Out-Null
-if (-not (Test-Path "$Dest\system\build.prop")) {
-    Write-Host "==> 补 system\build.prop" -ForegroundColor Cyan
-    & scp "$Remote`:$RemoteDir/system/build.prop" "$Dest\system\build.prop"
+# ── 子目录里的文件：**按 SHA256SUMS 清单补齐** ──
+#
+# 原来这里是硬编码的"补 system\build.prop"一条，而清单里还有
+# `vendor/build.prop`（模拟器同样要读它）—— 漏了它，校验阶段就报
+# "缺文件：vendor\build.prop"。**这正是 SHA256SUMS 校验存在的意义**：
+# 清单是权威，手工维护的下载列表一定会落后于它。
+#
+# 改成读清单：凡带子目录的条目，本地没有就拉。以后打包多带什么文件，
+# 这里不用再改。
+if (Test-Path "$Dest\SHA256SUMS") {
+    $subTodo = @()
+    foreach ($line in Get-Content "$Dest\SHA256SUMS") {
+        if ($line -notmatch '^\s*[0-9a-fA-F]{64}\s+\*?\./(.+)$') { continue }
+        $rel = $Matches[1] -replace '/', '\'
+        if ($rel -notmatch '\\') { continue }        # 顶层文件已由上面两个清单管
+        if (Test-Path (Join-Path $Dest $rel)) { continue }
+        $subTodo += $rel
+    }
+    foreach ($rel in $subTodo) {
+        $relRemote = $rel -replace '\\', '/'
+        $localPath = Join-Path $Dest $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path $localPath) | Out-Null
+        Write-Host "==> 补 $rel（按 SHA256SUMS 清单）" -ForegroundColor Cyan
+        & scp "$Remote`:$RemoteDir/$relRemote" $localPath
+        if ($LASTEXITCODE -ne 0) { throw "scp 失败（$rel）" }
+    }
 }
 
 # initrd：模拟器 -initrd 指向它
