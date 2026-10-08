@@ -37,6 +37,7 @@ cc_defaults {
         "png_encoder.cpp",
         "keyboard.cpp",
         "mouse.cpp",
+        "textinput.cpp",    // 整串文本输入（UTF-8 与 US 布局映射）
         "clipops.cpp",
         "webui.cpp",
         "image_encoder.cpp",

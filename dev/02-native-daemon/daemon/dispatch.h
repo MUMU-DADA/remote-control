@@ -92,6 +92,9 @@ class Dispatcher {
     // v9：鼠标 / 滚轮。args[0] = move|button|click|wheel
     ReplyPacket HandleMouse(const Request& req, const std::vector<std::string>& args);
 
+    // v10：整串文本输入。args[0] = 文本，args[1] = paste|type
+    ReplyPacket HandleText(const Request& req, const std::vector<std::string>& args);
+
     Capture*  capture_;
     Injector* injector_;
     std::unique_ptr<AppOps>  appOps_;

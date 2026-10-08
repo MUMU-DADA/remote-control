@@ -21,6 +21,7 @@
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -314,6 +315,76 @@ else:
         gone = PROBE not in sh("pm list packages")
         check("卸载 APK（判据：设备上真的没了）", st == 200 and gone,
               f"HTTP {st}；已消失={gone}")
+
+print("\n\033[1;34m[5c] 整串文本输入（含中文）\033[0m")
+# 判据同样是设备侧证据：用 uiautomator 把输入框里的文字读回来，
+# 而不是信接口那句 ok:true。曾经最典型的坑就是"接口说成功、字符没进去"。
+
+
+def uiautomator_field_text():
+    """读回当前界面上那个搜索框的文字（取不到就返回空串）。"""
+    sh("uiautomator dump /sdcard/sweep_text.xml")
+    out = sh("cat /sdcard/sweep_text.xml 2>/dev/null "
+             "| tr '>' '\\n' | grep -F 'search_src_text'")
+    m = re.search(r'text="([^"]*)"', out)
+    return m.group(1) if m else ""
+
+
+def clear_focused_field(n=80):
+    """清空当前输入框：先跳到末尾，再一路退格。"""
+    sh("input keyevent 123")            # KEYCODE_MOVE_END
+    for _ in range(n // 10):
+        sh("input keyevent " + " ".join(["67"] * 10))   # KEYCODE_DEL ×10
+    time.sleep(0.5)
+
+
+# 需要一个真的输入框。Settings 的搜索页最省事，且每个模拟器镜像都有。
+sh("am start -a com.android.settings.action.SETTINGS_SEARCH")
+time.sleep(3)
+clear_focused_field()
+
+CJK = "你好，世界！Hello123"
+st, d = req("/api/v1/text", "POST", {"text": CJK})
+readback = uiautomator_field_text()
+check("粘贴中文（判据：输入框里读回来的就是那串字）",
+      st == 200 and readback == CJK,
+      f"HTTP {st}；期望 {CJK!r}，读回 {readback!r}")
+
+# 剪贴板必须还回去 —— 不还的话一次远程输入就把用户复制的密码顶掉了
+st, d = req("/api/v1/clipboard?op=get")
+clip = d.get("text", "")
+check("文本输入后剪贴板没有被留下我们的内容",
+      CJK not in clip, f"剪贴板现在是 {clip[:40]!r}")
+
+# type 模式：逐字符按键（走 uinput 键盘），顺便验大小写
+clear_focused_field()
+st, d = req("/api/v1/text", "POST", {"text": "Ab1!", "mode": "type"})
+readback = uiautomator_field_text()
+check("逐字符键入 ASCII（判据：输入框里读回，且大小写正确）",
+      st == 200 and readback == "Ab1!",
+      f"HTTP {st}；读回 {readback!r}（大写 A 能验出 Shift 有没有按对）")
+
+# type 模式遇到中文必须**明确拒绝**，而且要指出是第几个字符 ——
+# 打到一半才发现打不出来，设备上会留半截文本，比直接拒绝难收拾得多
+st, d = req("/api/v1/text", "POST", {"text": "abc中文", "mode": "type"})
+err = d.get("error", "")
+check("type 模式遇中文 → 501 且指出第几个字符",
+      st == 501 and "第 4 个字符" in err,
+      f"HTTP {st}；{err[:80]}")
+
+# 非法 UTF-8 直接拒，不"尽力而为"地塞进去。
+# ⚠️ 必须发**原始字节**：走 json.dumps 的话 Python 会把它转成 \uXXXX 转义，
+#    那测的是"JSON 转义对不对"，而不是"非法 UTF-8 会不会被拦下"。
+_r = urllib.request.Request(
+    BASE + "/api/v1/text", data=b'{"text":"\xff\xfe"}',
+    headers={"Content-Type": "application/json"}, method="POST")
+try:
+    with urllib.request.urlopen(_r, timeout=20) as _resp:
+        _st, _body = _resp.status, _resp.read()
+except urllib.error.HTTPError as _e:
+    _st, _body = _e.code, _e.read()
+check("非法 UTF-8 → 400（不静默塞乱码）", _st == 400,
+      f"HTTP {_st}；{_body[:70].decode(errors='replace')}")
 
 # ── 文件 ──
 print("\n\033[1;34m[6] 文件管理\033[0m")

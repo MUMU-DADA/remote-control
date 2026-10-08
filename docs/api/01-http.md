@@ -133,7 +133,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```json
 {
   "service": "remote-control",
-  "protocolVersion": 9,
+  "protocolVersion": 10,
   "pid": 21266,
   "capabilities": {
     "screenshot": true, "touch": true, "multiTouch": true,
@@ -159,7 +159,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
 ```json
 {
   "ok": true,
-  "protocolVersion": 9,
+  "protocolVersion": 10,
   "config": {
     "socketPath": "/data/local/tmp/remote-control.sock",
     "usingInitSocket": false,
@@ -175,7 +175,7 @@ curl -H "Authorization: Bearer $T" http://host:8088/api/v1/describe
   "runtime": {
     "pid": 6595, "uid": 0, "gid": 0,
     "uptimeMs": 752080,
-    "protocolVersion": 9,
+    "protocolVersion": 10,
     "verbose": false,
     "capture": {
       "backend": "surfaceflinger",
@@ -853,6 +853,77 @@ curl -X POST http://host:8088/api/v1/key \
 adb shell dumpsys input | grep -A3 remote-control-mouse   # Classes: CURSOR
 adb shell getevent -lt /dev/input/eventN                  # 逐条看真实事件
 ```
+
+### POST /text
+
+输入一整串文字。**这是唯一能输入中文 / emoji 的方式** ——
+`POST /key` 只能一次一个键码，表达不了任意字符。
+
+```json
+{"text": "你好，世界！Hello 123"}                  // mode 默认 paste
+{"text": "user@example.com", "mode": "type"}       // 逐字符按键
+{"text": "……", "restore": false}                  // 不恢复剪贴板
+```
+
+```json
+{"ok":true,"mode":"paste","chars":15,"bytes":27,"clipboardRestored":true}
+{"ok":true,"mode":"type","chars":16,"bytes":16}
+```
+
+**两种模式的区别很重要**：
+
+| | `paste`（默认） | `type` |
+|---|---|---|
+| 能输入什么 | **任意 Unicode**（中文、emoji、任何符号） | 只有可打印 ASCII |
+| 怎么做的 | 写剪贴板 → 发 `KEY_PASTE` | 逐字符发按键（含 Shift 处理） |
+| 副作用 | **临时改写系统剪贴板**（用完恢复） | 不碰剪贴板 |
+| 行为特征 | 一次性插入，不触发逐字符事件 | 与真人打字一致：逐字符文本监听、自动补全都会响应 |
+
+**为什么中文只能用 `paste`** —— 这不是本实现的取舍，是按键注入这条路的上限：
+Linux 键码是**物理按键编号**，字符是由键盘布局解释出来的，键码空间里
+根本没有"中"这个字。Android 自带的 `input text` 撞的是同一堵墙，实测：
+
+```
+$ adb shell input text '中文测试'
+Exception occurred while executing 'text':
+java.lang.NullPointerException: Attempt to get length of null array
+    at com.android.server.input.InputShellCommand.sendText(InputShellCommand.java:275)
+```
+
+（`KeyCharacterMap.getEvents()` 对布局里没有的字符返回 `null`。）
+
+`type` 模式下遇到打不出来的字符会返回 **501** 并**指出是第几个字符**，
+而不是静默丢字：
+
+```json
+{"ok":false,"status":4104,
+ "error":"type 模式只能打可打印 ASCII；第 4 个字符 \"中\" 打不出来（Linux 键码空间里没有它）。要输入中文/emoji 请用 paste 模式（不带 mode 参数即是）"}
+```
+
+**典型用法是先点好输入框**（让它拿到焦点），再调这个接口：
+
+```bash
+curl -X POST .../api/v1/tap    -d '{"x":640,"y":300}'    # 点中输入框
+curl -X POST .../api/v1/text   -d '{"text":"你好，世界！"}'
+```
+
+**剪贴板会被临时改写然后恢复**。`clipboardRestored` 说明恢复是否成功：
+
+- 原剪贴板是文本 → 恢复，`true`
+- 原剪贴板为**空或非文本**（比如一张图片）→ 没法"恢复成空"，返回 `false`
+  并在服务日志里说明。传 `restore:false` 可以完全跳过恢复（少一次读写，
+  代价是剪贴板留着你刚发的内容）。
+
+**接口不回显输入的文字** —— 这里的典型用途包含密码与令牌，把原文放进响应
+等于多写一份日志、多一份抓包。只回 `chars`/`bytes`。
+
+**其他限制**：
+
+- 文本上限 64 KiB。`type` 模式每字符约 50ms，太长会把请求挂住。
+- 非法 UTF-8 直接 **400**，不会"尽力而为"地塞进去 ——
+  乱码进了输入框比明确报错难查得多。
+- `paste` 依赖剪贴板后端（`/system/etc/remote-control/cliptool.jar`）；
+  它不在时 `paste` 返回 501 并提示改用 `type`。
 
 ---
 

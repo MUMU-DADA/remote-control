@@ -26,8 +26,11 @@
 #include "frame_hub.h"
 #include "image_encoder.h"
 #include "png_encoder.h"
+#include <linux/input.h>   // KEY_PASTE 等键码常量
+
 #include "keyboard.h"
 #include "mouse.h"
+#include "textinput.h"
 #include "log_buffer.h"
 #include "selftest.h"
 #include "service_state.h"
@@ -446,6 +449,8 @@ ReplyPacket Dispatcher::Handle(const Request& req, const std::string& payload,
             return HandleKeyEvent(req, args);
         case Cmd::Mouse:
             return HandleMouse(req, args);
+        case Cmd::Text:
+            return HandleText(req, args);
         case Cmd::Clipboard:
             return HandleClipboard(req, args);
         case Cmd::Rotate:
@@ -1067,6 +1072,7 @@ const CommandSpec kCommands[] = {
     {"AppEnabled",   41,  8, "<package>\\0<on|off>",     "启用 / 停用应用"},
     {"AppPermission",42,  8, "<package>\\0<权限名>\\0<grant|revoke>", "授予 / 撤销运行时权限"},
     {"Mouse",        43,  9, "move|button|click|wheel …",  "鼠标：相对移动 / 按键 / 滚轮"},
+    {"Text",         44, 10, "<文本>[\\0<paste|type>]",   "整串文本输入（paste 支持任意 Unicode）"},
     {"Describe",     20,  3, "无",                      "本清单：有哪些命令、哪些可用"},
     {"GetConfig",    21,  3, "无",                      "当前配置与运行时状态"},
     {"SetConfig",    22,  3, "<key>\0<value>...",       "热改配置"},
@@ -1167,6 +1173,20 @@ ReplyPacket Dispatcher::HandleDescribe(const Request& req) {
                     reason = "/dev/uinput 不可写，无法创建虚拟鼠标";
                 }
                 break;
+            case Cmd::Text: {
+                // 两条路只要有**一条**通就算可用，因为 Text 会自己选：
+                //   paste 需要剪贴板后端，type 需要 uinput 键盘。
+                // 这里不建任何设备（Describe 不能有副作用），
+                // 只判断依赖在不在。
+                const bool clip = ClipOps::Instance().Available();
+                const bool kbd  = access("/dev/uinput", W_OK) == 0;
+                available = clip || kbd;
+                if (!available) {
+                    reason = "剪贴板后端与 /dev/uinput 都不可用，"
+                             "整串文本既粘不了也打不了";
+                }
+                break;
+            }
             case Cmd::ListApps:
             case Cmd::AppInfo:
             case Cmd::LaunchApp:
@@ -1575,6 +1595,181 @@ ReplyPacket Dispatcher::HandleMouse(const Request& req,
 
     return MakeJsonError(req.cmd, kErrBadArg,
                          "未知动作: " + action + "（可用: move|button|click|wheel）");
+}
+
+// ── v10：整串文本输入 ───────────────────────────────────────────────────────
+//
+// 两条路，默认 paste（见 protocol.h 里 Cmd::Text 的说明）。
+//
+// 为什么不回显输入的文字：这里的典型用途包含**密码**与令牌，
+// 把原文回显到响应里等于把它多写进一份日志/一份抓包。
+// 只回长度，调用方自己知道发的是什么。
+ReplyPacket Dispatcher::HandleText(const Request& req,
+                                   const std::vector<std::string>& args) {
+    if (args.empty() || args[0].empty()) {
+        return MakeJsonError(req.cmd, kErrPayload, "缺少文本");
+    }
+    const std::string text = args[0];
+
+    // 上限：整串文字要么进剪贴板要么逐字符发按键。逐字符那条路
+    // 一个字符一次按下/抬起（约 50ms），太长会把这个接口挂住几分钟。
+    constexpr size_t kMaxBytes = 64 * 1024;
+    if (text.size() > kMaxBytes) {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "文本过长（" + std::to_string(text.size()) +
+                             " 字节，上限 " + std::to_string(kMaxBytes) + "）");
+    }
+
+    std::string mode = (args.size() > 1 && !args[1].empty()) ? args[1] : "paste";
+    bool restoreClipboard = true;
+    // 第三个参数（可选）：restore=0 时不恢复剪贴板
+    if (args.size() > 2 && args[2] == "0") restoreClipboard = false;
+
+    if (mode != "paste" && mode != "type") {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "模式只能是 paste|type（收到: " + mode + "）");
+    }
+
+    // 先整体验一遍 UTF-8。非法字节会让"字符计数"和"打不出来的那个字符"
+    // 两个报错都变得不可信，所以在做任何有副作用的动作**之前**先拒掉。
+    const textinput::Decoded decoded = textinput::Decode(text);
+    const size_t charCount = decoded.codepoints.size();
+    if (decoded.invalidBytes > 0) {
+        return MakeJsonError(req.cmd, kErrBadArg,
+                             "文本不是合法的 UTF-8（" +
+                             std::to_string(decoded.invalidBytes) +
+                             " 个字节无法解码）");
+    }
+
+    std::string error;
+
+    // ── type：逐字符发按键 ─────────────────────────────────────────────────
+    if (mode == "type") {
+        // ⚠️ 先整体检查再动手。打到一半才发现第 30 个字符打不出来，
+        //    设备上会留下半截文本 —— 那比直接拒绝难收拾得多
+        //    （调用方以为整串都进去了）。
+        uint32_t bad = 0;
+        size_t badIndex = 0;
+        if (textinput::FirstUntypable(text, &bad, &badIndex)) {
+            return MakeJsonError(
+                req.cmd, kErrUnsupported,
+                "type 模式只能打可打印 ASCII；第 " + std::to_string(badIndex + 1) +
+                " 个字符 \"" + textinput::Encode(bad) +
+                "\" 打不出来（Linux 键码空间里没有它）。"
+                "要输入中文/emoji 请用 paste 模式（不带 mode 参数即是）");
+        }
+
+        if (keyboard_ == nullptr) keyboard_ = std::make_unique<Keyboard>();
+        if (!keyboard_->ready()) {
+            std::string err;
+            if (!keyboard_->Init(&err)) {
+                return MakeJsonError(req.cmd, kErrUnsupported, err);
+            }
+        }
+
+        size_t typed = 0;
+        for (size_t i = 0; i < decoded.codepoints.size(); ++i) {
+            uint32_t code = 0;
+            bool shift = false;
+            if (!textinput::MapChar(decoded.codepoints[i], &code, &shift)) {
+                // 前面已经查过，走到这里说明两次判断不一致 —— 不静默继续
+                return MakeJsonError(req.cmd, kErrInternal,
+                                     "第 " + std::to_string(i + 1) +
+                                     " 个字符在预检后变得打不出来（内部不一致）");
+            }
+            if (!keyboard_->TypeKey(code, shift, &error)) {
+                return MakeJsonError(req.cmd, kErrInjected,
+                                     "第 " + std::to_string(i + 1) +
+                                     " 个字符按键失败（已输入 " +
+                                     std::to_string(typed) + " 个）: " + error);
+            }
+            ++typed;
+        }
+
+        json::Writer w;
+        w.Obj().Field("ok", true).Field("mode", "type")
+               .Field("chars", static_cast<int64_t>(typed))
+               .Field("bytes", static_cast<int64_t>(text.size()))
+         .EndObj();
+        return MakeJsonReply(req.cmd, w.str());
+    }
+
+    // ── paste：写剪贴板 + KEY_PASTE ───────────────────────────────────────
+    if (!ClipOps::Instance().Available()) {
+        std::string err;
+        ClipOps::Instance().Init(&err);
+        return MakeJsonError(
+            req.cmd, kErrUnsupported,
+            "剪贴板后端不可用，粘不了（" + err +
+            "）。改用 type 模式仍可输入 ASCII");
+    }
+
+    // 1) 先存下用户原来的剪贴板 —— 用完要还回去。
+    //    不还的话，一次远程输入就把人家复制的密码换成我们发的东西。
+    ClipInfo prev;
+    bool prevEmpty = true;
+    bool havePrev = false;
+    if (restoreClipboard) {
+        std::string getErr;
+        havePrev = ClipOps::Instance().Get(&prev, &prevEmpty, &getErr);
+    }
+
+    // 2) 写入要粘的文字。Set 内部会回读确认 ——
+    //    ClipboardService 权限不足时是**静默 return**，不确认就会报成功。
+    if (!ClipOps::Instance().Set(text, &error)) {
+        return MakeJsonError(req.cmd, kErrInternal, "写剪贴板失败: " + error);
+    }
+
+    // 3) 发 KEY_PASTE。焦点在哪就粘到哪 —— 调用方负责先点好输入框。
+    if (keyboard_ == nullptr) keyboard_ = std::make_unique<Keyboard>();
+    if (!keyboard_->ready()) {
+        std::string err;
+        if (!keyboard_->Init(&err)) {
+            return MakeJsonError(req.cmd, kErrUnsupported,
+                                 "写进了剪贴板但键盘不可用，粘贴发不出去: " + err);
+        }
+    }
+    if (!keyboard_->Key(KEY_PASTE, false, &error)) {
+        return MakeJsonError(req.cmd, kErrInjected,
+                             "写进了剪贴板但粘贴按键失败: " + error);
+    }
+
+    // 4) 把剪贴板还回去。
+    //
+    // ⚠️ 这里必须等一会儿：KEY_PASTE 只是把事件交给系统，目标应用是在
+    //    它自己的下一轮消息处理里才去读剪贴板的。立刻恢复的话，应用读到的
+    //    会是我们刚恢复的旧内容 —— 症状是"粘贴粘出来的是上一次复制的东西"，
+    //    而且时快时慢，极难查。
+    //
+    //    500ms 对正常应用绰绰有余；设备极忙时理论上仍可能不够，
+    //    所以调用方可以用 restore=0 换掉这个不确定性。
+    bool restored = false;
+    std::string restoreErr;
+    if (restoreClipboard) {
+        if (!havePrev) {
+            restoreErr = "读不到原剪贴板，未恢复";
+        } else if (prevEmpty || prev.text.empty()) {
+            // 原来是空的或非文本（图片等）—— 我们没法"恢复成空的"，
+            // 只能如实报告没恢复，而不是假装还回去了
+            restoreErr = "原剪贴板为空或非文本，无法恢复（现在留着本次的文字）";
+        } else {
+            usleep(500 * 1000);
+            restored = ClipOps::Instance().Set(prev.text, &restoreErr);
+        }
+    }
+
+    json::Writer w;
+    w.Obj().Field("ok", true).Field("mode", "paste")
+           .Field("chars", static_cast<int64_t>(charCount))
+           .Field("bytes", static_cast<int64_t>(text.size()))
+           .Field("clipboardRestored", restored)
+     .EndObj();
+    // 没恢复成功不算失败（文字已经粘进去了），但必须让调用方知道 ——
+    // 否则它会以为用户的剪贴板还好好的。
+    if (!restoreErr.empty()) {
+        ALOGW("Text(paste): 剪贴板未恢复 —— %s", restoreErr.c_str());
+    }
+    return MakeJsonReply(req.cmd, w.str());
 }
 
 ReplyPacket Dispatcher::HandleClipboard(const Request& req,

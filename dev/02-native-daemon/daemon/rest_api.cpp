@@ -2803,6 +2803,33 @@ HttpResponse RestApi::Handle(const HttpRequest& req) {
         return HttpResponse::Error(
                 400, "未知 action: " + action + "（可用: move|button|click|wheel）");
     }
+    // ── v10：整串文本输入 ──
+    //
+    // body: {"text":"要输入的文字", "mode":"paste"|"type", "restore":true}
+    //   text    必填。**支持中文/emoji**（paste 模式）。
+    //   mode    默认 paste。
+    //   restore 默认 true：用完把系统剪贴板恢复原样。
+    //
+    // 典型用法是先 POST /tap 点好输入框（让它拿到焦点），再 POST 这里。
+    if (res == "text" && method == "POST") {
+        json::Value b; HttpResponse err;
+        if (!ParseJsonBody(req, &b, &err)) return err;
+        const std::string text = b.str("text");
+        if (text.empty()) {
+            return HttpResponse::Error(400, "text 不能为空");
+        }
+        std::string mode = b.str("mode");
+        if (mode.empty()) mode = "paste";
+        if (mode != "paste" && mode != "type") {
+            return HttpResponse::Error(
+                    400, "mode 只能是 paste|type（收到: " + mode + "）");
+        }
+        // 只有显式 restore=false 才关掉恢复；缺省保持开启
+        if (b.has("restore") && !b.flag("restore")) {
+            return Call(Cmd::Text, PackArgs({text, mode, "0"}), 0, -1);
+        }
+        return Call(Cmd::Text, PackArgs({text, mode}), 0, -1);
+    }
     if (res == "clipboard" && (method == "GET" || method == "POST")) {
         return HandleClipboard(req);
     }

@@ -13,20 +13,21 @@
 |---|---|
 | 目标 Android | **12（API 31）**；NDK daemon 的 API 26 编译已验证，低于 Android 12 的设备运行尚未验证，见 [`docs/03-reference.md`](docs/03-reference.md) |
 | 架构 | native daemon（`remote-control`） |
-| 协议 | **v9，38 条命令**；HTTP/JSON 与 Unix socket 共用 `Dispatcher`，WebSocket 提供实时流 |
+| 协议 | **v10，39 条命令**；HTTP/JSON 与 Unix socket 共用 `Dispatcher`，WebSocket 提供实时流 |
 | 截图 | ✅ SurfaceFlinger 直连（8–12 ms/帧）／screencap exec（~197 ms） |
 | 触控 | ✅ `/dev/uinput`（Android 12 的 `IInputManager` 是 Java-only，native 调不了） |
 | 按键 / 鼠标 | ✅ 虚拟键盘 + 虚拟鼠标（滚轮、右键、悬停 —— 触控表达不了的三件事） |
+| 文本输入 | ✅ 整串文字，**含中文 / emoji**（剪贴板粘贴；逐字符键入仅限 ASCII） |
 | 应用管理 | ✅ 列表、启动、停止、APK 安装（上传上限 4 GiB） |
 | 文件管理 | ✅ 共享存储根（`/sdcard`）下的读写；相对路径仍相对下载目录 |
 | 画面流 | ✅ WebSocket + MJPEG，jpeg/webp/png/h264，可中途改帧率/画质/分辨率 |
 | 屏幕方向 | ✅ `0/90/180/270`（设备转不动时退到换显示尺寸，如实回报） |
 | 鉴权 / 服务开关 | ✅ 令牌鉴权、软开关（不真停进程） |
-| 验证 | 单元/集成 **585 项检查**（15 个套件）、文档一致性 **103 项**、真浏览器端到端 6 组 |
+| 验证 | 单元/集成 **659 项检查**（16 个套件）、文档一致性 **104 项**、真浏览器端到端 6 组 |
 
 **全功能体检**：`python3 tools/functional-sweep.py [host:port]`
 
-覆盖 38 条命令的 HTTP 面（截图/触控/按键/应用管理/文件/剪贴板/旋转/画面流/电源…）。
+覆盖 39 条命令的 HTTP 面（截图/触控/按键/应用管理/文件/剪贴板/旋转/画面流/电源…）。
 它和别的测试最大的区别是**判据取设备侧证据，不信接口返回** ——
 这是被坑出来的：电源接口一直回 `ok:true` 而设备纹丝不动、画面流一切正常而抓帧
 一帧没成功、应用管理退出码骗人，三次都是"接口说成功、设备没动"。

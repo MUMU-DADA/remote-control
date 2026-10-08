@@ -76,7 +76,7 @@ NDK_SRCS=(main.cpp socket_server.cpp dispatch.cpp selftest.cpp
          capture_screencap.cpp inject.cpp inject_uinput.cpp
          appops.cpp subprocess.cpp fileops.cpp http_client.cpp
          service_state.cpp log_buffer.cpp http_server.cpp rest_api.cpp
-         json_parser.cpp png_encoder.cpp keyboard.cpp mouse.cpp clipops.cpp
+         json_parser.cpp png_encoder.cpp keyboard.cpp mouse.cpp textinput.cpp clipops.cpp
          webui.cpp image_encoder.cpp frame_hub.cpp h264_encoder.cpp
          encode_pool.cpp
          jpeg_encoder.cpp
@@ -173,6 +173,7 @@ COMMON_FLAGS=(
     "$DAEMON/png_encoder.cpp" \
     "$DAEMON/keyboard.cpp" \
     "$DAEMON/mouse.cpp" \
+    "$DAEMON/textinput.cpp" \
     "$DAEMON/clipops.cpp" \
     "$DAEMON/webui.cpp" \
     "$DAEMON/image_encoder.cpp" \

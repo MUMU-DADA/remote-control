@@ -46,6 +46,13 @@ class Keyboard {
     // 用于需要长按的键（如电源键菜单）。
     bool Key(uint32_t linuxKeyCode, bool longPress, std::string* error);
 
+    // 按一次键，可按需**按住 Shift**。
+    //
+    // 为什么不复用 Key()：上档符号（大写字母、!@#$…）要求 Shift 处于
+    // 按下的**那段时间里**打那个键。Key() 每次都是一次完整的按下/抬起，
+    // 连调两次做不到这件事 —— 必须能同时按住两个键。
+    bool TypeKey(uint32_t linuxKeyCode, bool shift, std::string* error);
+
     // 把 "home" / "KEY_HOME" / "172" 解析成 Linux 键码。
     //
     // 接受三种写法，是因为调用方来自不同地方：人类写名字、

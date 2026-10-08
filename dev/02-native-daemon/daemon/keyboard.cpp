@@ -271,6 +271,22 @@ bool Keyboard::Init(std::string* error) {
         ioctl(fd_, UI_SET_KEYBIT, c);
     }
 
+    // 剪贴板 / 编辑键。
+    //
+    // ⚠️ 这几个**必须显式声明**：它们不在上面任何一段连续区间里
+    //    （KEY_PASTE=279，而声明的区间只到 KEY_END=107）。
+    //    不声明的话内核会静默丢弃 —— 症状是"粘贴按了没反应"，
+    //    而接口一路返回成功，非常难查。整串文本输入（Text 的 paste 模式）
+    //    正是靠 KEY_PASTE，所以这条不是可选项。
+    const uint32_t editKeys[] = {KEY_PASTE, KEY_COPY, KEY_CUT,
+                                 KEY_SELECT, KEY_CLEAR, KEY_FIND,
+                                 KEY_UNDO, KEY_REDO, KEY_ZOOMIN, KEY_ZOOMOUT};
+    for (uint32_t c : editKeys) {
+        if (ioctl(fd_, UI_SET_KEYBIT, c) < 0) {
+            ALOGW("UI_SET_KEYBIT(%u) 失败: %s", c, strerror(errno));
+        }
+    }
+
     uinput_setup us{};
     const char* name = "remote-control-keyboard";
     strncpy(us.name, name, UINPUT_MAX_NAME_SIZE - 1);
@@ -358,6 +374,53 @@ bool Keyboard::Key(uint32_t linuxKeyCode, bool longPress, std::string* error) {
     }
 
     ALOGI("按键注入: keycode=%u%s", linuxKeyCode, longPress ? "（长按）" : "");
+    return true;
+}
+
+bool Keyboard::TypeKey(uint32_t linuxKeyCode, bool shift, std::string* error) {
+    if (!ready()) {
+        if (error) *error = "键盘未就绪（Init 没成功）";
+        return false;
+    }
+    if (linuxKeyCode == 0 || linuxKeyCode > KEY_MAX) {
+        if (error) {
+            *error = "键码 " + std::to_string(linuxKeyCode) +
+                     " 超出范围（1.." + std::to_string(KEY_MAX) + "）";
+        }
+        return false;
+    }
+
+    // Shift 按下 → 字母按下 → 字母抬起 → Shift 抬起。
+    // 每一步之间都要 SYN：内核按 SYN 分批把状态交给 InputReader，
+    // 全都塞进一个 SYN 的话 Shift 与字母的先后关系就丢了。
+    if (shift) {
+        if (!Emit(EV_KEY, KEY_LEFTSHIFT, 1) || !Sync()) {
+            if (error) *error = "发送 Shift 按下失败";
+            return false;
+        }
+    }
+
+    bool ok = Emit(EV_KEY, static_cast<uint16_t>(linuxKeyCode), 1) && Sync();
+    if (ok) {
+        // 与 Key() 同样的 50ms：太短会被输入法当成抖动丢掉
+        usleep(50 * 1000);
+        ok = Emit(EV_KEY, static_cast<uint16_t>(linuxKeyCode), 0) && Sync();
+    }
+
+    // ⚠️ Shift 无论如何都要抬起来。中途失败就 return 的话，
+    //    Shift 会**一直按着**，后面所有按键都变成上档符号 ——
+    //    设备看起来像"键盘坏了"，而根因是这里少了一次释放。
+    if (shift) {
+        if (!Emit(EV_KEY, KEY_LEFTSHIFT, 0) || !Sync()) {
+            if (error) *error = "发送 Shift 抬起失败（Shift 可能卡住）";
+            return false;
+        }
+    }
+
+    if (!ok) {
+        if (error) *error = "发送按键事件失败";
+        return false;
+    }
     return true;
 }
 

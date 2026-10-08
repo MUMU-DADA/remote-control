@@ -584,7 +584,7 @@ ALOGI("capture: 合成=%lldus 拷贝=%lldus",
 | 压感 / 接触面积 | ⚠️ 每个手势可设常量值，尚不支持逐点曲线 |
 | **真多点触控** | ✅ **uinput 后端最多 10 个指针**（`kMaxSlots = 10`，`pointerId` → slot 映射）；⚠️ Binder 后端固定 `pointerCount = 1`；⚠️ 官方 `virtual_touchpad` 后端只有 2 槽位 |
 | 按键注入 | ✅ `KeyEvent` 已实现（uinput 虚拟键盘） |
-| 文本输入 | ⚠️ 靠逐个键码，未做输入法接口 |
+| 文本输入 | ✅ `Text` 两条路：`paste`（剪贴板 + `KEY_PASTE`，**支持中文/emoji 等任意 Unicode**，用完恢复剪贴板）与 `type`（逐字符按键，仅可打印 ASCII）。**没有自建输入法** —— `type` 打不出中文是按键注入的上限（Linux 键码里没有"中"这个字），Android 自带 `input text` 同样打不出 |
 | 鼠标 / 滚轮 | ✅ `Mouse`（`uinput` 虚拟鼠标）：相对移动 / 左中右键 / 垂直与水平滚轮。**只有相对移动**，没有绝对定位 —— Android 的鼠标设备本身就只有 `REL_*` |
 
 **多点触控（Binder 路径）要做什么**：

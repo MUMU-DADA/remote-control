@@ -29,7 +29,8 @@ constexpr uint32_t kMagic = 0x44545541;
 //   7 = 屏幕方向（0/90/180/270/free）
 //   8 = 应用生命周期补全（卸载 / 清数据 / 启用停用 / 权限授予撤销）
 //   9 = 鼠标（相对移动 / 按键 / 滚轮）
-constexpr uint32_t kProtocolVersion = 9;
+//  10 = 整串文本输入（剪贴板粘贴 / 逐字符键入）
+constexpr uint32_t kProtocolVersion = 10;
 
 // 单次上传的字节上限（HTTP 请求体 / APK / 普通文件）。
 //
@@ -165,6 +166,25 @@ enum class Cmd : uint32_t {
     // ⚠️ 只有相对移动。Android 的鼠标设备本身就只有 REL_*，要"移到 (x,y)"
     //    得先知道光标在哪，而接口没有这个信息 —— 需要精确落点时用 Tap。
     Mouse         = 43,
+
+    // ── 整串文本输入（v10）────────────────────────────────────────────────
+    //
+    // 为什么需要它：`KeyEvent` 只能一次一个键码，而"输入一段文字"是另一件事 ——
+    // 调用方得自己处理大小写、上档符号、以及**根本打不出来的字符**。
+    //
+    // payload: "<文本>[\0<模式>]"，模式：
+    //   paste（默认）—— 写剪贴板 + KEY_PASTE。**支持任意 Unicode**（中文、emoji），
+    //                  因为整串文字压根不经过键盘。会临时改写系统剪贴板，用完恢复。
+    //   type        —— 逐字符发按键。行为同真人打字（触发逐字符监听、自动补全），
+    //                  不碰剪贴板；但**只能打可打印 ASCII**。
+    //
+    // ⚠️ 打不出中文不是本实现的缺陷，是按键注入这条路的上限：Linux 键码是
+    //    "物理按键编号"，字符由键盘布局解释出来，键码空间里没有"中"这个字。
+    //    Android 自带的 `input text` 撞的是同一堵墙 —— 实测对中文直接抛
+    //    NullPointerException（KeyCharacterMap.getEvents() 返回 null）。
+    //    所以中文只能走 paste。type 模式下遇到打不出的字符会**明确报错**
+    //    （指出是第几个字符），而不是静默丢字。
+    Text          = 44,
 
     Power         = 34,  // payload: "reboot" | "shutdown" | "reboot-recovery"
                          //          | "reboot-bootloader" | "reboot-sideload"
