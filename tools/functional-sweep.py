@@ -47,6 +47,43 @@ for cand in ("/root/AutoSnapshotAndroid/aosp/out/host/linux-x86/bin/adb", "adb")
         continue
 SERIAL = "emulator-5580"
 
+# 访问令牌。
+#
+# **交付的 ROM 默认开启鉴权**（首启生成随机令牌写进
+# /data/misc/remote-control/remote-control.conf），所以不做这一步的话
+# 整个扫查会在第一个请求上就 401 —— 而扫查本来就是给交付配置用的。
+# 原来这里没有令牌支持，只能对着手工起的"关了鉴权"的守护进程跑，
+# 那测的就不是用户实际拿到的那套配置了。
+#
+# 顺序：命令行 --token=xxx / 环境变量 RC_TOKEN / 设备上的配置文件。
+TOKEN = ""
+for _a in sys.argv[1:]:
+    if _a.startswith("--token="):
+        TOKEN = _a.split("=", 1)[1]
+if not TOKEN:
+    TOKEN = os.environ.get("RC_TOKEN", "")
+if not TOKEN and ADB:
+    try:
+        _out = subprocess.run(
+            [ADB, "-s", SERIAL, "shell",
+             "grep -E '^token' /data/misc/remote-control/remote-control.conf "
+             "2>/dev/null | head -1 | cut -d= -f2-"],
+            capture_output=True, timeout=15).stdout.decode(errors="replace").strip()
+        if _out:
+            TOKEN = _out
+    except Exception:
+        pass
+if not TOKEN:
+    print("!! 没拿到访问令牌（可用 --token=xxx 或 RC_TOKEN=xxx 指定）；"
+          "若服务确实开了鉴权，下面会一片 401")
+
+
+def auth_headers(extra=None):
+    h = dict(extra or {})
+    if TOKEN:
+        h["Authorization"] = "Bearer " + TOKEN
+    return h
+
 passed, failed, known = [], [], []
 
 
@@ -78,7 +115,7 @@ def check(name, ok, detail="", known_limitation=None):
 def req(path, method="GET", body=None, raw=False, timeout=25):
     url = BASE + path
     data = None
-    headers = {}
+    headers = auth_headers()
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
@@ -341,7 +378,8 @@ PROBE = "org.autosnap.arm64probe"
 def upload(path, blob, timeout=180):
     """二进制上传（APK）。req() 会把 body 当 JSON 编码，这里不能复用它。"""
     r = urllib.request.Request(BASE + path, data=blob,
-                               headers={"Content-Type": "application/octet-stream"},
+                               headers=auth_headers(
+                                   {"Content-Type": "application/octet-stream"}),
                                method="POST")
     try:
         with urllib.request.urlopen(r, timeout=timeout) as resp:
@@ -491,7 +529,7 @@ check("type 模式遇中文 → 501 且指出第几个字符",
 #    那测的是"JSON 转义对不对"，而不是"非法 UTF-8 会不会被拦下"。
 _r = urllib.request.Request(
     BASE + "/api/v1/text", data=b'{"text":"\xff\xfe"}',
-    headers={"Content-Type": "application/json"}, method="POST")
+    headers=auth_headers({"Content-Type": "application/json"}), method="POST")
 try:
     with urllib.request.urlopen(_r, timeout=20) as _resp:
         _st, _body = _resp.status, _resp.read()
@@ -579,8 +617,13 @@ def stream_frames(seconds=6):
     except Exception as e:
         return -1, str(e)
     key = base64.b64encode(b"0123456789abcdef").decode()
+    # ⚠️ 握手也要带令牌。这一条以前漏了：HTTP 那几处加了 Authorization，
+    #    握手是自己拼的原始请求，于是 401 —— 表现是"WebSocket 收到 0 帧"，
+    #    看着像产品坏了，其实是扫查自己没带证。
+    auth = f"Authorization: Bearer {TOKEN}\r\n" if TOKEN else ""
     s.sendall((f"GET /api/v1/stream HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+               f"{auth}"
                f"Sec-WebSocket-Version: 13\r\n\r\n").encode())
     buf = b""
     while b"\r\n\r\n" not in buf:

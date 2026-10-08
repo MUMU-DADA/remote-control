@@ -173,18 +173,65 @@ static void destroyDisplay(const sp<IBinder>& display);
 
 ---
 
-## 五、MediaCodec Surface 输入 —— 独立视频路径的后续方向
+## 五、MediaCodec Surface 输入 —— 已实现
 
 scrcpy 等社区项目使用显示镜像 Surface 直接喂 MediaCodec，
-避免视频编码前由 CPU 读取整帧像素。
+避免视频编码前由 CPU 读取整帧像素。**这条路径已经实现了**（默认开启）。
 
-截图接口要提供 **PNG / JPEG / WebP / 原始 RGBA**，这些仍需要 CPU 可读像素。
-当前 H.264 也使用抓帧后 RGBA→NV12→MediaCodec ByteBuffer 的流程，
-并未实现 Surface 输入的零拷贝路径。
+旧路径每帧要过：
 
-后续可以让独立的视频 Surface 路径与现有截图路径并存。需要验证 Android 12
-私有 API、按订阅启停、方向和分辨率变更、编码器并发能力及延迟收益；
-截图需要 CPU 像素并不否定视频单独省掉这些拷贝的可能性。
+```
+抓帧(SF 合成到缓冲) → memfd → mmap
+  → preparePixels：整帧 RGBA 行拷贝 / BGRA 换序 / 降采样
+  → libyuv ABGR→NV12 全帧颜色转换（纯 CPU）
+  → 再往 AMediaCodec 输入缓冲拷一次
+```
+
+新路径：
+
+```
+SurfaceFlinger ──合成──> 编码器的输入 Surface ──> NAL
+```
+
+编码器配成 `COLOR_FormatSurface`（`0x7F000789`），并用一个**虚拟显示**
+镜像主屏的 layer stack，把它的输出接到那个 Surface 上；缩放与颜色转换
+都在 SF / 编码器里做，不再经过 CPU 可读像素。
+
+* 开关：`H264Encoder::Config::useSurface`；流这边默认开，
+  `Start` 失败会自动降级回抓帧模式（慢一点但能用，比黑屏好）。
+* Surface 模式下调用方**只能轮询 `PollOutput`**，不能调 `EncodeRgba` ——
+  喂了会把表面上的画面顶掉（症状是"流里偶尔闪一下静止画面"）。
+* 生命周期：`Stop()` 必须**先拆虚拟显示再删 codec**，顺序反了会往
+  已经删掉的 codec 里合成。
+
+截图接口仍要 CPU 可读像素（PNG / JPEG / WebP / 原始 RGBA），
+所以两条路径**并存**，不是替换。
+
+### 验证
+
+`--selftest` 的 `[3] 画面通路` 是这条路的前置探针：按顺序试
+`createInputSurface` → 建虚拟显示 → 接上 → 镜像主屏 layer stack → 提交事务，
+失败时明确报是哪一环，然后原样拆掉。
+
+端到端用 `tools/verify-h264-surface.py`：走 WebSocket 收 H.264，**解出图**
+再和设备上直接抓的 JPEG 比亮度。为什么必须解图 —— **黑屏也是一串合法字节**，
+这条路最容易出的错就是"建起来了但 layer stack 没镜像对，一直在编一块黑屏"，
+那种情况下帧率、码率、字节数**全都正常**。
+
+模拟器实测（720x1280，持续滑动屏幕 8 秒）：
+
+| 项 | 值 |
+|---|---|
+| 收到的二进制帧 | 39 帧 / 184001 字节 |
+| 流里的帧 亮度均值 | YAVG=62.10 |
+| 设备抓帧 亮度均值 | YAVG=62.92 |
+
+两者一致（全黑会是 ~16）。
+
+⚠️ 量这个**必须让画面动起来**：静止画面上虚拟显示不产生新缓冲，编码器
+自然没输出。第一次只按了一下 Home，6 秒只收到 2 帧，看着像失败 ——
+其实量到的是"屏幕有多静"，不是"这条路通不通"。
+
 
 ---
 
