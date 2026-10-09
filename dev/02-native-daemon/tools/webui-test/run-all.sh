@@ -1,12 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# 跑完整的浏览器端到端套件（10 个脚本），逐个报**退出码**。
+# 跑完整的浏览器端到端套件，逐个报**退出码**。
+# （**故意不写脚本个数**：以前写死的数字全部过期了 —— 仓库的规矩是数字问 runner 要。）
 #
 # 为什么要有一个 runner：
-#   * 这十个脚本各自输出格式不一样 —— 有 `通过 N/M`、有 `Passed N/M`、
+#   * 这些脚本各自输出格式不一样 —— 有 `通过 N/M`、有 `Passed N/M`、
 #     还有只逐条打 ✓ 靠**退出码**表态的。分散跑很容易只看自己想看的那一行，
 #     然后把红的当成"输出有点怪"。
-#   * 之前没有 runner，README 里写的"10 个脚本"实际上没地方一键验证。
+#   * 之前没有 runner，README 里写的脚本数实际上没地方一键验证。
 #     实测教训：这一套曾经在**页面 401** 的情况下报 8/9 —— 假绿。
 #     所以这里的判据只看退出码 + 逐条 ✗，不看任何一行"看起来还行"的输出。
 #
@@ -38,7 +39,7 @@ cd "$(dirname "$0")" || exit 2
 export RC_TOKEN="$TOKEN"
 BASE="http://$HOST:$PORT"
 
-# 十个脚本对参数的叫法不一样（多数 --host/--port，流那个是 --base）
+# 脚本对参数的叫法不一样（多数 --host/--port，流那个是 --base）
 SCRIPTS="coord_space_test.py filebrowser_test.py fillmode_test.py
          maxwidth_test.py mouse_test.py rotate_test.py text_test.py
          upload_test.py webui_test.py"

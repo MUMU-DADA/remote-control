@@ -27,7 +27,7 @@ _TOKEN = None
 def install_global_auth(token: str) -> None:
     """让本进程里**所有** urllib 请求自动带上令牌。
 
-    为什么用这种"改动全局状态"的做法：这十个脚本里发 HTTP 请求的写法有两种
+    为什么用这种"改动全局状态"的做法：这套脚本里发 HTTP 请求的写法有两种
     （有的直接 `urlopen(BASE + path)`，有的自己包了个 `api()` 建 Request），
     一共十几处。逐处加 header 很容易漏 —— 而漏掉的表现是
     `HTTPError: 401`，看起来像服务坏了。
