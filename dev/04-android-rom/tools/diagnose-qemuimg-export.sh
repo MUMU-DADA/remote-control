@@ -5,11 +5,18 @@
 # 为什么换：
 #   现在的问题不是归档不忠实 —— 实测归档里 qcow2 的 md5 与源**逐字节相同**，
 #   解出来也相同。但恢复出来的实例开机后 /data 是空的，而原实例重启却好好的。
-#   剩下唯一可疑的是 **raw backing 那个 32G 稀疏文件**：
+#   剩下唯一可疑的是 **raw backing 那个 64 GiB 稀疏文件**（实占约 550MB）：
 #     · 它的逻辑内容 md5 一致，但 tar 解开后的**实占块数**和源差了 8 块
-#       （1126712 vs 1126704）—— 说明空洞布局还原得并不完全一样
+#       （1126712 vs 1126704）—— 当初据此怀疑空洞布局还原得不完全一样
 #     · 我的合成稀疏测试（3G 文件 8MB 数据）是通过的，但真实文件
 #       空洞多得多，GNU sparse 格式在极端情况下是有坑的
+#
+#   ⚠️ 2026-10-09 复核：**这条假设没能复现。** 拿真实的 userdata-qemu.img
+#      （64 GiB 表观 / 550MB 实占 / 1126904 块）做 tar -cS / -xS 往返，
+#      解出来**还是 1126904 块，差 0**。所以"tar 丢掉空洞布局"不是根因。
+#      同一轮还确认了：覆盖层在 sysdir 里、会被打包（arch_exclude 不排它），
+#      而且它的 backing 引用是**相对路径**，换目录也接得上。
+#      真因仍未找到 —— 见 docs/12 §7。
 #
 # qemu-img 路线的好处：
 #   · 只存**已分配的簇**，天然紧凑，根本没有稀疏文件这回事
@@ -19,6 +26,30 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 EMU=./scripts/emulator.sh
+# ── 前提：这个探针要**再起两个模拟器**并转换 64 GiB 镜像 ──────────────
+#    2026-10-09 复核时这台机器只剩 3.8G 可用、可用内存 8G，**跑不动** ——
+#    而脚本原来一声不响就往下走。前提立不住就当场说清楚，别让人以为"跑过了"。
+#    磁盘要按**仓库所在的分区**算 —— 2026-10-09 我先量错了对象：
+#    `/root` 只剩 3.8G，而仓库挂在另一块盘上（458G/可用 113G）。
+#    用 `.`（脚本自己所在的分区）才是对的。
+NEED_DISK_MB=12000        # 一次 convert(-c) + 转回 raw 的余量
+#    内存**量过**再定：一个 --memory 6144 的实例实测 RSS 5.2GB（`default` 那份）。
+#    探针同时只多这一个（起 tA→写→停→转换→起 tB），所以 6500MB 够，留了余量。
+#    （前两版是拍的：先按"两个同时跑"估 14000，又凭感觉改 9000 —— 都用不住。）
+NEED_MEM_MB=6500
+_free_mb=$(df -Pm . | awk 'NR==2{print $4}')
+_avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+if [ "${_free_mb:-0}" -lt "$NEED_DISK_MB" ]; then
+    echo "[x] 磁盘不够：需要约 ${NEED_DISK_MB}MB，当前可用 ${_free_mb}MB"
+    echo "    这个探针会用 qemu-img 转换 64GiB 的 userdata 镜像，装不下就别硬跑。"
+    exit 2
+fi
+if [ "${_avail_mb:-0}" -lt "$NEED_MEM_MB" ]; then
+    echo "[x] 内存可能不够：建议可用 ≥ ${NEED_MEM_MB}MB，当前 ${_avail_mb}MB"
+    echo "    它会同时起 tA 与 tB 两个模拟器。"
+    exit 2
+fi
+
 QI=/opt/android/emulator-new/emulator/qemu-img
 [ -x "$QI" ] || QI=$(find /opt/android -name qemu-img -type f 2>/dev/null | head -1)
 ADB=/root/AutoSnapshotAndroid/aosp/out/host/linux-x86/bin/adb
