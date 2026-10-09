@@ -127,7 +127,9 @@ AutoSnapshotAndroid/
 │   │                             陈旧路径 / 脚本路径是否存在（**文档 ↔ 仓库**）
 │   ├── check-scripts.py          所有 .ps1 必须带 UTF-8 BOM（PowerShell 5.1 会读坏中文）
 │   ├── check-verify-honesty.py   verify-*.sh 不许"前提崩了照样下结论"
-│   └── check-duplicate-lines.py  连续两行完全相同的赋值（打补丁"替换成本来就在的那行"的形状）
+│   ├── check-duplicate-lines.py  连续两行完全相同的赋值（打补丁"替换成本来就在的那行"的形状）
+│   ├── check-lineage-parity.py   仓库侧 vs 交付版：动词差异必须等于记录在案的那几处
+│   └── check-image-lists.py      ROM 镜像清单：生产端产出的 vs 各平台认为必需的，必须对得上
 │
 ├── aosp/                      ← AOSP 源码树
 │

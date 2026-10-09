@@ -167,6 +167,25 @@ for f in files:
         problems["孤儿文档（没有任何文档链接到它）"].append(rel(f))
 
 # --------------------------------------------------------------------------
+# [2b] 门禁工具必须在 README 里被列出来
+#
+# 这一条是上面"孤儿文档"的**工具版**。2026-10-09 实测：`tools/` 下已经攒了
+# 好几个 `check-*.py`，而 README 的工具清单只列了其中两个 —— 剩下那些等于
+# 不存在：**谁也不会去跑一个不知道存在的门禁。** 补全之后写成本条，免得再漏。
+#
+# 只查 `tools/check-*.py` 这一档（门禁）。不扩大范围 —— 一次性诊断脚本、
+# arm64-probe/ 之类本来就不该塞进工具清单里，那样只会制造噪音。
+# --------------------------------------------------------------------------
+_readme = os.path.join(ROOT, "README.md")
+if os.path.isfile(_readme):
+    _text = open(_readme, encoding="utf-8").read()
+    import glob as _glob
+    for _tool in sorted(_glob.glob(os.path.join(ROOT, "tools", "check-*.py"))):
+        _name = os.path.basename(_tool)
+        if _name not in _text:
+            problems["门禁工具没被列进 README 的工具清单（等于不存在）"].append(_name)
+
+# --------------------------------------------------------------------------
 # [3] 编号连续性（针对 00-xx-name.md 这种命名）
 # --------------------------------------------------------------------------
 NUM_RE = re.compile(r"^(\d{2})-(.+)$")
