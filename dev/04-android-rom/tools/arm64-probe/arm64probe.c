@@ -10,8 +10,13 @@
 #include <string.h>
 #include <sys/utsname.h>
 
+// ⚠️ 符号名必须与 Java 包名**逐字对应**（点换成下划线，不能再多下划线）。
+//    这里原来写的是 org_remote_control_…（多一个下划线），而 Java 侧的包是
+//    org.remotecontrol.…（没有下划线）—— 于是运行时报
+//    `satisfiedLinkError: No implementation found for …abiInfo()`，
+//    探针其实**从来没真正调到过原生代码**（2026-10-09 发现）。
 JNIEXPORT jstring JNICALL
-Java_org_remote_control_arm64probe_MainActivity_abiInfo(JNIEnv *env, jclass clazz) {
+Java_org_remotecontrol_arm64probe_MainActivity_abiInfo(JNIEnv *env, jclass clazz) {
     char buf[256];
     struct utsname u;
     uname(&u);

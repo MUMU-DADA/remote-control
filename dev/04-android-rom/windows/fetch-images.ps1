@@ -145,7 +145,9 @@ $probeLocal  = Join-Path $Dest "arm64-probe.apk"
 #    同一个值问两遍既慢又容易两次得到不同结果，内联那次还会挂住。
 $probeInDir = (Remote-Size "arm64-probe.apk")
 $probeAlt   = (Invoke-Remote "stat -c %s '$probeRemote' 2>/dev/null").Trim()
-if ($probeInDir -or $probeAlt) {
+# ⚠️ 比的是**字节数**不是"有没有这个字符串"：PowerShell 里 "0" 是真值，
+#    远端那个 0 字节的占位文件会被当成"有"，于是拉回来一个空包。
+if (([int]$probeInDir -gt 0) -or ([int]$probeAlt -gt 0)) {
     $src = if ($probeInDir) { "$RemoteDir/arm64-probe.apk" } else { $probeRemote }
     if ((-not (Test-Path $probeLocal)) -or $Force) {
         Write-Host "==> 拉取自建 arm64 探针 APK"

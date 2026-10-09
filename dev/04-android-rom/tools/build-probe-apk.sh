@@ -45,7 +45,16 @@ log "2/6 javac（用 AOSP 自带 JDK，宿主不需要装 java）"
 "$JDK/bin/javac" -source 8 -target 8 -nowarn \
     -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" \
     -d "$BUILD/classes" "$SRC/MainActivity.java" 2>&1 | grep -v "bootstrap class path" || true
-[ -f "$BUILD/classes/org/remote_control/arm64probe/MainActivity.class" ] || die "javac 没产出 class"
+# ⚠️ 这里原来写死的是 `classes/org/remote_control/arm64probe/MainActivity.class`
+#    —— 那是**另一个包名**，源码里根本没有它（源码用的是
+#    `org.remotecontrol.arm64probe`，没有下划线）。于是本脚本**必然失败**：
+#    编译成功也会报 "javac 没产出 class"，产物就此再没重建过，
+#    交付目录里那份 APK 停在改名之前（装上去叫 org.autosnap.arm64probe）。
+#
+#    判据应该是「javac 到底产出了什么」，不是「我以为它会产出什么」。
+CLASS=$(find "$BUILD/classes" -name 'MainActivity.class' 2>/dev/null | head -1)
+[ -n "$CLASS" ] || die "javac 没产出 MainActivity.class"
+log "    class: ${CLASS#"$BUILD/classes/"}"
 
 log "3/6 d8 → classes.dex"
 "$JDK/bin/java" -cp "$D8_JAR" com.android.tools.r8.D8 \

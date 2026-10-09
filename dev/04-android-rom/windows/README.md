@@ -125,12 +125,60 @@ ssh root@192.168.0.108 echo OK
 
 ---
 
-## ⚠️ 仍未验证的部分
+## ✅ 2026-10-09：启动与验收全部跑通了
 
-> **2026-10-08 决定：B3 就停在这里**（"先不动 WHPX"）。
-> 下面这段保留原样 —— 它是"要接着做的话该怎么做"的说明，不是待办欠账。
-> 已经验到的部分见上面两节：镜像拉取 + SHA256SUMS 校验、预检全绿、
-> SDK/模拟器下载 + sha1 校验、两侧 system.img 指纹一致。
+> **B3 完成。** 2026-10-08 那次"停在预检"是**误判**（判据拿错了，见上），
+> 不是机器跑不了 —— 补上几处脚本缺陷后，在真机上跑通了全流程。
+
+**第一次真跑就接连撞到 6 个脚本缺陷**（都已修，逐条记在下面），
+其中一个直接说明：**这段代码以前不可能跑通**。
+
+### 实测证据（Windows 10 19044 + WHPX + 自编 ROM）
+
+```
+==> 验收 1/4：镜像身份与 ABI        [OK] sdk=31 / device=remote_control_x64_arm64 / abilist=x86_64,arm64-v8a
+==> 验收 2/4：翻译层接线            [OK] libndk_translation.so / binfmt: arm64_dyn arm64_exe arm_dyn arm_exe
+==> 验收 3/4：aarch64 机器码        [OK] libc.so 的 ELF 头 = 03 00 b7 00（e_machine=0xB7=AArch64）
+==> 验收 4/4：arm64 应用            [OK] pm install --abi arm64-v8a → Success
+                                        [OK] 进程存活 3014
+                                        [OK] 映射的 arm64 库条数 16
+                                        [OK] 探针原生返回值
+                                             PROBE_RESULT arm64-v8a native ok | built_for=arm64-v8a
+                                                           | kernel=x86_64 | ptr=64 bit
+==> 验收全部通过 ✓
+```
+
+服务侧也逐项验过（都是**设备侧/真数据**，不是接口自报）：
+
+| 项 | 证据 |
+|---|---|
+| 服务起来 | `GET /api/v1/info` → 200，`1280x720`；无令牌 → **401**（鉴权生效） |
+| 真抓到画面 | `GET /api/v1/capture` → 230100 字节，文件头 `89 50 4e 47`（PNG）；`?format=jpeg` → 56548 字节，`ff d8 ff` |
+| 触控真的生效 | 上滑前后各截一张：哈希 `A5AA45AB…` → `A36919FC…`，字节 230097 → 71331（打开了应用抽屉） |
+
+### 修掉的 6 个缺陷（都在 Windows 侧脚本里）
+
+| # | 症状 | 根因 |
+|---|---|---|
+| 1 | 预检报"WHPX 未启用" | 拿 `HypervisorPlatform` 的功能勾选状态当判据；实际 **Hyper-V 开着就够**，`emulator -accel-check` 说 usable |
+| 2 | 预检把十个镜像逐条报"缺" | `$PSScriptRoot` 写在 `param` 默认值里，`[CmdletBinding()]` 下算成 `\images`。四个脚本全中 |
+| 3 | 验收卡在 2/4 | `binfmt_misc` **只有 root adbd 读得到**，脚本没 `adb root`（Linux 侧一直是先提权的） |
+| 4 | 验收卡在 4/4，日志停在"用自建 arm64 探针 APK" | `adb push` 把进度写 **stderr**，`$ErrorActionPreference="Stop"` 下变成**终止性 NativeCommandError**，脚本**就地静默退出** |
+| 5 | 同一位置的第二个坑 | `$pid` 是 PowerShell **只读自动变量**，赋值抛 `VariableNotWritable` —— 这段**从来没能跑完过** |
+| 6 | 探针装不上/启动不了 | 交付的 `arm64-probe.apk` 停在改名之前（包名 `org.autosnap.…`，脚本写死 `org.remotecontrol.…`）；而 `build-probe-apk.sh` 断言了一个**源码里不存在**的 class 路径，所以产物**再没重建过** |
+
+还有两个是"假绿"，值得单独记：
+
+* **0 字节当成"有"**：`Test-Path` 只看存在性，一个拉取失败留下的空 `arm64-probe.apk` 会让脚本去装空包；
+* **logcat 缓冲骗过断言**：`logcat -d` 把整个缓冲区 dump 出来，上一次运行留下的
+  `arm64-v8a native ok` 能满足断言 —— 这一次哪怕 JNI 报 `satisfiedLinkError` 也是绿的。
+  （Linux 侧的 `run-linux.sh` 早就有"先清 logcat"这一步，注释写着"彩排时踩过"；Windows 侧没跟上。）
+  顺带查出探针 C 侧的 JNI 符号多了一个下划线（`org_remote_control_…` vs 包名 `org.remotecontrol.…`），
+  **探针其实从来没真正调到过原生代码** —— 修完才是真的。
+
+---
+
+## 原计划的说明（保留）
 
 `run-windows.ps1` 的**启动与验收**这一段还没跑过。⚠️ 但**拦路的原因不是 WHPX**
 —— 见下面两条订正，那条拦路虎是我自己的误判，现在已经拆掉。
