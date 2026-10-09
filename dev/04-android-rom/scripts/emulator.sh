@@ -633,13 +633,22 @@ cmd_export() {
 
     # 压平：以覆盖层为入口（它会读穿 backing 链），得到一张自包含 qcow2。
     # 没有覆盖层（从没启动过的实例）就以 backing 为入口。
-    local qi src
-    qi="$(pick_qemu_img)"
-    if [ -f "$sysdir/$data_ovl" ]; then src="$sysdir/$data_ovl"; else src="$sysdir/$data_img"; fi
-    [ -f "$src" ] || die "实例里既没有 $data_ovl 也没有 $data_img —— 工作目录不对？"
-    log "压平数据镜像（$DATA_FLAT）…"
-    if ! "$qi" convert -O qcow2 -c "$src" "$stage/sysdir/$DATA_FLAT" 2>/dev/null; then
-        rm -rf "$stage"; die "qemu-img convert 失败：$src"
+    local qi src="" have_data=0
+    if [ -f "$sysdir/$data_ovl" ]; then src="$sysdir/$data_ovl"
+    elif [ -f "$sysdir/$data_img" ]; then src="$sysdir/$data_img"; fi
+    if [ -n "$src" ]; then
+        qi="$(pick_qemu_img)"
+        log "压平数据镜像（$DATA_FLAT）…"
+        if ! "$qi" convert -O qcow2 -c "$src" "$stage/sysdir/$DATA_FLAT" 2>/dev/null; then
+            rm -rf "$stage"; die "qemu-img convert 失败：$src"
+        fi
+        have_data=1
+    else
+        # ⚠️ 没有数据镜像**不是错**：从没启动过的实例、以及测试里的最小 mock 实例
+        #    都是这样。导出仍然有意义（服务令牌、配置、状态文件），只是归档里没有数据。
+        #    （第一版在这里 die，把 test-lifecycle-unix.py 的最小实例直接打断了 ——
+        #     它验的正是"令牌被带进归档"，而我的检查死在它前面。）
+        warn "这个实例没有数据镜像（$data_img／$data_ovl 都不在）—— 归档里不会有数据"
     fi
     if [ -d "$datadir" ]; then
         for f in "$datadir"/*; do
@@ -671,7 +680,7 @@ cmd_export() {
     {
         printf '{\n'
         printf '  "format": 2,\n'
-        printf '  "dataFile": "%s",\n' "$DATA_FLAT"
+        [ "$have_data" = 1 ] && printf '  "dataFile": "%s",\n' "$DATA_FLAT"
         printf '  "instance": "%s",\n' "$name"
         printf '  "exportedAt": "%s",\n' "$now"
         printf '  "exportedFrom": "linux",\n'
@@ -834,7 +843,9 @@ cmd_import() {
     # 稀疏 raw；**不需要覆盖层**，也就没有"两份文件配不配得上"的问题。
     local dfile; dfile="$(printf '%s' "$mf" | sed -n 's/.*"dataFile": *"\([^"]*\)".*/\1/p')"
     dfile="${dfile:-$DATA_FLAT}"
-    if [ "$fmt" -ge 2 ]; then
+    local has_dfile=0
+    printf '%s' "$mf" | grep -q '"dataFile"' && has_dfile=1
+    if [ "$fmt" -ge 2 ] && [ "$has_dfile" = 1 ]; then
         [ -f "$sysdir/$dfile" ] || die "归档是格式 2，但里面没有 $dfile —— 归档不完整？"
         log "还原数据镜像（$dfile → userdata-qemu.img）…"
         rm -f "$sysdir/userdata-qemu.img" "$sysdir/userdata-qemu.img.qcow2"
@@ -859,8 +870,8 @@ cmd_import() {
 
     # 读回确认：关键文件真的落地了
     if [ ! -s "$sysdir/userdata-qemu.img" ]; then
-        [ "$fmt" -ge 2 ] && die "格式 2 的归档恢复后没有 userdata-qemu.img —— 不该发生"
-        warn "userdata-qemu.img 不在归档里？"
+        [ "$fmt" -ge 2 ] && [ "$has_dfile" = 1 ] && die "格式 2 的归档恢复后没有 userdata-qemu.img —— 不该发生"
+        warn "归档里没有数据镜像（导出时实例就没有）"
     fi
     log "已导入： '$name'（端口 $port）"
     printf '    下一步   ./scripts/emulator.sh start %s\n' "$name"
