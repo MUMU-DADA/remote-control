@@ -53,8 +53,21 @@ $script:EmuProc = $null
 #
 #     Linux 侧同样场景下 `read -r` 拿到 EOF 会**立刻** die —— 这里对齐那个行为，
 #     不再出现"一边快速失败、一边无声挂死"。
+    # ⚠️ 默认 **120 秒**，而且可以用 AUTOSNAP_CONFIRM_TIMEOUT 覆盖。
+    #
+    #    第一版我写的是 20 秒 —— 那是个**我自己引入的可用性回归**：
+    #    Linux 侧同一处是 `read -r`，**无限等**；而人坐在屏幕前读一遍中文警告、
+    #    想一下、再敲 yes，很可能超过 20 秒。超时的后果不是"危险"，
+    #    而是**破坏性命令白敲一遍**（安全，但恼人）。
+    #
+    #    上限本身不能去掉：非交互场景必须有界，否则又会挂死 —— 而第 5 轮已经
+    #    用实测证明"有没有控制台"的那些标准探针**全都不可信**（UserInteractive、
+    #    IsInputRedirected、$Host.Name、RawUI 全报"有"，可就是没人能输入）。
+    #
+    #    偏差方向是刻意选的：等太久只让脚本化的误用慢两分钟；
+    #    等太短会让一个真人白敲一次。
 function Read-LineWithTimeout {
-    param([int]$TimeoutSec = 20)
+    param([int]$TimeoutSec = $(if ($env:AUTOSNAP_CONFIRM_TIMEOUT) { [int]$env:AUTOSNAP_CONFIRM_TIMEOUT } else { 120 }))
     $tmp = [System.IO.Path]::GetTempFileName()
     try {
         $p = Start-Process -FilePath "powershell.exe" -PassThru -NoNewWindow -ArgumentList @(
@@ -62,10 +75,39 @@ function Read-LineWithTimeout {
             "[Console]::ReadLine() | Set-Content -LiteralPath '$tmp' -Encoding UTF8")
         if (-not $p.WaitForExit($TimeoutSec * 1000)) {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            return $null
+            # 直接在这里 die，而不是把 $null 交回调用方 —— 三个调用点超时后的处理
+            # 一模一样，分散写还会带来一个坑：消息里的秒数会被**写死**。
+            # （第一版就是 `Die "等了 20 秒…"`，我把默认值改成 120 之后，
+            #   它就开始撒谎了。）
+            Die ("等了 $TimeoutSec 秒没人输入 —— 按非交互处理。这是破坏性操作，请显式加 -Yes" +
+                 "（Linux 侧同场景下 read 拿到 EOF 会立刻 die，这里对齐同样的行为）")
         }
-        return (Get-Content -LiteralPath $tmp -Raw -ErrorAction SilentlyContinue)
-    } catch { return $null }
+        $v = Get-Content -LiteralPath $tmp -Raw -ErrorAction SilentlyContinue
+        # ⚠️ 空读要规范成空串，**不能**把 $null 交出去。
+        #    "读取成功但内容为空"和"超时"是两条不同的路径：
+        #      · 超时 → 上面已经 die 了；
+        #      · 空读 → 子进程立刻拿到 EOF（非交互场景就是这样），文件是空的，
+        #               `Get-Content -Raw` 返回 $null；调用方随后 `$ans.Trim()` 会炸成
+        #               "You cannot call a method on a null-valued expression"。
+        #    2026-10-09：我把调用点那段 `if ($null -eq $ans) { Die … }` 当成死代码
+        #    删掉之后就是这个报错 —— 它挡的正是这条路径。
+        if ($null -eq $v) { $v = "" }
+        return $v
+    } catch {
+        # ⚠️ 这里**不能** `return $null`：调用方随后会做 `$ans.Trim()`，
+        #    $null 会炸成 "You cannot call a method on a null-valued expression"，
+        #    而那是个看不出所以然的报错。
+        #
+        #    这条路径**真的会走到**：本函数靠启动 `powershell.exe` 读一行，
+        #    起不来就抛（例如在 Linux 的 pwsh 里跑 —— 那是测试环境，
+        #    不是产品环境；也可能 PATH 出问题）。
+        #    2026-10-09 实测：我一度以为调用点那段判空是死代码把它删了，
+        #    结果在 Linux 上用 pwsh 一跑就复现了这条路径。
+        #
+        #    处理：当成"没人回答"，并说清楚是**为什么**没有回答。
+        Die ("无法启动读取输入的 powershell.exe 子进程（$($_.Exception.Message)）" +
+             " —— 按非交互处理。这是破坏性操作，请显式加 -Yes")
+    }
     finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 }
 
@@ -74,11 +116,7 @@ function Confirm-OrDie {
     param([string]$What, [string]$Name, [switch]$Yes)
     if ($Yes) { return }
     Write-Warn "$What '$Name' 会删除实例数据（已装应用、应用数据、/sdcard 与快照）"
-    $ans = Read-LineWithTimeout 20
-    if ($null -eq $ans) {
-        Die ("等了 20 秒没人输入 —— 按非交互处理。这是破坏性操作，请显式加 -Yes" +
-             "（Linux 侧同场景下 read 拿到 EOF 会立刻 die，这里对齐同样的行为）")
-    }
+    $ans = Read-LineWithTimeout      # 超时的话它自己会 die（消息里用真实秒数）
     if ($ans.Trim() -ne "yes") { Die "已取消" }
 }
 

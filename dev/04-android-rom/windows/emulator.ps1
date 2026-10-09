@@ -563,8 +563,21 @@ function Invoke-Start {
 #    这是"孤儿控制台"：控制台对象在，输入源不在。所以唯一可靠的判据是
 #    **限时等一行**：等到了就是有人，等不到就当作非交互、快速失败。
 #    （同进程 runspace，共享同一个控制台；用 Start-Job 不行 —— 那是新进程，没有控制台。）
+    # ⚠️ 默认 **120 秒**，而且可以用 AUTOSNAP_CONFIRM_TIMEOUT 覆盖。
+    #
+    #    第一版我写的是 20 秒 —— 那是个**我自己引入的可用性回归**：
+    #    Linux 侧同一处是 `read -r`，**无限等**；而人坐在屏幕前读一遍中文警告、
+    #    想一下、再敲 yes，很可能超过 20 秒。超时的后果不是"危险"，
+    #    而是**破坏性命令白敲一遍**（安全，但恼人）。
+    #
+    #    上限本身不能去掉：非交互场景必须有界，否则又会挂死 —— 而第 5 轮已经
+    #    用实测证明"有没有控制台"的那些标准探针**全都不可信**（UserInteractive、
+    #    IsInputRedirected、$Host.Name、RawUI 全报"有"，可就是没人能输入）。
+    #
+    #    偏差方向是刻意选的：等太久只让脚本化的误用慢两分钟；
+    #    等太短会让一个真人白敲一次。
 function Read-LineWithTimeout {
-    param([int]$TimeoutSec = 20)
+    param([int]$TimeoutSec = $(if ($env:AUTOSNAP_CONFIRM_TIMEOUT) { [int]$env:AUTOSNAP_CONFIRM_TIMEOUT } else { 120 }))
     # 用**子进程**读，而不是同进程 runspace：runspace 里 [Console]::ReadLine() 一样
     # 会卡死整个进程（2026-10-09 实测，WaitOne 超时根本没机会触发）。
     # 子进程共享同一个控制台，而 WaitForExit 的超时是可靠的。
@@ -575,11 +588,40 @@ function Read-LineWithTimeout {
             "[Console]::ReadLine() | Set-Content -LiteralPath '$tmp' -Encoding UTF8")
         if (-not $p.WaitForExit($TimeoutSec * 1000)) {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            return $null
+            # 直接在这里 die，而不是把 $null 交回调用方 —— 三个调用点超时后的处理
+            # 一模一样，分散写还会带来一个坑：消息里的秒数会被**写死**。
+            # （第一版就是 `Die "等了 20 秒…"`，我把默认值改成 120 之后，
+            #   它就开始撒谎了。）
+            Die ("等了 $TimeoutSec 秒没人输入 —— 按非交互处理。这是破坏性操作，请显式加 -Yes" +
+                 "（Linux 侧同场景下 read 拿到 EOF 会立刻 die，这里对齐同样的行为）")
         }
         $v = Get-Content -LiteralPath $tmp -Raw -ErrorAction SilentlyContinue
+        # ⚠️ 空读要规范成空串，**不能**把 $null 交出去。
+        #    "读取成功但内容为空"和"超时"是两条不同的路径：
+        #      · 超时     → 上面已经 die 了；
+        #      · 空读     → 子进程立刻拿到 EOF（非交互场景就是这样），
+        #                   文件是空的，`Get-Content -Raw` 返回 $null。
+        #    调用方随后做 `$ans.Trim()`，$null 会炸成
+        #    "You cannot call a method on a null-valued expression"。
+        #    2026-10-09：我把调用点那段 `if ($null -eq $ans) { Die … }`
+        #    当成死代码删掉之后，就是这个报错 —— 它不是死代码，它挡的是这条路径。
+        if ($null -eq $v) { $v = "" }
         return $v
-    } catch { return $null }
+    } catch {
+        # ⚠️ 这里**不能** `return $null`：调用方随后会做 `$ans.Trim()`，
+        #    $null 会炸成 "You cannot call a method on a null-valued expression"，
+        #    而那是个看不出所以然的报错。
+        #
+        #    这条路径**真的会走到**：本函数靠启动 `powershell.exe` 读一行，
+        #    起不来就抛（例如在 Linux 的 pwsh 里跑 —— 那是测试环境，
+        #    不是产品环境；也可能 PATH 出问题）。
+        #    2026-10-09 实测：我一度以为调用点那段判空是死代码把它删了，
+        #    结果在 Linux 上用 pwsh 一跑就复现了这条路径。
+        #
+        #    处理：当成"没人回答"，并说清楚是**为什么**没有回答。
+        Die ("无法启动读取输入的 powershell.exe 子进程（$($_.Exception.Message)）" +
+             " —— 按非交互处理。这是破坏性操作，请显式加 -Yes")
+    }
     finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 }
 
@@ -628,11 +670,8 @@ function Invoke-Reset {
         #    我还把它误判成 `stop` 卡住 —— 因为日志的行序骗人：管道
         #    `& $emu stop ... | Add-Content` 的输出是**结束**时才追加的，
         #    所以日志里最后一行看起来停在 stop 那一步。
-        $ans = Read-LineWithTimeout 20
-        if ($null -eq $ans) {
-            Die ("等了 20 秒没人输入 —— 按非交互处理。这是破坏性操作，请显式加 -Yes" +
-                 "（Linux 侧同场景下 read 拿到 EOF 会立刻 die，这里对齐同样的行为）")
-        }
+        $ans = Read-LineWithTimeout
+        $ans = Read-LineWithTimeout
         if ($ans.Trim() -ne "yes") { Die "已取消" }
         Write-Host "[!] 重置 '$N' 会清空数据分区（已装应用 / 应用数据 / sdcard / 快照）" -ForegroundColor Yellow
     }
@@ -684,11 +723,8 @@ function Invoke-Delete {
         #    我还把它误判成 `stop` 卡住 —— 因为日志的行序骗人：管道
         #    `& $emu stop ... | Add-Content` 的输出是**结束**时才追加的，
         #    所以日志里最后一行看起来停在 stop 那一步。
-        $ans = Read-LineWithTimeout 20
-        if ($null -eq $ans) {
-            Die ("等了 20 秒没人输入 —— 按非交互处理。这是破坏性操作，请显式加 -Yes" +
-                 "（Linux 侧同场景下 read 拿到 EOF 会立刻 die，这里对齐同样的行为）")
-        }
+        $ans = Read-LineWithTimeout
+        $ans = Read-LineWithTimeout
         if ($ans.Trim() -ne "yes") { Die "已取消" }
         Write-Host "[!] 删除 '$N' 会删掉整个工作目录（含已装应用与快照）" -ForegroundColor Yellow
     }
