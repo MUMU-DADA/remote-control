@@ -58,6 +58,11 @@ echo "   qcow2: $(stat -c %s .run/sysdir-$PORT/userdata-qemu.img.qcow2 2>/dev/nu
 echo "== 3. 优雅关机（就是 emulator.sh stop，等同用户"关机"）"
 $EMU stop t2 2>&1 | tail -1
 sleep 2
+# ⚠️ **必须确认它真的停了。** 停机失败的话，下面那次"再启动"其实没重启
+#    （实例已经在跑，start 会直接返回），标记当然还在 —— 于是脚本会得出
+#    **"数据在磁盘上持久"** 这个**反向**的假结论。比报错坏得多。
+$EMU list 2>/dev/null | awk '$1=="t2"' | grep -q "已停止" \
+    || die "t2 没停下来 —— 没停机就没有'重启'可验，不下结论"
 echo "   停机后磁盘上还在吗："
 echo "     userdata-qemu.img        $(stat -c %s .run/sysdir-$PORT/userdata-qemu.img 2>/dev/null) 字节"
 echo "     userdata-qemu.img.qcow2  $(stat -c %s .run/sysdir-$PORT/userdata-qemu.img.qcow2 2>/dev/null) 字节"

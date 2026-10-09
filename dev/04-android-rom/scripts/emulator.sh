@@ -264,7 +264,11 @@ cmd_start() {
     #    于是开完机才炸。**这不是谁写错了端口，是端口撞车没被提前发现。**
     # 注意用 tcp_port_in_use，不是 port_listening —— 后者问的是
     # "有没有模拟器拿它当控制台端口"，一条 ssh 隧道它看不见。
-    if [ -n "$SERVICE_HTTP_PORT" ] && tcp_port_in_use "$SERVICE_HTTP_PORT"; then
+    # 允许显式跳过：测试沙箱里这个端口是**故意**被 mock 占着的
+    # （test-lifecycle-unix.py 开了一个假的 guest HTTP peer，把它的端口当
+    #  AUTOSNAP_HTTP_PORT 喂进来 —— 整套转发在沙箱里是假的）。
+    if [ "${AUTOSNAP_SKIP_HTTP_PORT_CHECK:-0}" != 1 ] \
+       && [ -n "$SERVICE_HTTP_PORT" ] && tcp_port_in_use "$SERVICE_HTTP_PORT"; then
         die "HTTP 服务端口 $SERVICE_HTTP_PORT 已被别的进程占用，起完机也建不了转发。
      （它是按控制台端口 $port 算出来的，不是本实例在用）
      处置：换一个端口起停 —— AUTOSNAP_HTTP_PORT=<空闲端口> $0 start $name

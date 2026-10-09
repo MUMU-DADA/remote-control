@@ -44,6 +44,9 @@ echo "== 1. 建一台全新实例（使用当前默认数据分区）"
 $EMU delete t1 -y >/dev/null 2>&1
 $EMU create t1 2>&1 | grep -E "端口|数据分区"
 PORT=$($EMU list | awk '$1=="t1"{print $2}')
+# 原来这里没有判空：create 失败时 PORT 为空，要等到 CONFIG_FILE 取不到内容
+# 才在下游炸 —— 中间隔了十几行，报错完全指不到真因。
+[ -n "$PORT" ] || die "查不到 t1 的端口（create 没成功？）—— 前提不成立，不下结论"
 echo "   端口 $PORT"
 
 CONFIG_FILE=".run/sysdir-$PORT/config.ini"

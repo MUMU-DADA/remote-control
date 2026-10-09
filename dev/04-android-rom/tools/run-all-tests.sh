@@ -55,6 +55,38 @@ declare -A KIND=(
     [verify-partition-resize.sh]=device
 )
 
+# ── 静态体检（秒级，每次都应该跑）──────────────────────────────────────
+#
+# 为什么把它们也纳进来：这三个（加一个要服务的）原来**没有任何自动调用者** ——
+# docs 里写着"改了文档跑一下"，靠人记得。2026-10-09 实测就吃了这个亏：
+# `check-docs.py` **不带 `--strict` 永远退出 0**，所以大家（包括我）跑了几个月
+# 都是绿的，而它其实一直有 2 个问题（一个孤儿文档 + 一处误报）。
+#
+# 用文件名发现，同样"没分类就报错"—— 新增一个 check-*.py 忘了接进来会立刻炸。
+REPO_ROOT="$(cd "$HERE/../../.." && pwd)"   # tools → 04-android-rom → dev → 仓库根
+declare -A CHECK_KIND=(
+    [check-docs.py]=strict              # ⚠️ 必须带 --strict，否则永远退出 0
+    [check-scripts.py]=plain
+    [check-verify-honesty.py]=plain
+    [check-api-docs.py]=device          # 要真在跑的服务（/api/v1/describe）
+)
+shopt -s nullglob
+check_files=()
+for f in "$REPO_ROOT"/tools/check-*.py; do
+    check_files+=("$(basename "$f")")
+done
+shopt -u nullglob
+if [ "${#check_files[@]}" -eq 0 ]; then
+    echo "[x] 一个 tools/check-*.py 都没发现 —— 路径不对"; exit 1
+fi
+for f in "${check_files[@]}"; do
+    if [ -z "${CHECK_KIND[$f]:-}" ]; then
+        echo "[x] 静态体检 $f 没有分类，拒绝静默跳过它"
+        echo "    处理：在 $0 的 CHECK_KIND 表里标 strict / plain / device"
+        exit 1
+    fi
+done
+
 # ── 发现 ────────────────────────────────────────────────────────────────
 shopt -s nullglob
 found=()
@@ -84,6 +116,8 @@ for f in "${found[@]}"; do
     if [ "${KIND[$f]}" = host ]; then host_list+=("$f"); else device_list+=("$f"); fi
 done
 
+echo "静态体检（秒级）：${#check_files[@]} 个"
+printf '  %s\n' "${check_files[@]}"
 echo "宿主侧（一定会跑）：${#host_list[@]} 个"
 printf '  %s\n' "${host_list[@]}"
 if [ "$WITH_DEVICE" = 1 ]; then _devnote="--with-device 已开，会跑"; else _devnote="默认跳过，加 --with-device 才跑"; fi
@@ -117,6 +151,29 @@ run_one() {
     fi
     rm -f "$log"
 }
+
+# ── 先跑静态体检 ────────────────────────────────────────────────────────
+echo "静态体检（${#check_files[@]} 个）："
+for f in "${check_files[@]}"; do
+    kind="${CHECK_KIND[$f]}"
+    if [ "$kind" = device ] && [ "$WITH_DEVICE" != 1 ]; then
+        printf '  \033[1;33m-\033[0m %-26s SKIP：需要真在跑的服务（加 --with-device 才跑）\n' "$f"
+        skip=$((skip + 1)); skipped_names+=("$f")
+        continue
+    fi
+    extra=""
+    [ "$kind" = strict ] && extra="--strict"
+    out="$(python3 "$REPO_ROOT/tools/$f" $extra 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '  \033[1;32m✓\033[0m %-26s %s\n' "$f" "$(printf '%s' "$out" | tail -1 | cut -c1-60)"
+        pass=$((pass + 1))
+    else
+        printf '  \033[1;31m✗\033[0m %-26s（退出码 %s）\n' "$f" "$rc"
+        printf '%s\n' "$out" | tail -8 | sed 's/^/      /'
+        fail=$((fail + 1)); failed_names+=("$f")
+    fi
+done
+echo
 
 for f in "${host_list[@]}"; do run_one "$f"; done
 

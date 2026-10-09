@@ -180,7 +180,10 @@ nohup() { mock_launch "$@"; }
         for server in (console, http_peer):
             threading.Thread(target=server.serve_forever, daemon=True).start()
         port = console.server_address[1]
-        env = dict(os.environ, AUTOSNAP_HTTP_PORT=str(http_peer.server_address[1]),
+        env = dict(os.environ, # 这个端口是**故意**被上面的假 guest HTTP peer 占着的：
+# 沙箱里没有真的转发，emulator.sh 不该因为"端口被占"拒绝启动。
+                   AUTOSNAP_SKIP_HTTP_PORT_CHECK="1",
+                   AUTOSNAP_HTTP_PORT=str(http_peer.server_address[1]),
                    AUTOSNAP_CONSOLE_TOKEN_FILE=str(console_token), EMULATOR_BIN=str(emulator),
                    EMULATOR_PORT_BASE=str(port), AUTOSNAP_PORT_BASE=str(port),
                    ADB=str(adb), AUTOSNAP_ADB=str(adb), MOCK_ADB_LOG=str(adb_log),

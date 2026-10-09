@@ -56,7 +56,7 @@ packaging/
 | `tools/net-bridge*.sh` | `../tools/`（**仅 linux 包**；Windows 侧 `-net-tap` 没实现） |
 | `tools/arm64-probe.apk` | `../artifacts/arm64-probe.apk`（项目自建 arm64 验收探针） |
 | `tools/remote-control-controller.apk` | release 前从 `dev/05-controller-app/` 当前源码重新构建 |
-| `tools/CONTROLLER-APP.md` | `CONTROLLER-APP.md`（APK 安装方法、签名类型和能力状态） |
+| `tools/CONTROLLER-APP.md` | [CONTROLLER-APP.md](CONTROLLER-APP.md)（APK 安装方法、签名类型和能力状态） |
 | `images/**` | `../artifacts/rom-<product>/`（ROM 交付目录，硬链接） |
 | `runtime/**` | SDK 模拟器包 + platform-tools（按平台下载并校验 sha1） |
 

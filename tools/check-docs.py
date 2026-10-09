@@ -273,8 +273,20 @@ for f in files:
 for f in files:
     if "/vendor/" in rel(f):
         continue
+    in_fence = False
     for line_no, line in enumerate(open(f, encoding="utf-8").read().splitlines(), 1):
         st = line.strip()
+        # ⚠️ **必须跳过围栏代码块。** 粘贴进来的命令输出里经常有以 `|` 开头的行 ——
+        #    2026-10-09 实测：windows/README.md 里一段 arm64 探针输出
+        #    （`PROBE_RESULT … | kernel=x86_64 | ptr=64 bit`）被误报成
+        #    "表格行被换行截断"。**误报会让 --strict 变成"狼来了"**，
+        #    然后就没人用它了 —— 而这条检查恰恰一直没起作用：
+        #    大家（包括我）跑的都是不带 --strict 的，它永远退出 0。
+        if st.startswith("```") or st.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         if not st.startswith("|"):
             continue
         if not st.endswith("|"):
