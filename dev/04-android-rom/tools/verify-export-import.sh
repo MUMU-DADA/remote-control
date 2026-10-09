@@ -77,7 +77,7 @@ chk_out "inspect 报出实例名" '"instance": "t4"' $EMU inspect "$ARCHIVE"
 chk_out "inspect 报出 ROM 指纹" "romFingerprint" $EMU inspect "$ARCHIVE"
 # 实测：inspect 把 manifest 的 **JSON 正文**打出来，不是文件清单；
 # 原来期望 "INSTANCE-MANIFEST.json" 永远匹配不上（过期期望）。
-chk_out "inspect 打印 manifest 正文" '"format": 1' $EMU inspect "$ARCHIVE"
+chk_out "inspect 打印 manifest 正文" '"format": 2' $EMU inspect "$ARCHIVE"
 chk_out "inspect 打印归档内容清单" "内容（前 12 项）" $EMU inspect "$ARCHIVE"
 chk "停机了（导出前自动停的）" bash -c "! $EMU list | awk '\$1==\"t4\"' | grep -q 运行中"
 
@@ -86,22 +86,31 @@ echo "── [4] 删掉原实例，从归档恢复出一台新的"
 $EMU delete t4 -y >/dev/null 2>&1
 chk "原实例已删" bash -c "! test -d .run/sysdir-$PORT"
 
-# 安全闸：不带 --unsafe 必须拒绝，而且理由要说清楚
-chk_out "import 不带 --unsafe 会**拒绝执行**" "已拒绝执行" $EMU import "$ARCHIVE" -n t5
-chk_out "拒绝时说明原因（未通过验证）" "未通过验证" $EMU import "$ARCHIVE" -n t5
-chk "拒绝之后**没有**留下半个实例" bash -c "! $EMU list | awk '\$1==\"t5\"' | grep -q t5"
+# 安全闸（2026-10-09 改）：**按归档格式判**。
+#   格式 1（老的 tar 路线）→ 仍然拒绝，要 --unsafe；
+#   格式 2（压平路线，已验证）→ **不需要** --unsafe。
+chk_out "格式 2 的归档**不需要** --unsafe 就放行" "已导入" $EMU import "$ARCHIVE" -n t5
 
-chk_out "import --unsafe 才放行" "已导入" $EMU import "$ARCHIVE" -n t5 --unsafe
-NEWPORT=$($EMU list | awk '$1=="t5"{print $2}')
-echo "   t5 端口 ${NEWPORT:-（空）}"
-# ⚠️ **空值必须先挡住。** 2026-10-09 实测：导入被拒绝时 t5 根本没被创建，
-#    NEWPORT 取到空串，后面拼出来的串口是 "emulator-" —— 而 `adb -s emulator-`
-#    会**一直等一个不存在的设备**，把脚本挂死（日志停在 [5] 不动，看起来像"卡在开机"）。
-#    空串绝不能进 adb 参数。
-[ -n "$NEWPORT" ] || die "t5 没被创建（NEWPORT 为空）—— 导入没成功，后面的检查无从谈起"
+# 格式 1 的拒绝行为仍然要守 —— 拿一份**最小的格式 1 归档**来验。
+# 拒绝发生在任何文件操作**之前**，所以只要 manifest 是格式 1 就够，
+# 不需要真的复制一整份归档（原来那版改 tar 里的字段，构造本身就失败）。
+F1DIR=/root/AutoSnapshotAndroid/.tmp/fmt1-fixture
+rm -rf "$F1DIR"; mkdir -p "$F1DIR"
+F1="$F1DIR/fmt1.tar"
+printf '{"format": 1, "instance": "dev3"}\n' > "$F1DIR/INSTANCE-MANIFEST.json"
+if tar -cf "$F1" -C "$F1DIR" ./INSTANCE-MANIFEST.json 2>/dev/null \
+   && tar -xOf "$F1" ./INSTANCE-MANIFEST.json 2>/dev/null | grep -q '"format": 1'; then
+    chk_out "格式 1 的归档仍然拒绝执行" "已拒绝执行" $EMU import "$F1" -n t5f
+    chk "格式 1 被拒后**没有**留下半个实例" bash -c "! $EMU list | awk '\$1==\"t5f\"' | grep -q t5f"
+else
+    # 不静默跳过：造不出来就**算失败**，否则"没验"会被读成"验过了"
+    chk "格式 1 的固件能造出来（造不出来 = 这一轮没验拒绝行为）" false
+fi
+
 chk "恢复出来的工作目录在" test -d ".run/sysdir-$NEWPORT"
 chk "userdata-qemu.img 落地了" test -s ".run/sysdir-$NEWPORT/userdata-qemu.img"
-chk "qcow2 落地了" test -s ".run/sysdir-$NEWPORT/userdata-qemu.img.qcow2"
+# 格式 2 是**单文件**恢复：压平镜像转回 raw，**不带覆盖层**（这正是它成立的原因）
+chk "没有覆盖层（格式 2 是单文件恢复）" test ! -e ".run/sysdir-$NEWPORT/userdata-qemu.img.qcow2"
 chk "镜像重新链上了（不是打包进去的）" test -L ".run/sysdir-$NEWPORT/system-qemu.img"
 chk "**hardware-qemu.ini 没带过来**（绝对路径会指错机器）" test ! -e ".run/sysdir-$NEWPORT/hardware-qemu.ini"
 chk "config.ini 用本地真源覆盖了" cmp -s ".run/sysdir-$NEWPORT/config.ini" emulator/config.ini
@@ -114,11 +123,13 @@ wait_boot "emulator-$NEWPORT" || die "t5 等不到 boot_completed=1 —— 前�
 GOT=$($ADB -s "emulator-$NEWPORT" shell "cat /data/local/tmp/$MARK 2>&1" | tr -d '\r')
 echo "   标记读回: [$GOT]"
 chk "恢复后能开机" test "$($ADB -s "emulator-$NEWPORT" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1"
-# 已知缺口：归档搬得走磁盘结构，搬不走 guest 里的数据。
-# **这里断言"数据不在"是刻意的** —— 它是这个闸存在的理由。
-# 哪天数据能过来了，这一项会红，提醒同时把上面那条 --unsafe 闸去掉。
-chk "★ 已知缺口：恢复出来的机器**没有**原来的数据" \
-    bash -c "printf '%s' \"$GOT\" | grep -q 'No such file'"
+# ✅ 2026-10-09：数据**能过来了** —— 这条原来的注释写着
+#   "哪天数据能过来了，这一项会红，提醒同时把上面那条 --unsafe 闸去掉"，
+#   它红了，也正是照它说的把闸改成按格式判的。断言随之翻面。
+# 判据是**内容等于那个标记**，不是"没报 No such file" ——
+#   （翻面时只改了描述、没改判据，这一条红了才是对的结果，见 docs/12 §7）
+chk "★ 恢复出来的机器**有**原来的数据（格式 2）" \
+    bash -c "printf '%s' \"$GOT\" | grep -qx '$MARK'"
 
 echo
 echo "── [6] 边界"

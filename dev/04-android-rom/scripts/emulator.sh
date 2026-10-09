@@ -179,6 +179,19 @@ pick_emulator() {
     die "找不到模拟器（export EMULATOR_BIN=...）"
 }
 
+# 找 qemu-img：压平/恢复数据镜像要用它，就在模拟器本体旁边。
+# 2026-10-09 加：export/import 改成"压平成一张自包含 qcow2"的路线
+# （见 docs/12 §7 的验证），原来这条路线只在探针里手写着路径。
+pick_qemu_img() {
+    if [ -n "${QEMU_IMG_BIN:-}" ]; then printf '%s' "$QEMU_IMG_BIN"; return; fi
+    local c
+    for c in "$(dirname "$(pick_emulator)")/qemu-img" \
+             /opt/android/emulator-new/emulator/qemu-img; do
+        [ -x "$c" ] && { printf '%s' "$c"; return; }
+    done
+    die "找不到 qemu-img（export QEMU_IMG_BIN=...）—— 导出/恢复数据镜像要用它"
+}
+
 console_appears() {   # 最多 40 秒；进程提前退出即失败
     local port="$1"
     for _ in $(seq 1 8); do
@@ -529,6 +542,8 @@ cmd_clone() {
 #      不删的话两台机器会指向同一份 userdata。跟 clone 那边同一个道理。
 
 MANIFEST_NAME="INSTANCE-MANIFEST.json"
+# 归档里那份**压平后**的数据镜像（格式 2 起）。见 cmd_export / cmd_import。
+DATA_FLAT="userdata-flat.qcow2"
 
 # 归档里**不要**带的东西（路径/运行期相关，import 时会按新环境重建）
 arch_exclude() {
@@ -597,15 +612,35 @@ cmd_export() {
         chmod 600 "$stage/host-service.token"
     fi
 
+    # 数据镜像（backing + 覆盖层）**不原样搬**，改成压平成一张自包含 qcow2。
+    #
+    # ⚠️ 这是 2026-10-09 改的，理由是实测：原样搬两个文件时，恢复出来的机器
+    #    **guest 读不到原来的数据**（文件层面逐字节忠实 —— 表观/实占块数/md5 全一致，
+    #    见 docs/12 §7 —— 但起来之后 /data 是空的）。而压平这条路线验过是好的：
+    #    压成一张自包含 qcow2 只存已分配的簇，恢复时转回 raw，guest 数据完好。
+    local data_img="userdata-qemu.img" data_ovl="userdata-qemu.img.qcow2"
     local n_state=0 f b
     for f in "$sysdir"/*; do
         [ -e "$f" ] || continue
         [ -L "$f" ] && continue              # 指向 ROM 镜像的符号链接：不导
         b="$(basename "$f")"
         arch_exclude "$b" && continue        # 路径/运行期相关：不导
+        [ "$b" = "$data_img" ] && continue   # 见上面：走压平路线
+        [ "$b" = "$data_ovl" ] && continue
         ln "$f" "$stage/sysdir/$b" 2>/dev/null || cp -a "$f" "$stage/sysdir/$b"
         n_state=$((n_state + 1))
     done
+
+    # 压平：以覆盖层为入口（它会读穿 backing 链），得到一张自包含 qcow2。
+    # 没有覆盖层（从没启动过的实例）就以 backing 为入口。
+    local qi src
+    qi="$(pick_qemu_img)"
+    if [ -f "$sysdir/$data_ovl" ]; then src="$sysdir/$data_ovl"; else src="$sysdir/$data_img"; fi
+    [ -f "$src" ] || die "实例里既没有 $data_ovl 也没有 $data_img —— 工作目录不对？"
+    log "压平数据镜像（$DATA_FLAT）…"
+    if ! "$qi" convert -O qcow2 -c "$src" "$stage/sysdir/$DATA_FLAT" 2>/dev/null; then
+        rm -rf "$stage"; die "qemu-img convert 失败：$src"
+    fi
     if [ -d "$datadir" ]; then
         for f in "$datadir"/*; do
             [ -e "$f" ] || continue
@@ -624,7 +659,10 @@ cmd_export() {
     done
 
     local bytes fp now
-    bytes=$(du -sb "$sysdir" "$datadir" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+    # ⚠️ 用**实占**（--block-size=1 而不是 -b）：-b 给的是表观大小，
+    #    于是 manifest 里记成 66G，而 import 拿它比剩余空间 —— 要求 66G 空闲
+    #    才能导入一份实占 1.9G 的归档。import 要的是"解出来要写多少"。
+    bytes=$(du -s --block-size=1 "$stage" 2>/dev/null | awk '{print $1+0}')
     fp="$(rom_fingerprint)"
     now="$(date -Iseconds)"
 
@@ -632,7 +670,8 @@ cmd_export() {
     # （嵌套的 $( ) + 引号在 here-doc 里出过一次词法问题，干脆避开）
     {
         printf '{\n'
-        printf '  "format": 1,\n'
+        printf '  "format": 2,\n'
+        printf '  "dataFile": "%s",\n' "$DATA_FLAT"
         printf '  "instance": "%s",\n' "$name"
         printf '  "exportedAt": "%s",\n' "$now"
         printf '  "exportedFrom": "linux",\n'
@@ -675,8 +714,9 @@ cmd_export() {
     printf '    条目     %s 个（tar -tf 数出来的）\n' "$listed"
     printf '    镜像     未打包（import 时按本地 ROM 重新链接）\n'
     printf '    恢复     ./scripts/emulator.sh import %s -n %s\n' "$(basename "$out")" "$name"
-    warn "⚠️ 恢复（import）目前**未通过验证**：归档是忠实的，但恢复出来数据是空的。"
-    warn "   别把这个归档当备份用。详情见 docs/12-emulator-control.md。"
+    # 格式 2 起走的是**验证过的**压平路线（docs/12 §7），不再是那句老警告。
+    log "    数据     $DATA_FLAT（压平：backing+覆盖层 → 一张自包含 qcow2；恢复时转回 raw）"
+    log "    恢复     ./scripts/emulator.sh import $(basename "$out") -n <新名字>"
 }
 
 # ⚠️ 下面 cmd_inspect / cmd_import 里那两句 `|| true` **不能省**：
@@ -725,16 +765,24 @@ cmd_import() {
     #
     #   在查清之前，这条命令默认不让跑 —— "备份"要是恢复不出来，
     #   比没有备份更危险：用户会以为数据安全了。
-    if [ "$OPT_UNSAFE" != 1 ]; then
-        warn "import 目前**未通过验证**：恢复出来的实例 /data 是空的（归档本身没问题）"
-        warn "详见 docs/12-emulator-control.md §7「导出 / 导入：导出可用，恢复未通过验证」。确实要用加 --unsafe。"
-        die "已拒绝执行（这是保护，不是故障）"
-    fi
-    warn "以 --unsafe 运行：恢复出来的机器可能没有原来的数据"
-
+    #
+    #   ⚠️ 2026-10-09 起，闸门**按归档格式判**（要先读 manifest，所以顺序调整了）：
+    #     · 格式 1：老的 tar 路线（原样搬 backing + 覆盖层）—— **仍然恢复不出数据**，
+    #               照旧要 --unsafe 才放行；
+    #     · 格式 2：压平路线（backing+覆盖层压成一张自包含 qcow2，恢复时转回 raw）
+    #               —— 探针验过数据完好（docs/12 §7），**不需要 --unsafe**。
     local name="${OPT_NAME:-}"
     local mf; mf="$(tar -xOf "$f" "./$MANIFEST_NAME" 2>/dev/null || tar -xOf "$f" "$MANIFEST_NAME" 2>/dev/null || true)"
     [ -n "$mf" ] || die "归档里没有 $MANIFEST_NAME —— 不是本工具导出的？"
+
+    local fmt; fmt="$(printf '%s' "$mf" | sed -n 's/.*"format": *\([0-9]*\).*/\1/p')"
+    fmt="${fmt:-1}"          # 没有 format 字段 = 老归档 = 当作 1
+    if [ "$fmt" -lt 2 ] && [ "$OPT_UNSAFE" != 1 ]; then
+        warn "这是**格式 1** 的老归档：那条路线恢复出来的实例 /data 是空的（归档本身没问题）"
+        warn "详见 docs/12-emulator-control.md §7。确实要用加 --unsafe。"
+        die "已拒绝执行（这是保护，不是故障）"
+    fi
+    [ "$fmt" -lt 2 ] && warn "以 --unsafe 运行格式 1 的归档：恢复出来的机器可能没有原来的数据"
     [ -n "$name" ] || name="$(printf '%s' "$mf" | sed -n 's/.*"instance": *"\([^"]*\)".*/\1/p')"
     [ -n "$name" ] || die "归档里没写实例名，用 -n 指定一个"
     instance_exists "$name" && die "实例 '$name' 已经存在（用 -n 换个名字）"
@@ -781,6 +829,20 @@ cmd_import() {
     }
     rm -f "$sysdir/$MANIFEST_NAME" 2>/dev/null
 
+    # ── 格式 2：把压平镜像转回 raw 当 backing ────────────────────────────
+    # 这正是探针验过的路线（docs/12 §7）：只存已分配的簇，恢复时写出正确的
+    # 稀疏 raw；**不需要覆盖层**，也就没有"两份文件配不配得上"的问题。
+    local dfile; dfile="$(printf '%s' "$mf" | sed -n 's/.*"dataFile": *"\([^"]*\)".*/\1/p')"
+    dfile="${dfile:-$DATA_FLAT}"
+    if [ "$fmt" -ge 2 ]; then
+        [ -f "$sysdir/$dfile" ] || die "归档是格式 2，但里面没有 $dfile —— 归档不完整？"
+        log "还原数据镜像（$dfile → userdata-qemu.img）…"
+        rm -f "$sysdir/userdata-qemu.img" "$sysdir/userdata-qemu.img.qcow2"
+        "$(pick_qemu_img)" convert -O raw "$sysdir/$dfile" "$sysdir/userdata-qemu.img" 2>/dev/null \
+            || die "qemu-img convert 失败：$sysdir/$dfile"
+        rm -f "$sysdir/$dfile"
+    fi
+
     # 按本地 ROM 重新链镜像（归档里没带）
     local missing=""
     for i in "$ARTIFACTS_DIR/rom-$PRODUCT_NAME"/*; do
@@ -796,7 +858,10 @@ cmd_import() {
           "$sysdir/bootcompleted.ini" "$sysdir/version_num.cache" "$sysdir"/*.qcow2.lock 2>/dev/null
 
     # 读回确认：关键文件真的落地了
-    [ -s "$sysdir/userdata-qemu.img" ] || warn "userdata-qemu.img 不在归档里？"
+    if [ ! -s "$sysdir/userdata-qemu.img" ]; then
+        [ "$fmt" -ge 2 ] && die "格式 2 的归档恢复后没有 userdata-qemu.img —— 不该发生"
+        warn "userdata-qemu.img 不在归档里？"
+    fi
     log "已导入： '$name'（端口 $port）"
     printf '    下一步   ./scripts/emulator.sh start %s\n' "$name"
 

@@ -89,6 +89,8 @@ BUILDER_CONTAINER="${BUILDER_CONTAINER:-remote-control-builder}"
 BUILDER_AOSP_PATH="${BUILDER_AOSP_PATH:-/aosp}"
 ADB="${ADB:-$AOSP_DIR/out/host/linux-x86/bin/adb}"
 EMULATOR_BIN="${EMULATOR_BIN:-}"
+# 同理：export/import 要压平数据镜像，用 qemu-img（不设就自动找）
+QEMU_IMG_BIN="${QEMU_IMG_BIN:-}"
 EMULATOR_PORT="${EMULATOR_PORT:-5580}"
 
 # 模拟器运行配置（屏幕尺寸/密度等）。**本项目唯一真源** —— ROM 构建产物里那份
