@@ -78,6 +78,10 @@ cp "$X64_DIR/emulator/config.ini" "$SANDBOX/emulator/config.ini"
 cp "$X64_DIR/windows/emulator.ps1" "$SANDBOX/win/emulator.ps1"
 mkdir -p "$SANDBOX/packaging/bin/windows"
 cp "$X64_DIR/packaging/bin/windows/console.ps1" "$X64_DIR/packaging/bin/windows/storage.ps1" "$SANDBOX/packaging/bin/windows/"
+# ⚠️ archive.ps1 也要拷：管理器会 dot-source 它（export/import 用）。
+#    少拷这一个会让**所有**动词连带失效 —— 2026-10-09 实测踩到，
+#    与 test-lifecycle-unix.py 那边漏拷 archive.sh 是同一类问题。
+cp "$X64_DIR/packaging/bin/windows/archive.ps1" "$SANDBOX/packaging/bin/windows/"
 
 config_value() {
     awk -F= -v key="$1" '$1 == key { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' \

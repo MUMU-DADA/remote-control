@@ -12,7 +12,24 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
 # 归档（export/import）的共享实现。与 Linux 侧的 packaging/bin/linux/archive.sh
 # **同一份格式契约** —— 所以归档跨平台互认（Linux 导出的 Windows 能恢复，反之亦然）。
-. (Join-Path $PSScriptRoot "archive.ps1")
+#
+# ⚠️ **允许它缺失**：只有 export/import 需要它，别的动词不受影响。
+#    2026-10-09 实测踩到：无条件 dot-source 时，只拷了部分文件的地方
+#    （比如 test-windows-emulator.sh 的沙箱）会**连 list/start 一起挂掉**，
+#    报的还是"The term '…archive.ps1' is not recognized"。
+#    Linux 侧是同一类问题的孪生（那边的沙箱漏拷 archive.sh），两边都加了容错。
+$archiveLib = Join-Path $PSScriptRoot "archive.ps1"
+if (Test-Path -LiteralPath $archiveLib) {
+    . $archiveLib
+} else {
+    Write-Warn "找不到归档实现：$archiveLib —— export / import 将不可用（其余动词正常）"
+    function Export-InstanceArchive { param() Die "找不到归档实现：$archiveLib（export 需要它）" }
+    function Import-InstanceArchive { param() Die "找不到归档实现：$archiveLib（import 需要它）" }
+    function Test-ArchivePreflight  { param() Die "找不到归档实现：$archiveLib（import 需要它）" }
+    function Get-ArchiveMember      { param([string]$Archive, [string]$Member) return "" }
+    function Get-ArchiveField       { param([string]$Manifest, [string]$Field) return "" }
+    function Get-ArchiveListing     { param([string]$Archive) return @() }
+}
 
 function Show-Usage {
     Write-Host @"

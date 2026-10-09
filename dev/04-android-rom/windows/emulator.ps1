@@ -450,7 +450,19 @@ function Invoke-Create {
 . (Join-Path $script:X64Dir "packaging\bin\windows\console.ps1")
 . (Join-Path $script:X64Dir "packaging\bin\windows\storage.ps1")
 # 归档（export/import）的共享实现 —— 与交付版同一个文件、与 Linux 侧同一份格式契约。
-. (Join-Path $script:X64Dir "packaging\bin\windows\archive.ps1")
+# ⚠️ 允许缺失（理由同交付版那份的注释）：只拷部分文件的地方不该连 list/start 一起挂掉。
+$archiveLib = Join-Path $script:X64Dir "packaging\bin\windows\archive.ps1"
+if (Test-Path -LiteralPath $archiveLib) {
+    . $archiveLib
+} else {
+    Write-Warn "找不到归档实现：$archiveLib —— export / import 将不可用（其余动词正常）"
+    function Export-InstanceArchive { param() Die "找不到归档实现：$archiveLib（export 需要它）" }
+    function Import-InstanceArchive { param() Die "找不到归档实现：$archiveLib（import 需要它）" }
+    function Test-ArchivePreflight  { param() Die "找不到归档实现：$archiveLib（import 需要它）" }
+    function Get-ArchiveMember      { param([string]$Archive, [string]$Member) return "" }
+    function Get-ArchiveField       { param([string]$Manifest, [string]$Field) return "" }
+    function Get-ArchiveListing     { param([string]$Archive) return @() }
+}
 
 # ---------------------------------------------------------------------------
 # start
