@@ -11,6 +11,17 @@
     分发      daemon/rest_api.cpp                      名字 → Cmd:: 的映射
     文档      docs/api/*.md + README                  客户端作者读的就是这份
 
+**HTTP 端点**是同一份对照的第三块（2026-10-09 扩进来的）：`rest_api.cpp` 里的每个
+`res == "x"` 都要在 `docs/api/01-http.md` 里出现；文档写了某个方法而代码不收，
+也要报（客户端照文档写，只有真调用时才失败）。
+
+⚠️ 抽取是**启发式**的：路由是 if 链而不是表，方法条件通常在同一行，但有几个
+（`apps`/`config`/`files`/`update`/`adb`）不在一行 —— 那几个**只核对存在性**，
+不核对方法。工具会把"只核对了存在性"的个数**打出来**，不假装全查了；
+抽出的路由少于 20 个时直接报"抽取需要重新校对"，而不是报绿。
+（2026-10-09 实测踩过：第一版正则遇到嵌套括号就停，悄悄漏掉 4 个路由，
+却因为"漏的两边都没有"而报出 0 缺失。）
+
 **错误码**是这条链子的另一半（2026-10-09 扩进来的）：客户端靠 `0x1009` 这样的码
 分支处理。这里查两件事 —— 每个码文档里要有，而且**必须真的会被返回**：
 定义了却从不返回的码，会让客户端为一件不会发生的事写分支。
@@ -46,6 +57,8 @@ ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL = ROOT / "dev" / "02-native-daemon" / "daemon" / "protocol.h"
 DOC_GLOBS = ["docs/api/*.md"]
 DOC_FILES = ["README.md", "dev/02-native-daemon/README.md"]
+DAEMON_REST = ROOT / "dev" / "02-native-daemon" / "daemon" / "rest_api.cpp"
+DOC_HTTP = ROOT / "docs" / "api" / "01-http.md"
 
 # 刻意不写进 API 文档的（要有理由）。
 # 今天为空 —— `Token` 虽然 socket-only，但 docs/api/03-socket.md 里写了。谁要豁免谁写进来。
@@ -77,8 +90,9 @@ def main() -> int:
     text = "\n".join(d.read_text(encoding="utf-8") for d in docs)
     low = text.lower()
 
-    missing = []      # 文档里找不到的（命令 token 和错误码共用）
+    missing = []      # 文档里找不到的（命令 token / 错误码 / HTTP 路由共用）
     dead = []         # 定义了但 daemon 从不返回的错误码
+    problems = []     # 其它对不上的：抽取前提崩了、端点方法对不上
     for name, _ in tokens:
         if name in ALLOW:
             continue
@@ -103,16 +117,63 @@ def main() -> int:
         if uses <= 0:
             dead.append((name, val))
 
-    print(f"协议清单对照：protocol.h 里 {len(tokens)} 个 token + {len(errs)} 个错误码，"
-          f"对照 {len(docs)} 个文档")
-    if not missing and not dead:
+    # ── HTTP 端点：`rest_api.cpp` 的路由 vs docs/api/01-http.md ──────────
+    # 比命令 token 更强的一层：端点还带**方法**。文档说 POST、代码只收 GET，
+    # 就是一次静默分叉 —— 客户端照文档写，只有真调用时才失败。
+    #
+    # ⚠️ 抽取是**启发式**的：路由写成 if 链而不是表，方法条件通常在同一行，
+    #    但有几个（apps/config/files/update/adb）不在一行 —— 那几个**只核对存在性**，
+    #    不核对方法。工具会把"只核对了存在性"的个数说出来，不假装全查了。
+    http_doc = ROOT / "docs" / "api" / "01-http.md"
+    routes, method_unchecked = {}, 0
+    if http_doc.is_file() and DAEMON_REST.is_file():
+        code = DAEMON_REST.read_text(encoding="utf-8")
+        for line in code.splitlines():
+            m = re.search(r'res == "([a-z_]+)"', line)
+            if not m:
+                continue
+            ms = set(re.findall(r'method == "([A-Z]+)"', line))
+            routes.setdefault(m.group(1), set()).update(ms or {"?"})
+        if len(routes) < 20:
+            problems.append(f"只从 rest_api.cpp 抽出 {len(routes)} 个路由 —— 路由的写法变了，"
+                            f"本工具的抽取需要重新校对（**不要**把它当成'没问题'）")
+        dtext = http_doc.read_text(encoding="utf-8")
+        docmap = {}
+        for m in re.finditer(r'\b(GET|POST|PUT|DELETE|PATCH)\s+`?(/api/v1/[a-z_]+|/[a-z_]+)`?', dtext):
+            seg = m.group(2)
+            seg = seg[len("/api/v1/"):] if seg.startswith("/api/v1/") else seg.lstrip("/")
+            docmap.setdefault(seg, set()).add(m.group(1))
+        for r in sorted(routes):
+            if r not in docmap:
+                missing.append((r, "http route"))
+                continue
+            if routes[r] == {"?"}:
+                method_unchecked += 1
+                continue
+            for meth in sorted(docmap[r] - routes[r]):
+                problems.append(f"HTTP 端点 `{r}`：文档写了 {meth}，代码只接受 "
+                                f"{sorted(routes[r])} —— 客户端照文档写会失败")
+
+    print(f"协议清单对照：protocol.h 里 {len(tokens)} 个 token + {len(errs)} 个错误码；"
+          f"rest_api.cpp 里 {len(routes)} 个 HTTP 路由（其中 {method_unchecked} 个只核对了存在性、"
+          f"方法未核对）；对照 {len(docs)} 个文档")
+    if problems:
+        print(f"  ✗ {len(problems)} 处对不上：")
+        for p_ in problems:
+            print(f"      {p_}")
+    if not missing and not dead and not problems:
         print(f"  ✓ 每个 token（{len(tokens)} 个）和错误码（{len(errs)} 个）都在文档里，"
-              f"且每个错误码都真的会被返回")
+              f"每个错误码都真的会被返回，{len(routes)} 个 HTTP 路由都在文档里")
         return 0
-    print(f"  ✗ {len(missing)} 个条目在文档里找不到 —— 客户端作者不会知道它们存在：")
+    if missing:
+        print(f"  ✗ {len(missing)} 个条目在文档里找不到 —— 客户端作者不会知道它们存在：")
     for name, s in missing:
-        hint = f"（文档里找的是 `{name}` 或 `{s}`）" if not s.startswith("0x") else f"（找的是 `{s}` 或十进制 {int(s, 16)}）"
-        print(f"      {name:<18}{hint}")
+        if s == "http route":
+            print(f"      HTTP 路由 {name} —— docs/api/01-http.md 里没有它")
+        elif s.startswith("0x"):
+            print(f"      {name:<18}（找的是 `{s}` 或十进制 {int(s, 16)}）")
+        else:
+            print(f"      {name:<18}（文档里找的是 `{name}` 或 `{s}`）")
     if dead:
         print(f"  ✗ {len(dead)} 个错误码**定义了却从不返回** —— 客户端会为不会发生的事写分支：")
         for name, val in dead:
