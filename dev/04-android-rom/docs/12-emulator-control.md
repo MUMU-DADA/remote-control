@@ -490,7 +490,7 @@ cp -a "$PACKAGING_DIR/bin/$(target_platform "$plat")/." "$root/bin/"
 
 | 差异 | 在哪 | 为什么 |
 |---|---|---|
-| `export` / `import` | 只在**仓库侧 Linux** | 交付版不带：`import` 未通过验证，见 §7 |
+| ~~`export` / `import`~~ | ~~只在仓库侧~~ **两边都有了** | 2026-10-09：归档逻辑抽成 `packaging/bin/linux/archive.sh`，两套管理器 source 同一份 —— 原来"只在仓库侧"的理由（`import` 未通过验证）到这一天为止 |
 | `verify` | 只在**交付版**（两侧都是） | 交付包自带验收；开发侧走 `run-linux.sh --verify` |
 | `inspect` | 只在**交付版 Windows** | 读归档用；归档由 Linux 侧的 `export` 产生 |
 

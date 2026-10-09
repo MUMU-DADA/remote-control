@@ -46,7 +46,12 @@ PAIRS = [
 # 已知且**有理由**的差异：{对: (只在仓库侧有的, 只在交付版有的)}
 EXPECTED = {
     ("scripts/emulator.sh", "packaging/bin/linux/emulator.sh"): (
-        {"export", "import"},        # 交付版不带：import 未通过验证，见 docs/12 §7
+        # ✅ 2026-10-09：`export`/`import` 两边**都有了** —— 归档逻辑抽成
+        #    `packaging/bin/linux/archive.sh`，两套管理器 source 同一份
+        #    （原先只在开发侧有，理由是"import 未通过验证"；那个理由到这一天为止）。
+        #    所以这里从 {"export","import"} 变成空集 —— 这个检查报的
+        #    "记录在案的差异已经不存在了"正是它该做的事，不是故障。
+        set(),
         {"verify"},                  # 交付包自带验收；开发侧走 run-linux.sh --verify
     ),
     ("windows/emulator.ps1", "packaging/bin/windows/emulator.ps1"): (

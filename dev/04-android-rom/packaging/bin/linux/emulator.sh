@@ -4,6 +4,12 @@ set -eo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$BIN_DIR/lib.sh"
+# 归档（export/import）的**共享实现** —— 与开发侧的 scripts/emulator.sh 同一份。
+# 2026-10-09 抽出来：原先只有开发侧有，用户跑的是这一份；与其写第二份，
+# 不如两边 source 同一份（见 archive.sh 头部与 docs/12 §10）。
+source "$BIN_DIR/archive.sh"
+# 包里的 qemu-img（压平/还原数据镜像要用）
+if [ -x "$RUNTIME/emulator/qemu-img" ]; then QEMU_IMG_BIN="$RUNTIME/emulator/qemu-img"; fi
 
 usage() {
     cat <<'EOF'
@@ -21,6 +27,8 @@ usage() {
   clone <源> <新名称> 复制实例数据与应用，不复制快照
   delete [名称]       停止并删除实例及其数据
   inspect <归档>      只读查看实例归档清单与内容
+  export <名称>       把实例打成一个归档（--out 指定路径）
+  import <归档>       从归档恢复出一台新实例（--name 指定名字）
   help                显示本页
 
 常用选项：--name NAME、--port PORT、--timeout SEC、--yes、--force
@@ -118,7 +126,7 @@ inspect_archive() {
 command_name="${1:-help}"
 [ "$#" -eq 0 ] || shift
 case "$command_name" in
-    create|start|stop|kill|restart|status|list|ls|verify|reset|delete|clone|inspect) ;;
+    create|start|stop|kill|restart|status|list|ls|verify|reset|delete|clone|inspect|export|import) ;;
     help|-h|--help) usage; exit 0 ;;
     *) die_usage "未知命令：$command_name" ;;
 esac
@@ -128,6 +136,7 @@ GPU=""; MEMORY=""; CORES=""; ACCEL=""; PRODUCT=""
 FORCE=0; YES=0; REUSE=0; WIPE=0; GUI=0; NO_WAIT=0; TEST_INSTANCE=0
 BRIDGE=0; NAT=0; VERIFY_HOST=0; VERIFY_DEVICE=0; HELP=0
 POS_COUNT=0; POS1=""; POS2=""
+OUT_OPT=""; UNSAFE=0; ARCHIVE_EXPORT_NAME=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -145,6 +154,15 @@ while [ "$#" -gt 0 ]; do
         --port=*)
             [ "$PORT_SEEN" = 0 ] || die "端口只能指定一次"
             PORT_OPT="${1#*=}"; PORT_SEEN=1; [ -n "$PORT_OPT" ] || die "--port 后需要端口"; shift; continue ;;
+        --out|-o)
+            [ "$#" -ge 2 ] || die "$1 后需要归档路径"
+            [ -z "$OUT_OPT" ] || die "--out 只能指定一次"
+            OUT_OPT="$2"; shift 2; continue ;;
+        --out=*)
+            [ -z "$OUT_OPT" ] || die "--out 只能指定一次"
+            OUT_OPT="${1#*=}"; [ -n "$OUT_OPT" ] || die "--out 后需要归档路径"; shift; continue ;;
+        --unsafe)
+            UNSAFE=1; shift; continue ;;
         --timeout)
             [ "$#" -ge 2 ] || die "--timeout 后需要秒数"
             [ -z "$TIMEOUT" ] || die "--timeout 只能指定一次"
@@ -201,7 +219,7 @@ if [ "$HELP" = 1 ]; then
         status|list|ls) exec bash "$BIN_DIR/status.sh" --help ;;
         verify) exec bash "$BIN_DIR/verify.sh" --help ;;
         reset) exec bash "$BIN_DIR/reset.sh" --help ;;
-        create|clone|inspect) usage; exit 0 ;;
+        create|clone|inspect|export|import) usage; exit 0 ;;
         restart) exec bash "$BIN_DIR/start-headless.sh" --help ;;
     esac
 fi
@@ -219,6 +237,134 @@ if [ "$command_name" = inspect ]; then
         && [ -z "$TIMEOUT$GPU$MEMORY$CORES$ACCEL$PRODUCT" ] \
         || die_usage "inspect 只接受归档路径"
     inspect_archive "$POS1"
+    exit 0
+fi
+
+# ── export / import：归档逻辑在 archive.sh，这里只做本管理器该做的 ──────
+
+# 共享实现在打包前调这个钩子，把服务属性/令牌摆进它的暂存目录。
+archive_extra_stage() {
+    local stage="$1" key value
+    : > "$stage/host-service.env"
+    for key in SERVICE_PORT SERVICE_ENABLED SERVICE_AUTH SERVICE_BIND SERVICE_ADB; do
+        value="$(instance_service_value "$ARCHIVE_EXPORT_NAME" "$key")"
+        [ -z "$value" ] || printf '%s=%s\n' "$key" "$value" >> "$stage/host-service.env"
+    done
+    if [ -s "$(service_token_file "$ARCHIVE_EXPORT_NAME")" ]; then
+        (umask 077; cp "$(service_token_file "$ARCHIVE_EXPORT_NAME")" "$stage/host-service.token")
+        chmod 600 "$stage/host-service.token"
+    fi
+}
+
+if [ "$command_name" = export ]; then
+    [ "$POS_COUNT" -le 1 ] || die_usage "export 只接受一个实例名"
+    NAME="$DEFAULT_NAME"
+    [ "$NAME_SEEN" = 0 ] || NAME="$NAME_OPT"
+    [ "$POS_COUNT" -eq 0 ] || NAME="$POS1"
+    valid_name "$NAME"
+    instance_exists "$NAME" || die "没有叫 '$NAME' 的实例（用 list 看看）"
+    command -v tar >/dev/null 2>&1 || die "export 需要系统 tar"
+    [ -z "$(command -v du)" ] && die "export 需要 du"
+
+    PORT="$(instance_port "$NAME")"
+    SYSDIR="$(sysdir_for_port "$PORT")"; DATADIR="$(datadir_for_port "$PORT")"
+    OUT="${OUT_OPT:-$ROOT/$NAME-$(date +%Y%m%d-%H%M%S).tar}"
+
+    if port_listening "$PORT"; then
+        log "导出前先停掉 '$NAME'（运行中导出会拿到不一致的镜像）"
+        bash "$BIN_DIR/stop.sh" "$NAME" >/dev/null 2>&1 || bash "$BIN_DIR/stop.sh" "$NAME" --force >/dev/null 2>&1
+    fi
+
+    ARCHIVE_EXPORT_NAME="$NAME"
+    ARCHIVE_PRODUCT="${AUTOSNAP_PRODUCT:-remote_control}"
+    if [ -s "$IMAGES/SHA256SUMS" ]; then
+        ARCHIVE_ROM_FP="$(md5sum "$IMAGES/SHA256SUMS" | cut -d' ' -f1)"
+    else
+        ARCHIVE_ROM_FP="unknown"
+    fi
+    IMGS=""
+    for i in "$IMAGES"/*; do
+        [ -e "$i" ] || continue
+        b="$(basename "$i")"
+        [ -L "$SYSDIR/$b" ] || continue
+        IMGS="$IMGS $b"
+    done
+    ARCHIVE_IMAGES="$IMGS"
+
+    archive_export "$NAME" "$SYSDIR" "$DATADIR" "$OUT" "$([ "$FORCE" = 1 ] && printf -- '--force')" || exit 1
+    log "已导出： $OUT"
+    printf '    大小     %s\n' "$(du -h "$OUT" | cut -f1)"
+    printf '    条目     %s 个\n' "$ARCHIVE_LAST_ENTRIES"
+    log "    恢复     ./bin/emulator.sh import $(basename "$OUT") -n <新名字>"
+    exit 0
+fi
+
+if [ "$command_name" = import ]; then
+    [ "$POS_COUNT" -eq 1 ] || die_usage "import 需要归档路径"
+    command -v tar >/dev/null 2>&1 || die "import 需要系统 tar"
+    ARCHIVE="$POS1"
+    # ⚠️ 闸必须在**注册实例之前**跑 —— 否则被拒的导入会留下半个实例。
+    archive_preflight "$ARCHIVE" "$([ "$UNSAFE" = 1 ] && printf -- '--unsafe')" || exit 1
+    MF="$ARCHIVE_MF"
+
+    NAME="$DEFAULT_NAME"
+    [ "$NAME_SEEN" = 0 ] || NAME="$NAME_OPT"
+    [ -n "$NAME" ] || NAME="$(printf '%s' "$MF" | sed -n 's/.*"instance": *"\([^"]*\)".*/\1/p')"
+    [ -n "$NAME" ] || die "归档里没写实例名，用 --name 指定一个"
+    valid_name "$NAME"
+    instance_exists "$NAME" && die "实例 '$NAME' 已经存在（用 --name 换个名字）"
+
+    THERE="$(printf '%s' "$MF" | sed -n 's/.*"romFingerprint": *"\([^"]*\)".*/\1/p')"
+    HERE="unknown"
+    [ -s "$IMAGES/SHA256SUMS" ] && HERE="$(md5sum "$IMAGES/SHA256SUMS" | cut -d' ' -f1)"
+    [ "$THERE" = "$HERE" ] || warn "ROM 指纹不一致（归档 $THERE / 本地 $HERE）—— 镜像版本不同可能起不来"
+
+    PORT="$(alloc_port)"
+    port_taken "$PORT" && die "端口 $PORT 已被别的实例占用"
+    instance_register "$NAME" "$PORT"
+
+    # 服务属性/令牌：归档里带着就照搬（否则导入出来的机器会换一个令牌）
+    if [ -n "$(archive_member "$ARCHIVE" host-service.env)" ]; then
+        archive_member "$ARCHIVE" host-service.env > /tmp/.arch-svc-$$
+        while IFS= read -r line; do
+            case "$line" in
+                SERVICE_PORT=*|SERVICE_ENABLED=*|SERVICE_AUTH=*|SERVICE_BIND=*|SERVICE_ADB=*)
+                    printf '%s\n' "$line" >> "$(instance_file "$NAME")" ;;
+            esac
+        done < /tmp/.arch-svc-$$
+        rm -f /tmp/.arch-svc-$$
+    fi
+    TOK="$(archive_member "$ARCHIVE" host-service.token)"
+    if [ -n "$TOK" ]; then
+        (umask 077; printf '%s\n' "$TOK" > "$(service_token_file "$NAME")")
+        chmod 600 "$(service_token_file "$NAME")"
+    fi
+
+    SYSDIR="$(sysdir_for_port "$PORT")"
+    archive_import "$ARCHIVE" "$SYSDIR" "$(datadir_for_port "$PORT")" "$NAME" \
+        "$([ "$UNSAFE" = 1 ] && printf -- '--unsafe')" || exit 1
+
+    # 按本地 images/ 重新链镜像（归档里没带）
+    MISSING=""
+    for i in "$IMAGES"/*; do
+        [ -e "$i" ] || continue
+        b="$(basename "$i")"
+        [ -e "$SYSDIR/$b" ] && continue
+        ln -sfn "$i" "$SYSDIR/$b" 2>/dev/null || MISSING="$MISSING $b"
+    done
+    [ -z "$MISSING" ] || warn "这些镜像没链上（本地 images/ 缺）：$MISSING"
+
+    # ⚠️ config.ini 必须是**本机模板的副本**，不能是符号链接。
+    #    lib.sh:235 的 NO_LINK 里就写着 config.ini —— 因为链过去的话，
+    #    模拟器往 config.ini 写一次就把 images/ 里那份改了，SHA256SUMS 当场校验失败。
+    #    2026-10-09 实测：第一版 import 漏了这一步，恢复出来的 tP 的 config.ini
+    #    是个指向 ROM 目录的符号链接，而 create 出来的 dev2 是正规副本。
+    [ -s "$CONFIG_FILE" ] || die "本机模板缺失：$CONFIG_FILE（包里的 templates/config.ini）—— 不复制就恢复不出能用的实例"
+    rm -f "$SYSDIR/config.ini"
+    cp -f "$CONFIG_FILE" "$SYSDIR/config.ini" || die "复制 config.ini 失败：$CONFIG_FILE"
+
+    log "已导入： '$NAME'（端口 $PORT）"
+    printf '    下一步   ./bin/emulator.sh start %s\n' "$NAME"
     exit 0
 fi
 
