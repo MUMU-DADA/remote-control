@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 import time
 import urllib.error
 import urllib.request
@@ -183,6 +184,59 @@ def frame_entropy(payload):
 print(f"\n\033[1m=== remote-control 全功能体检 ===\033[0m  {BASE}\n")
 
 print("\033[1;34m[1] 元信息\033[0m")
+# ── 先确认"两个目标"是同一个设备，并把它们**打出来** ─────────────────────
+#
+# ⚠️ 这个脚本有**两条腿**：HTTP 走 BASE，其它（焦点窗口、pm list、uptime…）
+#    走 `sh()` → **本机 adb + RC_SERIAL**。对着远端实例跑的时候，两条腿会
+#    指向**不同的设备**，而脚本不会吭声。
+#
+#    2026-10-09 实测踩到：对着隧道那头的 Windows 实例跑（BASE=127.0.0.1:18090），
+#    而 RC_SERIAL 默认 `emulator-5580` —— 本机正好也有一个同名设备。
+#    结果接口/截图来自远端、焦点窗口读的是本机，报出一串"看起来像远端坏了"的
+#    失败（HOME 不生效、Settings 起不来、中文打不进去）。查了半天才发现是
+#    问错了设备 —— **和那次 8088 被别的实例占着是同一类错**。
+#
+#    没法可靠地"证明"两端同一（guest 里 `/proc/<pid>/exe` 读不到、`/info` 也不带指纹），
+#    所以改成**把话说在明处**：两个目标都打印；远端目标 + 默认序列号直接拒绝。
+print(f"\033[1m目标 HTTP : {BASE}\033[0m")
+print(f"\033[1m目标 adb  : {SERIAL}{'（默认值）' if 'RC_SERIAL' not in os.environ else '（显式指定）'}\033[0m")
+_loop = BASE.split(":")[0] in ("127.0.0.1", "localhost", "::1")
+if not _loop and "RC_SERIAL" not in os.environ:
+    print("\033[31m✗ HTTP 目标是远端，而 RC_SERIAL 没显式指定 —— 这个脚本的 sh() 会去问"
+          "**本机的 adb**，\n  两边很可能不是同一个设备，量出来的结论没有意义。\n"
+          "  请显式给出 RC_SERIAL（例如 ssh 隧道转发 guest 的 adb 端口后 adb connect）。\033[0m")
+    sys.exit(2)
+_probe = subprocess.run([ADB, "-s", SERIAL, "shell", "echo ok"],
+                        capture_output=True, text=True)
+if "ok" not in (_probe.stdout or ""):
+    print(f"\033[31m✗ adb 连不上 {SERIAL} —— sh() 取到的都会是空字符串，"
+          f"后续会报一堆看不出所以然的失败。\n  先 adb connect / 确认设备在线。\033[0m")
+    sys.exit(2)
+
+# **证明**两端是同一个设备：HTTP 写一个带随机数的标记文件，再用 adb 读回来。
+# 这是最便宜的决定性探针 —— 光看"是不是 127.0.0.1"没用（隧道会让远端看着像本机）。
+_ident = "sweep-ident-" + uuid.uuid4().hex[:12]
+_ok = False
+try:
+    _r = urllib.request.Request(
+        BASE + f"/api/v1/files/upload?path=%2Fsdcard&name={_ident}.txt",
+        data=_ident.encode(),
+        headers=auth_headers({"Content-Type": "application/octet-stream"}), method="POST")
+    with urllib.request.urlopen(_r, timeout=30) as _resp:
+        _ok = _resp.status in (200, 201)
+except Exception as _e:
+    print(f"\033[33m[--] 同一性探针：HTTP 写入失败（{_e}）—— 跳过这项自我检查\033[0m")
+_back = sh(f"cat /sdcard/{_ident}.txt 2>/dev/null").strip()
+sh(f"rm -f /sdcard/{_ident}.txt")
+if _ok and _back != _ident:
+    print("\033[31m✗ HTTP 那头和 adb 这头**不是同一个设备**："
+          f"HTTP 写进去的标记，adb 读回来是 {_back!r}。\n"
+          "  BASE 与 RC_SERIAL 指向了不同设备 —— 这样量出来的结论没有意义。\033[0m")
+    sys.exit(2)
+print("\033[32m✓ 两端同一设备（HTTP 写的标记，adb 读回来了）\033[0m" if _ok
+      else "\033[33m[--] 跳过同一性验证\033[0m")
+print()
+
 st, d = req("/api/v1/describe")
 check("GET /describe", st == 200 and d.get("service") == "remote-control",
       f"service={d.get('service')} 协议 v{d.get('protocolVersion')} 命令 {len(d.get('commands', []))} 条")
@@ -374,7 +428,15 @@ if launch_ok:
 #    不信接口返回 —— 这正是本脚本开头那条原则。
 print("\n\033[1;34m[5b] 应用生命周期（装/卸/清数据/启停/权限）\033[0m")
 
-PROBE = "org.autosnap.arm64probe"
+# ⚠️ **不要写死探针包名。** 它改过一次（org.remotecontrol.arm64probe →
+#    org.autosnap.arm64probe），而 artifacts/ 里的 APK 是**哪一轮构建的**并不确定。
+#    2026-10-09 就踩到了：重建探针 APK 之后包名回到 org.remotecontrol.…，
+#    而这里写死旧名 —— 于是"安装 APK"这条**在 Linux 上也开始失败**，
+#    看起来像安装功能坏了，其实是判据在找一个不存在的包。
+#
+#    改成**装完之后从设备清单里发现**（run-linux.sh 和 run-windows.ps1 都是这么做的）。
+PROBE_HISTORY = ("org.remotecontrol.arm64probe", "org.autosnap.arm64probe")
+PROBE = PROBE_HISTORY[1]     # 安装前的占位；装完会用发现到的真实包名覆盖
 
 
 def upload(path, blob, timeout=180):
@@ -403,12 +465,18 @@ _apk = os.path.normpath(os.path.join(
 if not os.path.exists(_apk):
     check("安装用例的探针 APK 存在", False, f"缺 {_apk}")
 else:
-    # 先清干净：上一轮的残留会让「安装成功」变成假绿
-    sh(f"pm uninstall {PROBE}")
+    # 先清干净：上一轮的残留会让「安装成功」变成假绿（两个历史包名都删）
+    for _old in PROBE_HISTORY:
+        sh(f"pm uninstall {_old}")
     st, d = upload("/api/v1/install", open(_apk, "rb").read())
-    listed = PROBE in sh("pm list packages")
+    # 装完从设备清单里发现真实包名，别用写死的那个
+    _found = sh("pm list packages | grep -i arm64probe")
+    _names = [ln.split(":")[-1].strip() for ln in _found.splitlines() if ":" in ln]
+    if _names:
+        PROBE = _names[0]
+    listed = bool(_names)
     check("安装 APK（判据：设备上真的出现了该包）", st == 200 and listed,
-          f"HTTP {st}；pm list 命中={listed}；{str(d)[:80]}")
+          f"HTTP {st}；发现包名={_names}；{str(d)[:80]}")
 
     if listed:
         st, d = req(f"/api/v1/apps/{PROBE}/clear", "POST", {})
