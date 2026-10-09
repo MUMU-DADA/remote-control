@@ -38,6 +38,50 @@ $script:NoLink = @("initrd", "config.ini")
 # 脚本级状态：StrictMode 会把"读了没赋值的变量"当错误，先初始化。
 $script:EmuProc = $null
 
+# ⚠️ **判"有没有人在键盘前"不能靠那些标准标志**（2026-10-09 在计划任务上下文实测）：
+#
+#     [Environment]::UserInteractive = True         ← 说是交互的
+#     [Console]::IsInputRedirected   = False        ← 说是没重定向
+#     $Host.Name                     = ConsoleHost  ← 说是真控制台
+#     $Host.UI.RawUI.WindowSize      = 120,50       ← 还有个假窗口
+#
+#     可 Read-Host / [Console]::ReadLine() **永远不返回** —— 没人能输入。
+#     这是"孤儿控制台"：控制台对象在，输入源不在。所以唯一可靠的办法是**限时等一行**。
+#
+#     而且不能同进程做：runspace 里 [Console]::ReadLine() 一样卡死整个进程
+#     （WaitOne 的超时根本没机会触发）。子进程共享同一个控制台，WaitForExit 才可靠。
+#
+#     Linux 侧同样场景下 `read -r` 拿到 EOF 会**立刻** die —— 这里对齐那个行为，
+#     不再出现"一边快速失败、一边无声挂死"。
+function Read-LineWithTimeout {
+    param([int]$TimeoutSec = 20)
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath "powershell.exe" -PassThru -NoNewWindow -ArgumentList @(
+            "-NoProfile", "-Command",
+            "[Console]::ReadLine() | Set-Content -LiteralPath '$tmp' -Encoding UTF8")
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+        return (Get-Content -LiteralPath $tmp -Raw -ErrorAction SilentlyContinue)
+    } catch { return $null }
+    finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+}
+
+# 统一的"破坏性操作二次确认"：非交互就快速失败，并告诉调用方加 -Yes
+function Confirm-OrDie {
+    param([string]$What, [string]$Name, [switch]$Yes)
+    if ($Yes) { return }
+    Write-Warn "$What '$Name' 会删除实例数据（已装应用、应用数据、/sdcard 与快照）"
+    $ans = Read-LineWithTimeout 20
+    if ($null -eq $ans) {
+        Die ("等了 20 秒没人输入 —— 按非交互处理。这是破坏性操作，请显式加 -Yes" +
+             "（Linux 侧同场景下 read 拿到 EOF 会立刻 die，这里对齐同样的行为）")
+    }
+    if ($ans.Trim() -ne "yes") { Die "已取消" }
+}
+
 function Write-Log  { param([string]$Msg) Write-Host "==> $Msg" -ForegroundColor Cyan }
 function Write-Warn { param([string]$Msg) Write-Host "[!] $Msg" -ForegroundColor Yellow }
 function Write-Ok   { param([string]$Msg) Write-Host "==> $Msg" -ForegroundColor Green }

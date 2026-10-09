@@ -27,10 +27,7 @@ if ($owners.Count -ne 1) { Die "端口 $Port 没有唯一的已登记实例；�
 $owner = $owners[0]
 if ([string]::IsNullOrWhiteSpace($Name)) { $Name = $owner }
 if ($owner -ne $Name) { Die "端口 $Port 属于实例 '$owner'，不是 '$Name'" }
-if (-not $Yes) {
-    Write-Warn "重置 '$owner' 会清空已装应用、应用数据、sdcard 与快照"
-    if ((Read-Host "输入 yes 继续") -ne "yes") { Die "已取消" }
-}
+Confirm-OrDie "重置" $owner -Yes:$Yes
 if (-not (Stop-Instance $Port $TimeoutSec -Force:$Force)) {
     Die "实例还在运行；未删除数据。检查服务或显式 -Force 后重试"
 }

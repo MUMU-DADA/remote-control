@@ -99,9 +99,8 @@ function Copy-TreeWithoutReparsePoints {
 
 function Confirm-DestructiveAction {
     param([string]$Action, [string]$Name, [switch]$Yes)
-    if ($Yes) { return }
-    Write-Warn "$Action '$Name' 会删除实例数据（已装应用、应用数据、/sdcard 与快照）"
-    if ((Read-Host "输入 yes 继续") -ne "yes") { Die "已取消" }
+    # 走 common.ps1 的统一实现：非交互时**限时快速失败**，不再用裸 Read-Host 挂死。
+    Confirm-OrDie $Action $Name -Yes:$Yes
 }
 
 function Invoke-InspectArchive {

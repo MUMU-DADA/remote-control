@@ -289,7 +289,7 @@ function Request-ServiceShutdown {
     } catch { return $false }
 }
 
-function Stop-Instance {
+function Stop-InstanceCore {
     param([int]$Port, [int]$TimeoutSec = 60, [switch]$Force)
     if (-not (Test-EmulatorPortRunning $Port)) { return $true }
     Write-Log "请 guest 通过 remote-control 正常关机"
@@ -328,3 +328,33 @@ function Stop-Instance {
     return (-not (Test-EmulatorPortRunning $Port))
 }
 
+
+# ── Stop-Instance：包一层，**停止之后**才回收镜像零块 ──────────────────────
+#
+# ⚠️ 这一层不是装饰，是修一个实测出来的大坑：
+#
+#    `Optimize-ImageStorage` 原来只在 `Build-SysDir`（**创建实例时**）被调用。
+#    可那个时刻 sysdir 里全是**指向 images\ 的链接**，而真正占地方的
+#    `userdata-qemu.img`（64 GiB）是**模拟器之后才建出来的** —— 于是它
+#    从来没被回收过。2026-10-09 实测一台实例实占 64 GiB，全是实体。
+#
+#    那能不能"运行中顺手回收"？**不能**，实测两个文件全部失败：
+#
+#        无法回收镜像零块 userdata-qemu.img：… 正由另一进程使用 …
+#        C: 可用 661.83 GB      ← 零回收
+#
+#    **停机那一刻是唯一的窗口**：QEMU 退了、文件还没人占。同一台实例，
+#    停机后回收：C: 可用 665 GB → 708 GB → 继续涨（64 GiB 的零块被退回）。
+#
+#    所以放在这里：所有调用方（stop / reset / delete / clone / restart）都经过它。
+function Stop-Instance {
+    param([int]$Port, [int]$TimeoutSec = 60, [switch]$Force)
+    $ok = Stop-InstanceCore $Port $TimeoutSec -Force:$Force
+    if ($ok -and (Get-Command Optimize-ImageStorage -ErrorAction SilentlyContinue)) {
+        $n = Get-InstanceNameForPort $Port
+        if ($n) {
+            try { Optimize-ImageStorage (Get-SysDir $n) } catch { }
+        }
+    }
+    return $ok
+}
