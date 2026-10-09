@@ -718,6 +718,11 @@ cmd_import() {
     #      且它的 backing 引用是**相对路径**，换目录也接得上。
     #      详见 docs/12 §7 与 tools/diagnose-qemuimg-export.sh。
     #
+    #   ✅ 2026-10-09 探针跑通：**qemu-img 压平路线是可行的** ——
+    #      压成一张自包含 qcow2、再转回 raw 当 backing，恢复出来的实例数据完好
+    #      （tB 里 /data/local/tmp 与 /sdcard 的标记都在）。
+    #      而 tar 这条路线恢复出来 /data 是空的。两条路线的差别就是下一步的入口。
+    #
     #   在查清之前，这条命令默认不让跑 —— "备份"要是恢复不出来，
     #   比没有备份更危险：用户会以为数据安全了。
     if [ "$OPT_UNSAFE" != 1 ]; then
