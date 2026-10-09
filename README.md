@@ -132,7 +132,8 @@ AutoSnapshotAndroid/
 │   ├── check-image-lists.py      ROM 镜像清单：生产端产出的 vs 各平台认为必需的，必须对得上
 │   ├── check-protocol-docs.py    协议清单：token / 错误码 / HTTP 路由，文档里都要有且对得上方法
 │   ├── check-config-keys.py      配置键三段链：config.ini → 各管理器 -prop → daemon 读的属性
-│   └── check-apk-abis.py         随包发出去的 APK：带原生库就必须含 arm64-v8a
+│   ├── check-apk-abis.py         随包发出去的 APK：带原生库就必须含 arm64-v8a
+│   └── check-no-build.sh         **不是门禁**：判据（容器里有没有编译在跑），给防重入检查调用
 │
 ├── aosp/                      ← AOSP 源码树
 │
