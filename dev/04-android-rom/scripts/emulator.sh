@@ -252,6 +252,25 @@ cmd_start() {
     service_register "$name" "$port" "$OPT_TEST" 1
     build_service_property_args
 
+    # ⚠️ **先确认 HTTP 转发端口是空的，再开机。**
+    #
+    #    这个端口是**从控制台端口死算出来的**（`18088 + (port - PORT_BASE)/2`），
+    #    没有任何可用性检查。撞上任何无关的监听者都会失败 —— 而失败发生在
+    #    **开机之后**（下面的 service_create_redirect），于是留下一个
+    #    "运行中(启动中)" 的残留实例，报错还只有一个端口号。
+    #
+    #    2026-10-09 实测：`verify-clone-independent.sh` 起了 dev2（端口 5584
+    #    → 转发端口 18090），而本机 18090 上正好有一条调试用的 ssh 隧道，
+    #    于是开完机才炸。**这不是谁写错了端口，是端口撞车没被提前发现。**
+    # 注意用 tcp_port_in_use，不是 port_listening —— 后者问的是
+    # "有没有模拟器拿它当控制台端口"，一条 ssh 隧道它看不见。
+    if [ -n "$SERVICE_HTTP_PORT" ] && tcp_port_in_use "$SERVICE_HTTP_PORT"; then
+        die "HTTP 服务端口 $SERVICE_HTTP_PORT 已被别的进程占用，起完机也建不了转发。
+     （它是按控制台端口 $port 算出来的，不是本实例在用）
+     处置：换一个端口起停 —— AUTOSNAP_HTTP_PORT=<空闲端口> $0 start $name
+           或者先释放 $SERVICE_HTTP_PORT（ss -ltnp | grep :$SERVICE_HTTP_PORT 看是谁）"
+    fi
+
     if [ -n "$OPT_GPU" ]; then
         log "硬件参数： -memory $MEM_MB  -cores $CORES  -gpu $GPU_MODE（命令行指定）"
     else

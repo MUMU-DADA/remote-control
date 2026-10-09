@@ -36,7 +36,9 @@ done
 
 # ── 分类表 ──────────────────────────────────────────────────────────────
 # host   = 纯宿主侧，任何机器都能跑
-# device = 需要真在跑的模拟器/设备
+# device = 会自己 create/start 真实例（不是"需要你先把模拟器跑起来" ——
+#          它们自带启动），代价是各自要开关机几次、几分钟到十几分钟，
+#          而且要占几 GB 到几十 GB 磁盘。默认跳过只是因为它重，不是因为它缺前提。
 declare -A KIND=(
     [test-macos-port.sh]=host
     [test-packaging-windows.py]=host
@@ -85,7 +87,7 @@ done
 echo "宿主侧（一定会跑）：${#host_list[@]} 个"
 printf '  %s\n' "${host_list[@]}"
 if [ "$WITH_DEVICE" = 1 ]; then _devnote="--with-device 已开，会跑"; else _devnote="默认跳过，加 --with-device 才跑"; fi
-echo "需要模拟器（$_devnote）：${#device_list[@]} 个"
+echo "会自己起真实例、比较重（$_devnote）：${#device_list[@]} 个"
 printf '  %s\n' "${device_list[@]}"
 [ "$LIST_ONLY" = 1 ] && exit 0
 echo
@@ -123,7 +125,7 @@ for f in "${device_list[@]}"; do
         run_one "$f"
     else
         printf '════ %s\n' "$f"
-        printf '  \033[1;33m-\033[0m SKIP：需要真在跑的模拟器（加 --with-device 才跑）\n'
+        printf '  \033[1;33m-\033[0m SKIP：会自己起真实例、比较重（加 --with-device 才跑）\n'
         skip=$((skip + 1)); skipped_names+=("$f")
     fi
 done

@@ -243,6 +243,23 @@ port_listening() {   # 真有进程在用（含没登记的野实例）
     [ -n "$(emu_pid_for_port "$1")" ]
 }
 
+# 有没有**任何**进程在监听这个 TCP 端口（不只是模拟器）。
+#
+# ⚠️ 别和上面的 port_listening 搞混：那个问的是"有没有**模拟器**拿它当控制台端口"
+#    （实现是 emu_pid_for_port）。要判断"这个转发端口空不空"，必须问 TCP 本身 ——
+#    2026-10-09 实测：一条无关的 ssh 隧道占着 18090，而 port_listening 说"没人"，
+#    于是启动流程一路开到建转发才失败，还留下一个"运行中(启动中)"的残留实例。
+tcp_port_in_use() {
+    local p="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v pat=":$p$" '$4 ~ pat { found = 1 } END { exit !found }'
+        return $?
+    fi
+    # 没有 ss 就退到连接探测：能连上就说明有人
+    (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && return 0
+    return 1
+}
+
 alloc_port() {
     local p="$EMULATOR_PORT_BASE"
     while [ "$p" -lt 5700 ]; do
