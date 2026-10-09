@@ -27,6 +27,17 @@ cd windows
 .\run-windows.ps1        # 4. 启动 + 验收（abilist / 翻译层 / arm64 应用）
 ```
 
+> ⚠️ **重新拉镜像之前必须先停掉实例。** 实例在跑的时候，模拟器**占着
+> `images\` 里的镜像文件**，Windows 不允许别的进程以写方式打开它们 ——
+> `scp` 会报 `open local "…": Broken pipe` 或 `: Failure`，而**网络其实完全正常**
+> （2026-10-09 实测，白查了一阵）。
+>
+> ```powershell
+> .\emulator.ps1 stop run-5580      # 先停
+> .\fetch-images.ps1 -Force          # 再拉
+> .\run-windows.ps1 -Headless        # 最后起（换新镜像后实例要重建/重置）
+> ```
+
 > 日常开机关机用 **`emulator.ps1`**（`run-windows.ps1` 是"启动 + 验收"的
 > 一次性流程，`emulator.ps1` 管实例的整个生命周期）：
 
