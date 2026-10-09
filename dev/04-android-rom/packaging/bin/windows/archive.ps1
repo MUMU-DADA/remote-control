@@ -31,6 +31,18 @@
 #   理由和 Linux 侧那段注释一样：表观是 64G，拿它比剩余空间会要求 64G 空闲。
 # =============================================================================
 
+# ⚠️ 这几个 `$script:` 变量**必须先初始化**：管理器开了 Set-StrictMode，
+#    读一个没赋过值的变量会直接抛错（不是当 $null）。2026-10-09 实测踩到。
+$script:ArchiveListing = @()
+$script:ArchiveListingFor = ""
+$script:ArchiveMf = ""
+$script:ArchiveFmt = 1
+$script:ArchiveNeedMb = 0
+$script:ArchiveImages = @()
+$script:ArchiveExportName = ""
+$script:ArchiveProduct = "unknown"
+$script:ArchiveRomFp = "unknown"
+
 $ArchiveManifestName = "INSTANCE-MANIFEST.json"
 $ArchiveDataFlat     = "userdata-flat.qcow2"
 $ArchDataImg         = "userdata-qemu.img"
@@ -65,12 +77,28 @@ function Get-ArchiveQemuImg {
     return $null
 }
 
+function Get-ArchiveListing {
+    # 归档成员名单（缓存）。**必须先用它判断成员在不在** ——
+    # 直接对不存在的成员跑 `tar -xOf` 会往 stderr 写一行，
+    # 而 PowerShell 会把原生命令的 stderr 当**终止错误**，把整个导入打断。
+    # 2026-10-09 在真 Windows 上实测踩到（导出的实例没有令牌文件时）。
+    param([string]$Archive)
+    if ($script:ArchiveListingFor -eq $Archive -and $script:ArchiveListing) { return $script:ArchiveListing }
+    $tar = Get-ArchiveTar
+    if (-not $tar) { Die "需要系统 tar.exe" }
+    $script:ArchiveListing = @(& $tar -tf $Archive 2>$null | ForEach-Object { ([string]$_).Trim() })
+    $script:ArchiveListingFor = $Archive
+    return $script:ArchiveListing
+}
+
 function Get-ArchiveMember {
-    # 读出归档里某个成员的内容（不落盘）
+    # 读出归档里某个成员的内容（不落盘）。成员不在就返回空 —— 不报错、不打断。
     param([string]$Archive, [string]$Member)
     $tar = Get-ArchiveTar
     if (-not $tar) { Die "需要系统 tar.exe" }
+    $listing = Get-ArchiveListing -Archive $Archive
     foreach ($candidate in @("./$Member", $Member)) {
+        if ($listing -notcontains $candidate) { continue }
         $lines = @(& $tar -xOf $Archive $candidate 2>$null)
         if ($LASTEXITCODE -eq 0 -and $lines.Count -gt 0) { return ($lines -join "`n") }
     }
@@ -147,6 +175,11 @@ function Export-InstanceArchive {
     $stateFiles = 0
     foreach ($f in Get-ChildItem -LiteralPath $SysDir -File -Force -ErrorAction SilentlyContinue) {
         $b = $f.Name
+        # ⚠️ **符号链接不要导** —— 那些是指向 ROM 镜像的（system/vendor/userdata…）。
+        #    Linux 侧同样跳过；不跳的话真 ROM 上归档会白胖 3G，而恢复时
+        #    本来就是"按清单里的名字重链本地那份"。2026-10-09 实测抓到：
+        #    第一版把它们当普通文件打进去了（哑镜像时看不出来，真镜像就是 3G）。
+        if ($f.LinkType) { continue }
         if (Test-ArchiveExcluded -Name $b) { continue }
         if ($b -eq $ArchDataImg -or $b -eq $ArchDataOvl) { continue }   # 走压平路线
         Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $stage "sysdir\$b") -Force
@@ -203,7 +236,12 @@ function Export-InstanceArchive {
     Write-Log "打包（状态实占约 $([int64]($need / 1GB))G；稀疏空洞不写）"
     Push-Location $stage
     try {
-        & $tar --sparse --numeric-owner -cf $Out .
+        # ⚠️ **不要传 `--sparse` / `--numeric-owner`** —— Windows 自带的是 bsdtar，
+        #    它不认这些 GNU tar 的选项，会直接报 "Option --sparse is not supported"
+        #    然后打包失败。2026-10-09 在真 Windows 上实测踩到（本机没有 PowerShell，
+        #    写完只验了语法，是端到端那一步把它抓出来的）。
+        #    bsdtar 默认就会**识别并稀疏地存**稀疏文件，本来也不需要那个开关。
+        & $tar -cf $Out .
         $tarOk = ($LASTEXITCODE -eq 0)
     } finally { Pop-Location }
     if (-not $tarOk) { Remove-Item -LiteralPath $stage -Recurse -Force; Die "tar 失败" }
@@ -271,29 +309,28 @@ function Import-InstanceArchive {
 
     $port = ($SysDir -split '-')[-1]
     Write-Log "解包 → sysdir-$port（约 $([int64]($needMb / 1024))G）"
-    # bsdtar 的 -s 是替换语法（GNU tar 的 --transform 在这里没有）。
-    # 直接落到目标位置，避免 64GiB 的稀疏文件被复制一遍。
-    Push-Location $parent
-    try {
-        & $tar --sparse --numeric-owner -xf $Archive `
-            -s "|^\./sysdir|sysdir-$port|" -s "|^\./datadir|datadir-$port|" `
-            --exclude "./host-service.env" --exclude "./host-service.token" 2>$null
-    } finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0) {
-        # -s 或 --exclude 不可用时退回两步走（慢，但至少对）
-        Write-Warn "tar 带替换参数失败，退回两步解包"
-        $tmp = Join-Path $parent (".import-tmp-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-        & $tar -xf $Archive -C $tmp 2>$null
-        if (Test-Path -LiteralPath (Join-Path $tmp "sysdir")) {
-            Copy-Item -Path (Join-Path $tmp "sysdir\*") -Destination $SysDir -Recurse -Force
-        }
-        if (Test-Path -LiteralPath (Join-Path $tmp "datadir")) {
-            Copy-Item -Path (Join-Path $tmp "datadir\*") -Destination $DataDir -Recurse -Force
-        }
-        Remove-Item -LiteralPath $tmp -Recurse -Force
+    # ⚠️ Windows 自带的 bsdtar **不支持 `-s` 替换语法**（也不支持 GNU tar 的
+    #    `--transform`），实测报 "-s is not supported by this version of bsdtar"。
+    #    所以老老实实解到父目录下的临时目录，再 **Move-Item 改名就位** ——
+    #    同卷改名是瞬时的，不会把 64GiB 的稀疏镜像复制一遍。
+    #    另外：原生命令往 stderr 写一行会被 PowerShell 当**终止错误**，
+    #    所以这里把所有流都吃掉（`*>&1 | Out-Null`），成败只认 $LASTEXITCODE。
+    $tmp = Join-Path $parent (".import-tmp-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    & $tar -xf $Archive -C $tmp *>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue; Die "tar 解包失败：$Archive" }
+
+    if (Test-Path -LiteralPath (Join-Path $tmp "sysdir")) {
+        if (Test-Path -LiteralPath $SysDir) { Remove-Item -LiteralPath $SysDir -Recurse -Force }
+        Move-Item -LiteralPath (Join-Path $tmp "sysdir") -Destination $SysDir -Force
     }
+    if (Test-Path -LiteralPath (Join-Path $tmp "datadir")) {
+        if (Test-Path -LiteralPath $DataDir) { Remove-Item -LiteralPath $DataDir -Recurse -Force }
+        Move-Item -LiteralPath (Join-Path $tmp "datadir") -Destination $DataDir -Force
+    }
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+
     Remove-Item -LiteralPath (Join-Path $SysDir $ArchiveManifestName) -Force -ErrorAction SilentlyContinue
 
     # ── 格式 2：把压平镜像转回 raw 当 backing

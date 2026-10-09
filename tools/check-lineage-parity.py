@@ -56,7 +56,12 @@ EXPECTED = {
     ),
     ("windows/emulator.ps1", "packaging/bin/windows/emulator.ps1"): (
         set(),                       # 仓库侧没有独有的动词
-        {"inspect", "verify"},       # inspect 读归档（归档由 Linux 侧 export 产生）；verify 同上
+        # inspect / verify：交付包自带查看与验收；开发侧走 run-windows.ps1
+        # export / import：2026-10-09 接进**交付版**（用户真正跑的那一份）并在真 Windows
+        #   上验通：导出→导入→镜像重链→config 重写→服务属性搬运，全绿。
+        #   **开发侧那份还没接** —— 是有意留的差异，不是漏了：那要再写一遍接线、
+        #   再各自验一遍；先把"用户拿得到"的那条做扎实。
+        {"inspect", "verify", "export", "import"}
     ),
 }
 
