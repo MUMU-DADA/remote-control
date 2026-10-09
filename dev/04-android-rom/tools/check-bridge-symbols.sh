@@ -28,6 +28,14 @@ if ! bridge_applicable; then
 fi
 
 SYS="${1:-$PRODUCT_OUT/system}"
+
+# 没有构建产物时**明说跳过**，而不是 die —— 这样它才能进主 runner 的宿主档：
+# 任何机器都能跑（跑出"还没得可查"也是如实的一条结果），而不是把 runner 弄红。
+# 主 runner 会把这一行打出来，所以"跳过"不会被读成"通过"。
+if [ ! -d "$SYS" ]; then
+    log "⊘ 跳过：没有构建产物 $SYS（先编 ROM 再来查）"
+    exit 0
+fi
 BRIDGE="$DEVICE_DST/remote_control_x64_arm64/bridge/system"
 [ -d "$SYS/lib64" ] || die "找不到 system/lib64：$SYS"
 [ -d "$BRIDGE/lib64" ] || die "找不到翻译层：$BRIDGE（先 ./apply-overlay.sh）"

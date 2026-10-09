@@ -76,6 +76,7 @@ declare -A CHECK_KIND=(
     [check-protocol-docs.py]=plain       # protocol.h 里每个命令 token，文档里都要写得到
     [check-config-keys.py]=plain         # config.ini → 各套管理器的 -prop → daemon 读的属性，三段必须对得上
     [check-apk-abis.py]=plain            # 随包发出去的 APK 带原生库时必须含 arm64-v8a
+    [check-bridge-symbols.sh]=plain      # 翻译层动态依赖自检（没有构建产物时自己 skip 并说明）
     [check-api-docs.py]=device          # 要真在跑的服务（/api/v1/describe）
 )
 # 只能在 Windows 上跑的（这里列出来是为了**可发现**，不是假装跑过）。
@@ -99,9 +100,20 @@ declare -A EXTERNAL_SUITE=(
     [dev/02-native-daemon/tools/webui-test/run-all.sh]="要一台跑着的实例 + Chromium + xvfb：xvfb-run -a ./run-all.sh --host 127.0.0.1 --port <转发的端口>"
 )
 
+# 有些文件的名字也匹配 check-*.sh，但**不是体检** —— 它们是给别的脚本调用的判据。
+# 列在这里 + 写明理由，而不是让它们每次都被当成"没分类"。**必须有理由**：
+# 没理由的豁免等于把洞重新挖开。
+declare -A NOT_A_CHECK=(
+    [check-no-build.sh]="不是体检，是判据：退出码 0=容器里有编译在跑、1=没有。给防重入检查用，没有'通过/失败'可言"
+)
+
 shopt -s nullglob
 check_files=()
-for f in "$REPO_ROOT"/tools/check-*.py; do
+# ⚠️ 这里必须覆盖 **.sh 和 .py**：2026-10-09 发现 `check-bridge-symbols.sh`
+#    就躺在同一个目录里、却因为只匹配 *.py 而**完全没被发现** ——
+#    而"没分类就报错"那条规则只遍历认识的名字，所以它也没喊。
+#    （这正是第 10 轮那条设计想防的"新检查忘了接进来"，洞在**匹配模式**上。）
+for f in "$REPO_ROOT"/tools/check-*.py "$REPO_ROOT"/tools/check-*.sh; do
     check_files+=("$(basename "$f")")
 done
 shopt -u nullglob
@@ -109,6 +121,10 @@ if [ "${#check_files[@]}" -eq 0 ]; then
     echo "[x] 一个 tools/check-*.py 都没发现 —— 路径不对"; exit 1
 fi
 for f in "${check_files[@]}"; do
+    if [ -n "${NOT_A_CHECK[$f]:-}" ]; then
+        printf '    （跳过 %s：%s）\n' "$f" "${NOT_A_CHECK[$f]}"
+        continue
+    fi
     if [ -z "${CHECK_KIND[$f]:-}" ]; then
         echo "[x] 静态体检 $f 没有分类，拒绝静默跳过它"
         echo "    处理：在 $0 的 CHECK_KIND 表里标 strict / plain / device"
