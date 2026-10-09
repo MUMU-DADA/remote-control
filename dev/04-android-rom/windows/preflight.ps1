@@ -32,7 +32,7 @@ function Info($m) { Write-Host "  [--] $m" -ForegroundColor DarkGray }
 Write-Host "==> 1. 虚拟化 / WHPX" -ForegroundColor Cyan
 $cs = Get-CimInstance Win32_ComputerSystem
 if ($cs.HypervisorPresent) { Ok "HypervisorPresent=True（Hyper-V/WHPX 已在运行或系统已启用虚拟化）" }
-else { Warn2 "HypervisorPresent=False：没有任何 hypervisor 在跑。'WHPX 不可用' 与 'AEHD 未安装' 会同时成立，模拟器直接起不来（不是 warning，是硬失败）——到「启用或关闭 Windows 功能」勾选「Windows 虚拟机监控程序平台」并重启，或关掉 Hyper-V 后装 AEHD" }
+else { Warn2 "HypervisorPresent=False：没有任何 hypervisor 在跑。'WHPX 不可用' 与 'AEHD 未安装' 会同时成立，模拟器直接起不来（不是 warning，是硬失败）——到「启用或关闭 Windows 功能」勾选「Hyper-V」并重启（Hyper-V 开着就够；「Windows 虚拟机监控程序平台」可以一起勾，但**不要拿它的状态当判据**），或关掉 Hyper-V 后装 AEHD" }
 
 # 模拟器主目录：缺了它模拟器会报 "Unexpected error while creating ... (error: 3)"
 # 并且**不退出**、只是无限重试刷日志（2026-10-05 实测踩过）。

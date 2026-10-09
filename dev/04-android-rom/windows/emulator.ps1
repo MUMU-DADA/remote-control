@@ -268,10 +268,10 @@ function Get-EmuLogFatal {
     }
     if ($text -match 'emulation currently requires hardware acceleration' -or
         $text -match 'Android Emulator hypervisor driver is not installed') {
-        return "没有可用的硬件加速（WHPX / AEHD 都没生效）`n    修法一：启用或关闭 Windows 功能 → 勾选「Windows 虚拟机监控程序平台」→ 重启；`n    修法二：关掉 Hyper-V 后装 Android Emulator hypervisor driver（AEHD）。详见 windows\README.md"
+        return "没有可用的硬件加速（WHPX / AEHD 都没生效）`n    先跑 `emulator -accel-check` 看它怎么说（**这才是判据**）。`n    若确实不可用：修法一：启用或关闭 Windows 功能 → 勾选「Hyper-V」→ 重启（**Hyper-V 开着就够**，不必再单独勾「Windows 虚拟机监控程序平台」——实测那个勾显示 Disabled 也可能是好的）；修法二：关掉 Hyper-V 后装 Android Emulator hypervisor driver（AEHD）。详见 windows\README.md"
     }
     if ($text -match 'WHPX is either not available or not installed') {
-        return "WHPX 没启用：启用或关闭 Windows 功能 → 勾选「Windows 虚拟机监控程序平台」→ 重启"
+        return "WHPX 没启用。先跑 `emulator -accel-check` 确认（**别拿功能勾选状态当判据**：`HypervisorPlatform` 显示 Disabled 也可能是好的）。确实不可用才去「启用或关闭 Windows 功能」勾「Hyper-V」→ 重启"
     }
     return ""
 }

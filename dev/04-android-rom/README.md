@@ -113,7 +113,7 @@ dev/04-android-rom/
 │   ├── arm64-probe/                ← 探针源码（manifest / Activity / JNI）
 │   ├── check-bridge-symbols.sh     ← 翻译层动态依赖自检（启动前发现版本错配）
 │   ├── verify-clone-independent.sh ← 证明 clone 出来的实例和原实例数据互不影响
-│   ├── test-windows-emulator.sh    ← 在 Linux 上用 pwsh 实跑 windows\emulator.ps1（55 项）
+│   ├── test-windows-emulator.sh    ← 在 Linux 上用 pwsh 实跑 windows\emulator.ps1（56 项；需先备好 .tmp/pwsh，脚本里写了步骤）
 │   ├── test-release.sh             ← release 打包体检（假 ROM 端到端 + 全部脚本语法，68 项）
 │   ├── test-script-safety.sh       ← 脚本命令边界、覆盖保护与并发数据目录检查（11 项）
 │   ├── test-macos-port.sh          ← macOS 移植与 darwin release 清单回归（当前 121 项）
@@ -196,7 +196,7 @@ cd dev/04-android-rom
 ```
 
 完整命令表、每个命令的注意事项、以及 Windows 侧是怎么在 Linux 上验证的
-（`tools/test-windows-emulator.sh`，55 项）见
+（`tools/test-windows-emulator.sh`，56 项；**需要先备好 `.tmp/pwsh`**，脚本头部写了下载步骤）见
 [`docs/12-emulator-control.md`](docs/12-emulator-control.md)。
 
 ### 打 release：一个平台一个 zip

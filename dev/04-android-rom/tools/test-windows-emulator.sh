@@ -32,7 +32,28 @@ chk_out() {   # chk_out <描述> <期望子串> <命令...>
     else printf '  \033[1;31m✗\033[0m %s\n    期望包含: %s\n    实际: %s\n' "$desc" "$want" "$(printf '%s' "$out" | head -3 | tr '\n' '|')"; fail=$((fail+1)); fi
 }
 
-[ -x "$PWSH" ] || { echo "[x] 没有 pwsh：$PWSH（下载见对话记录）"; exit 1; }
+if [ ! -x "$PWSH" ]; then
+    cat >&2 <<'PWHEOF'
+[x] 没有 pwsh：需要 PowerShell 7 的 linux-x64 版，解包到 .tmp/pwsh/
+
+    为什么要有这一条：这台机器上没有 Windows，而"写完没跑过的脚本"正是
+    这个项目反复吃亏的地方 —— 所以 windows\emulator.ps1 的文件与生命周期逻辑
+    （建实例 / 链镜像 / 复制 / 重置 / 删除）在这里用 pwsh 真跑一遍。
+
+    ⚠️ 原来这里写的是"（下载见对话记录）" —— **新克隆一份仓库照文档跑必然卡在这一步**，
+       因为 .tmp/ 是 gitignore 的，pwsh 不会跟着仓库走。现在把步骤写在这里：
+
+        mkdir -p .tmp && cd .tmp
+        curl -fL -o pwsh.tar.gz \
+          https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/powershell-7.4.6-linux-x64.tar.gz
+        mkdir -p pwsh && tar -xzf pwsh.tar.gz -C pwsh && chmod +x pwsh/pwsh
+        cd .. && .tmp/pwsh/pwsh -NoProfile -Command '$PSVersionTable.PSVersion'
+
+    ⚠️ 本机没有 ICU，**必须**带 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 才能启动
+       （不带会打印一堆 UnmanagedPSEntry 的调用栈后退出）。下面的 ps() 已经带上了。
+PWHEOF
+    exit 1
+fi
 
 ps() { DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 "$PWSH" -NoProfile -File "$SANDBOX/win/emulator.ps1" "$@"; }
 

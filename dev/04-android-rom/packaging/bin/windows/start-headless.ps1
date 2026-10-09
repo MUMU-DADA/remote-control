@@ -126,7 +126,7 @@ else {
         $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
         if (-not $cs.HypervisorPresent) {
             Write-Warn "HypervisorPresent=False：WHPX 可能没开。模拟器会报 'WHPX is not installed'。"
-            Write-Warn "  修法：启用或关闭 Windows 功能 → 勾选「Windows 虚拟机监控程序平台」→ 重启"
+            Write-Warn "  修法：启用或关闭 Windows 功能 → 勾选「Hyper-V」→ 重启（Hyper-V 开着就够；`HypervisorPlatform` 那个勾显示 Disabled 也可能是好的 —— 先跑 emulator -accel-check 确认）"
         }
     } catch { Write-Warn "查不到虚拟化状态（非 Windows 或权限不足），跳过这项自检" }
 }

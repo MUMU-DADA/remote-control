@@ -10,9 +10,10 @@
 | 检查 | 期望 | 不符时 |
 |---|---|---|
 | CPU 虚拟化 | `CPU 虚拟化已在固件层启用` | 进 BIOS/UEFI 打开 VT-x / AMD-V |
-| WHPX 功能 | `Windows Hypervisor Platform 已启用` | 「启用或关闭 Windows 功能」勾选 *Windows 虚拟机监控程序平台* → 重启 |
+| 硬件加速 | **`emulator -accel-check` 报 `WHPX … is installed and usable`**（`preflight.ps1` 现在直接调它） | 只有真的不可用才去「启用或关闭 Windows 功能」勾 **Hyper-V** |
+| ~~WHPX 功能勾选状态~~ | ⚠️ **别拿它当判据** | 实测那台机器 `HypervisorPlatform` = **Disabled**，可模拟器报 **usable**、`Microsoft-Hyper-V-All` = Enabled。**Hyper-V 开着就够**，这个勾显示 Disabled 完全可能是好的（2026-10-09 实测，曾据此误判"跑不了"） |
 | 模拟器主目录 | `模拟器主目录存在：C:\Users\<你>\.android` | 缺了它会报 `...lock (error: 3)` 并**无限重试刷日志**；`preflight.ps1` / `start-headless.ps1` 现在都会自动创建，建不出来才报错 |
-| 磁盘 | 可用 ≥ 20 GB（镜像 5.7 GB + 解包与覆盖层） | 换盘或清理 |
+| 磁盘 | **运行中每个实例 ~65 GB**（NTFS 上 `userdata-qemu.img` 是实体文件，`disk.dataPartition.size = 64g`）；**停止时会自动退回** | 同时跑两台要按 ~130 GB 准备 |
 | 必需镜像 | `system-qemu.img / vendor-qemu.img / product-qemu.img / ramdisk-qemu.img / kernel-ranchu / encryptionkey.img / userdata.img / advancedFeatures.ini / config.ini / system\build.prop` 全部 `[OK]` | 缺哪个重跑 `fetch-images.ps1` |
 | `SHA256SUMS` | `校验通过（N 个文件）` | 传输损坏 → 重跑 `fetch-images.ps1 -Force` |
 | 指纹行 | `ro.system.build.fingerprint = remote-control/remote_control_x64_arm64/...` | 与 Linux 侧不一致说明不是同一份 ROM |
@@ -55,6 +56,8 @@
 | `adb devices` 一开始显示 `offline` | 正常，等开机完成 |
 | 日志里没有 `boot time` / `Boot completed in` 行 | 自编 ROM 不一定打印，**不是故障**（脚本只把它当附注显示） |
 | Windows 防火墙弹窗 | 允许即可（adb 需要本地端口） |
+| **停止实例要等十几秒到几分钟** | 停机后会自动回收镜像零块（`Optimize-ImageStorage`，实测回收 64.00 GiB / 152.7 秒）。**这是正常的**，别当成卡住 |
+| 重新拉镜像前必须**先停实例** | 实例在跑时模拟器占着 `images\` 里的文件，`scp` 会报 `open local …: Broken pipe` / `: Failure` —— **网络没问题**，是文件被占 |
 
 ---
 
