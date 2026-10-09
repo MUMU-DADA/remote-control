@@ -77,7 +77,7 @@ cd windows
 
 | 项 | 说明 |
 |---|---|
-| 虚拟化 | `-accel on` 走 WHPX；若报 `WHPX is not installed`，到「启用或关闭 Windows 功能」勾选 *Windows 虚拟机监控程序平台* |
+| 虚拟化 | `-accel on` 走 WHPX。**判据用 `emulator -accel-check`**，别用功能勾选状态：Hyper-V 开着（`Microsoft-Hyper-V-All`=Enabled）就够了，`HypervisorPlatform` 显示 Disabled 也可能完全可用（2026-10-09 实测，见下） |
 | 模拟器主目录 | 脚本启动前自动建 `%USERPROFILE%\.android`（可用 `$env:ANDROID_EMULATOR_HOME` 换位置）。**模拟器自己不建它**：缺了会报 `Unexpected error while creating: ...lock (error: 3)` 并且**不退出**、只无限重试刷日志 |
 | 起不来时 | 脚本盯日志：命中 `error: 3`、缺硬件加速这类"只会重试"的错误会**立刻停进程 + 给中文诊断**，不再等到超时；服务不就绪时 `.\bin\status.ps1` 会打印日志最后一条 ERROR |
 | 镜像 | 只需 `system.img / vendor.img / ramdisk.img / kernel-ranchu / encryptionkey.img / userdata.img / build.prop / advancedFeatures.ini / source.properties` + `system\build.prop` |
@@ -116,8 +116,10 @@ ssh root@192.168.0.108 echo OK
 | 2 | 打印完 `==> 远端：…` 之后再也不动 | `(ssh $Remote "…") -join ""` 这种**捕获 ssh 输出**的写法在 Windows 上会**永远挂住**（`ssh host echo hi` 正常、`cmd /c echo hi` 捕获也正常，只有 ssh 例外；`ssh -n` 也救不了）。改用 `Start-Process -RedirectStandardOutput` |
 | 3 | scp 对每个文件报一次 `The system cannot find the path specified.` | `$todo` 里存的是 `"$RemoteDir/$f"`，**少了 `$Remote:` 前缀** —— scp 把它当成本地路径。这个脚本在任何机器上都拉不到东西 |
 
-修完之后：前置检查 11 项如实报出（WHPX 未启用是唯一硬项），
-镜像按 SHA256SUMS 校验通过。
+修完之后：前置检查全绿，镜像按 SHA256SUMS 校验通过（20 个文件）。
+
+> ⚠️ **当时那句"WHPX 未启用是唯一硬项"是错的**，2026-10-09 订正 —— 见下面的
+> 「两条被误判的拦路虎」。
 
 `tools/check-scripts.py` 是给第 1 条加的回归闸门：**所有 .ps1 必须带 UTF-8 BOM**。
 
@@ -130,9 +132,45 @@ ssh root@192.168.0.108 echo OK
 > 已经验到的部分见上面两节：镜像拉取 + SHA256SUMS 校验、预检全绿、
 > SDK/模拟器下载 + sha1 校验、两侧 system.img 指纹一致。
 
-WHPX 未启用（见下），所以 `run-windows.ps1` 的**启动与验收**这一段还没跑过：
+`run-windows.ps1` 的**启动与验收**这一段还没跑过。⚠️ 但**拦路的原因不是 WHPX**
+—— 见下面两条订正，那条拦路虎是我自己的误判，现在已经拆掉。
+
+### 两条被误判的拦路虎（2026-10-09 订正）
+
+**① "WHPX 未启用" —— 判据拿错了。** 当时看的是
+`Get-WindowsOptionalFeature -FeatureName HypervisorPlatform` 的状态（Disabled），
+就下了"加速不可用"的结论。实测那台机器：
+
+| 项 | 值 |
+|---|---|
+| `Microsoft-Hyper-V-All` | **Enabled** |
+| `HypervisorPlatform`（Windows 虚拟机监控程序平台） | Disabled |
+| `HypervisorPresent` | True |
+| `emulator -accel-check` | **`WHPX(10.0.19044) is installed and usable.`** |
+
+也就是说：**Hyper-V 开着就够用**，那个"虚拟机监控程序平台"的勾不必再单独勾。
+正确的判据是**模拟器自己的 `-accel-check`**，`preflight.ps1` 已改成先跑它。
+
+**② `preflight.ps1` 把镜像全报成"缺"** —— 因为 `$PSScriptRoot` 写在 `param` 的
+默认值里。带 `[CmdletBinding()]` 时参数绑定发生在 `$PSScriptRoot` 赋值**之前**，
+默认值算成了 `\images`（丢了盘符和目录），而且**不报错**。同一台机器 A/B：
+
+```
+param([string]$X = "$PSScriptRoot\images")                 → [\images]  ✗
+[CmdletBinding()] param([string]$X = "$PSScriptRoot\images") → [\images]  ✗（就是这种）
+```
+
+`fetch-emulator.ps1` / `fetch-images.ps1` / `run-windows.ps1` **三个都中同一招**，
+默认值都改成了"留空 + 绑定后再补"。四个脚本都已重新语法校验并在真机上跑通
+（预检退出码 0）。
+
+`tools/check-scripts.py` 加了这条检查，防止以后再写回去。
+
+原计划说明如下：
 
 - `run-windows.ps1` 的**参数与流程**在 Linux 上用**同源代码的 SDK emulator 37.2.11** 验证过
   （同一份 `google_apis;x86_64` 镜像 29.0 秒开机、属性一致，见评估文档 §2.2）；
-- 但 **WHPX 路径本身没有跑过**——首次在 Windows 上执行时请把 `run-windows.ps1` 的输出贴回来，
-  有问题大概率出在：WHPX 未启用、镜像目录少文件、或 adb 版本过旧。
+- 但 **WHPX 路径本身没有跑过**——首次在 Windows 上执行时请把 `run-windows.ps1` 的输出贴回来。
+  出问题时按这个顺序看：**先在交互式桌面会话里跑**（SSH 落在 session 0，模拟器会报
+  `SetProcessDpiAwarenessContext … COM error 0x5: 拒绝访问`，这不是 Hyper-V 的问题）、
+  再看镜像目录、最后看 adb 版本。**加速本身已经确认可用**，不用再查 WHPX 了。

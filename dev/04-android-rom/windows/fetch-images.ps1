@@ -13,10 +13,20 @@
 param(
     [string]$Remote    = "root@192.168.0.108",
     [string]$RemoteDir = "/root/AutoSnapshotAndroid/dev/04-android-rom/artifacts/rom-remote_control_x64_arm64",
-    [string]$Dest      = "$PSScriptRoot\images",
+    [string]$Dest      = "",
     [switch]$Force,
     [switch]$SkipVerify
 )
+
+# ⚠️ **不要**把 `$PSScriptRoot` 写在 param 的默认值里。
+#    带 `[CmdletBinding()]` 时参数绑定发生在 `$PSScriptRoot` 赋值**之前**，
+#    默认值会算成 `\images` 这种丢掉了盘符和目录的路径，而且**不报错**。
+#    2026-10-09 实测（同一台机器，只改这一处）：
+#        param([string]$X = "$PSScriptRoot\images")            → [\images]   ✗
+#        [CmdletBinding()] param([string]$X = "$PSScriptRoot\images") → [\images] ✗
+#    于是镜像明明就在 `windows\images\` 里，预检却逐条报"缺 xxx.img"。
+#    正确写法：默认值留空，绑定之后再补：
+if (-not $Dest) { $Dest = Join-Path $PSScriptRoot "images" }
 
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null

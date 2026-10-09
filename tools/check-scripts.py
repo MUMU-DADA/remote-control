@@ -24,12 +24,18 @@
 """
 import os
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BOM = b"\xef\xbb\xbf"
 
 EXTS = {".ps1": "Windows PowerShell 5.1 需要 BOM 才能正确按 UTF-8 解码"}
+
+# param 块里 `[string]$X = "…$PSScriptRoot…"` 这种默认值（见下面用处的说明）
+PARAM_PSROOT = re.compile(
+    r'^\s*\[(?:string|int|switch|bool)\][^=\n]*=\s*"[^"\n]*\$PSScriptRoot',
+    re.MULTILINE)
 
 
 # 不进入的目录。
@@ -73,6 +79,27 @@ def main():
 
             if not raw.startswith(BOM):
                 problems.append(f"{rel}: 缺 UTF-8 BOM —— {why}")
+
+            # ⚠️ 别把 `$PSScriptRoot` 写进 param 的默认值。
+            #
+            #    带 `[CmdletBinding()]` 时，参数绑定发生在 `$PSScriptRoot` 赋值**之前**，
+            #    默认值会算成 `\images`（丢掉盘符和目录），而且**不报错** ——
+            #    表现是"文件明明在，脚本却说缺"。
+            #
+            #    2026-10-09 在真机上 A/B 出来的（同一台机器，只差 [CmdletBinding()]）：
+            #        param([string]$X = "$PSScriptRoot\images")                  → [\images] ✗
+            #        [CmdletBinding()] param([string]$X = "$PSScriptRoot\images") → [\images] ✗
+            #    当时 Windows 侧四个脚本**全中**（preflight/fetch-emulator/
+            #    fetch-images/run-windows），预检把十个镜像逐条报成"缺"。
+            #
+            #    正确写法：默认值留空，param 之后 `if (-not $X) { $X = Join-Path $PSScriptRoot "images" }`
+            text = raw.decode("utf-8")
+            for m in PARAM_PSROOT.finditer(text):
+                line = text[:m.start()].count("\n") + 1
+                problems.append(
+                    f"{rel}:{line}: param 默认值里用了 $PSScriptRoot"
+                    "（[CmdletBinding()] 下会算成丢盘符的半截路径）——"
+                    "默认值留空，绑定后再用 Join-Path $PSScriptRoot 补")
 
     # 顺带看一眼 .sh：它们不需要 BOM（反而会破坏 shebang），
     # 但必须是合法 UTF-8，否则 Linux 侧读中文注释会出乱码。

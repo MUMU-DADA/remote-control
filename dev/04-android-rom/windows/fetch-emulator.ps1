@@ -15,7 +15,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Dest = "$PSScriptRoot\sdk",
+    [string]$Dest = "",
     [string]$Channel = "Stable",
     [string]$RepoBase = "https://mirrors.cloud.tencent.com/AndroidSDK",
     [string]$EmulatorZipUrl = "",
@@ -24,6 +24,16 @@ param(
     [switch]$Force,
     [switch]$DryRun
 )
+
+# ⚠️ **不要**把 `$PSScriptRoot` 写在 param 的默认值里。
+#    带 `[CmdletBinding()]` 时参数绑定发生在 `$PSScriptRoot` 赋值**之前**，
+#    默认值会算成 `\images` 这种丢掉了盘符和目录的路径，而且**不报错**。
+#    2026-10-09 实测（同一台机器，只改这一处）：
+#        param([string]$X = "$PSScriptRoot\images")            → [\images]   ✗
+#        [CmdletBinding()] param([string]$X = "$PSScriptRoot\images") → [\images] ✗
+#    于是镜像明明就在 `windows\images\` 里，预检却逐条报"缺 xxx.img"。
+#    正确写法：默认值留空，绑定之后再补：
+if (-not $Dest) { $Dest = Join-Path $PSScriptRoot "sdk" }
 
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null

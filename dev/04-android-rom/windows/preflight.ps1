@@ -9,9 +9,19 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ImagesDir = "$PSScriptRoot\images",
+    [string]$ImagesDir = "",
     [int]$NeedGB = 80
 )
+
+# ⚠️ **不要**把 `$PSScriptRoot` 写在 param 的默认值里。
+#    带 `[CmdletBinding()]` 时参数绑定发生在 `$PSScriptRoot` 赋值**之前**，
+#    默认值会算成 `\images` 这种丢掉了盘符和目录的路径，而且**不报错**。
+#    2026-10-09 实测（同一台机器，只改这一处）：
+#        param([string]$X = "$PSScriptRoot\images")            → [\images]   ✗
+#        [CmdletBinding()] param([string]$X = "$PSScriptRoot\images") → [\images] ✗
+#    于是镜像明明就在 `windows\images\` 里，预检却逐条报"缺 xxx.img"。
+#    正确写法：默认值留空，绑定之后再补：
+if (-not $ImagesDir) { $ImagesDir = Join-Path $PSScriptRoot "images" }
 
 $ErrorActionPreference = "Continue"
 $bad = 0
@@ -46,13 +56,50 @@ $vm = Get-CimInstance Win32_Processor | Select-Object -First 1
 if ($vm.VirtualizationFirmwareEnabled) { Ok "CPU 虚拟化已在固件层启用" }
 else { Warn2 "CPU 虚拟化未启用（BIOS/UEFI 里打开 VT-x / AMD-V）" }
 
-# WHPX 功能状态（可选功能名：HypervisorPlatform）
-$feat = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue
-if ($feat) {
-    if ($feat.State -eq "Enabled") { Ok "Windows Hypervisor Platform 已启用" }
-    else { Warn2 "Windows Hypervisor Platform 未启用：启用或关闭 Windows 功能 → 勾选它，然后重启" }
-} else {
-    Info "查不到 HypervisorPlatform 功能状态（家庭版可能没有该功能名）——若模拟器报 WHPX 不可用，改用 -accel off 或启用 Hyper-V"
+# ── 硬件加速到底能不能用 ────────────────────────────────────────────────
+#
+# ⚠️ **不要拿 `Get-WindowsOptionalFeature HypervisorPlatform` 的状态当判据。**
+#
+#    2026-10-09 在真机上实测到的反例：
+#
+#        Microsoft-Hyper-V-All        Enabled
+#        HypervisorPlatform           **Disabled**
+#        HypervisorPresent            True
+#        emulator -accel-check        **WHPX(10.0.19044) is installed and usable.**
+#
+#    也就是说：**Hyper-V 开着就够用**，`HypervisorPlatform` 那个勾显示 Disabled
+#    并不代表加速不可用。旧版本的这里把 Disabled 当成"硬项"，于是把一台**本来
+#    就能跑**的机器判成跑不了，还让人去勾一个不必勾的开关。
+#    （模拟器自己的文档也只要求"有 hypervisor 在跑 + WHPX API 可用"。）
+#
+#    判据按可靠性排序，从上往下取第一个能给出结论的：
+#      1. 模拟器自己的 `-accel-check` —— 最权威，它说 usable 就是能用
+#      2. `HypervisorPresent` —— 有 hypervisor 在跑
+#      3. 功能状态 —— Hyper-V（任意一种）或 HypervisorPlatform 任一 Enabled 即可
+$accelChecked = $false
+$emuExe = Join-Path $PSScriptRoot "sdk\emulator\emulator.exe"
+if (Test-Path -LiteralPath $emuExe) {
+    $accelOut = & $emuExe -accel-check 2>&1 | Out-String
+    if ($accelOut -match "is installed and usable") {
+        Ok ("模拟器自检：硬件加速可用（" + ($accelOut -replace "\s+", " ").Trim() + "）")
+        $accelChecked = $true
+    } elseif ($accelOut -match "not installed|not usable|Unable") {
+        Warn2 ("模拟器自检说硬件加速不可用：" + ($accelOut -replace "\s+", " ").Trim() +
+               " —— 启用在「启用或关闭 Windows 功能」里的 Hyper-V **或**「Windows 虚拟机监控程序平台」，然后重启")
+        $accelChecked = $true
+    }
+}
+if (-not $accelChecked) {
+    $hv = @("Microsoft-Hyper-V-All", "Microsoft-Hyper-V", "HypervisorPlatform") |
+          ForEach-Object { Get-WindowsOptionalFeature -Online -FeatureName $_ -ErrorAction SilentlyContinue } |
+          Where-Object { $_ -and $_.State -eq "Enabled" }
+    if ($hv) {
+        Ok ("Hyper-V / 虚拟机监控程序平台已启用（" + ($hv.FeatureName -join ", ") + "）")
+    } elseif ($cs.HypervisorPresent) {
+        Info "功能状态读不到，但 HypervisorPresent=True（有 hypervisor 在跑）——多半够用，跑一次 run-windows.ps1 便知"
+    } else {
+        Warn2 "没有任何 hypervisor 在跑，且 Hyper-V / 虚拟机监控程序平台都没启用 —— 模拟器起不来。到「启用或关闭 Windows 功能」勾选 Hyper-V（或「Windows 虚拟机监控程序平台」）并重启"
+    }
 }
 
 Write-Host "==> 2. 磁盘空间" -ForegroundColor Cyan
