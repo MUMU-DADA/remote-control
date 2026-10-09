@@ -10,6 +10,9 @@
 #>
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
+# 归档（export/import）的共享实现。与 Linux 侧的 packaging/bin/linux/archive.sh
+# **同一份格式契约** —— 所以归档跨平台互认（Linux 导出的 Windows 能恢复，反之亦然）。
+. (Join-Path $PSScriptRoot "archive.ps1")
 
 function Show-Usage {
     Write-Host @"
@@ -25,6 +28,8 @@ function Show-Usage {
   list                查看全部实例
   verify [名称]       验收 ROM、服务和 ARM64 应用支持
   inspect <归档>      只读查看实例归档清单与内容
+  export [实例名]     把实例打成一个归档（-Out 指定路径；默认 <名>-<时间>.tar）
+  import <归档>       从归档恢复出一台新实例（-Name 指定名字）
   reset [名称]        清空数据分区和快照，保留实例
   clone <源> <新名称> 复制实例状态与已安装应用
   delete [名称]       停止并删除实例
@@ -294,12 +299,13 @@ $command = ([string]$rawArgs[0]).ToLowerInvariant()
 $rawArgs = @($rawArgs | Select-Object -Skip 1)
 if ($command -in @("help", "-h", "--help", "-?")) { Show-Usage; exit 0 }
 if ($command -eq "ls") { $command = "list" }
-$commands = @("create", "start", "stop", "kill", "restart", "status", "list", "verify", "inspect", "reset", "clone", "delete")
+$commands = @("create", "start", "stop", "kill", "restart", "status", "list", "verify", "inspect", "export", "import", "reset", "clone", "delete")
 if ($commands -notcontains $command) { Die "未知命令：$command（运行 .\bin\emulator.ps1 help）" }
 
 $valueAliases = @{
     "name" = "name"; "n" = "name"; "port" = "port"; "gpu" = "gpu"
     "memory" = "memory"; "cores" = "cores"; "timeout" = "timeoutsec"; "timeoutsec" = "timeoutsec"
+    "out" = "out"; "o" = "out"
 }
 $flagAliases = @{
     "yes" = "yes"; "y" = "yes"; "force" = "force"; "f" = "force"
@@ -307,6 +313,7 @@ $flagAliases = @{
     "nowait" = "nowait"; "no-wait" = "nowait"; "gui" = "gui"
     "testinstance" = "testinstance"; "test-instance" = "testinstance"
     "noaccel" = "noaccel"; "no-accel" = "noaccel"
+    "unsafe" = "unsafe"
 }
 $values = @{}
 $flags = @{}
@@ -352,12 +359,147 @@ $allowed = @{
     "list" = @()
     "verify" = @("name", "port")
     "inspect" = @()
+    "export" = @("name", "port", "out", "force")
+    "import" = @("name", "unsafe", "force")
     "reset" = @("name", "port", "timeoutsec", "force", "yes")
     "clone" = @("port", "timeoutsec", "force")
     "delete" = @("name", "timeoutsec", "force", "yes")
 }
 foreach ($key in $values.Keys) { if ($allowed[$command] -notcontains $key) { Die "-$key 不适用于 $command 命令" } }
 foreach ($key in $flags.Keys) { if ($allowed[$command] -notcontains $key) { Die "-$key 不适用于 $command 命令" } }
+
+# ── export / import：归档逻辑在 archive.ps1，这里只做本管理器该做的事 ─────────
+
+function Add-ArchiveExtraStage {
+    # archive.ps1 在打包前调这个钩子：把服务属性/令牌摆进它的暂存目录。
+    # 有就带上、没有就跳过 —— 与 Linux 侧那份的容忍一致（导入侧不依赖它们）。
+    param([string]$Stage)
+    $envFile = Get-InstanceFile $script:ArchiveExportName
+    if (Test-Path -LiteralPath $envFile) {
+        $svc = @(Get-Content -LiteralPath $envFile | Where-Object { $_ -match '^SERVICE_' })
+        if ($svc.Count -gt 0) {
+            Set-Content -LiteralPath (Join-Path $Stage "host-service.env") -Value $svc -Encoding ASCII
+        }
+    }
+    $tok = Join-Path $script:InstancesDir "$($script:ArchiveExportName).token"
+    if (Test-Path -LiteralPath $tok) {
+        Copy-Item -LiteralPath $tok -Destination (Join-Path $Stage "host-service.token") -Force
+    }
+}
+
+function Invoke-ExportArchive {
+    param([string]$Name, [string]$Out, [switch]$Force)
+    if (-not (Test-Instance $Name)) { Die "没有叫 '$Name' 的实例（用 list 看看）" }
+    $port = Get-InstancePort $Name
+    $sysdir = Get-SysDir $port
+    $datadir = Get-DataDir $port
+    if (-not $Out) { $Out = Join-Path $script:Root ("$Name-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".tar") }
+
+    # 运行中导出会拿到不一致的镜像 —— 和 Linux 侧一样，先停
+    if (Test-InstanceRunning -P $port) {
+        Write-Log "导出前先停掉 '$Name'（运行中导出会拿到不一致的镜像）"
+        Stop-ForMutation -Name $Name -TimeoutSec 120
+    }
+
+    $script:ArchiveExportName = $Name
+    $script:ArchiveProduct = "remote_control"
+    $sums = Join-Path $script:Images "SHA256SUMS"
+    $script:ArchiveRomFp = if (Test-Path -LiteralPath $sums) {
+        (Get-FileHash -LiteralPath $sums -Algorithm MD5).Hash.ToLower()
+    } else { "unknown" }
+    # 镜像清单 = 工作目录里那些**指向 ROM 的符号链接**（不导内容，恢复时按名字重链本地那份）
+    $script:ArchiveImages = @(Get-ChildItem -LiteralPath $sysdir -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.LinkType } | ForEach-Object { $_.Name })
+
+    Export-InstanceArchive -Name $Name -SysDir $sysdir -DataDir $datadir -Out $Out -Force:$Force
+
+    Write-Log "已导出： $Out"
+    Write-Host ("    大小     {0:N1} MB" -f ((Get-Item -LiteralPath $Out).Length / 1MB))
+    Write-Host ("    条目     {0} 个" -f $script:ArchiveLastEntries)
+    Write-Log  "    恢复     .\bin\emulator.ps1 import $(Split-Path -Leaf $Out) -Name <新名字>"
+}
+
+function Invoke-ImportArchive {
+    param([string]$Archive, [string]$Name, [switch]$Unsafe)
+    if (-not (Test-Path -LiteralPath $Archive -PathType Leaf)) { Die "没有这个归档：$Archive" }
+
+    # ⚠️ 闸必须在**注册实例之前**跑 —— 否则被拒的导入会留下半个实例。
+    Test-ArchivePreflight -Archive $Archive
+
+    if (-not $Name) { $Name = Get-ArchiveField -Manifest $script:ArchiveMf -Field "instance" }
+    if ([string]::IsNullOrWhiteSpace($Name)) { Die "归档里没写实例名，用 -Name 指定一个" }
+    Assert-InstanceName $Name
+    if (Test-Instance $Name) { Die "实例 '$Name' 已经存在（用 -Name 换个名字）" }
+
+    $here = "unknown"
+    $sums = Join-Path $script:Images "SHA256SUMS"
+    if (Test-Path -LiteralPath $sums) { $here = (Get-FileHash -LiteralPath $sums -Algorithm MD5).Hash.ToLower() }
+    $there = Get-ArchiveField -Manifest $script:ArchiveMf -Field "romFingerprint"
+    if ($there -and $there -ne $here) {
+        Write-Warn "ROM 指纹不一致（归档 $there / 本地 $here）—— 镜像版本不同可能起不来"
+    }
+
+    $port = New-FreePort
+    Register-Instance $Name $port
+    $sysdir = Get-SysDir $port
+    $datadir = Get-DataDir $port
+
+    # 服务属性/令牌：归档里带着就照搬（否则导入出来的机器会换一个令牌）
+    $svc = Get-ArchiveMember -Archive $Archive -Member "host-service.env"
+    if (-not [string]::IsNullOrWhiteSpace($svc)) {
+        $lines = @($svc -split "`n" | Where-Object { $_ -match '^SERVICE_' })
+        if ($lines.Count -gt 0) { Add-Content -LiteralPath (Get-InstanceFile $Name) -Value $lines -Encoding ASCII }
+    }
+    $tok = Get-ArchiveMember -Archive $Archive -Member "host-service.token"
+    if (-not [string]::IsNullOrWhiteSpace($tok)) {
+        Set-Content -LiteralPath (Join-Path $script:InstancesDir "$Name.token") -Value $tok.Trim() -Encoding ASCII -NoNewline
+    }
+
+    Import-InstanceArchive -Archive $Archive -SysDir $sysdir -DataDir $datadir -Name $Name -Unsafe:$Unsafe
+
+    # 按本地 images\ 重新链镜像（归档里没带）
+    $missing = @()
+    foreach ($img in @($script:ArchiveImages)) {
+        $src = Join-Path $script:Images $img
+        $dst = Join-Path $sysdir $img
+        if (Test-Path -LiteralPath $dst) { continue }
+        if (Test-Path -LiteralPath $src) {
+            try { New-Item -ItemType SymbolicLink -Path $dst -Target $src -Force | Out-Null }
+            catch { $missing += $img }
+        } else { $missing += $img }
+    }
+    if ($missing.Count -gt 0) { Write-Warn "这些镜像没链上（本地 images\ 缺）：$($missing -join ' ')" }
+
+    # config.ini 必须是**本机模板的副本**，不能是链接 —— 模拟器写它会把模板改掉
+    if (-not (Test-Path -LiteralPath $script:ConfigFile)) {
+        Die "本机模板缺失：$($script:ConfigFile) —— 不复制就恢复不出能用的实例"
+    }
+    $cfg = Join-Path $sysdir "config.ini"
+    Remove-Item -LiteralPath $cfg -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $script:ConfigFile -Destination $cfg -Force
+
+    Write-Log "已导入： '$Name'（端口 $port）"
+    Write-Host ("    下一步   .\bin\emulator.ps1 start $Name")
+}
+
+if ($command -eq "export") {
+    if ($positionals.Count -gt 1) { Die "用法：.\bin\emulator.ps1 export [实例名] [-Out <归档路径>] [-Force]" }
+    if ($positionals.Count -eq 1 -and $values.ContainsKey("name")) { Die "不能同时用位置实例名和 -Name" }
+    $exportName = if ($positionals.Count -eq 1) { [string]$positionals[0] }
+                  elseif ($values.ContainsKey("name")) { [string]$values["name"] }
+                  else { "default" }
+    Assert-InstanceName $exportName
+    $exportOut = if ($values.ContainsKey("out")) { [string]$values["out"] } else { $null }
+    Invoke-ExportArchive -Name $exportName -Out $exportOut -Force:($flags.ContainsKey("force"))
+    exit 0
+}
+
+if ($command -eq "import") {
+    if ($positionals.Count -ne 1) { Die "用法：.\bin\emulator.ps1 import <归档路径> [-Name <新名字>] [-Unsafe]" }
+    $importName = if ($values.ContainsKey("name")) { [string]$values["name"] } else { $null }
+    Invoke-ImportArchive -Archive ([string]$positionals[0]) -Name $importName -Unsafe:($flags.ContainsKey("unsafe"))
+    exit 0
+}
 
 if ($command -eq "inspect") {
     if ($positionals.Count -ne 1) { Die "用法：.\bin\emulator.ps1 inspect <归档路径>" }
