@@ -123,8 +123,11 @@ AutoSnapshotAndroid/
 │   ├── build-remote-control.sh            编 remote-control / rcctl（AOSP 平台后端）
 │   ├── build-ndk.sh              编 NDK 版（screencap 后端，无需 AOSP 树）
 │   ├── check-api-docs.py         核对文档与运行中的服务是否一致（**文档 ↔ 服务**）
-│   └── check-docs.py             文档体检：链接 / 索引覆盖 / 编号 / 孤儿 /
-│                                 陈旧路径 / 脚本路径是否存在（**文档 ↔ 仓库**）
+│   ├── check-docs.py             文档体检：链接 / 索引覆盖 / 编号 / 孤儿 /
+│   │                             陈旧路径 / 脚本路径是否存在（**文档 ↔ 仓库**）
+│   ├── check-scripts.py          所有 .ps1 必须带 UTF-8 BOM（PowerShell 5.1 会读坏中文）
+│   ├── check-verify-honesty.py   verify-*.sh 不许"前提崩了照样下结论"
+│   └── check-duplicate-lines.py  连续两行完全相同的赋值（打补丁"替换成本来就在的那行"的形状）
 │
 ├── aosp/                      ← AOSP 源码树
 │

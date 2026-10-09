@@ -70,6 +70,7 @@ declare -A CHECK_KIND=(
     [check-docs.py]=strict              # 带 --strict（它现在已经是默认，显式写出来更清楚）
     [check-scripts.py]=plain
     [check-verify-honesty.py]=plain
+    [check-duplicate-lines.py]=plain     # 连续重复赋值（'确认提示弹两次'那个 bug 的形状）
     [check-api-docs.py]=device          # 要真在跑的服务（/api/v1/describe）
 )
 shopt -s nullglob
