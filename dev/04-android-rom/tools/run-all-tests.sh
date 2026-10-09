@@ -83,6 +83,21 @@ declare -A WINDOWS_ONLY=(
     [windows/verify-windows-cli.ps1]="在 Windows 检出目录里：powershell -NoProfile -ExecutionPolicy Bypass -File verify-windows-cli.ps1"
 )
 
+# ── 别处的端到端套件 ────────────────────────────────────────────────────
+#
+# 本仓库还有独立的套件（自己的 runner、自己的依赖），**不在** tools/ 下，
+# 所以上面的 `tools/test-*` 那套发现机制看不见它们。
+# 2026-10-09 实测：`dev/02-native-daemon/tools/webui-test/run-all.sh`（10 个浏览器
+# 端到端脚本）就是这样 —— 文件在、README 里被当证据引用，但**没有任何地方说怎么跑它**，
+# 主 runner 也不提。它自己那份 README 里还记着一次假绿教训
+# （页面 401 时照样报 8/9）。这种"存在但没人负责跑"的东西等于没有。
+#
+# 所以改成**发现式**：扫 dev/*/tools/*/run-all.sh，每一个都必须在下面分类，
+# 没分类就报错（和第 10 轮那条"没分类就报错"同一个道理）。
+declare -A EXTERNAL_SUITE=(
+    [dev/02-native-daemon/tools/webui-test/run-all.sh]="要一台跑着的实例 + Chromium + xvfb：xvfb-run -a ./run-all.sh --host 127.0.0.1 --port <转发的端口>"
+)
+
 shopt -s nullglob
 check_files=()
 for f in "$REPO_ROOT"/tools/check-*.py; do
@@ -129,6 +144,24 @@ for f in "${found[@]}"; do
     if [ "${KIND[$f]}" = host ]; then host_list+=("$f"); else device_list+=("$f"); fi
 done
 
+# 扫别处的套件，没分类就报错
+ext_found=()
+while IFS= read -r f; do
+    [ -n "$f" ] && ext_found+=("$f")
+done < <(cd "$REPO_ROOT" && ls -d dev/*/tools/*/run-all.sh 2>/dev/null)
+for f in "${ext_found[@]}"; do
+    if [ -z "${EXTERNAL_SUITE[$f]:-}" ]; then
+        echo "[x] 发现一个别处的套件 $f，但没有分类，拒绝静默跳过它"
+        echo "    处理：在 $0 的 EXTERNAL_SUITE 表里写清「要什么依赖、怎么跑」"
+        exit 1
+    fi
+done
+if [ "${#ext_found[@]}" -gt 0 ]; then
+    echo "别处的端到端套件（本机不自动跑，列出来免得被忘掉）：${#ext_found[@]} 个"
+    for f in "${ext_found[@]}"; do
+        printf '  %s\n    %s\n' "$f" "${EXTERNAL_SUITE[$f]}"
+    done
+fi
 if [ "${#WINDOWS_ONLY[@]}" -gt 0 ]; then
     echo "只能在 Windows 上跑（本机跑不了，列出来免得被忘掉）：${#WINDOWS_ONLY[@]} 个"
     for k in "${!WINDOWS_ONLY[@]}"; do
