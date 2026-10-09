@@ -86,6 +86,43 @@ def classify(path: Path, line: str):
     return None
 
 
+# ── 规则二：环境相关的绝对路径只许有一份 ─────────────────────────────
+#
+# 2026-10-09 实测：`webui-test/` 下 **10 个脚本各写一份** Chromium 路径，而且
+# 两种写法混着 —— 4 个用 `os.environ.get("CHROME", "<默认>")`（可覆盖，对的做法），
+# 7 个直接把全路径塞进 `launch(executable_path=...)`。
+#
+# 这正是"同一句话抄到 N 处、只改了一处"：playwright 换了 Chromium 版本之后，
+# 改 4 个、忘 7 个 —— 表现是**一部分脚本能跑、一部分起不来**，
+# 比"全都起不来"更难查，因为它看起来像已经修好了。
+#
+# 为什么不写成通用的"同目录内重复的绝对路径"：试过了，全仓命中 4 处，
+# 全是正当的（`/api/v1/describe` 这类 API 字符串、AOSP 的 `/aosp/out/soong_ui`）。
+# 要压成能用的规则就得加白名单，而白名单会随着新测试不断变长。
+# 所以只写这一条**确定性**的：作用域明确、零误报、且正的这次踩的坑。
+PATH_RULES = [
+    # (目录, 允许持有该字面量的文件, 禁令里的字面量, 说明)
+    ("dev/02-native-daemon/tools/webui-test", {"wctest_chrome.py"}, "ms-playwright",
+     "Chromium 路径只能由 wctest_chrome.py 持有，别的脚本一律 `from wctest_chrome import CHROME`"),
+]
+
+
+def check_path_rules(problems) -> int:
+    checked = 0
+    for rel_dir, allowed, needle, why in PATH_RULES:
+        d = ROOT / rel_dir
+        if not d.is_dir():
+            continue
+        for f in sorted(list(d.glob("*.py")) + list(d.glob("*.sh")) + list(d.glob("*.ps1"))):
+            checked += 1
+            if f.name in allowed:
+                continue
+            if needle in f.read_text(encoding="utf-8", errors="replace"):
+                problems.append(
+                    f"{f.relative_to(ROOT)} 里出现了 `{needle}` —— {why}")
+    return checked
+
+
 def main() -> int:
     # 用 os.walk + **原地剪枝**，而不是 rglob：rglob 会走进 aosp/（几万个文件）
     # 和 .run/、artifacts/ 才在结果里过滤掉，慢到跑不完。
@@ -127,23 +164,30 @@ def main() -> int:
             if prev and prev[1] == got[0] and prev[2] == got[1]:
                 rel = str(f.relative_to(ROOT))
                 if (rel, i) not in ALLOW:
-                    problems.append((rel, prev[0], i, got[0], got[1][:60]))
+                    # ⚠️ 统一用**字符串**（原来这里是 5 元组，加第二条规则时
+                    #    两处都往同一个列表里塞，报告循环按元组解包 → ValueError。
+                    #    是反向测试逮到的：规则命中了，却在**打印之前崩掉**。）
+                    problems.append(
+                        f"{rel}:{prev[0]} 和 :{i} 都是 `{got[0]} = …`\n"
+                        f"        第二处右边：{got[1][:60]}")
                 prev = (i, got[0], got[1])
             else:
                 prev = (i, got[0], got[1])
 
-    print(f"连续重复赋值体检：{len(files)} 个脚本，{checked} 条赋值")
+    n_path = check_path_rules(problems)
+    print(f"连续重复赋值体检：{len(files)} 个脚本，{checked} 条赋值"
+          f"；另有 {n_path} 个脚本受「环境相关路径只许一份」规则约束")
     if not problems:
-        print("  ✓ 没有同一个左值连着赋两次的情况")
+        print("  ✓ 没有同一个左值连着赋两次的情况，环境相关的路径也只有一份")
         return 0
 
     print(f"  ✗ {len(problems)} 处：")
-    for rel, l1, l2, lhs, rhs in problems:
-        print(f"      {rel}:{l1} 和 :{l2}   都是 `{lhs} = …`")
-        print(f"        第二处右边：{rhs}")
+    for item in problems:
+        print(f"      {item}")
     print()
-    print("  这几乎总是打补丁时「替换成了本来就在的那一行」造成的。")
-    print("  确认是故意的（极罕见）就写进本文件的 ALLOW 并说明理由。")
+    print("  重复赋值：几乎总是打补丁时「替换成了本来就在的那一行」造成的。")
+    print("  重复路径：把它收进一个共享模块，别的文件引用它。")
+    print("  两者都确实有理由时，写进本文件的 ALLOW / PATH_RULES 并说明。")
     return 1
 
 

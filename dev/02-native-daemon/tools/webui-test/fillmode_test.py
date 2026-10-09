@@ -39,12 +39,11 @@ import urllib.request
 from playwright.sync_api import sync_playwright
 
 import wctest_token
+from wctest_chrome import CHROME
 
 # 交付镜像默认开鉴权：没令牌页面会 401，而多数检查照样"通过"。
 _TOKEN = wctest_token.resolve_token()
 
-CHROME = os.environ.get(
-    "CHROME", "/root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome")
 
 checks = []
 

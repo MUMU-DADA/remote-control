@@ -4,6 +4,7 @@ import time, sys
 from playwright.sync_api import sync_playwright
 
 import wctest_token
+from wctest_chrome import CHROME
 
 # 交付镜像默认开鉴权：没令牌页面会 401，而多数检查照样"通过"。
 _TOKEN = wctest_token.resolve_token()
@@ -21,7 +22,7 @@ def chk(name, cond, extra=""):
 
 with sync_playwright() as p:
     b = p.chromium.launch(headless=True,
-        executable_path="/root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome",
+        executable_path=CHROME,
         args=["--no-sandbox", "--disable-gpu",
               f"--unsafely-treat-insecure-origin-as-secure={BASE}"])
     pg = wctest_token.new_page(b, _TOKEN, viewport={"width": 900, "height": 1400})

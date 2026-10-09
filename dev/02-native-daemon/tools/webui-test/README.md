@@ -19,6 +19,29 @@ xvfb-run -a ./run-all.sh --host 127.0.0.1 --port 18088 --token <访问令牌>
 照样会"通过"**（拖动条范围、元素存在性这些是纯 UI 的），所以令牌这一环
 必须给上，否则跑出来的绿是假的。
 
+## Chromium 从哪来（只有一份定义）
+
+```bash
+python3 -m playwright install chromium     # 没有的话装一个
+CHROME=/path/to/chrome ./run-all.sh …      # 或指定现成的
+```
+
+默认值**只写在 `wctest_chrome.py` 一个文件里**，别的脚本一律
+`from wctest_chrome import CHROME`。
+
+**为什么强调这件事** —— 2026-10-09 实测，这个路径原来在 **10 个脚本里各写一份**，
+而且两种写法混着：4 个用 `os.environ.get("CHROME", "<默认>")`（可覆盖，对的做法），
+7 个直接把全路径塞进 `launch(executable_path=...)`。
+
+这是"同一句话抄到 N 处、只改了一处"的典型：playwright 换了 Chromium 版本之后，
+改 4 个、忘 7 个 —— 表现是**一部分脚本能跑、一部分起不来**，
+比"全都起不来"更难查，因为它看起来像已经修好了。
+
+`tools/check-duplicate-lines.py` 里有一条规则守着它（作用域明确、零误报）：
+`webui-test/` 下除 `wctest_chrome.py` 外，任何脚本都不许出现 `ms-playwright`。
+
+---
+
 ## 这些脚本
 
 | 脚本 | 验什么 |
