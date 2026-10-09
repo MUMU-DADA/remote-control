@@ -1189,7 +1189,7 @@ linux          windows          darwin-aarch64          darwin-x86_64
 |---|---|---|
 | arm64 内核 5.10 与 API 31 的配对（`EMULATOR_KERNEL_FILE` 在 `arm64-kernel.mk` 里是 `kernel-5.10-gz` 变体） | 起不来 / 起得慢 | 产物已在（§7.0.1），在真机上直接试；这是 `sdk_phone64_arm64` 的官方配对 |
 | arm64 系统库体积与启动时间相对 x86_64 的差异 | 尚无可比较的真机启动数据 | 按 §7.1 #6 在 Apple Silicon 上实测后记录 |
-| 新增应用 APK 含预编译 `.so` | 原生 arm64 ROM 上**没有翻译层兜底**，必须自带 `arm64-v8a` | 集成应用时检查 APK 的 `lib/` 目录 |
+| 新增应用 APK 含预编译 `.so` | 原生 arm64 ROM 上**没有翻译层兜底**，必须自带 `arm64-v8a` | **`tools/check-apk-abis.py`**（2026-10-09 加的，进了主 runner）：扫随包发出去的 APK，带 `lib/` 就必须含 `arm64-v8a`，否则报错。原来这里写的是「集成应用时检查 APK 的 `lib/` 目录」—— 一条**没有任何代码执行**的规矩 |
 | 两个产品的 `remote-control` 行为差异（例如 `Ro属性` 上报、`abilist`） | 体检脚本的期望值要按产品区分 | 让 `functional-sweep.py` 的期望设备感知（它已经支持"已知平台限制"这个机制） |
 
 ### 7.3 未决（需要人来定，不是技术能定的）

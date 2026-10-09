@@ -75,6 +75,7 @@ declare -A CHECK_KIND=(
     [check-image-lists.py]=plain         # 生产端产出的镜像 vs 各平台认为必需的，必须对得上
     [check-protocol-docs.py]=plain       # protocol.h 里每个命令 token，文档里都要写得到
     [check-config-keys.py]=plain         # config.ini → 各套管理器的 -prop → daemon 读的属性，三段必须对得上
+    [check-apk-abis.py]=plain            # 随包发出去的 APK 带原生库时必须含 arm64-v8a
     [check-api-docs.py]=device          # 要真在跑的服务（/api/v1/describe）
 )
 # 只能在 Windows 上跑的（这里列出来是为了**可发现**，不是假装跑过）。
