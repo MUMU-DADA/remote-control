@@ -550,6 +550,39 @@ function Invoke-Start {
 # ---------------------------------------------------------------------------
 # stop / kill / restart
 # ---------------------------------------------------------------------------
+# ⚠️ **判"有没有人在键盘前"不能靠那些标准标志。**
+#
+#    2026-10-09 在计划任务上下文里实测，全部失灵：
+#
+#        [Environment]::UserInteractive = True        ← 说是交互的
+#        [Console]::IsInputRedirected  = False        ← 说是没重定向
+#        $Host.Name                    = ConsoleHost  ← 说是真控制台
+#        $Host.UI.RawUI.WindowSize     = 120,50       ← 还有个假窗口
+#        可 [Console]::ReadLine() / Read-Host **永远不返回** —— 没人能输入
+#
+#    这是"孤儿控制台"：控制台对象在，输入源不在。所以唯一可靠的判据是
+#    **限时等一行**：等到了就是有人，等不到就当作非交互、快速失败。
+#    （同进程 runspace，共享同一个控制台；用 Start-Job 不行 —— 那是新进程，没有控制台。）
+function Read-LineWithTimeout {
+    param([int]$TimeoutSec = 20)
+    # 用**子进程**读，而不是同进程 runspace：runspace 里 [Console]::ReadLine() 一样
+    # 会卡死整个进程（2026-10-09 实测，WaitOne 超时根本没机会触发）。
+    # 子进程共享同一个控制台，而 WaitForExit 的超时是可靠的。
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath "powershell.exe" -PassThru -NoNewWindow -ArgumentList @(
+            "-NoProfile", "-Command",
+            "[Console]::ReadLine() | Set-Content -LiteralPath '$tmp' -Encoding UTF8")
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+        $v = Get-Content -LiteralPath $tmp -Raw -ErrorAction SilentlyContinue
+        return $v
+    } catch { return $null }
+    finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+}
+
 function Invoke-Stop {
     param([string]$N)
     Assert-Instance $N
@@ -583,9 +616,25 @@ function Invoke-Reset {
     if (Test-InstanceRunning $N) { Write-Log "先停掉 '$N'"; if (-not (Invoke-Stop $N)) { Die "实例未停止；未修改数据，请显式 -Force 后重试" } }
 
     if (-not $Yes) {
+        # ⚠️ **非交互环境下 `Read-Host` 会永久阻塞。**
+        #
+        #    计划任务 / ssh 没分配 tty / 管道喂进来的脚本，都没有 stdin ——
+        #    `Read-Host` 不返回、不报错、不超时，就这么挂着。
+        #
+        #    而 Linux 侧同样场景下 `read -r ans` 拿到的是 **EOF** → `$ans` 为空
+        #    → 立刻 `die "已取消"`。**同一套语义，一个快速失败，一个无声挂死。**
+        #
+        #    2026-10-09 实测：计划任务里跑 `delete`，卡了 8 分钟零输出；
+        #    我还把它误判成 `stop` 卡住 —— 因为日志的行序骗人：管道
+        #    `& $emu stop ... | Add-Content` 的输出是**结束**时才追加的，
+        #    所以日志里最后一行看起来停在 stop 那一步。
+        $ans = Read-LineWithTimeout 20
+        if ($null -eq $ans) {
+            Die ("等了 20 秒没人输入 —— 按非交互处理。这是破坏性操作，请显式加 -Yes" +
+                 "（Linux 侧同场景下 read 拿到 EOF 会立刻 die，这里对齐同样的行为）")
+        }
+        if ($ans.Trim() -ne "yes") { Die "已取消" }
         Write-Host "[!] 重置 '$N' 会清空数据分区（已装应用 / 应用数据 / sdcard / 快照）" -ForegroundColor Yellow
-        $ans = Read-Host "    输入 yes 继续"
-        if ($ans -ne "yes") { Die "已取消" }
     }
 
     $sysdir = Get-SysDir $N
@@ -623,9 +672,25 @@ function Invoke-Delete {
     if (Test-InstanceRunning $N) { Write-Log "先停掉 '$N'"; if (-not (Invoke-Stop $N)) { Die "实例未停止；未修改数据，请显式 -Force 后重试" } }
 
     if (-not $Yes) {
+        # ⚠️ **非交互环境下 `Read-Host` 会永久阻塞。**
+        #
+        #    计划任务 / ssh 没分配 tty / 管道喂进来的脚本，都没有 stdin ——
+        #    `Read-Host` 不返回、不报错、不超时，就这么挂着。
+        #
+        #    而 Linux 侧同样场景下 `read -r ans` 拿到的是 **EOF** → `$ans` 为空
+        #    → 立刻 `die "已取消"`。**同一套语义，一个快速失败，一个无声挂死。**
+        #
+        #    2026-10-09 实测：计划任务里跑 `delete`，卡了 8 分钟零输出；
+        #    我还把它误判成 `stop` 卡住 —— 因为日志的行序骗人：管道
+        #    `& $emu stop ... | Add-Content` 的输出是**结束**时才追加的，
+        #    所以日志里最后一行看起来停在 stop 那一步。
+        $ans = Read-LineWithTimeout 20
+        if ($null -eq $ans) {
+            Die ("等了 20 秒没人输入 —— 按非交互处理。这是破坏性操作，请显式加 -Yes" +
+                 "（Linux 侧同场景下 read 拿到 EOF 会立刻 die，这里对齐同样的行为）")
+        }
+        if ($ans.Trim() -ne "yes") { Die "已取消" }
         Write-Host "[!] 删除 '$N' 会删掉整个工作目录（含已装应用与快照）" -ForegroundColor Yellow
-        $ans = Read-Host "    输入 yes 继续"
-        if ($ans -ne "yes") { Die "已取消" }
     }
 
     $sysdir = Get-SysDir $N
