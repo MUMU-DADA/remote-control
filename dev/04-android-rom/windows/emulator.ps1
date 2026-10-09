@@ -588,7 +588,7 @@ function Read-LineWithTimeout {
             "[Console]::ReadLine() | Set-Content -LiteralPath '$tmp' -Encoding UTF8")
         if (-not $p.WaitForExit($TimeoutSec * 1000)) {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            # 直接在这里 die，而不是把 $null 交回调用方 —— 三个调用点超时后的处理
+            # 直接在这里 die，而不是把 $null 交回调用方 —— 两个调用点超时后的处理
             # 一模一样，分散写还会带来一个坑：消息里的秒数会被**写死**。
             # （第一版就是 `Die "等了 20 秒…"`，我把默认值改成 120 之后，
             #   它就开始撒谎了。）
@@ -671,7 +671,6 @@ function Invoke-Reset {
         #    `& $emu stop ... | Add-Content` 的输出是**结束**时才追加的，
         #    所以日志里最后一行看起来停在 stop 那一步。
         $ans = Read-LineWithTimeout
-        $ans = Read-LineWithTimeout
         if ($ans.Trim() -ne "yes") { Die "已取消" }
         Write-Host "[!] 重置 '$N' 会清空数据分区（已装应用 / 应用数据 / sdcard / 快照）" -ForegroundColor Yellow
     }
@@ -723,7 +722,6 @@ function Invoke-Delete {
         #    我还把它误判成 `stop` 卡住 —— 因为日志的行序骗人：管道
         #    `& $emu stop ... | Add-Content` 的输出是**结束**时才追加的，
         #    所以日志里最后一行看起来停在 stop 那一步。
-        $ans = Read-LineWithTimeout
         $ans = Read-LineWithTimeout
         if ($ans.Trim() -ne "yes") { Die "已取消" }
         Write-Host "[!] 删除 '$N' 会删掉整个工作目录（含已装应用与快照）" -ForegroundColor Yellow

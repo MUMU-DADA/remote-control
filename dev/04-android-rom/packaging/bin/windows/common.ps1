@@ -75,7 +75,7 @@ function Read-LineWithTimeout {
             "[Console]::ReadLine() | Set-Content -LiteralPath '$tmp' -Encoding UTF8")
         if (-not $p.WaitForExit($TimeoutSec * 1000)) {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            # 直接在这里 die，而不是把 $null 交回调用方 —— 三个调用点超时后的处理
+            # 直接在这里 die，而不是把 $null 交回调用方 —— 各调用点超时后的处理
             # 一模一样，分散写还会带来一个坑：消息里的秒数会被**写死**。
             # （第一版就是 `Die "等了 20 秒…"`，我把默认值改成 120 之后，
             #   它就开始撒谎了。）
