@@ -348,19 +348,42 @@ print(1 if int(d['files']['sha256sumsLines'])==n else '0 got=%d want=%d'%(n,d['f
 echo
 echo "── [2] 解压出来的包能自述（不启动模拟器）"
 RESET_RUN="$SANDBOX/run-reset"
-mkdir -p "$RESET_RUN/instances" "$RESET_RUN/sysdir-5580/snapshots" "$RESET_RUN/datadir-5580"
-printf 'PORT=5580\n' > "$RESET_RUN/instances/default.env"
-printf 'app-data\n' > "$RESET_RUN/sysdir-5580/userdata-qemu.img.qcow2"
-printf 'snapshot\n' > "$RESET_RUN/sysdir-5580/snapshots/state"
-printf 'scratch\n' > "$RESET_RUN/datadir-5580/marker"
+
+# ⚠️ **端口不能写死。** 原来这里是 `PORT=5580`，而本机经常真有一个开发实例
+#    跑在 5580 上（`.run/sysdir-5580`）。`emu_pid_for_port` 是扫
+#    `/proc/*/cmdline` 找 ` -port <N> ` 的 —— 一旦撞上，`stop` 会认为
+#    "有东西在跑"，拿沙箱里那个假令牌去请求 HTTP 正常关机，然后 die：
+#
+#        [x] 无法请求正常关机：HTTP 服务或保存的令牌不可用…
+#
+#    2026-10-09 实测：本机 5580 真有实例，这个脚本因此 **144 通过 / 3 失败**。
+#    **测试不该依赖环境里恰好没有别的东西** —— 自己挑一个确定空闲的端口。
+pick_free_port() {
+    local p=20000
+    while [ "$p" -lt 40000 ]; do
+        # 与产品同样的判据：有没有 qemu 的 cmdline 里带 " -port <p> "
+        if ! grep -lqsw " -port $p " /proc/[0-9]*/cmdline 2>/dev/null; then
+            printf '%s\n' "$p"; return 0
+        fi
+        p=$((p + 1))
+    done
+    return 1
+}
+RPORT="$(pick_free_port)" || { echo "[x] 找不到空闲端口"; exit 1; }
+
+mkdir -p "$RESET_RUN/instances" "$RESET_RUN/sysdir-$RPORT/snapshots" "$RESET_RUN/datadir-$RPORT"
+printf 'PORT=%s\n' "$RPORT" > "$RESET_RUN/instances/default.env"
+printf 'app-data\n' > "$RESET_RUN/sysdir-$RPORT/userdata-qemu.img.qcow2"
+printf 'snapshot\n' > "$RESET_RUN/sysdir-$RPORT/snapshots/state"
+printf 'scratch\n' > "$RESET_RUN/datadir-$RPORT/marker"
 printf 'token\n' > "$RESET_RUN/instances/default.token"
-ln -s "$SANDBOX/x/$LROOT/images/system-qemu.img" "$RESET_RUN/sysdir-5580/system-qemu.img"
+ln -s "$SANDBOX/x/$LROOT/images/system-qemu.img" "$RESET_RUN/sysdir-$RPORT/system-qemu.img"
 chk_out "emulator.sh reset 明确完成重置" "已重置" \
     env AUTOSNAP_RUN_DIR="$RESET_RUN" "$SANDBOX/x/$LROOT/bin/emulator.sh" reset default --yes
 chk "reset 删除数据和快照但保留镜像链接" bash -c \
-    "test ! -e '$RESET_RUN/sysdir-5580/userdata-qemu.img.qcow2' && test ! -e '$RESET_RUN/sysdir-5580/snapshots' && test -L '$RESET_RUN/sysdir-5580/system-qemu.img' && test -e '$RESET_RUN/sysdir-5580/system-qemu.img'"
+    "test ! -e '$RESET_RUN/sysdir-$RPORT/userdata-qemu.img.qcow2' && test ! -e '$RESET_RUN/sysdir-$RPORT/snapshots' && test -L '$RESET_RUN/sysdir-$RPORT/system-qemu.img' && test -e '$RESET_RUN/sysdir-$RPORT/system-qemu.img'"
 chk "reset 删除旧服务令牌并保留实例登记" bash -c \
-    "test ! -e '$RESET_RUN/instances/default.token' && grep -qx 'PORT=5580' '$RESET_RUN/instances/default.env'"
+    "test ! -e '$RESET_RUN/instances/default.token' && grep -qx \"PORT=$RPORT\" '$RESET_RUN/instances/default.env'"
 chk_out "linux status.sh 能跑" "这个包里的 ROM" \
     env AUTOSNAP_RUN_DIR="$SANDBOX/run-linux" "$SANDBOX/x/$LROOT/bin/status.sh"
 chk_out "linux status.sh 报出模板参数" "hw.ramSize" \
@@ -380,6 +403,20 @@ chk_out "Linux --port 值不会被当成实例名" "端口必须" \
     env AUTOSNAP_RUN_DIR="$SANDBOX/run-manager-linux" "$SANDBOX/x/$LROOT/bin/emulator.sh" start --port 5581
 chk_out "Linux manager rejects invalid low console ports" "5554..65534" \
     env AUTOSNAP_RUN_DIR="$SANDBOX/run-manager-lowport" "$SANDBOX/x/$LROOT/bin/emulator.sh" create low --port 2
+# ⚠️ 这一节（create/clone）用 5680 源端口、5682 克隆端口，它们**必须空闲**。
+#    产品侧的 `emu_pid_for_port` 是扫 `/proc/*/cmdline` 找 " -port N " 的 ——
+#    一旦本机真有个实例占了这两个端口之一，脚本对"有没有在跑"的判断就会翻转，
+#    测试会以**看不懂的方式**失败（前面 5580 写死就是这么翻车的：144 通过 / 3 失败，
+#    而且失败信息指向 HTTP 关机，完全看不出是端口撞车）。
+#    这里把端口占用变成一句人话，而不是让人去猜。
+for _p in 5680 5682; do
+    if grep -lqsw " -port $_p " /proc/[0-9]*/cmdline 2>/dev/null; then
+        echo "[x] 端口 $_p 被占用（本机有 qemu 实例在跑）—— 这一节需要它空闲" >&2
+        echo "    处理：停掉占用它的实例后再跑（./bin/emulator.sh list 看有哪些）" >&2
+        exit 1
+    fi
+done
+
 MANAGER_RUN="$SANDBOX/run-manager-linux"
 chk_out "Linux manager create 创建实例" "已创建实例 'source'" \
     env AUTOSNAP_RUN_DIR="$MANAGER_RUN" "$SANDBOX/x/$LROOT/bin/emulator.sh" create source --port 5680
