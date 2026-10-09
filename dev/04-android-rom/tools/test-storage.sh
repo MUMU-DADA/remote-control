@@ -58,5 +58,16 @@ PWSH="$(command -v pwsh || true)"
 [ -n "$PWSH" ] || { [ ! -x "$X64_DIR/../../.tmp/pwsh/pwsh" ] || PWSH="$X64_DIR/../../.tmp/pwsh/pwsh"; }
 if [ -n "$PWSH" ]; then
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 "$PWSH" -NoProfile -File "$X64_DIR/tools/test-storage.ps1"
+else
+    # ⚠️ 这里原来**没有 else** —— 缺 pwsh 就静默少跑一整套 PowerShell 测试，
+    #    而脚本照样退出 0、日志里一个字都不提。2026-10-09 实测：把 .tmp/pwsh
+    #    挪走后跑这个脚本，退出码 0，`grep -icE "skip|跳过|pwsh"` 命中 **0**。
+    #    **"跑过了"和"跑了"是两回事** —— 它的兄弟 test-script-safety.sh 一直是
+    #    明说 [SKIP] 的，这里对齐。
+    printf '  [SKIP] 没有 pwsh —— Windows 侧的存储测试（test-storage.ps1）整套没跑\n'
+    printf '         注意：上面的 PASS 只覆盖 Python 那部分，**不代表整套通过**。\n'
+    printf '         补上它：把 PowerShell 7.4.6 linux-x64 解包到 .tmp/pwsh/，\n'
+    printf '         确切命令见 tools/test-windows-emulator.sh 头部（本机还需\n'
+    printf '         DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1，否则启动即崩）。\n'
 fi
 

@@ -222,6 +222,8 @@ if [ -n "$PWSH" ]; then
     fi
 else
     printf '  [SKIP] pwsh unavailable; Windows runtime mock skipped\n'
+    printf '         （要补上：PowerShell 7.4.6 linux-x64 解包到 .tmp/pwsh/，\n'
+    printf '           确切命令见 tools/test-windows-emulator.sh 头部）\n'
 fi
 
 echo "-- package-rom leaves source and active sysdir data intact"

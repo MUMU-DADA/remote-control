@@ -18,7 +18,11 @@ project = Path(__file__).resolve().parents[1]
 repo = project.parents[1]
 pwsh = shutil.which("pwsh") or str(repo / ".tmp/pwsh/pwsh")
 if not Path(pwsh).is_file():
-    raise SystemExit("pwsh unavailable; install the host test runtime first")
+    raise SystemExit(
+        "pwsh unavailable; install the host test runtime first\n"
+        "  → PowerShell 7.4.6 linux-x64 解包到 .tmp/pwsh/，确切命令见\n"
+        "    tools/test-windows-emulator.sh 头部（本机还需\n"
+        "    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1，否则启动即崩）")
 
 
 with tempfile.TemporaryDirectory(prefix="autosnap-windows-") as temp:
