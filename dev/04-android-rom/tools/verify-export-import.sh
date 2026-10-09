@@ -100,8 +100,10 @@ F1="$F1DIR/fmt1.tar"
 printf '{"format": 1, "instance": "dev3"}\n' > "$F1DIR/INSTANCE-MANIFEST.json"
 if tar -cf "$F1" -C "$F1DIR" ./INSTANCE-MANIFEST.json 2>/dev/null \
    && tar -xOf "$F1" ./INSTANCE-MANIFEST.json 2>/dev/null | grep -q '"format": 1'; then
-    chk_out "格式 1 的归档仍然拒绝执行" "已拒绝执行" $EMU import "$F1" -n t5f
-    chk "格式 1 被拒后**没有**留下半个实例" bash -c "! $EMU list | awk '\$1==\"t5f\"' | grep -q t5f"
+    # ✅ 2026-10-09 翻面：格式 1 **不再被拒绝** —— 恢复时会自动压平迁移
+    #    （实测迁移后数据读得出来，见 docs/12 §7）。原来那两条断言的是"拒绝"。
+    chk_out "格式 1 的归档**不再被拒绝**（会自动迁移）" "已导入" $EMU import "$F1" -n t5f
+    chk "格式 1 也留下了完整的实例" bash -c "$EMU list | awk '\$1==\"t5f\"' | grep -q t5f"
 else
     # 不静默跳过：造不出来就**算失败**，否则"没验"会被读成"验过了"
     chk "格式 1 的固件能造出来（造不出来 = 这一轮没验拒绝行为）" false

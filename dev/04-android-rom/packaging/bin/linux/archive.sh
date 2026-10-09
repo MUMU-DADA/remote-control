@@ -29,9 +29,10 @@
 #   ./host-service.token        服务令牌（600）
 #   ./sysdir/…  ./datadir/…     实例状态
 #
-#   format 1：数据镜像**原样搬**（backing + 覆盖层）。恢复出来 guest 读不到数据
-#             —— 文件层面逐字节忠实，但起来之后 /data 是空的。**仍然拒绝恢复**
-#             除非显式 --unsafe。原因未查明，见 docs/12 §7。
+#   format 1：数据镜像**原样搬**（backing + 覆盖层）。**恢复时自动压平迁移**
+#             （读穿链写出单张 raw、删掉覆盖层）—— 实测迁移后数据读得出来。
+#             历史：不迁移的话 guest 读不到数据（文件逐字节忠实，起来之后 /data 却空），
+#             所以曾经有一道闸拦着；2026-10-09 查明"差别只在覆盖层在不在"之后放开。
 #   format 2：数据镜像压平成**一张自包含** qcow2（`dataFile`），恢复时转回 raw。
 #             **已验证：数据完好。** 见 docs/12 §7。
 # =============================================================================
@@ -205,12 +206,11 @@ archive_preflight() {
     [ -n "$ARCHIVE_MF" ] || die "归档里没有 $ARCHIVE_MANIFEST —— 不是本工具导出的？"
     ARCHIVE_FMT="$(printf '%s' "$ARCHIVE_MF" | sed -n 's/.*"format": *\([0-9]*\).*/\1/p')"
     ARCHIVE_FMT="${ARCHIVE_FMT:-1}"     # 没有 format 字段 = 老归档 = 当作 1
-    if [ "$ARCHIVE_FMT" -lt 2 ] && [ "$unsafe" != "--unsafe" ]; then
-        warn "这是**格式 1** 的老归档：那条路线恢复出来的实例 /data 是空的（归档本身没问题）"
-        warn "详见 docs/12-emulator-control.md §7。确实要用加 --unsafe。"
-        die "已拒绝执行（这是保护，不是故障）"
-    fi
-    [ "$ARCHIVE_FMT" -lt 2 ] && warn "以 --unsafe 运行格式 1 的归档：恢复出来的机器可能没有原来的数据"
+    # ⚠️ 这道闸 2026-10-09 **放开了**：格式 1 的归档现在会在恢复时**自动压平迁移**
+    #    （backing+覆盖层 → 单张 raw），实测数据能读出来（docs/12 §7）。
+    #    闸原来存在的理由是"恢复不出来比没有备份更危险" —— 那个危险没有了。
+    #    `--unsafe` 仍然接受（老脚本可能还在传），只是不再需要。
+    [ "$ARCHIVE_FMT" -lt 2 ] && log "格式 1 的老归档：恢复时会自动压平（backing+覆盖层 → 单张 raw）"
     ARCHIVE_NEED_MB="$(printf '%s' "$ARCHIVE_MF" | sed -n 's/.*"dirBytes": *\([0-9]*\).*/\1/p')"
     ARCHIVE_NEED_MB=$(( ${ARCHIVE_NEED_MB:-0} / 1048576 ))
     return 0
@@ -264,6 +264,24 @@ archive_import() {
         "$(archive_qemu_img)" convert -O raw "$sysdir/$dfile" "$sysdir/$_ARCH_DATA_IMG" 2>/dev/null \
             || die "qemu-img convert 失败：$sysdir/$dfile"
         rm -f "$sysdir/$dfile"
+    fi
+
+    # ── 格式 1：归档里是"原样搬的一对文件"（backing + 覆盖层）──────────────
+    #
+    # ⚠️ 实测（docs/12 §7，2026-10-09）：那样恢复出来的实例**开机后 guest 读不到数据**
+    #    —— 而把**同一对文件**压平成单张 raw 就好了。字节完全相同，差别只在
+    #    恢复出来的实例带不带那份覆盖层。
+    #
+    #    所以这里**就地迁移**：读穿 backing 链写出自包含的 raw，再删掉覆盖层。
+    #    做完之后，格式 1 和格式 2 的落地形态**完全一样**（单张 raw），
+    #    于是老归档里的数据也救得回来。
+    if [ "$fmt" -lt 2 ] && [ -f "$sysdir/$_ARCH_DATA_OVL" ]; then
+        log "格式 1：压平 backing+覆盖层（老归档这样才读得出数据）…"
+        rm -f "$sysdir/.flat-raw-$$"
+        "$(archive_qemu_img)" convert -O raw "$sysdir/$_ARCH_DATA_OVL" "$sysdir/.flat-raw-$$" 2>/dev/null \
+            || die "qemu-img convert 失败：$sysdir/$_ARCH_DATA_OVL"
+        mv -f "$sysdir/.flat-raw-$$" "$sysdir/$_ARCH_DATA_IMG"
+        rm -f "$sysdir/$_ARCH_DATA_OVL"
     fi
 
     # 清掉运行期/路径相关的东西（config.ini 由调用方按本地真源重写）

@@ -68,7 +68,7 @@ release 调用 `dev/05-controller-app/build-apk.sh` 重新构建 APK；本地 An
 已有实例默认保留数据，`reset` 和 `delete` 会再次确认后才清理数据。导出/导入**是本包的能力**：`bin/emulator.sh export|import|inspect`。
 数据镜像压平成一张自包含 qcow2（归档格式 2），恢复时转回 raw ——
 实测恢复出来的机器数据完好（`docs/12` §7）。
-**格式 1 的老归档会被拒绝**（那条路线恢复出来 `/data` 是空的，原因未查明）。
+**格式 1 的老归档也能恢复** —— 恢复时自动压平迁移，实测数据读得出来（`docs/12` §7）。
 
 ---
 
