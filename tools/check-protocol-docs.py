@@ -7,9 +7,13 @@
 
 "有哪些命令"这件事写在**三个地方**：
 
-    真源      dev/02-native-daemon/daemon/protocol.h   enum Token（40 个）
+    真源      dev/02-native-daemon/daemon/protocol.h   enum Token（40 个）+ kErr*（13 个）
     分发      daemon/rest_api.cpp                      名字 → Cmd:: 的映射
     文档      docs/api/*.md + README                  客户端作者读的就是这份
+
+**错误码**是这条链子的另一半（2026-10-09 扩进来的）：客户端靠 `0x1009` 这样的码
+分支处理。这里查两件事 —— 每个码文档里要有，而且**必须真的会被返回**：
+定义了却从不返回的码，会让客户端为一件不会发生的事写分支。
 
 2026-10-09 逐个对照过：REST 层覆盖 39/40（缺的那个是 `Token`，**socket-only**，
 v11 的既定设计），文档里 40 个**一个不缺**。三份目前是同步的。
@@ -73,7 +77,8 @@ def main() -> int:
     text = "\n".join(d.read_text(encoding="utf-8") for d in docs)
     low = text.lower()
 
-    missing = []
+    missing = []      # 文档里找不到的（命令 token 和错误码共用）
+    dead = []         # 定义了但 daemon 从不返回的错误码
     for name, _ in tokens:
         if name in ALLOW:
             continue
@@ -81,17 +86,42 @@ def main() -> int:
             continue
         missing.append((name, snake(name)))
 
-    print(f"协议命令清单对照：protocol.h 里 {len(tokens)} 个 token，"
+    # ── 错误码：同一条链子的另一半 ──────────────────────────────────────
+    # 客户端要靠码来分支处理（`0x1009` = 找不到）。加了码却忘了写文档 →
+    # 客户端不知道怎么处理；写了却**从不返回** → 客户端为一件不会发生的事写分支。
+    # 两件都报。
+    errs = re.findall(r"(kErr[A-Za-z]+)\s*=\s*(0x[0-9A-Fa-f]+)", src)
+    src_all = "\n".join(
+        f.read_text(encoding="utf-8", errors="replace")
+        for f in Path(__file__).resolve().parent.parent.joinpath(
+            "dev", "02-native-daemon", "daemon").rglob("*")
+        if f.suffix in (".cpp", ".h"))
+    for name, val in errs:
+        if val.lower() not in low and str(int(val, 16)) not in text:
+            missing.append((name, val))
+        uses = len(re.findall(r"\b" + name + r"\b", src_all)) - 1   # 减去定义那一行
+        if uses <= 0:
+            dead.append((name, val))
+
+    print(f"协议清单对照：protocol.h 里 {len(tokens)} 个 token + {len(errs)} 个错误码，"
           f"对照 {len(docs)} 个文档")
-    if not missing:
-        print("  ✓ 每个 token 都在文档里出现")
+    if not missing and not dead:
+        print(f"  ✓ 每个 token（{len(tokens)} 个）和错误码（{len(errs)} 个）都在文档里，"
+              f"且每个错误码都真的会被返回")
         return 0
-    print(f"  ✗ {len(missing)} 个 token 在文档里找不到 —— 客户端作者不会知道它们存在：")
+    print(f"  ✗ {len(missing)} 个条目在文档里找不到 —— 客户端作者不会知道它们存在：")
     for name, s in missing:
-        print(f"      {name:<16}（文档里找的是 `{name}` 或 `{s}`）")
+        hint = f"（文档里找的是 `{name}` 或 `{s}`）" if not s.startswith("0x") else f"（找的是 `{s}` 或十进制 {int(s, 16)}）"
+        print(f"      {name:<18}{hint}")
+    if dead:
+        print(f"  ✗ {len(dead)} 个错误码**定义了却从不返回** —— 客户端会为不会发生的事写分支：")
+        for name, val in dead:
+            print(f"      {val}  {name}")
     print()
-    print("  去 docs/api/ 把命令补上；确实不该公开的（比如 socket-only），")
-    print("  写进本文件的 ALLOW 并说明理由。")
+    print("  缺文档的：去 docs/api/ 把它写上；确实不该公开的（比如 socket-only 的 Token），")
+    print("            写进本文件的 ALLOW 并说明理由。")
+    print("  从不返回的：要么是死码（删掉），要么是某条分支漏了返回它（补上）。")
+    print("            客户端会为一件不会发生的事写分支 —— 那和缺文档一样是坑。")
     return 1
 
 
