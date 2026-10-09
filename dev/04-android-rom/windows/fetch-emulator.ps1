@@ -77,7 +77,16 @@ function Get-Remote([string]$rel, [string]$out) {
     $base = $RepoBase
     $a = @("-fL", "--retry", "2", "-o", $out)
     if ($Proxy) { $a = @("-x", $Proxy) + $a }
-    & curl.exe @a "$base/$rel"
+    # ⚠️ 原生调用必须把 `$ErrorActionPreference` 临时降成 Continue。
+    #
+    #    本脚本开头是 `= "Stop"`，而 PowerShell 5.1 会把**原生 stderr** 变成终止性
+    #    NativeCommandError —— `curl.exe` 恰好把下载进度写到 stderr，于是脚本
+    #    **就地静默退出**，下面那句 `if ($LASTEXITCODE -ne 0)` 根本执行不到。
+    #    表现是"下载几个 GB 的东西，跑着跑着没声了、进程也没了"。
+    #    （同一个坑在 fetch-images.ps1 和 run-windows.ps1 里也各有一处，2026-10-09 一并修。）
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & curl.exe @a "$base/$rel" } finally { $ErrorActionPreference = $saved }
     if ($LASTEXITCODE -ne 0) { throw "下载失败：$base/$rel" }
 }
 

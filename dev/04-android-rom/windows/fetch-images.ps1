@@ -55,6 +55,23 @@ $optional = @("system_ext-qemu.img", "initrd", "system.img", "vendor.img", "prod
 #
 #    这个坑特别隐蔽：脚本打印完第一行"==> 远端：…"之后再也不动，
 #    看起来像"网络慢"或"在拉大文件"，实际上是卡在第一个 stat 上。
+# ⚠️ **原生调用都要这样包一层。**
+#
+#    本脚本开头是 `$ErrorActionPreference = "Stop"`，而 PowerShell 5.1 会把
+#    **原生 stderr** 变成终止性 NativeCommandError —— `scp` 恰好把进度和警告
+#    写到 stderr，于是脚本**就地静默退出**：连紧跟其后的
+#    `if ($LASTEXITCODE -ne 0) { throw ... }` 都执行不到。
+#
+#    2026-10-09 实测：用计划任务跑本脚本，日志停在
+#    "==> 拉取 20 个文件（可能几 GB，耐心等）" 之后再无输出、进程也消失了，
+#    看起来像卡住，其实是死了。（`2>&1 | Out-Null` **不够** —— 记录类型仍是 error。）
+function Invoke-Scp([string[]]$scpArgs) {
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & scp @scpArgs } finally { $ErrorActionPreference = $saved }
+    return $LASTEXITCODE
+}
+
 function Invoke-Remote([string]$cmdline) {
     $tmp = Join-Path $env:TEMP ("rc-remote-" + [guid]::NewGuid().ToString("N") + ".txt")
     $err = "$tmp.err"
@@ -100,8 +117,8 @@ if ($missingRequired.Count -gt 0) {
 }
 if ($todo.Count -gt 0) {
     Write-Host ("==> 拉取 {0} 个文件（可能几 GB，耐心等）" -f $todo.Count) -ForegroundColor Cyan
-    & scp @($todo + $Dest)
-    if ($LASTEXITCODE -ne 0) { throw "scp 失败（$LASTEXITCODE）" }
+    $rc = Invoke-Scp @($todo + $Dest)
+    if ($rc -ne 0) { throw "scp 失败（$rc）" }
 }
 
 # ── 子目录里的文件：**按 SHA256SUMS 清单补齐** ──
@@ -127,8 +144,8 @@ if (Test-Path "$Dest\SHA256SUMS") {
         $localPath = Join-Path $Dest $rel
         New-Item -ItemType Directory -Force -Path (Split-Path $localPath) | Out-Null
         Write-Host "==> 补 $rel（按 SHA256SUMS 清单）" -ForegroundColor Cyan
-        & scp "$Remote`:$RemoteDir/$relRemote" $localPath
-        if ($LASTEXITCODE -ne 0) { throw "scp 失败（$rel）" }
+        $rc = Invoke-Scp @("$Remote`:$RemoteDir/$relRemote", $localPath)
+        if ($rc -ne 0) { throw "scp 失败（$rel）" }
     }
 }
 
@@ -151,7 +168,8 @@ if (([int]$probeInDir -gt 0) -or ([int]$probeAlt -gt 0)) {
     $src = if ($probeInDir) { "$RemoteDir/arm64-probe.apk" } else { $probeRemote }
     if ((-not (Test-Path $probeLocal)) -or $Force) {
         Write-Host "==> 拉取自建 arm64 探针 APK"
-        & scp "$Remote`:$src" "$Dest"
+        $rc = Invoke-Scp @("$Remote`:$src", "$Dest")
+        if ($rc -ne 0) { throw "探针 APK 拉取失败（$rc）" }
     }
 }
 
