@@ -19,6 +19,14 @@ set -euo pipefail
 export LC_ALL=C
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/common.sh"
 
+# ⚠️ 整份脚本都是**翻译层**的符号检查。原生 arm64 产品（HAS_BRIDGE=0）上
+#    没有翻译层，这里应当如实标 ⊘ 并**成功退出** —— 不适用不是失败。
+#    见 docs/13-macos-port.md §2.6 与 §8 #9。
+if ! bridge_applicable; then
+    skip "翻译层符号自检" "PRODUCT=$PRODUCT 没有翻译层"
+    exit 0
+fi
+
 SYS="${1:-$PRODUCT_OUT/system}"
 BRIDGE="$DEVICE_DST/remote_control_x64_arm64/bridge/system"
 [ -d "$SYS/lib64" ] || die "找不到 system/lib64：$SYS"

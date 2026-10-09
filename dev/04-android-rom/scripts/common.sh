@@ -110,6 +110,17 @@ NET_BRIDGE_IF="${NET_BRIDGE_IF-br0}"
 # 一个抢 tap、一个共用不存在的 datadir。
 JOBS="${JOBS:-12}"
 
+# ⊘ = **不适用**（不是通过，也不是失败）。
+# 原生 arm64 产品（PRODUCT=arm64 → HAS_BRIDGE=0）上**没有翻译层**，
+# 与它绑定的检查应当如实标 ⊘，而不是红一片、看起来像失败。
+# 见 docs/13-macos-port.md §2.6 与 §8 #9；`verify.sh` 里那份是包内的同类实现。
+SKIPS=0
+skip() {   # skip <描述> [为什么]
+    printf '\033[1;33m⊘\033[0m %s%s\n' "$1" "${2:+ —— $2}" >&2
+    SKIPS=$((SKIPS + 1))
+}
+bridge_applicable() { [ "${HAS_BRIDGE:-0}" = 1 ]; }   # 有翻译层才该查那些项
+
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }

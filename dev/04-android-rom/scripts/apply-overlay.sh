@@ -99,8 +99,8 @@ if [ "$HAS_BRIDGE" = 1 ]; then
     [ "$n_arm64" -ge 59 ] || die "arm64 系统库数量不对（$n_arm64，期望 59）"
     log "载荷 OK：翻译器+proxy $n_libs 个，arm64 系统库 $n_arm64 个，总 $(du -sh "$PAYLOAD_DIR" | cut -f1)"
 else
-    log "PRODUCT=$PRODUCT（原生 arm64）：跳过翻译层载荷 ✓ 不适用"
-    log "  翻译层载荷（$PAYLOAD_DIR）是为 x86_64 guest 准备的，本产品不需要"
+    # 用 skip()：它会进 SKIPS 计数、并打 ⊘ 记号（原来只是两行 log，不好 grep）
+    skip "翻译层载荷校验" "PRODUCT=$PRODUCT 是原生 arm64 —— 载荷（$PAYLOAD_DIR）是给 x86_64 guest 的"
 fi
 
 # 顺带核对：这个产品的设备树目录在源里存在

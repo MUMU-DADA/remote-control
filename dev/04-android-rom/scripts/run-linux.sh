@@ -337,15 +337,24 @@ chk() {  # chk <描述> <实际值> <期望匹配>
 log "验收 1/4：镜像身份与 ABI"
 chk "ro.build.version.sdk"   "$("$ADB" -s "$SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')"      '^31$'
 chk "ro.product.device"      "$("$ADB" -s "$SERIAL" shell getprop ro.product.device | tr -d '\r')"         'remote_control_x64_arm64'
-chk "ro.product.cpu.abilist" "$("$ADB" -s "$SERIAL" shell getprop ro.product.cpu.abilist | tr -d '\r')"    'x86_64,arm64-v8a'
+ABILIST="$("$ADB" -s "$SERIAL" shell getprop ro.product.cpu.abilist | tr -d '\r')"
+chk "ro.product.cpu.abilist" "$ABILIST"    'x86_64,arm64-v8a'
 
-log "验收 2/4：翻译层接线"
-chk "native.bridge"          "$("$ADB" -s "$SERIAL" shell getprop ro.dalvik.vm.native.bridge | tr -d '\r')" 'libndk_translation.so'
-chk "enable.native.bridge.exec" "$("$ADB" -s "$SERIAL" shell getprop ro.enable.native.bridge.exec | tr -d '\r')" '^1$'
-# 注意：ls 按字母序输出（arm64_dyn 在 arm64_exe 之前），别写成顺序依赖的正则
-bf=$("$ADB" -s "$SERIAL" shell 'ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | tr "\n" " "' | tr -d '\r')
-chk "binfmt: arm64_exe"      "$bf" 'arm64_exe'
-chk "binfmt: arm64_dyn"      "$bf" 'arm64_dyn'
+# 翻译层相关的检查只对"x86_64 宿主 + 翻译层跑 arm64 应用"这个产品成立 ——
+# 从**设备自己**的 abilist 判（不猜、也不看包名）：没有 x86_64 就是原生 arm64 ROM。
+# 那一侧这些项应当如实标 ⊘（不适用），而不是红一片、看起来像验收失败。
+# 见 docs/13-macos-port.md §2.6 与 §8 #9；包内的 verify.sh 有同一套闸门。
+if printf '%s' "$ABILIST" | grep -q x86_64; then
+    log "验收 2/4：翻译层接线"
+    chk "native.bridge"          "$("$ADB" -s "$SERIAL" shell getprop ro.dalvik.vm.native.bridge | tr -d '\r')" 'libndk_translation.so'
+    chk "enable.native.bridge.exec" "$("$ADB" -s "$SERIAL" shell getprop ro.enable.native.bridge.exec | tr -d '\r')" '^1$'
+    # 注意：ls 按字母序输出（arm64_dyn 在 arm64_exe 之前），别写成顺序依赖的正则
+    bf=$("$ADB" -s "$SERIAL" shell 'ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | tr "\n" " "' | tr -d '\r')
+    chk "binfmt: arm64_exe"      "$bf" 'arm64_exe'
+    chk "binfmt: arm64_dyn"      "$bf" 'arm64_dyn'
+else
+    skip "验收 2/4：翻译层接线（4 项）" "abilist=$ABILIST —— 原生 arm64 ROM，没有翻译层"
+fi
 
 log "验收 3/4：aarch64 机器码真的在跑"
 NDK_DIR="${NDK_DIR:-/opt/android/android-ndk-r26d}"
@@ -457,7 +466,12 @@ if [ -s "$APK" ]; then
         pid=$("$ADB" -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)
         chk "进程存活"              "${pid:-DEAD}" '^[0-9]+$'
         if [ -n "$pid" ]; then
-            chk "映射的 arm64 库条数" "$("$ADB" -s "$SERIAL" shell "grep -c '/system/lib64/arm64/' /proc/$pid/maps" | tr -d '\r')" '^[1-9][0-9]*$'
+            # 这条只在有翻译层时才有意义：`/system/lib64/arm64/` 下的库是翻译层提供的映射。
+            if printf '%s' "$ABILIST" | grep -q x86_64; then
+                chk "映射的 arm64 库条数" "$("$ADB" -s "$SERIAL" shell "grep -c '/system/lib64/arm64/' /proc/$pid/maps" | tr -d '\r')" '^[1-9][0-9]*$'
+            else
+                skip "映射的 arm64 库条数" "原生 arm64 ROM 的库在 /system/lib64/，不经翻译层"
+            fi
         fi
         chk "primaryCpuAbi"         "$("$ADB" -s "$SERIAL" shell "pm dump $PKG 2>/dev/null | grep -m1 primaryCpuAbi" | tr -d '\r' || true)" 'arm64-v8a'
         # 自建探针：再从 logcat 里确认原生方法真的返回了结果
@@ -473,5 +487,6 @@ fi
 echo
 log "ROM 指纹： $("$ADB" -s "$SERIAL" shell getprop ro.build.fingerprint | tr -d '\r')"
 log "设备：     $("$ADB" -s "$SERIAL" shell getprop ro.product.device | tr -d '\r')  开机： $(grep -oE '(boot time|Boot completed in) [0-9]+ ms' "$RUN_DIR/emulator-$EMULATOR_PORT.log" 2>/dev/null | tail -1 || true)"
+[ "${SKIPS:-0}" -gt 0 ] && log "⊘ $SKIPS 项**不适用**（不是失败，也不计入通过）"
 if [ "$fails" = 0 ]; then log "验收全部通过 ✓  （ROM：$PRODUCT_OUT）"
 else die "有 $fails 项未通过"; fi

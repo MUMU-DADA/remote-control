@@ -207,6 +207,14 @@ PRODUCT_OUT="${PRODUCT_OUT:-$AOSP_DIR/out/target/product/$PRODUCT_NAME}"
 
 这些脚本/断言在 arm64 产品上会失效——不是"需要改"，而是"需要跳过"：
 
+> ✅ **2026-10-09：五处都加了 ⊘ 闸门**（下面表里的位置是**设计时**的行号，早就漂了，
+> 按内容找）。判据统一：包内脚本按**设备自己的 `abilist`** 判、仓库侧脚本用
+> `common.sh` 的 `HAS_BRIDGE`/`bridge_applicable`。命中的地方打印
+> `⊘ <项> —— <为什么>` 并**单独计数**，汇总里如实报"⊘ N 项不适用（不是失败，
+> 也不计入通过）"。`verify.sh`（包内）有一条实跑验证：拿 x86_64 实例跑完整验收
+> **全部通过**、翻译层项照常执行；`check-bridge-symbols.sh` 两个产品都实跑过
+> （x86_64 正常往下走、arm64 ⊘ 且退出 0）。
+
 | 位置 | 内容 |
 |---|---|
 | `scripts/apply-overlay.sh:119-125` | 检查 4 个翻译层载荷文件存在（`libndk_translation.so`、`ndk_translation_program_runner_binfmt_misc_arm64`、`ndk_translation.rc`、`ld.config.arm64.txt`） |
@@ -1216,7 +1224,7 @@ linux          windows          darwin-aarch64          darwin-x86_64
 - [x] 7. sepolicy 复用同一份（不复制，§2.5）
 - [ ] 7b. `remote-control.rc` 在 arm64 guest 中开机自启（§7.1 #5b）
 - [ ] 8. `tools/functional-sweep.py` 跑 38 条命令（含 uinput 触控）
-- [~] 9. §2.6 的 6 处翻译层断言加闸门并如实打印 ⊘ —— **部分完成（2026-10-09）**：`packaging/bin/linux/verify.sh` 里那几处已加（翻译层两段按设备 abilist 判、映射条数那条、退路的 arm64 系统库两条），并用 `⊘` 单独计数、汇总里如实报「N 项不适用（不是失败，也不计入通过）」。**尚未做**：`apply-overlay.sh`、`run-linux.sh`、`tools/check-bridge-symbols.sh`、`scripts/package-rom.sh` 四处
+- [x] 9. §2.6 的 6 处翻译层断言加闸门并如实打印 ⊘ —— **已完成（2026-10-09）**：`packaging/bin/linux/verify.sh`（翻译层两段按设备 abilist 判、映射条数、退路的 arm64 系统库两条）、`scripts/run-linux.sh`（同样两段 + 映射条数，并把 abilist 收进变量）、`tools/check-bridge-symbols.sh`（整份是翻译层检查 → 开局 ⊘ 并**成功退出**）、`scripts/apply-overlay.sh`（'不适用'那两行改成 `skip()`，进计数）、`scripts/package-rom.sh`（**本来就有** `HAS_BRIDGE` 的 if/else，且 else 里写着"本 ROM 跑不了纯 x86/x86_64 应用" —— 不用改）。统一用 `common.sh` 的 `skip()`/`bridge_applicable()`，`⊘` 单独计数、汇总如实报。
 - [x] 10. `dev/05-controller-app` 的 APK 确认有 `arm64-v8a` 库 —— **已完成（2026-10-09）**：实测那个 APK 是**纯 Java**（16KB、6 个条目、没有 `lib/`），所以与架构无关；并且加了 `tools/check-apk-abis.py`（进了主 runner）守着将来集成带 `.so` 的应用
 - [x] 10b. `m remote-control rcctl remote-control-launch` 在 arm64 产品下编出 —— **已完成**（§7.0.7）
 - [x] 10c. arm64 ROM 全量构建（`m`），并把服务装进镜像 —— **已完成**（§7.1 #5）
