@@ -79,7 +79,11 @@ with sync_playwright() as p:
                 break
         print(f"  ── {name} ──")
         for s in seen:
-            print(f"     {s}")
+            # ⚠️ 加 `│ ` 前缀：这些是**页面回显**，不是本脚本的判定。
+            #    它们里面可能带 ✗（比如大文件那档「✗ 安装失败：…Failed to parse APK」
+            #    —— 那是**预期**的，喂的是随机字节）。原样打出来会让读日志的人
+            #    和按 `✗` 判失败的 runner 都把它当成失败。
+            print(f"     │ {s}")
         print(f"     HTTP: {net}")
         if 413 in net:
             print("     ✗ 被 413 拒了 —— 大文件上传仍然失败")
@@ -115,5 +119,7 @@ with sync_playwright() as p:
     print(f"\n  通过 {ok}/{len(results)}")
     for nm, v in results:
         if not v:
-            print(f"    ✗ {nm}")
+            # 对齐套件惯例（两个空格）—— runner 用 `^ *✗` 判，缩进不再有影响，
+            # 但统一了更好读。
+            print(f"  ✗ {nm}")
     raise SystemExit(0 if ok == len(results) else 1)
