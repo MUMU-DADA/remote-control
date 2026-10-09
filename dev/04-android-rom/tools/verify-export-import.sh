@@ -107,6 +107,16 @@ else
     chk "格式 1 的固件能造出来（造不出来 = 这一轮没验拒绝行为）" false
 fi
 
+NEWPORT=$($EMU list | awk '$1=="t5"{print $2}')
+echo "   t5 端口 ${NEWPORT:-（空）}"
+# ⚠️ **空值必须先挡住。** 2026-10-09 实测：导入被拒绝时 t5 根本没被创建，
+#    NEWPORT 取到空串，后面拼出来的串口是 "emulator-" —— 而 `adb -s emulator-`
+#    会**一直等一个不存在的设备**，把脚本挂死（日志停在 [5] 不动，看起来像"卡在开机"）。
+#    空串绝不能进 adb 参数。
+#    （2026-10-09 我又把这段删掉过一次 —— 改成"格式 2 不需要 --unsafe"时顺手删多了，
+#      脚本在 set -u 下直接 `NEWPORT: 未绑定的变量` 挂掉，**没走到最关键那条断言**。）
+[ -n "$NEWPORT" ] || die "t5 没被创建（NEWPORT 为空）—— 导入没成功，后面的检查无从谈起"
+
 chk "恢复出来的工作目录在" test -d ".run/sysdir-$NEWPORT"
 chk "userdata-qemu.img 落地了" test -s ".run/sysdir-$NEWPORT/userdata-qemu.img"
 # 格式 2 是**单文件**恢复：压平镜像转回 raw，**不带覆盖层**（这正是它成立的原因）

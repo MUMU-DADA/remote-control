@@ -261,19 +261,28 @@ reset / delete`，断言文件系统层面的结果 —— **绝不碰真的 `im
 
 ---
 
-## 7. 导出 / 导入：**导出可用，恢复未通过验证**
+## 7. 导出 / 导入：**两条都已验证**（格式 2）
+
+> ✅ **2026-10-09：恢复修好了。** 归档格式升到 **2**：数据镜像不再原样搬
+> （backing + 覆盖层），改成 `qemu-img convert -O qcow2 -c` **压平成一张自包含的
+> qcow2**，`import` 时 `convert -O raw` 转回 raw 当 backing —— **单文件、没有覆盖层**。
+> 实测（`tools/verify-export-import.sh`，含开机读标记）：**恢复出来的机器有原来的数据**。
+> 归档也从 1.9G 降到 161M（只存已分配的簇 + `-c` 压缩）。
+>
+> **格式 1 的老归档仍然被拒绝**（要 `--unsafe`）—— 那条路线恢复出来 `/data` 是空的，
+> 原因仍未查明（但已排除"稀疏空洞布局"那条，见 §7 末尾）。
 
 ```bash
 ./scripts/emulator.sh export  default            # 打成一个归档
 ./scripts/emulator.sh inspect default-xxx.tar    # 不解包，看里面是什么
-./scripts/emulator.sh import  default-xxx.tar -n newname --unsafe
+./scripts/emulator.sh import  default-xxx.tar -n newname
 ```
 
 | 命令 | 状态 |
 |---|---|
 | `export` | ✅ 归档**逐字节忠实**（qcow2 的 md5 与源完全一致，解出来也一致） |
 | `inspect` | ✅ 正常 |
-| `import` | ❌ **恢复出来的实例 `/data` 是空的**。已加安全闸：不加 `--unsafe` 直接拒绝执行 |
+| `import` | ✅ **恢复出来的实例数据完好**（2026-10-09 起，格式 2）。老归档（格式 1，没有 `format` 字段的）**仍然拒绝**执行，要 `--unsafe` —— 那条路线恢复出来的 `/data` 是空的，理由见下 |
 
 ### 归档格式
 
