@@ -230,6 +230,10 @@ run_one() {
 # ── 先跑静态体检 ────────────────────────────────────────────────────────
 echo "静态体检（${#check_files[@]} 个）："
 for f in "${check_files[@]}"; do
+    # 不是体检的（NOT_A_CHECK，比如"容器里有没有编译在跑"那个判据）在这里也要跳过 ——
+    # 它不在 CHECK_KIND 里，直接取会在 set -u 下炸"未绑定的变量"。
+    # （2026-10-09 实测炸过：体检档 11 项全绿，汇总这一行却把整轮 runner 带走了。）
+    [ -n "${NOT_A_CHECK[$f]:-}" ] && continue
     kind="${CHECK_KIND[$f]}"
     if [ "$kind" = device ] && [ "$WITH_DEVICE" != 1 ]; then
         printf '  \033[1;33m-\033[0m %-26s SKIP：需要真在跑的服务（加 --with-device 才跑）\n' "$f"
