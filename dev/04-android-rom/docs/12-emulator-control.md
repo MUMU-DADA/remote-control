@@ -229,7 +229,8 @@ Windows 克隆时任一状态文件复制失败都会使操作失败，并清理
 `emulator.ps1` 是在 Linux 上用 PowerShell 7 实跑验证的：
 
 ```bash
-bash tools/test-windows-emulator.sh      # 56 项，全在 Linux 上跑
+bash tools/run-all-tests.sh --with-device   # 一把跑完（含本文件这些）
+bash tools/test-windows-emulator.sh         # 只跑这一个，全在 Linux 上跑
 #   前置：.tmp/pwsh/ 要有 PowerShell 7 的 linux-x64 版（.tmp/ 是 gitignore 的，
 #   新克隆不会有）。脚本头部写了确切的下载命令与必需的环境变量。
 ```

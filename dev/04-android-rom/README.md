@@ -113,10 +113,13 @@ dev/04-android-rom/
 │   ├── arm64-probe/                ← 探针源码（manifest / Activity / JNI）
 │   ├── check-bridge-symbols.sh     ← 翻译层动态依赖自检（启动前发现版本错配）
 │   ├── verify-clone-independent.sh ← 证明 clone 出来的实例和原实例数据互不影响
-│   ├── test-windows-emulator.sh    ← 在 Linux 上用 pwsh 实跑 windows\emulator.ps1（56 项；需先备好 .tmp/pwsh，脚本里写了步骤）
-│   ├── test-release.sh             ← release 打包体检（假 ROM 端到端 + 全部脚本语法，68 项）
-│   ├── test-script-safety.sh       ← 脚本命令边界、覆盖保护与并发数据目录检查（11 项）
-│   ├── test-macos-port.sh          ← macOS 移植与 darwin release 清单回归（当前 121 项）
+│   ├── run-all-tests.sh            ← **一把跑完下面这些**（bootstrap：先跑它）
+│   ├── test-windows-emulator.sh    ← 在 Linux 上用 pwsh 实跑 windows\emulator.ps1（需先备好 .tmp/pwsh，脚本头部写了步骤）
+│   ├── test-release.sh             ← release 打包体检（假 ROM 端到端 + 全部脚本语法）
+│   ├── test-script-safety.sh       ← 脚本命令边界、覆盖保护与并发数据目录检查
+│   ├── test-macos-port.sh          ← macOS 移植与 darwin release 清单回归
+│   ├── test-lifecycle-unix.py      ← 实例生命周期（Linux 侧）
+│   ├── test-packaging-windows.py   ← 打包产物里的 Windows 生命周期
 │   ├── net-bridge.sh               ← 桥接模式：建 br0 把上行网卡桥进去（带自动回滚）
 │   └── net-bridge-ifup.sh          ← 模拟器拉起 TAP 时的回调，把它挂进桥
 ├── windows/                        ← Windows 侧（同一份镜像）
@@ -151,6 +154,31 @@ dev/04-android-rom/
 > **不参与 AOSP 构建，改完不需要重编 ROM** —— 但改
 > `disk.dataPartition.size` 要清掉 `userdata-qemu.img*` 才生效
 > （`./scripts/emulator.sh reset <实例>` 会一起做掉）。
+
+---
+
+## 2.5 跑测试：`tools/run-all-tests.sh`
+
+```bash
+bash tools/run-all-tests.sh               # 宿主侧，不需要模拟器
+bash tools/run-all-tests.sh --with-device # 连需要真模拟器的 verify-* 一起跑
+bash tools/run-all-tests.sh --list        # 只列分类
+```
+
+**为什么要有它**：这些测试原来只散在本文件里被提到，没有任何一处把它们串起来跑。
+"全套通过"于是成了人工动作 —— 2026-10-09 实测，人工动作漏掉了一个真失败
+（`test-release.sh` 因为沙箱端口写死 5580、撞上本机真在跑的开发实例，
+144 通过 / **3 失败**，一直没人发现）。
+
+**它唯一重要的一条性质是：不许静默漏测。**
+
+* 测试是**按文件发现**的，不是硬编码清单；
+* 发现到的每个文件**必须**在脚本内的分类表里，否则脚本**直接报错退出** ——
+  新加一个 `test-*.sh` 却忘了接进来会立刻炸，而不是被无声忽略；
+* 跳过的一定会打印出来，并写明原因（"**不代表通过**"）。
+
+> 上面那份目录清单里**故意不写各项的测试条数**：实测 4 个里有 3 个已经过期
+> （写 68 实际 147、写 11 实际 12、写 121 实际 133）。数字问 runner 要，别抄。
 
 ---
 
@@ -196,7 +224,7 @@ cd dev/04-android-rom
 ```
 
 完整命令表、每个命令的注意事项、以及 Windows 侧是怎么在 Linux 上验证的
-（`tools/test-windows-emulator.sh`，56 项；**需要先备好 `.tmp/pwsh`**，脚本头部写了下载步骤）见
+（`tools/test-windows-emulator.sh`；**需要先备好 `.tmp/pwsh`**，脚本头部写了下载步骤）见
 [`docs/12-emulator-control.md`](docs/12-emulator-control.md)。
 
 ### 打 release：一个平台一个 zip
