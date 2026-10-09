@@ -390,7 +390,7 @@ python3 rc_client.py --socket /tmp/remote-control.sock swipe 540 1600 540 400
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 帧通道零拷贝优化（直接导出 dmabuf） | ⏳ **未做** | 现在仍是 `memcpy` 进 memfd。全仓库没有 dmabuf 相关代码 |
+| 帧通道零拷贝优化（直接导出 dmabuf） | ⏳ **未做（已决定接受推迟）** | 现在仍是 `memcpy` 进 memfd。全仓库没有 dmabuf 相关代码。**2026-10-09 决定：接受推迟** —— 它**没有消费者**：交付形态的客户端是浏览器，用不了 dmabuf；H.264 改走虚拟显示之后也不再抓帧；剩下的只有原生 raw 客户端，而仓库里没有这样的客户端。**这是已经定下来的结论，不是遗留待办** |
 | 请求处理并发 | 🤔 **刻意限制** | `Dispatcher::Handle()` 用共享的 `opMutex_` 串行化触控等有状态操作及其它非 `Info`/`Capture` 命令，HTTP 与 Unix socket 共用此锁。`Info`/`Capture` 在前置分支绕过它；抓帧由 Capture 后端自己的锁保护，不会因触控排队，但同一后端的抓帧仍串行。编码侧另由 `encode_pool` 限流 |
 | 整串文本输入 | ✅ **已完成** | 协议 v10 的 `Text`：`paste`（任意 Unicode，走剪贴板再发粘贴）与 `type`（逐字符按键，仅 ASCII）。`webui-test/text_test.py` 12 项。⚠️ 这一行原来写的是“⏳ 未做”—— `Text` 上了 v10 之后**没同步改这里**，一直错到 2026-10-09 才发现 |
 | 剪贴板写入 | ✅ **已完成** | 辅助工具以 shell UID 跑，`com.android.shell` 持有后台剪贴板权限。实测 set→get 往返（中文 + emoji）一字不差。⚠️ 这一行原来写的是“⛔ 平台做不到”—— 那是**误判**，[`docs/api/01-http.md`](../../docs/api/01-http.md) 里早已订正，只是这里没跟上 |
@@ -464,7 +464,7 @@ adb shell "/data/local/tmp/rcctl --socket /data/local/tmp/remote-control.sock ta
 
 | 项 | 状态 |
 |---|---|
-| 帧通道改直接导出 `GraphicBuffer` 的 dmabuf fd（省一次 memcpy） | ⏳ **未做** —— 现在仍是 `memcpy` 进 memfd |
+| 帧通道改直接导出 `GraphicBuffer` 的 dmabuf fd（省一次 memcpy） | ⏳ **未做（已决定接受推迟，2026-10-09）** —— 现在仍是 `memcpy` 进 memfd；理由见上面「下一步」表里那一行 |
 | 加请求处理线程池（当前是串行） | 🤔 **刻意不做** —— 串行是有意的，理由见上面「下一步」 |
 | 实现 `KeyEvent` / 按键注入 | ✅ **已完成**（`keyboard.cpp`，79 项测试） |
 | 真多点触控 | ✅ **已完成**（uinput 协议 B 槽位管理，10 个槽位） |
