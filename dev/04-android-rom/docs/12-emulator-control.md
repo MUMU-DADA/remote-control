@@ -388,3 +388,40 @@ guest 的 `eth0` MAC 是 QEMU 的默认值 `52:54:00:12:34:56`，**所有实例�
 也就是说这里赌的是"显式写出来的东西就是想要的"。如果你觉得该反过来
 （给 `--wipe-data` 也加确认），那是个**产品决定**，不是 bug 修复 ——
 改它会同时影响脚本化调用，别顺手改。
+
+---
+
+## 10. 两条血统：仓库侧的管理器和**交付包里的**不是同一份实现
+
+这一节是 2026-10-09 查清楚的，之前一直含糊。
+
+交付包的 `bin/` 是这么来的（`scripts/release.sh`）：
+
+```bash
+cp -a "$PACKAGING_DIR/bin/$(target_platform "$plat")/." "$root/bin/"
+```
+
+所以：
+
+| | 仓库侧（开发用） | 交付版（用户拿到手的） |
+|---|---|---|
+| Linux | `scripts/emulator.sh`（918 行） | `packaging/bin/linux/emulator.sh`（451 行） |
+| Windows | `windows/emulator.ps1` | `packaging/bin/windows/emulator.ps1` |
+
+**两份是手工维护的两套实现，内容完全不同。** 这一轮之前没有一处文档说清这件事，
+于是"两条血统不一样"这个意外在一轮会话里撞见了四次（`-Force` 的作用域校验、
+`export`/`import`、`inspect`、`Read-LineWithTimeout` 各写一份）。
+
+### 动词集合的差异（`tools/check-lineage-parity.py` 守着）
+
+| 差异 | 在哪 | 为什么 |
+|---|---|---|
+| `export` / `import` | 只在**仓库侧 Linux** | 交付版不带：`import` 未通过验证，见 §7 |
+| `verify` | 只在**交付版**（两侧都是） | 交付包自带验收；开发侧走 `run-linux.sh --verify` |
+| `inspect` | 只在**交付版 Windows** | 读归档用；归档由 Linux 侧的 `export` 产生 |
+
+> ⚠️ 那个检查**不要求两边一样**（本来就不该一样：交付版是精简过的）。
+> 它要求的是：**不一样的地方必须是写下来的、有理由的，而不是悄悄长出来的。**
+
+参数作用域那一层比不了（交付版 Windows 有按动词查表，仓库侧没有），
+那部分靠人读 —— 不假装机器能查。

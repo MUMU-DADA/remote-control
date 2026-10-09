@@ -123,7 +123,8 @@ dev/04-android-rom/
 │   ├── net-bridge.sh               ← 桥接模式：建 br0 把上行网卡桥进去（带自动回滚）
 │   └── net-bridge-ifup.sh          ← 模拟器拉起 TAP 时的回调，把它挂进桥
 ├── windows/                        ← Windows 侧（同一份镜像）
-│   ├── emulator.ps1                ← 实例生命周期（Windows）：命令与语义和 emulator.sh 一一对应
+│   ├── emulator.ps1                ← 实例生命周期（Windows）：语义与 emulator.sh 对齐，
+│   │                                 **动词集合不一一对应**（见 docs/12 §10）
 │   ├── run-windows.ps1             ← 启动 + 验收（WHPX）
 │   └── fetch-*.ps1 / preflight.ps1 ← 拉模拟器与镜像、前置检查
 ├── docs/                           ← 设计记录与实测结论
