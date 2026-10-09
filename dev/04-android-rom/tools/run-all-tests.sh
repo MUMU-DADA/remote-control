@@ -73,6 +73,12 @@ declare -A CHECK_KIND=(
     [check-duplicate-lines.py]=plain     # 连续重复赋值（'确认提示弹两次'那个 bug 的形状）
     [check-api-docs.py]=device          # 要真在跑的服务（/api/v1/describe）
 )
+# 只能在 Windows 上跑的（这里列出来是为了**可发现**，不是假装跑过）。
+# 格式：文件 → 在哪、怎么跑
+declare -A WINDOWS_ONLY=(
+    [windows/verify-windows-cli.ps1]="在 Windows 检出目录里：powershell -NoProfile -ExecutionPolicy Bypass -File verify-windows-cli.ps1"
+)
+
 shopt -s nullglob
 check_files=()
 for f in "$REPO_ROOT"/tools/check-*.py; do
@@ -119,6 +125,12 @@ for f in "${found[@]}"; do
     if [ "${KIND[$f]}" = host ]; then host_list+=("$f"); else device_list+=("$f"); fi
 done
 
+if [ "${#WINDOWS_ONLY[@]}" -gt 0 ]; then
+    echo "只能在 Windows 上跑（本机跑不了，列出来免得被忘掉）：${#WINDOWS_ONLY[@]} 个"
+    for k in "${!WINDOWS_ONLY[@]}"; do
+        printf '  %s\n    %s\n' "$k" "${WINDOWS_ONLY[$k]}"
+    done
+fi
 echo "静态体检（秒级）：${#check_files[@]} 个"
 printf '  %s\n' "${check_files[@]}"
 echo "宿主侧（一定会跑）：${#host_list[@]} 个"
