@@ -36,7 +36,21 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # 归档（export/import/inspect）的**共享实现** —— 与交付包里的管理器同一份。
 # 2026-10-09 抽出来：这个功能原先只在开发侧有，而用户跑的是交付包那份；
 # 与其写第二份，不如两边 source 同一份（见 packaging/bin/linux/archive.sh 头部）。
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../packaging/bin/linux/archive.sh"
+ARCHIVE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../packaging/bin/linux/archive.sh"
+if [ -f "$ARCHIVE_LIB" ]; then
+    source "$ARCHIVE_LIB"
+else
+    # ⚠️ 允许它缺失：只有 export/import/inspect 需要归档实现，别的动词不受影响。
+    #    （2026-10-09：**第一版直接 source**，于是只拷 `scripts/` 的地方
+    #      —— 比如 test-lifecycle-unix.py 的沙箱 —— 管理器在启动时就死在
+    #      `set -e` 上，报的还是"没有那个文件或目录"，看不出为什么。
+    #      现在缺文件也能跑，只有真要用归档功能时才报，并说清楚缺什么。）
+    warn "找不到归档实现：$ARCHIVE_LIB —— export / import 将不可用（其余动词正常）"
+    archive_export()    { die "找不到归档实现：$ARCHIVE_LIB（export 需要它）"; }
+    archive_import()    { die "找不到归档实现：$ARCHIVE_LIB（import 需要它）"; }
+    archive_preflight() { die "找不到归档实现：$ARCHIVE_LIB（import 需要它）"; }
+    archive_member()    { :; }
+fi
 require_console_helper
 
 DEFAULT_NAME="default"

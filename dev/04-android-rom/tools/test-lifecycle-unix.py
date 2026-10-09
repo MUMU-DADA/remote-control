@@ -44,6 +44,9 @@ for kind in ("linux", "darwin", "emulator", "run-linux"):
             helper = work / "packaging/bin/linux"
             helper.mkdir(parents=True)
             shutil.copy2(project / "packaging/bin/linux/console.sh", helper / "console.sh")
+            # emulator.sh 还会 source 归档实现（export/import 用）。沙箱要镜像真实结构，
+            # 少拷这一个文件会让它在启动时就死在 set -e 上 —— 2026-10-09 实测踩到过。
+            shutil.copy2(project / "packaging/bin/linux/archive.sh", helper / "archive.sh")
             images = work / "artifacts/rom-remote_control_x64_arm64"
             config = work / "emulator/config.ini"
             common = bindir / "common.sh"
