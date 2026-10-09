@@ -59,13 +59,15 @@ declare -A KIND=(
 #
 # 为什么把它们也纳进来：这三个（加一个要服务的）原来**没有任何自动调用者** ——
 # docs 里写着"改了文档跑一下"，靠人记得。2026-10-09 实测就吃了这个亏：
-# `check-docs.py` **不带 `--strict` 永远退出 0**，所以大家（包括我）跑了几个月
-# 都是绿的，而它其实一直有 2 个问题（一个孤儿文档 + 一处误报）。
+# `check-docs.py` 原来**要显式加 `--strict` 才非 0 退出**，所以大家（包括我）
+# 跑了几个月都是绿的，而它其实一直有 2 个问题（一个孤儿文档 + 一处误报）。
+# 2026-10-09 已把默认改成严格（`--lenient` 才是只报告）；这里仍然显式带上
+# `--strict`，是为了让"这一档需要严格模式"这件事在调用处看得见。
 #
 # 用文件名发现，同样"没分类就报错"—— 新增一个 check-*.py 忘了接进来会立刻炸。
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"   # tools → 04-android-rom → dev → 仓库根
 declare -A CHECK_KIND=(
-    [check-docs.py]=strict              # ⚠️ 必须带 --strict，否则永远退出 0
+    [check-docs.py]=strict              # 带 --strict（它现在已经是默认，显式写出来更清楚）
     [check-scripts.py]=plain
     [check-verify-honesty.py]=plain
     [check-api-docs.py]=device          # 要真在跑的服务（/api/v1/describe）

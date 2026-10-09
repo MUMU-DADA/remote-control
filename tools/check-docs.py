@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 """文档体检：链接、索引覆盖、编号连续、标题重复。
 
-    python3 tools/check-docs.py            # 只报告
-    python3 tools/check-docs.py --strict   # 有问题就非 0 退出（给 CI/提交前用）
+    python3 tools/check-docs.py            # 体检；有问题就非 0 退出（**默认严格**）
+    python3 tools/check-docs.py --lenient  # 只报告，永远退出 0（给人眼看细节时用）
+
+⚠️ **默认严格是 2026-10-09 改的。** 原来要显式加 `--strict` 才非 0 退出，
+   于是"大家（包括我）跑的都是不带 --strict 的版本，它永远退出 0" ——
+   这个文件里明明攒着 2 个问题（一个孤儿文档 + 一处误报），却一直是绿的。
+   **一个默认永远绿的门禁等于没有门禁**，而且比没有更坏：它给人一种
+   "已经查过了"的错觉。安全的行为必须是默认行为。
+   `--strict` 仍然接受（无副作用），免得已有的调用方炸掉。
 
 查六件事：
   [1] 相对链接是否指得到（含锚点语法；不校验锚点是否存在，只校验文件）
@@ -372,5 +379,8 @@ if total == 0:
 else:
     print("共 %d 个问题" % total)
 
-if "--strict" in sys.argv and total:
+# 默认严格；只有显式 --lenient 才退回"只报告"。
+# `--strict` 保留为兼容写法（它现在什么都不用做，因为已经是默认了）。
+STRICT = "--lenient" not in sys.argv
+if STRICT and total:
     sys.exit(1)
