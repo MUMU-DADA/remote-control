@@ -18,6 +18,12 @@
 #   bash tools/run-all-tests.sh --with-device # 连需要模拟器的 verify-* 一起跑
 #   bash tools/run-all-tests.sh --list        # 只列出分类，不跑
 # =============================================================================
+# ⚠️ **改这个文件之前，先确认没有 runner 在跑**（否则改动会读到错位的字节）：
+#       ps -eo pid,cmd | grep 'bash tools/run-all-tests' | grep -v grep
+#    bash 是**按字节偏移增量读脚本**的 —— 运行期间改动会让它从错位的地方继续读，
+#    表现是中途报语法错、或跑出一份**不可信的结果**。
+#    2026-09-29（第 29 轮）、2026-10-09（第 46、49 轮）各踩过一次，所以写成硬规矩挂这里。
+#    顺带：**别用 `pkill -f run-all-tests`** —— 那条命令行自己也含这个模式，会把自己杀掉。
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
