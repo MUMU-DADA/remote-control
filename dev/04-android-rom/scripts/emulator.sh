@@ -33,6 +33,10 @@
 # =============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+# 归档（export/import/inspect）的**共享实现** —— 与交付包里的管理器同一份。
+# 2026-10-09 抽出来：这个功能原先只在开发侧有，而用户跑的是交付包那份；
+# 与其写第二份，不如两边 source 同一份（见 packaging/bin/linux/archive.sh 头部）。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../packaging/bin/linux/archive.sh"
 require_console_helper
 
 DEFAULT_NAME="default"
@@ -572,160 +576,55 @@ cmd_export() {
         cmd_stop "$name" || cmd_kill "$name"
     fi
 
-    local port sysdir datadir
+    local port sysdir datadir out
     port="$(instance_port "$name")"
-    sysdir="$(inst_sysdir "$name")"
-    datadir="$(inst_datadir "$name")"
-    [ -d "$sysdir" ] || die "工作目录不存在：$sysdir"
-
-    local out="${OPT_OUT:-$RUN_DIR/$name-$(date +%Y%m%d-%H%M%S).tar}"
+    sysdir="$(inst_sysdir "$name")"; datadir="$(inst_datadir "$name")"
+    out="${OPT_OUT:-$RUN_DIR/$name-$(date +%Y%m%d-%H%M%S).tar}"
     case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
-    if [ -e "$out" ] && [ "$OPT_FORCE" != 1 ]; then
-        die "已存在：$out（加 --force 覆盖）"
-    fi
 
-    # 空间检查：归档 ≈ 实占大小（稀疏空洞不写，所以不是表观大小）
-    local need free_mb
-    need=$(du -sm "$sysdir" "$datadir" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-    free_mb=$(df -Pm "$(dirname "$out")" | awk 'NR==2{print $4}')
-    if [ "$free_mb" -le $((need + 512)) ]; then
-        die "空间不够：归档预计 ${need}MB，目标分区只剩 ${free_mb}MB"
-    fi
-
-    # ── 搭一个"与端口无关"的暂存目录 ──
-    # 归档里是 sysdir/ datadir/，不带端口号 —— import 到别的端口也能用。
-    # 用**硬链接**挂进去，35G 的 qcow2 不会真的再复制一份。
-    local stage="$RUN_DIR/.export-stage-$$"
-    rm -rf "$stage"
-    mkdir -p "$stage/sysdir" "$stage/datadir"
-
-    # Guest /data already contains the persisted service credentials.  Carry
-    # their host counterpart so importing does not create a different token.
-    local key value
-    : > "$stage/host-service.env"
-    for key in SERVICE_PORT SERVICE_ENABLED SERVICE_AUTH SERVICE_BIND SERVICE_ADB; do
-        value="$(instance_service_value "$name" "$key")"
-        [ -z "$value" ] || printf '%s=%s\n' "$key" "$value" >> "$stage/host-service.env"
-    done
-    if [ -s "$(service_token_file "$name")" ]; then
-        (umask 077; cp "$(service_token_file "$name")" "$stage/host-service.token")
-        chmod 600 "$stage/host-service.token"
-    fi
-
-    # 数据镜像（backing + 覆盖层）**不原样搬**，改成压平成一张自包含 qcow2。
-    #
-    # ⚠️ 这是 2026-10-09 改的，理由是实测：原样搬两个文件时，恢复出来的机器
-    #    **guest 读不到原来的数据**（文件层面逐字节忠实 —— 表观/实占块数/md5 全一致，
-    #    见 docs/12 §7 —— 但起来之后 /data 是空的）。而压平这条路线验过是好的：
-    #    压成一张自包含 qcow2 只存已分配的簇，恢复时转回 raw，guest 数据完好。
-    local data_img="userdata-qemu.img" data_ovl="userdata-qemu.img.qcow2"
-    local n_state=0 f b
-    for f in "$sysdir"/*; do
-        [ -e "$f" ] || continue
-        [ -L "$f" ] && continue              # 指向 ROM 镜像的符号链接：不导
-        b="$(basename "$f")"
-        arch_exclude "$b" && continue        # 路径/运行期相关：不导
-        [ "$b" = "$data_img" ] && continue   # 见上面：走压平路线
-        [ "$b" = "$data_ovl" ] && continue
-        ln "$f" "$stage/sysdir/$b" 2>/dev/null || cp -a "$f" "$stage/sysdir/$b"
-        n_state=$((n_state + 1))
-    done
-
-    # 压平：以覆盖层为入口（它会读穿 backing 链），得到一张自包含 qcow2。
-    # 没有覆盖层（从没启动过的实例）就以 backing 为入口。
-    local qi src="" have_data=0
-    if [ -f "$sysdir/$data_ovl" ]; then src="$sysdir/$data_ovl"
-    elif [ -f "$sysdir/$data_img" ]; then src="$sysdir/$data_img"; fi
-    if [ -n "$src" ]; then
-        qi="$(pick_qemu_img)"
-        log "压平数据镜像（$DATA_FLAT）…"
-        if ! "$qi" convert -O qcow2 -c "$src" "$stage/sysdir/$DATA_FLAT" 2>/dev/null; then
-            rm -rf "$stage"; die "qemu-img convert 失败：$src"
-        fi
-        have_data=1
-    else
-        # ⚠️ 没有数据镜像**不是错**：从没启动过的实例、以及测试里的最小 mock 实例
-        #    都是这样。导出仍然有意义（服务令牌、配置、状态文件），只是归档里没有数据。
-        #    （第一版在这里 die，把 test-lifecycle-unix.py 的最小实例直接打断了 ——
-        #     它验的正是"令牌被带进归档"，而我的检查死在它前面。）
-        warn "这个实例没有数据镜像（$data_img／$data_ovl 都不在）—— 归档里不会有数据"
-    fi
-    if [ -d "$datadir" ]; then
-        for f in "$datadir"/*; do
-            [ -e "$f" ] || continue
-            b="$(basename "$f")"
-            ln "$f" "$stage/datadir/$b" 2>/dev/null || cp -a "$f" "$stage/datadir/$b"
-        done
-    fi
-
-    # 归档里记下"要哪些镜像"，import 时按名字重新链本地那份
-    local imgs="" i
+    # 交给共享实现的三个输入（各家的知识：产品名 / ROM 指纹 / 镜像清单）
+    ARCHIVE_EXPORT_NAME="$name"
+    ARCHIVE_PRODUCT="$PRODUCT_NAME"
+    ARCHIVE_ROM_FP="$(rom_fingerprint)"
+    local imgs="" i b
     for i in "$ARTIFACTS_DIR/rom-$PRODUCT_NAME"/*; do
         [ -e "$i" ] || continue
         b="$(basename "$i")"
-        [ -L "$sysdir/$b" ] || continue
-        if [ -z "$imgs" ]; then imgs="\"$b\""; else imgs="$imgs, \"$b\""; fi
+        [ -L "$sysdir/$b" ] || continue      # 只记"链过来的镜像"
+        imgs="$imgs $b"
     done
+    ARCHIVE_IMAGES="$imgs"
 
-    local bytes fp now
-    # ⚠️ 用**实占**（--block-size=1 而不是 -b）：-b 给的是表观大小，
-    #    于是 manifest 里记成 66G，而 import 拿它比剩余空间 —— 要求 66G 空闲
-    #    才能导入一份实占 1.9G 的归档。import 要的是"解出来要写多少"。
-    bytes=$(du -s --block-size=1 "$stage" 2>/dev/null | awk '{print $1+0}')
-    fp="$(rom_fingerprint)"
-    now="$(date -Iseconds)"
-
-    # 清单：值全部先算成变量再拼，here-doc 里不做嵌套展开
-    # （嵌套的 $( ) + 引号在 here-doc 里出过一次词法问题，干脆避开）
-    {
-        printf '{\n'
-        printf '  "format": 2,\n'
-        [ "$have_data" = 1 ] && printf '  "dataFile": "%s",\n' "$DATA_FLAT"
-        printf '  "instance": "%s",\n' "$name"
-        printf '  "exportedAt": "%s",\n' "$now"
-        printf '  "exportedFrom": "linux",\n'
-        printf '  "product": "%s",\n' "$PRODUCT_NAME"
-        printf '  "romFingerprint": "%s",\n' "$fp"
-        printf '  "imageFiles": [%s],\n' "$imgs"
-        printf '  "stateFiles": %s,\n' "$n_state"
-        printf '  "dirBytes": %s\n' "$bytes"
-        printf '}\n'
-    } > "$stage/$MANIFEST_NAME"
-
-    local zflag=""
-    case "$out" in *.gz|*.tgz) zflag="-z" ;; esac
-    log "打包（状态实占约 $((need / 1024))G；稀疏空洞不写，所以不会等 48G）"
-    # ⚠️ --sparse 不能省：userdata-qemu.img 表观 48G、实占 551M，
-    #    不加的话 tar 会把 48G 的零原样写进归档。
-    if ! tar --sparse --numeric-owner $zflag -cf "$out" -C "$stage" . ; then
-        rm -rf "$stage"
-        die "tar 失败"
-    fi
-    # The archive includes the service token as well as guest /data.
-    chmod 600 "$out"
-    rm -rf "$stage"
-
-    # 导完**读回确认** —— tar 说成功不等于归档能用
-    local listed
-    listed="$(tar -tf "$out" 2>/dev/null | wc -l)"
-    if [ "$listed" -le 0 ]; then die "归档读不回来（tar -tf 是空的）：$out"; fi
-    if ! tar -tf "$out" 2>/dev/null | grep -q "$MANIFEST_NAME"; then
-        die "归档里没有 $MANIFEST_NAME"
-    fi
+    archive_export "$name" "$sysdir" "$datadir" "$out" \
+        "$([ "$OPT_FORCE" = 1 ] && printf -- '--force')" || return 1
 
     local sz pct rel
     sz=$(stat -c %s "$out")
-    pct=$(awk -v a="$bytes" -v b="$sz" 'BEGIN{ if (a>0) printf "%.0f", (1-b/a)*100; else printf "0" }')
+    pct=$(awk -v a="$ARCHIVE_LAST_BYTES" -v b="$sz" \
+          'BEGIN{ if (a>0) printf "%.0f", (1-b/a)*100; else printf "0" }')
     rel="${out#"$PROJECT_ROOT"/}"
     log "已导出： $rel"
     printf '    大小     %s（状态实占 %s，省了 %s%%）\n' \
-        "$(numfmt --to=iec "$sz")" "$(numfmt --to=iec "$bytes")" "$pct"
-    printf '    条目     %s 个（tar -tf 数出来的）\n' "$listed"
+        "$(numfmt --to=iec "$sz")" "$(numfmt --to=iec "$ARCHIVE_LAST_BYTES")" "$pct"
+    printf '    条目     %s 个（tar -tf 数出来的）\n' "$ARCHIVE_LAST_ENTRIES"
     printf '    镜像     未打包（import 时按本地 ROM 重新链接）\n'
-    printf '    恢复     ./scripts/emulator.sh import %s -n %s\n' "$(basename "$out")" "$name"
-    # 格式 2 起走的是**验证过的**压平路线（docs/12 §7），不再是那句老警告。
-    log "    数据     $DATA_FLAT（压平：backing+覆盖层 → 一张自包含 qcow2；恢复时转回 raw）"
+    log "    数据     $ARCHIVE_DATA_FLAT（压平：backing+覆盖层 → 一张自包含 qcow2；恢复时转回 raw）"
     log "    恢复     ./scripts/emulator.sh import $(basename "$out") -n <新名字>"
+}
+
+# 共享实现在打包前调这个钩子，把服务属性/令牌摆进它的暂存目录。
+# （取法各家不同：开发侧从实例的 env 与令牌文件取。）
+archive_extra_stage() {
+    local stage="$1" key value
+    : > "$stage/host-service.env"
+    for key in SERVICE_PORT SERVICE_ENABLED SERVICE_AUTH SERVICE_BIND SERVICE_ADB; do
+        value="$(instance_service_value "${ARCHIVE_EXPORT_NAME:?}" "$key")"
+        [ -z "$value" ] || printf '%s=%s\n' "$key" "$value" >> "$stage/host-service.env"
+    done
+    if [ -s "$(service_token_file "$ARCHIVE_EXPORT_NAME")" ]; then
+        (umask 077; cp "$(service_token_file "$ARCHIVE_EXPORT_NAME")" "$stage/host-service.token")
+        chmod 600 "$stage/host-service.token"
+    fi
 }
 
 # ⚠️ 下面 cmd_inspect / cmd_import 里那两句 `|| true` **不能省**：
@@ -754,44 +653,12 @@ cmd_import() {
     local f="${1:?归档文件}"
     [ -s "$f" ] || die "没有这个归档：$f"
 
-    # ⚠️⚠️ 安全闸。**恢复出来的实例数据是空的** —— 实测复现三次。
-    #
-    #   归档本身是忠实的（qcow2 的 md5 与源逐字节相同，解出来也相同），
-    #   原实例重启也一切正常，但把归档恢复成新实例后开机，guest 里的
-    #   文件全没了。根因**仍未找到**。
-    #
-    #   ⚠️ 2026-10-09 排除了一条：当初最可疑的是那个 64 GiB 的稀疏 raw
-    #      backing（"tar 解开后实占块数差 8 块，空洞布局对 qcow2 覆盖层有意义"）。
-    #      拿真实文件做 tar -cS/-xS 往返，解出来**差 0 块** —— 假设不成立。
-    #      同一轮还确认：覆盖层在 sysdir 里、会被打包（arch_exclude 不排它），
-    #      且它的 backing 引用是**相对路径**，换目录也接得上。
-    #      详见 docs/12 §7 与 tools/diagnose-qemuimg-export.sh。
-    #
-    #   ✅ 2026-10-09 探针跑通：**qemu-img 压平路线是可行的** ——
-    #      压成一张自包含 qcow2、再转回 raw 当 backing，恢复出来的实例数据完好
-    #      （tB 里 /data/local/tmp 与 /sdcard 的标记都在）。
-    #      而 tar 这条路线恢复出来 /data 是空的。两条路线的差别就是下一步的入口。
-    #
-    #   在查清之前，这条命令默认不让跑 —— "备份"要是恢复不出来，
-    #   比没有备份更危险：用户会以为数据安全了。
-    #
-    #   ⚠️ 2026-10-09 起，闸门**按归档格式判**（要先读 manifest，所以顺序调整了）：
-    #     · 格式 1：老的 tar 路线（原样搬 backing + 覆盖层）—— **仍然恢复不出数据**，
-    #               照旧要 --unsafe 才放行；
-    #     · 格式 2：压平路线（backing+覆盖层压成一张自包含 qcow2，恢复时转回 raw）
-    #               —— 探针验过数据完好（docs/12 §7），**不需要 --unsafe**。
-    local name="${OPT_NAME:-}"
-    local mf; mf="$(tar -xOf "$f" "./$MANIFEST_NAME" 2>/dev/null || tar -xOf "$f" "$MANIFEST_NAME" 2>/dev/null || true)"
-    [ -n "$mf" ] || die "归档里没有 $MANIFEST_NAME —— 不是本工具导出的？"
+    # ⚠️ 闸必须在**注册实例之前**跑 —— 否则被拒的导入会留下半个实例
+    #    （注册了、没内容），而验证脚本正是在检查这一点。
+    archive_preflight "$f" "$([ "$OPT_UNSAFE" = 1 ] && printf -- '--unsafe')"
+    local mf="$ARCHIVE_MF"
 
-    local fmt; fmt="$(printf '%s' "$mf" | sed -n 's/.*"format": *\([0-9]*\).*/\1/p')"
-    fmt="${fmt:-1}"          # 没有 format 字段 = 老归档 = 当作 1
-    if [ "$fmt" -lt 2 ] && [ "$OPT_UNSAFE" != 1 ]; then
-        warn "这是**格式 1** 的老归档：那条路线恢复出来的实例 /data 是空的（归档本身没问题）"
-        warn "详见 docs/12-emulator-control.md §7。确实要用加 --unsafe。"
-        die "已拒绝执行（这是保护，不是故障）"
-    fi
-    [ "$fmt" -lt 2 ] && warn "以 --unsafe 运行格式 1 的归档：恢复出来的机器可能没有原来的数据"
+    local name="${OPT_NAME:-}"
     [ -n "$name" ] || name="$(printf '%s' "$mf" | sed -n 's/.*"instance": *"\([^"]*\)".*/\1/p')"
     [ -n "$name" ] || die "归档里没写实例名，用 -n 指定一个"
     instance_exists "$name" && die "实例 '$name' 已经存在（用 -n 换个名字）"
@@ -804,58 +671,27 @@ cmd_import() {
     local port; port="${OPT_PORT:-$(alloc_port)}"
     port_taken "$port" && die "端口 $port 已被别的实例占用"
 
-    local free_mb need_mb
-    need_mb=$(printf '%s' "$mf" | sed -n 's/.*"dirBytes": *\([0-9]*\).*/\1/p')
-    need_mb=$(( ${need_mb:-0} / 1048576 ))
-    free_mb=$(df -Pm "$RUN_DIR" | awk 'NR==2{print $4}')
-    [ "$free_mb" -gt $((need_mb + 512)) ] ||         die "空间不够：需要约 ${need_mb}MB，只剩 ${free_mb}MB"
-
     instance_register "$name" "$port"
+
+    # 服务属性/令牌：归档里带着就照搬（否则导入出来的机器会换一个令牌）
     local service_metadata service_token
-    service_metadata="$(tar -xOf "$f" ./host-service.env 2>/dev/null || true)"
+    service_metadata="$(archive_member "$f" host-service.env)"
     if [ -n "$service_metadata" ]; then
-        printf '%s\n' "$service_metadata" | sed -n '/^SERVICE_\(PORT\|ENABLED\|AUTH\|BIND\|ADB\)=/p' >> "$(instance_file "$name")"
+        printf '%s\n' "$service_metadata" \
+            | sed -n '/^SERVICE_\(PORT\|ENABLED\|AUTH\|BIND\|ADB\)=/p' >> "$(instance_file "$name")"
     fi
-    service_token="$(tar -xOf "$f" ./host-service.token 2>/dev/null || true)"
+    service_token="$(archive_member "$f" host-service.token)"
     if [ -n "$service_token" ]; then
         (umask 077; printf '%s\n' "$service_token" > "$(service_token_file "$name")")
         chmod 600 "$(service_token_file "$name")"
     fi
+
     local sysdir; sysdir="$(inst_sysdir "$name")"
-    mkdir -p "$sysdir" "$(inst_datadir "$name")"
-
-    log "解包 → .run/sysdir-$port（约 $((need_mb/1024))G）"
-    tar --sparse --numeric-owner -xf "$f" -C "$RUN_DIR" --strip-components=0 \
-        --exclude=./host-service.env --exclude=./host-service.token \
-        --transform 's,^\./sysdir,sysdir-'"$port"',; s,^\./datadir,datadir-'"$port"',' \
-        2>/dev/null || {
-        # --transform 不可用（非 GNU tar）时退回两步走
-        rm -rf "$RUN_DIR/.import-tmp-$$"; mkdir -p "$RUN_DIR/.import-tmp-$$"
-        tar -xf "$f" -C "$RUN_DIR/.import-tmp-$$"
-        [ -d "$RUN_DIR/.import-tmp-$$/sysdir" ] && cp -a "$RUN_DIR/.import-tmp-$$/sysdir/." "$sysdir/"
-        [ -d "$RUN_DIR/.import-tmp-$$/datadir" ] && cp -a "$RUN_DIR/.import-tmp-$$/datadir/." "$(inst_datadir "$name")/"
-        rm -rf "$RUN_DIR/.import-tmp-$$"
-    }
-    rm -f "$sysdir/$MANIFEST_NAME" 2>/dev/null
-
-    # ── 格式 2：把压平镜像转回 raw 当 backing ────────────────────────────
-    # 这正是探针验过的路线（docs/12 §7）：只存已分配的簇，恢复时写出正确的
-    # 稀疏 raw；**不需要覆盖层**，也就没有"两份文件配不配得上"的问题。
-    local dfile; dfile="$(printf '%s' "$mf" | sed -n 's/.*"dataFile": *"\([^"]*\)".*/\1/p')"
-    dfile="${dfile:-$DATA_FLAT}"
-    local has_dfile=0
-    printf '%s' "$mf" | grep -q '"dataFile"' && has_dfile=1
-    if [ "$fmt" -ge 2 ] && [ "$has_dfile" = 1 ]; then
-        [ -f "$sysdir/$dfile" ] || die "归档是格式 2，但里面没有 $dfile —— 归档不完整？"
-        log "还原数据镜像（$dfile → userdata-qemu.img）…"
-        rm -f "$sysdir/userdata-qemu.img" "$sysdir/userdata-qemu.img.qcow2"
-        "$(pick_qemu_img)" convert -O raw "$sysdir/$dfile" "$sysdir/userdata-qemu.img" 2>/dev/null \
-            || die "qemu-img convert 失败：$sysdir/$dfile"
-        rm -f "$sysdir/$dfile"
-    fi
+    archive_import "$f" "$sysdir" "$(inst_datadir "$name")" "$name" \
+        "$([ "$OPT_UNSAFE" = 1 ] && printf -- '--unsafe')" || return 1
 
     # 按本地 ROM 重新链镜像（归档里没带）
-    local missing=""
+    local missing="" i b
     for i in "$ARTIFACTS_DIR/rom-$PRODUCT_NAME"/*; do
         [ -e "$i" ] || continue
         b="$(basename "$i")"
@@ -864,15 +700,7 @@ cmd_import() {
     done
     [ -z "$missing" ] || warn "这些镜像没链上（本地 ROM 缺）：$missing"
     rm -f "$sysdir/config.ini"; cp -f "$EMULATOR_CONFIG" "$sysdir/config.ini"
-    rm -f "$sysdir/hardware-qemu.ini" "$sysdir/hardware-qemu.ini.lock" \
-          "$sysdir/multiinstance.lock" "$sysdir/emu-launch-params.txt" \
-          "$sysdir/bootcompleted.ini" "$sysdir/version_num.cache" "$sysdir"/*.qcow2.lock 2>/dev/null
 
-    # 读回确认：关键文件真的落地了
-    if [ ! -s "$sysdir/userdata-qemu.img" ]; then
-        [ "$fmt" -ge 2 ] && [ "$has_dfile" = 1 ] && die "格式 2 的归档恢复后没有 userdata-qemu.img —— 不该发生"
-        warn "归档里没有数据镜像（导出时实例就没有）"
-    fi
     log "已导入： '$name'（端口 $port）"
     printf '    下一步   ./scripts/emulator.sh start %s\n' "$name"
 
