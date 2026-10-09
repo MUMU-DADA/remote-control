@@ -675,11 +675,17 @@ cmd_export() {
     warn "   别把这个归档当备份用。详情见 docs/12-emulator-control.md。"
 }
 
+# ⚠️ 下面 cmd_inspect / cmd_import 里那两句 `|| true` **不能省**：
+#    脚本是 `set -euo pipefail`，而 `mf="$(…)"` 的退出码就是命令替换的退出码 ——
+#    里面两次 tar 对**外部归档**都会失败，于是 set -e 在**赋值那一行直接退出**，
+#    紧随其后的那句 die（本该说"归档里没有 INSTANCE-MANIFEST.json —— 不是本工具导出的？"）
+#    **永远跑不到**。2026-10-09 实测：inspect 一个外部 tar 只打印一行"归档：…"、
+#    退出码 2、没有任何解释 —— 用户根本看不出是"这不是本工具的归档"。
 cmd_inspect() {   # 只看归档里是什么
     local f="${1:?归档文件}"
     [ -s "$f" ] || die "没有这个归档：$f"
     log "归档： $f（$(numfmt --to=iec "$(stat -c %s "$f")")）"
-    local mf; mf="$(tar -xOf "$f" "./$MANIFEST_NAME" 2>/dev/null || tar -xOf "$f" "$MANIFEST_NAME" 2>/dev/null)"
+    local mf; mf="$(tar -xOf "$f" "./$MANIFEST_NAME" 2>/dev/null || tar -xOf "$f" "$MANIFEST_NAME" 2>/dev/null || true)"
     [ -n "$mf" ] || die "归档里没有 $MANIFEST_NAME —— 不是本工具导出的？"
     printf '%s\n' "$mf" | sed 's/^/    /'
     local here; here="$(rom_fingerprint)"
@@ -707,13 +713,13 @@ cmd_import() {
     #   比没有备份更危险：用户会以为数据安全了。
     if [ "$OPT_UNSAFE" != 1 ]; then
         warn "import 目前**未通过验证**：恢复出来的实例 /data 是空的（归档本身没问题）"
-        warn "详见 docs/12-emulator-control.md 最后一节。确实要用加 --unsafe。"
+        warn "详见 docs/12-emulator-control.md §7「导出 / 导入：导出可用，恢复未通过验证」。确实要用加 --unsafe。"
         die "已拒绝执行（这是保护，不是故障）"
     fi
     warn "以 --unsafe 运行：恢复出来的机器可能没有原来的数据"
 
     local name="${OPT_NAME:-}"
-    local mf; mf="$(tar -xOf "$f" "./$MANIFEST_NAME" 2>/dev/null || tar -xOf "$f" "$MANIFEST_NAME" 2>/dev/null)"
+    local mf; mf="$(tar -xOf "$f" "./$MANIFEST_NAME" 2>/dev/null || tar -xOf "$f" "$MANIFEST_NAME" 2>/dev/null || true)"
     [ -n "$mf" ] || die "归档里没有 $MANIFEST_NAME —— 不是本工具导出的？"
     [ -n "$name" ] || name="$(printf '%s' "$mf" | sed -n 's/.*"instance": *"\([^"]*\)".*/\1/p')"
     [ -n "$name" ] || die "归档里没写实例名，用 -n 指定一个"

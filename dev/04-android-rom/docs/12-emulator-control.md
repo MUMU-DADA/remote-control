@@ -224,7 +224,7 @@ Windows 克隆时任一状态文件复制失败都会使操作失败，并清理
 
 ---
 
-## 7. Windows 侧怎么验的（在没有 Windows 的机器上）
+## 6. Windows 侧怎么验的（在没有 Windows 的机器上）
 
 `emulator.ps1` 是在 Linux 上用 PowerShell 7 实跑验证的：
 
@@ -261,7 +261,7 @@ reset / delete`，断言文件系统层面的结果 —— **绝不碰真的 `im
 
 ---
 
-## 6. 导出 / 导入：**导出可用，恢复未通过验证**
+## 7. 导出 / 导入：**导出可用，恢复未通过验证**
 
 ```bash
 ./scripts/emulator.sh export  default            # 打成一个归档
@@ -331,7 +331,7 @@ qcow2 覆盖层是有意义的 —— 覆盖层里没存的簇要去 backing 上
 
 ---
 
-## 7. 网络：默认不会让两台同时上物理 LAN
+## 8. 网络：默认不会让两台同时上物理 LAN
 
 guest 的 `eth0` MAC 是 QEMU 的默认值 `52:54:00:12:34:56`，**所有实例一模一样**
 （模拟器没暴露改它的参数，见 [`11-snapshots-and-multi.md`](11-snapshots-and-multi.md) §4）。
