@@ -1216,8 +1216,8 @@ linux          windows          darwin-aarch64          darwin-x86_64
 - [x] 7. sepolicy 复用同一份（不复制，§2.5）
 - [ ] 7b. `remote-control.rc` 在 arm64 guest 中开机自启（§7.1 #5b）
 - [ ] 8. `tools/functional-sweep.py` 跑 38 条命令（含 uinput 触控）
-- [ ] 9. §2.6 的 6 处翻译层断言加闸门并如实打印 ⊘
-- [ ] 10. `dev/05-controller-app` 的 APK 确认有 `arm64-v8a` 库
+- [~] 9. §2.6 的 6 处翻译层断言加闸门并如实打印 ⊘ —— **部分完成（2026-10-09）**：`packaging/bin/linux/verify.sh` 里那几处已加（翻译层两段按设备 abilist 判、映射条数那条、退路的 arm64 系统库两条），并用 `⊘` 单独计数、汇总里如实报「N 项不适用（不是失败，也不计入通过）」。**尚未做**：`apply-overlay.sh`、`run-linux.sh`、`tools/check-bridge-symbols.sh`、`scripts/package-rom.sh` 四处
+- [x] 10. `dev/05-controller-app` 的 APK 确认有 `arm64-v8a` 库 —— **已完成（2026-10-09）**：实测那个 APK 是**纯 Java**（16KB、6 个条目、没有 `lib/`），所以与架构无关；并且加了 `tools/check-apk-abis.py`（进了主 runner）守着将来集成带 `.so` 的应用
 - [x] 10b. `m remote-control rcctl remote-control-launch` 在 arm64 产品下编出 —— **已完成**（§7.0.7）
 - [x] 10c. arm64 ROM 全量构建（`m`），并把服务装进镜像 —— **已完成**（§7.1 #5）
 

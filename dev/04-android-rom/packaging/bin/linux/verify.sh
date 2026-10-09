@@ -32,6 +32,15 @@ require_adb
 [ -n "$(emu_pid_for_port "$PORT")" ] || die "端口 $PORT 上没有模拟器在跑"
 
 fails=0
+skips=0
+# ⊘ = **不适用**（不是通过，也不是失败）。翻译层相关的检查只对"x86_64 宿主 +
+# 翻译层跑 arm64 应用"这个产品成立；原生 arm64 ROM（Apple Silicon 那条线）
+# **没有翻译层**，那些项应当如实标 ⊘ —— 见 docs/13-macos-port.md §2.6 与 §8 #9。
+# 2026-10-09 之前这里没有 ⊘，于是 arm64 ROM 上会红一片，看起来像验收失败。
+skip() {   # skip <描述> <为什么>
+    warn "$(printf '⊘ %-34s %s' "$1" "${2:-不适用}")"
+    skips=$((skips + 1))
+}
 chk() {   # chk <描述> <实际值> <期望匹配>
     if printf '%s' "$2" | grep -qE "$3"; then ok "$(printf '%-34s %s' "$1" "$2")"
     else bad "$(printf '%-34s %s（期望匹配 %s）' "$1" "$2" "$3")"; fails=$((fails + 1)); fi
@@ -63,13 +72,20 @@ chk "ro.build.version.sdk"   "$(prop ro.build.version.sdk)"   '^31$'
 chk "ro.product.device"      "$(prop ro.product.device)"      'remote_control_x64_arm64'
 chk "ro.product.cpu.abilist" "$(prop ro.product.cpu.abilist)" 'x86_64,arm64-v8a'
 
-log "验收 2/4：翻译层接线"
-chk "ro.dalvik.vm.native.bridge"   "$(prop ro.dalvik.vm.native.bridge)"   'libndk_translation\.so'
-chk "ro.enable.native.bridge.exec" "$(prop ro.enable.native.bridge.exec)" '^1$'
-# ⚠️ `ls` 是字母序（arm64_dyn 在前），所以拆成两条独立检查，别写成顺序依赖的正则
-BF="$(sh_ 'ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | tr "\n" " "')"
-chk "binfmt_misc: arm64_exe" "$BF" 'arm64_exe'
-chk "binfmt_misc: arm64_dyn" "$BF" 'arm64_dyn'
+# 翻译层的四组检查只对 x86_64 宿主产品成立 —— 从**设备自己**的 abilist 判
+# （不猜、也不看包名）：没有 x86_64 就是原生 arm64 ROM。
+ABILIST="$(prop ro.product.cpu.abilist)"
+if printf '%s' "$ABILIST" | grep -q x86_64; then
+    log "验收 2/4：翻译层接线"
+    chk "ro.dalvik.vm.native.bridge"   "$(prop ro.dalvik.vm.native.bridge)"   'libndk_translation\.so'
+    chk "ro.enable.native.bridge.exec" "$(prop ro.enable.native.bridge.exec)" '^1$'
+    # ⚠️ `ls` 是字母序（arm64_dyn 在前），所以拆成两条独立检查，别写成顺序依赖的正则
+    BF="$(sh_ 'ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | tr "\n" " "')"
+    chk "binfmt_misc: arm64_exe" "$BF" 'arm64_exe'
+    chk "binfmt_misc: arm64_dyn" "$BF" 'arm64_dyn'
+else
+    skip "验收 2/4：翻译层接线（4 项）" "abilist=$ABILIST —— 原生 arm64 ROM，没有翻译层"
+fi
 
 log "验收 3/4：aarch64 机器码真的在跑"
 PROBE="$TOOLS/arm64-probe"
@@ -78,9 +94,14 @@ if [ -x "$PROBE" ] || [ -s "$PROBE" ]; then
     sh_ 'chmod 755 /data/local/tmp/arm64-probe' >/dev/null 2>&1 || true
     chk "aarch64 静态 ELF 执行" "$(sh_ '/data/local/tmp/arm64-probe')" 'ARM64_OK'
 else
-    # 包里没带探针时的退路：自证 /system/lib64/arm64/libc.so 是 aarch64 ELF（e_machine=0xB7）
-    chk "arm64 系统库存在" "$(sh_ 'ls /system/lib64/arm64/libc.so')" '/system/lib64/arm64/libc\.so'
-    chk "libc.so 是 aarch64 ELF" "$(sh_ 'head -c 20 /system/lib64/arm64/libc.so | od -An -tx1')" 'b7'
+    # 包里没带探针时的退路：自证 /system/lib64/arm64/libc.so 是 aarch64 ELF（e_machine=0xB7）。
+    # 这个路径同样**只有翻译层产品才有**。
+    if printf '%s' "$ABILIST" | grep -q x86_64; then
+        chk "arm64 系统库存在" "$(sh_ 'ls /system/lib64/arm64/libc.so')" '/system/lib64/arm64/libc\.so'
+        chk "libc.so 是 aarch64 ELF" "$(sh_ 'head -c 20 /system/lib64/arm64/libc.so | od -An -tx1')" 'b7'
+    else
+        skip "翻译层提供的 arm64 系统库（2 项）" "原生 arm64 ROM 没有这个目录"
+    fi
 fi
 
 log "验收 4/4：arm64 应用（纯 arm64-v8a 探针 APK）"
@@ -102,7 +123,14 @@ if [ -s "$APK" ]; then
         PID="$(sh_ "pidof $PKG")"
         chk "进程存活（$PKG）" "${PID:-DEAD}" '^[0-9]+$'
         if [ -n "$PID" ]; then
-            chk "映射的 arm64 库条数" "$(sh_ "grep -c '/system/lib64/arm64/' /proc/$PID/maps")" '^[1-9][0-9]*$'
+            # 这一条**只在有翻译层时才有意义**：`/system/lib64/arm64/` 下的库是
+            # 翻译层提供的映射。原生 arm64 ROM 的库在 `/system/lib64/` 下，
+            # 走的是另一条路 —— 那里这条必然红，属于**不适用**而不是失败。
+            if printf '%s' "$ABILIST" | grep -q x86_64; then
+                chk "映射的 arm64 库条数" "$(sh_ "grep -c '/system/lib64/arm64/' /proc/$PID/maps")" '^[1-9][0-9]*$'
+            else
+                skip "映射的 arm64 库条数" "原生 arm64 ROM 的库在 /system/lib64/，不经翻译层"
+            fi
         fi
         chk "primaryCpuAbi" "$(sh_ "pm dump $PKG 2>/dev/null | grep -m1 primaryCpuAbi")" 'arm64-v8a'
         sleep 2
@@ -118,6 +146,7 @@ fi
 echo
 log "ROM 指纹： $(prop ro.build.fingerprint)"
 log "设备：     $(prop ro.product.device)"
+[ "$skips" -gt 0 ] && log "⊘ $skips 项**不适用**（不是失败，也不计入通过）"
 if [ "$fails" = 0 ]; then
     ok "验收全部通过"
 else
