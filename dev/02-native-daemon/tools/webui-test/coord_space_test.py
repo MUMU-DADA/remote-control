@@ -28,6 +28,12 @@ import json
 from playwright.sync_api import sync_playwright
 
 import wctest_token
+
+# 检查计数：runner 按末尾的「通过 N/M」判，N<M 就是失败。
+# 这个脚本原来是靠 main() 的返回码表态的 —— 但 runner 的兜底判据要的是一句
+# 机器可读的汇总（有的脚本判据不完整、退出码可能仍是 0）。
+_PASS = [0]
+_TOTAL = [0]
 from wctest_chrome import CHROME
 
 # 交付镜像默认开鉴权：没令牌页面会 401，而多数检查照样"通过"。
@@ -74,6 +80,7 @@ def main():
     origin = f"http://{a.host}:{a.port}"
     dev = find_touch_device(a.serial)
     if dev is None:
+        _TOTAL[0] += 1
         print("  ✗ 找不到 remote-control-touch 设备", file=sys.stderr)
         return 1
     rng = abs_range(a.serial, dev)
@@ -84,6 +91,7 @@ def main():
     tW, tH = info["touchWidth"], info["touchHeight"]
     print(f"  /info 报的触控空间 {tW}x{tH}")
     if (tW, tH) != rng:
+        _TOTAL[0] += 1
         print(f"  ✗ /info 报的触控空间和 ABS 范围不一致 —— "
               f"客户端拿到的坐标空间是错的", file=sys.stderr)
         return 1
@@ -145,15 +153,20 @@ def main():
     print(f"  uinput 实际收到 X={xs[:3]} Y={ys[:3]}")
 
     if not xs or not ys:
+        _TOTAL[0] += 1
         print("  ✗ 没抓到注入事件", file=sys.stderr)
         return 1
 
     # 正中央 → 两边都该是范围的一半（容差 2px）
     ex, ey = tW // 2, tH // 2
     ok = abs(xs[0] - ex) <= 2 and abs(ys[0] - ey) <= 2
+    _TOTAL[0] += 1
+    _PASS[0] += 1 if ok else 0
     print(f"  {'✓' if ok else '✗'} 期望 ({ex},{ey})，实际 ({xs[0]},{ys[0]})")
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    print(f"\n  通过 {_PASS[0]}/{_TOTAL[0]}")
+    sys.exit(_rc)

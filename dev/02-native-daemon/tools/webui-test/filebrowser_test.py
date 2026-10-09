@@ -5,6 +5,7 @@ from playwright.sync_api import sync_playwright
 
 import wctest_token
 from wctest_chrome import CHROME
+import wctest_echo
 
 # 交付镜像默认开鉴权：没令牌页面会 401，而多数检查照样"通过"。
 _TOKEN = wctest_token.resolve_token()
@@ -45,8 +46,8 @@ with sync_playwright() as p:
     time.sleep(2)
     txt = pg.evaluate("()=>document.getElementById('fsPath').textContent")
     listing = pg.evaluate("()=>document.getElementById('fsList').textContent")
-    print(f"    路径栏: {txt}")
-    print(f"    列表: {listing[:90]}")
+    wctest_echo.echo_block(f"路径栏: {txt}")
+    wctest_echo.echo_block(f"列表: {listing[:90]}")
     chk("跳到根目录后列出来了", "DCIM" in listing or "Documents" in listing)
 
     # ⚠️ 自己造夹具，不依赖设备上预先放着什么 ——
@@ -60,7 +61,7 @@ with sync_playwright() as p:
     pg.evaluate("()=>fsGoto('/sdcard/Documents')")
     time.sleep(2)
     l2 = pg.evaluate("()=>document.getElementById('fsList').textContent")
-    print(f"    Documents 里: {l2[:80]}")
+    wctest_echo.echo_block(f"Documents 里: {l2[:80]}")
     chk("能进子目录并列出文件", "fromui" in l2 or "Documents" in l2 or l2.strip() != "",
         l2[:60])
 
@@ -80,7 +81,7 @@ with sync_playwright() as p:
     pg.evaluate("()=>fsGoto('/data')")
     time.sleep(2)
     m = pg.evaluate("()=>document.getElementById('fsMsg').textContent")
-    print(f"    越界提示: {m[:70]}")
+    wctest_echo.echo_block(f"越界提示: {m[:70]}")
     chk("越界路径被拒且提示清楚", "✗" in m and "允许范围" in m)
 
     chk("页面无 JS 报错", not errs, str(errs[:1]))

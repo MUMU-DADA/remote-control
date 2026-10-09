@@ -6,6 +6,7 @@ from playwright.sync_api import sync_playwright
 
 import wctest_token
 from wctest_chrome import CHROME
+import wctest_echo
 
 # 交付镜像默认开鉴权：没令牌页面会 401，而多数检查照样"通过"。
 _TOKEN = wctest_token.resolve_token()
@@ -78,12 +79,12 @@ with sync_playwright() as p:
             if m and ("上传中" not in m) and ("正在安装" not in m):
                 break
         print(f"  ── {name} ──")
+        # ⚠️ 这些是**页面回显**，不是本脚本的判定：里面可能带 ✗（大文件那档
+        #    「✗ 安装失败：…Failed to parse APK」是**预期**的，喂的是随机字节）。
+        #    必须走 echo_block —— 它给**每一行**加前缀。第一版只给第一行加了，
+        #    而这条消息是多行的，第二行从第 0 列开始就被 runner 当成了失败。
         for s in seen:
-            # ⚠️ 加 `│ ` 前缀：这些是**页面回显**，不是本脚本的判定。
-            #    它们里面可能带 ✗（比如大文件那档「✗ 安装失败：…Failed to parse APK」
-            #    —— 那是**预期**的，喂的是随机字节）。原样打出来会让读日志的人
-            #    和按 `✗` 判失败的 runner 都把它当成失败。
-            print(f"     │ {s}")
+            wctest_echo.echo_block(s)
         print(f"     HTTP: {net}")
         if 413 in net:
             print("     ✗ 被 413 拒了 —— 大文件上传仍然失败")
