@@ -180,7 +180,7 @@ Java-only AIDL。`remote-control` 用 `/dev/uinput` 绕开 —— 代价是会�
 - **Windows + WHPX 启动路径** —— 镜像拉取/校验、预检、
   SDK 下载都已验过；“启动 + 验收”那一段停在预检（见
   [`windows/README.md`](dev/04-android-rom/windows/README.md)）
-- **macOS（Apple Silicon）宿主** —— 代码已完成、离线 121 项全绿，
+- **macOS（Apple Silicon）宿主** —— 代码已完成、离线全绿（条数问 `dev/04-android-rom/tools/test-macos-port.sh` 要，别抄 —— 这里原来写 121，实测已 134），
   但**没在真 Mac 上跑过**（见 [`macos/README.md`](dev/04-android-rom/macos/README.md)）
 - 依赖**真机差异**的验证项（硬件编码器、GPU 合成路径、
   真实触控硬件）在模拟器上只能做到“能跑、结果对”，

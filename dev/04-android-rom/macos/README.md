@@ -127,6 +127,6 @@ Mac 侧的 `hw.gpu.mode=auto` 已由 Darwin 启动逻辑通过 `system_profiler 
 | macOS 源码树及包内脚本语法 | `bash -n` 通过 |
 | 在非 macOS 上会正确拒绝 | 在 Linux 上实跑，`preflight.sh` 报"不是 macOS"并继续做完其余检查 |
 | macOS 包确有 arm64 后端 | 下载 `emulator-darwin_aarch64-16428233.zip`（416,112,708 字节，sha1 与清单一致）后列包内目录（§7.0.2） |
-| macOS 离线测试台 | `bash tools/test-macos-port.sh`：121 项全绿（2026-10-05；stub/假包测试，不替代真机验证） |
+| macOS 离线测试台 | `bash tools/test-macos-port.sh`：全绿（条数问 runner 要，别抄；stub/假包测试，不替代真机验证） |
 
 首次在 Mac 上完成预检、下载、解压与启动后，应按实际输出更新真机验证记录。
