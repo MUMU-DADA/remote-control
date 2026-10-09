@@ -70,6 +70,10 @@ release 调用 `dev/05-controller-app/build-apk.sh` 重新构建 APK；本地 An
 实测恢复出来的机器数据完好（`docs/12` §7）。
 **格式 1 的老归档也能恢复** —— 恢复时自动压平迁移，实测数据读得出来（`docs/12` §7）。
 
+**Windows 包一样支持**：`bin\emulator.ps1 export|import`（CLI 形状随各家：`export <名> -Out <归档>`、
+`import <归档> -Name <新名字>`）。**归档跨平台互认** —— Linux 导出的能在 Windows 恢复，反之亦然：
+两边同一份格式契约。三项验证（数据镜像路径、跨平台互认、开发侧那份管理器）的记录见 `docs/12` §7。
+
 ---
 
 ## 两条**必须**守住的规矩（都是踩出来的）

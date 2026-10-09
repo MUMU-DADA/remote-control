@@ -396,6 +396,20 @@ qcow2 覆盖层是有意义的 —— 覆盖层里没存的簇要去 backing 上
 （机制本身仍未完全说清 —— 覆盖层怎么就让 guest 看不到 backing 上的数据，
 还没定位到具体那一步。但"压平就好"是**实测**的，不是推断的。）
 
+### ✅ 2026-10-09 Windows 侧三项验证（备份恢复这才算完整）
+
+| 验的是 | 怎么验的 | 结果 |
+|---|---|---|
+| **数据镜像路径**（导出压平、导入转回 raw） | 造 64MB raw，1MB 偏移写标记；转 qcow2 当覆盖层放进实例；导出→导入→转回 raw，**同偏移读标记** | ✅ 读回一致；归档里只有 `userdata-flat.qcow2`，原始镜像没泄进去 |
+| **跨平台互认** | Linux 侧造同样带标记的实例 → `export` → 归档推到 Windows → `import` | ✅ 读回一致；服务属性也跨平台搬过去了 |
+| **开发侧那份管理器** | 同一条链，跑 `windows\emulator.ps1` | ✅ 读回一致 |
+
+⚠️ 过程中撞到的都是**只有真跑才会暴露**的：Windows 自带 **bsdtar** 不支持
+`--sparse` / `-s`（照 GNU tar 写会直接失败）；镜像的**符号链接**曾被当普通文件打进归档
+（真 ROM 上白胖约 3G）；`qemu-img.exe` **缺旁边的 DLL** 时只给一个裸退出码 `0xC0000135`；
+两套血统的助手**签名不同**（交付版收端口、开发侧收实例名），传错会算出 `sysdir-0`。
+验完的清单与可复现配方在 `tools/{setup-win-pkg,verify-win-archive-data,verify-xplat-archive,verify-repo-side-win-archive}.ps1`。
+
 > 复现用的归档由 `tools/diagnose-format1-archive.sh` 造出（旧代码的布局：
 > 原样搬两个文件、manifest 写 `"format": 1`）—— 新代码已经不生产这种归档了。
 

@@ -89,6 +89,13 @@ declare -A CHECK_KIND=(
 # 格式：文件 → 在哪、怎么跑
 declare -A WINDOWS_ONLY=(
     [windows/verify-windows-cli.ps1]="在 Windows 检出目录里：powershell -NoProfile -ExecutionPolicy Bypass -File verify-windows-cli.ps1"
+    # 归档功能的 Windows 侧验证（2026-10-09 加）：本机没有 PowerShell，只能在 .246 上跑
+    [tools/parse-ps1.ps1]="用 PowerShell 自己的解析器做语法检查：-File parse-ps1.ps1 <文件>"
+    [tools/setup-win-pkg.ps1]="按真实包布局铺最小可跑环境（bin\ 与 images\ 平级，管理器靠 .. 找包根）"
+    [tools/run-win-archive-test.ps1]="跑一遍交付版 export/import 并核对（不含数据镜像那条）"
+    [tools/verify-win-archive-data.ps1]="验数据镜像路径：压平 → 还原 → 偏移 1MB 读标记比对"
+    [tools/verify-xplat-archive.ps1]="验跨平台互认：Linux 导出的归档在 Windows 恢复"
+    [tools/verify-repo-side-win-archive.ps1]="验开发侧 windows\emulator.ps1 的 export/import"
 )
 
 # ── 别处的端到端套件 ────────────────────────────────────────────────────

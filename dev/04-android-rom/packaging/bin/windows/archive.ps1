@@ -68,10 +68,27 @@ function Get-ArchiveTar {
 }
 
 function Get-ArchiveQemuImg {
-    # 与 Linux 侧同布局：模拟器主目录下的 qemu-img
-    $emuHome = Get-EmulatorHome
-    foreach ($n in @("qemu-img.exe", "qemu-img")) {
-        $p = Join-Path $emuHome $n
+    # 与 Linux 侧同布局：**运行时目录**下的 `emulator\qemu-img.exe`
+    # （模拟器二进制也在那儿：`$script:Emulator` = runtime\emulator\emulator.exe）。
+    #
+    # ⚠️ **不要用 `Get-EmulatorHome`** —— 它返回的是**用户配置目录**
+    #    （`%USERPROFILE%\.android`），不是"模拟器装在哪"。
+    #    2026-10-09 读出来才发现：用它找 qemu-img 会去 `C:\Users\<你>\.android` 找，
+    #    当然找不到。当时还没跑到数据路径，是**读代码**发现的。
+    if ($env:AUTOSNAP_QEMU_IMG) { return $env:AUTOSNAP_QEMU_IMG }
+    # ⚠️ `$script:Runtime` 只有**交付版**的 common.ps1 会定义；仓库侧的
+    #    windows\emulator.ps1 有自己的目录变量。管理器开了 Set-StrictMode，
+    #    直接读一个没定义的 $script: 变量会**抛错**而不是当 $null ——
+    #    所以这里先问"有没有这个变量"。（与 Linux 侧 `${QEMU_IMG_BIN:-}` 同理。）
+    $runtime = $null
+    if (Get-Variable -Name Runtime -Scope Script -ErrorAction SilentlyContinue) { $runtime = $script:Runtime }
+    if (-not $runtime -and $env:AUTOSNAP_RUNTIME) { $runtime = $env:AUTOSNAP_RUNTIME }
+    if (-not $runtime -and $env:AUTOSNAP_EMULATOR) {
+        $runtime = Split-Path -Parent (Split-Path -Parent $env:AUTOSNAP_EMULATOR)
+    }
+    if (-not $runtime) { return $null }
+    foreach ($p in @((Join-Path $runtime "emulator\qemu-img.exe"),
+                     (Join-Path $runtime "emulator\qemu-img"))) {
         if (Test-Path -LiteralPath $p) { return $p }
     }
     return $null
@@ -198,7 +215,7 @@ function Export-InstanceArchive {
     elseif (Test-Path -LiteralPath (Join-Path $SysDir $ArchDataImg)) { $src = Join-Path $SysDir $ArchDataImg }
     $haveData = 0
     if ($src) {
-        if (-not $qi) { Remove-Item -LiteralPath $stage -Recurse -Force; Die "找不到 qemu-img（模拟器主目录：$(Get-EmulatorHome)）" }
+        if (-not $qi) { Remove-Item -LiteralPath $stage -Recurse -Force; Die "找不到 qemu-img：$($script:Runtime)\emulator\qemu-img.exe（包里的运行时没带？）" }
         Write-Log "压平数据镜像（$ArchiveDataFlat）…"
         & $qi convert -O qcow2 -c $src (Join-Path $stage "sysdir\$ArchiveDataFlat") 2>$null
         if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $stage -Recurse -Force; Die "qemu-img convert 失败：$src" }
@@ -341,7 +358,7 @@ function Import-InstanceArchive {
     if ($fmt -ge 2 -and $hasDfile) {
         $flat = Join-Path $SysDir $dfile
         if (-not (Test-Path -LiteralPath $flat)) { Die "归档是格式 2，但里面没有 $dfile —— 归档不完整？" }
-        if (-not $qi) { Die "找不到 qemu-img（模拟器主目录：$(Get-EmulatorHome)）" }
+        if (-not $qi) { Die "找不到 qemu-img：$($script:Runtime)\emulator\qemu-img.exe（包里的运行时没带？）" }
         Write-Log "还原数据镜像（$dfile → $ArchDataImg）…"
         Remove-Item -LiteralPath (Join-Path $SysDir $ArchDataImg) -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $SysDir $ArchDataOvl) -Force -ErrorAction SilentlyContinue
@@ -353,7 +370,7 @@ function Import-InstanceArchive {
     # ── 格式 1：归档里是"原样搬的一对文件"。就地迁移成单张 raw（实测：不迁移读不到数据）
     $ovl = Join-Path $SysDir $ArchDataOvl
     if ($fmt -lt 2 -and (Test-Path -LiteralPath $ovl)) {
-        if (-not $qi) { Die "找不到 qemu-img（模拟器主目录：$(Get-EmulatorHome)）" }
+        if (-not $qi) { Die "找不到 qemu-img：$($script:Runtime)\emulator\qemu-img.exe（包里的运行时没带？）" }
         Write-Log "格式 1：压平 backing+覆盖层（老归档这样才读得出数据）…"
         $flatTmp = Join-Path $SysDir (".flat-raw-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
         & $qi convert -O raw $ovl $flatTmp 2>$null

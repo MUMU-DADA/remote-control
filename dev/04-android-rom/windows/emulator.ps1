@@ -20,6 +20,9 @@
   .\emulator.ps1 delete  dev2
   .\emulator.ps1 list
   .\emulator.ps1 status  dev2
+  .\emulator.ps1 export  dev2 -Out ..\dev2.tar
+  .\emulator.ps1 import  ..\dev2.tar dev3        # 位置 1 = 归档，位置 2 = 新实例名
+  .\emulator.ps1 import  ..\old.tar dev4 -Unsafe # 老归档（格式 1）现在会自动迁移，-Unsafe 只是兼容
 
 .NOTES
   网络：Windows 侧走模拟器默认的用户态 NAT（-net-tap 只在 Linux 侧实现，
@@ -48,6 +51,8 @@ param(
     [switch]$Yes,
     [switch]$Force,
     [switch]$TestInstance,
+    [string]$Out = "",          # export 的归档路径；"" = <名>-<时间>.tar
+    [switch]$Unsafe,            # import 的老归档开关（格式 1 现在会自动迁移，留着兼容）
     [int]$TimeoutSec = 60,
     [switch]$Help
 )
@@ -444,6 +449,8 @@ function Invoke-Create {
 # 常规生命周期共享 release 的 console/HTTP helper，实例文件函数仍使用名字。
 . (Join-Path $script:X64Dir "packaging\bin\windows\console.ps1")
 . (Join-Path $script:X64Dir "packaging\bin\windows\storage.ps1")
+# 归档（export/import）的共享实现 —— 与交付版同一个文件、与 Linux 侧同一份格式契约。
+. (Join-Path $script:X64Dir "packaging\bin\windows\archive.ps1")
 
 # ---------------------------------------------------------------------------
 # start
@@ -902,6 +909,135 @@ function Invoke-Status {
 
 # ---------------------------------------------------------------------------
 # 入口
+# ── export / import：归档逻辑在 archive.ps1，这里只做本管理器该做的事 ─────────
+
+function Get-ArchiveImagesDir {
+    # 归档要用到的"本地 ROM 镜像目录"。交付版是 $script:Runtime 旁；开发侧是 artifacts 下。
+    if ($env:AUTOSNAP_IMAGES) { return $env:AUTOSNAP_IMAGES }
+    # ⚠️ 两边叫法不同：交付版（common.ps1）是 `$script:Images`，开发侧是 `$script:ImagesDir`。
+    #    2026-10-09 读出来才发现只找前者的话，开发侧永远走不到这儿、
+    #    镜像重链会静默落空（表现是导入后镜像没链上，只报一句 warn）。
+    foreach ($v in @("Images", "ImagesDir")) {
+        $g = Get-Variable -Name $v -Scope Script -ErrorAction SilentlyContinue
+        if ($g -and $g.Value) { return $g.Value }
+    }
+    $cand = Get-ChildItem -Path (Join-Path $script:X64Dir "artifacts") -Directory -Filter "rom-*" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    if ($cand) { return $cand.FullName }
+    return ""
+}
+
+function Add-ArchiveExtraStage {
+    # archive.ps1 打包前调它：把服务属性/令牌摆进暂存目录。有就带、没有就跳过。
+    param([string]$Stage)
+    $envFile = Get-InstanceFile $script:ArchiveExportName
+    if (Test-Path -LiteralPath $envFile) {
+        $svc = @(Get-Content -LiteralPath $envFile | Where-Object { $_ -match '^SERVICE_' })
+        if ($svc.Count -gt 0) { Set-Content -LiteralPath (Join-Path $Stage "host-service.env") -Value $svc -Encoding ASCII }
+    }
+    $tok = Join-Path $script:InstancesDir "$($script:ArchiveExportName).token"
+    if (Test-Path -LiteralPath $tok) { Copy-Item -LiteralPath $tok -Destination (Join-Path $Stage "host-service.token") -Force }
+}
+
+function Invoke-ExportArchive {
+    param([string]$NameName, [string]$Out = "", [switch]$Force)
+    if (-not (Test-Instance $NameName)) { Die "没有叫 '$NameName' 的实例（用 list 看看）" }
+    $port = Get-InstancePort $NameName        # 仅用于下面 Test-InstanceRunning/停实例
+    # ⚠️ **开发侧这几个助手收的是"实例名"，不是端口** ——
+    #    `Get-SysDir`/`Get-DataDir`/`Test-InstanceRunning` 都会自己去查端口。
+    #    交付版那份相反（收端口）。两套血统在这个签名上不同，
+    #    而 tools/check-lineage-parity.py 比的是**动词**、看不到这种差异 ——
+    #    2026-10-09 实测踩到：传端口进去，它查不到、算出 sysdir-0。
+    $sysdir = Get-SysDir $NameName
+    $datadir = Get-DataDir $NameName
+    if (-not $Out) { $Out = Join-Path $script:RunDir ("$NameName-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".tar") }
+
+    if (Test-InstanceRunning $NameName) {
+        Write-Log "导出前先停掉 '$NameName'（运行中导出会拿到不一致的镜像）"
+        if (-not (Invoke-Stop $NameName)) { Die "停不下来，先手动 stop/kill 再导出" }
+    }
+
+    $imgs = Get-ArchiveImagesDir
+    $script:ArchiveExportName = $NameName
+    $script:ArchiveProduct = "remote_control"
+    $sums = if ($imgs) { Join-Path $imgs "SHA256SUMS" } else { "" }
+    $script:ArchiveRomFp = if ($sums -and (Test-Path -LiteralPath $sums)) {
+        (Get-FileHash -LiteralPath $sums -Algorithm MD5).Hash.ToLower()
+    } else { "unknown" }
+    $script:ArchiveImages = @(Get-ChildItem -LiteralPath $sysdir -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.LinkType } | ForEach-Object { $_.Name })
+
+    Export-InstanceArchive -Name $NameName -SysDir $sysdir -DataDir $datadir -Out $Out -Force:$Force
+    Write-Log "已导出： $Out"
+    Write-Host ("    大小     {0:N1} MB" -f ((Get-Item -LiteralPath $Out).Length / 1MB))
+    Write-Host ("    条目     {0} 个" -f $script:ArchiveLastEntries)
+    Write-Log  "    恢复     .\emulator.ps1 import $(Split-Path -Leaf $Out) -Name <新名字>"
+}
+
+function Invoke-ImportArchive {
+    param([string]$Archive, [string]$NewName = "", [switch]$Unsafe)
+    if (-not $Archive) { Die "用法：.\emulator.ps1 import <归档> -Name <新名字>" }
+    if (-not (Test-Path -LiteralPath $Archive -PathType Leaf)) { Die "没有这个归档：$Archive" }
+
+    # ⚠️ 闸必须在**注册实例之前**跑 —— 否则被拒的导入会留下半个实例。
+    Test-ArchivePreflight -Archive $Archive
+
+    if (-not $NewName) { $NewName = Get-ArchiveField -Manifest $script:ArchiveMf -Field "instance" }
+    if ([string]::IsNullOrWhiteSpace($NewName)) { Die "归档里没写实例名，用 -Name 指定一个" }
+    if (Test-Instance $NewName) { Die "实例 '$NewName' 已经存在（换个名字）" }
+
+    $imgs = Get-ArchiveImagesDir
+    $here = "unknown"
+    if ($imgs -and (Test-Path -LiteralPath (Join-Path $imgs "SHA256SUMS"))) {
+        $here = (Get-FileHash -LiteralPath (Join-Path $imgs "SHA256SUMS") -Algorithm MD5).Hash.ToLower()
+    }
+    $there = Get-ArchiveField -Manifest $script:ArchiveMf -Field "romFingerprint"
+    if ($there -and $there -ne $here) { Write-Warn "ROM 指纹不一致（归档 $there / 本地 $here）—— 可能起不来" }
+
+    $port = Get-InstancePort $NewName
+    if ($port -le 0) {
+        # 开发侧没有集中分配器：从 5580 往上找一个没被登记、也没人监听的
+        $port = 5580
+        while (@(Get-InstanceNames | ForEach-Object { Get-InstancePort $_ }) -contains $port) { $port += 2 }
+    }
+    Register-Instance $NewName $port
+    $sysdir = Get-SysDir $NewName
+    $datadir = Get-DataDir $NewName
+
+    $svc = Get-ArchiveMember -Archive $Archive -Member "host-service.env"
+    if (-not [string]::IsNullOrWhiteSpace($svc)) {
+        $lines = @($svc -split "`n" | Where-Object { $_ -match '^SERVICE_' })
+        if ($lines.Count -gt 0) { Add-Content -LiteralPath (Get-InstanceFile $NewName) -Value $lines -Encoding ASCII }
+    }
+    $tok = Get-ArchiveMember -Archive $Archive -Member "host-service.token"
+    if (-not [string]::IsNullOrWhiteSpace($tok)) {
+        Set-Content -LiteralPath (Join-Path $script:InstancesDir "$NewName.token") -Value $tok.Trim() -Encoding ASCII -NoNewline
+    }
+
+    Import-InstanceArchive -Archive $Archive -SysDir $sysdir -DataDir $datadir -Name $NewName -Unsafe:$Unsafe
+
+    $missing = @()
+    foreach ($img in @($script:ArchiveImages)) {
+        $dst = Join-Path $sysdir $img
+        if (Test-Path -LiteralPath $dst) { continue }
+        $src = if ($imgs) { Join-Path $imgs $img } else { "" }
+        if ($src -and (Test-Path -LiteralPath $src)) {
+            try { New-Item -ItemType SymbolicLink -Path $dst -Target $src -Force | Out-Null } catch { $missing += $img }
+        } else { $missing += $img }
+    }
+    if ($missing.Count -gt 0) { Write-Warn "这些镜像没链上（本地镜像目录缺）：$($missing -join ' ')" }
+
+    if (-not (Test-Path -LiteralPath $script:ConfigFile)) { Die "本机模板缺失：$($script:ConfigFile)" }
+    $cfg = Join-Path $sysdir "config.ini"
+    Remove-Item -LiteralPath $cfg -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $script:ConfigFile -Destination $cfg -Force
+
+    Write-Log "已导入： '$NewName'（端口 $port）"
+    Write-Host ("    下一步   .\emulator.ps1 start $NewName")
+}
+
+# ---------------------------------------------------------------------------
+# 分派
 # ---------------------------------------------------------------------------
 if ($Help -or -not $Command) { Show-Usage; if (-not $Command) { exit 1 } else { exit 0 } }
 
@@ -919,6 +1055,8 @@ switch ($Command.ToLower()) {
     "clone"   { Invoke-Clone $Name $Target }
     "list"    { Invoke-List }
     "ls"      { Invoke-List }
+    "export"  { Invoke-ExportArchive -NameName $(if ($Name) { $Name } else { $script:DefaultName }) -Out $Out -Force:$Force }
+    "import"  { Invoke-ImportArchive -Archive $Name -NewName $Target -Unsafe:$Unsafe }
     "status"  { Invoke-Status $Name }
     default   { Die "未知命令：$Command（-Help 看用法）" }
 }

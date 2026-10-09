@@ -45,6 +45,17 @@
 **老归档（格式 1）也能恢复**：恢复时会**自动压平迁移**（backing+覆盖层 → 单张 raw）——
 实测迁移后数据读得出来（`docs/12` §7）。不需要 `--unsafe`。
 
+**Windows 包一样支持**（2026-10-09 起）：
+
+```powershell
+.\bin\emulator.ps1 export  <实例名> -Out <归档路径>
+.\bin\emulator.ps1 import  <归档> -Name <新名字>
+```
+
+**归档跨平台互认** —— Linux 导出的能在 Windows 恢复，反之亦然：两边**同一份格式契约**
+（清单 + 服务属性 + 压平的数据镜像）。实测：在 Linux 侧写入的标记，Windows 恢复后
+在同一个偏移读得回来。见 `docs/12-emulator-control.md` §7。
+
 ---
 
 ## 2. 包里有什么
