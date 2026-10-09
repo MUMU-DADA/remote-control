@@ -59,7 +59,25 @@ cd windows
 > `partition(s) not found in /sys` / `failed to find device default fstab` 卡死并无限重启——
 > 这是本机实测踩过的（见 [`../docs/02-build-traps.md`](../docs/02-build-traps.md) 坑 8）。
 
-前置：OpenSSH 客户端（Win10 1809+ 自带）、≥80 GB 可用磁盘空间（快照或多实例建议 ≥100 GB）、≥8 GB 内存、
+前置：OpenSSH 客户端（Win10 1809+ 自带）、**≥80 GB 可用磁盘空间（每多一个实例再留 ~65 GB）**、≥8 GB 内存、
+
+> ⚠️ **磁盘这条 2026-10-09 实测修正过**，原来写的是"多实例建议 ≥100 GB"——**那个数在 Windows 上不够**。
+>
+> NTFS 上 `userdata-qemu.img` 是**实体文件**，一个实例实占 **~64 GiB**
+> （`disk.dataPartition.size = 64g`）。用 1 GiB 全零文件做过对照实验：
+> `[System.IO.File]::Create` + `SetLength` 出来的文件 **不是稀疏的**，
+> 实占 1024 MB；`Copy-Item` 再复制一份又是 1024 MB。
+>
+> 而 Linux 侧同一个文件是**稀疏**的（`emulator.sh` 里那条 `tar --sparse` 注释写着
+> "表观 48G、实占才 551M"）。**这是平台差异，不是脚本缺陷** —— 但直接后果是：
+>
+> | 用法 | Windows 实占 |
+> |---|---|
+> | 1 个实例 | ~65 GB |
+> | 2 个实例（含 clone） | ~130 GB |
+>
+> 所以"跑两台"要按 ~130 GB 准备，`clone` 也要按"**再复制一整份 userdata**"来算，
+> 不是"复制几个配置文件"那么便宜。
 **BIOS 里开启虚拟化**（WHPX 需要；若用 Hyper-V/WSL2 已开启则天然满足）。
 脚本会在启动前自动创建 `%USERPROFILE%\.android`（**模拟器自己不会建**，缺了它会无限重试刷日志，
 见 [`docs/02-build-traps.md`](../docs/02-build-traps.md) 坑 10.1）。
